@@ -1,0 +1,462 @@
+<title>Autopilot</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: one instrument panel. A sticky header with the autopilot and language switches, three tabs,
+   summary first (tiles, then rows), finished things collapsed at the bottom of each list. */
+:root {
+  --bg: #f4f6f8; --panel: #ffffff; --ink: #18202a; --muted: #5b6673; --line: #dde2e8;
+  --accent: #1d5fd0; --accent-soft: #e4ecfb;
+  --ok: #1b7f4c; --warn: #9a6200; --crit: #b42318; --gate: #6b3fa0;
+  --ok-soft: #e3f3ea; --warn-soft: #fbf0dc; --crit-soft: #fbe6e4; --gate-soft: #efe7f8;
+  --f-display: "IBM Plex Sans Condensed", "PingFang SC", "Noto Sans SC", "Arial Narrow", sans-serif;
+  --f-body: "IBM Plex Sans", "PingFang SC", "Noto Sans SC", "Helvetica Neue", Arial, sans-serif;
+  --f-data: "IBM Plex Mono", "SF Mono", Menlo, Consolas, monospace;
+  --r: 8px;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #0f141a; --panel: #171e26; --ink: #e6ebf0; --muted: #96a2ae; --line: #2a333d;
+  --accent: #6ea2ff; --accent-soft: #1b2a44;
+  --ok: #5fcf93; --warn: #e5b45a; --crit: #ff8a7a; --gate: #c4a2f0;
+  --ok-soft: #15301f; --warn-soft: #33270f; --crit-soft: #3a1a17; --gate-soft: #2a1f3a; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #0f141a; --panel: #171e26; --ink: #e6ebf0; --muted: #96a2ae; --line: #2a333d;
+  --accent: #6ea2ff; --accent-soft: #1b2a44;
+  --ok: #5fcf93; --warn: #e5b45a; --crit: #ff8a7a; --gate: #c4a2f0;
+  --ok-soft: #15301f; --warn-soft: #33270f; --crit-soft: #3a1a17; --gate-soft: #2a1f3a; color-scheme: dark }
+* { box-sizing: border-box }
+[hidden] { display: none !important }
+body { background: var(--bg); color: var(--ink); font: 15px/1.5 var(--f-body); margin: 0 }
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--panel) }
+.wrap { max-width: 1080px; margin: 0 auto; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 0 48px }
+header { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: var(--panel); border-bottom: 1px solid var(--line) }
+.bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding-block: 12px }
+h1 { font: 600 20px/1.2 var(--f-display); letter-spacing: .01em; margin: 0; margin-right: auto }
+h2 { font: 600 16px/1.3 var(--f-display); margin: 0; text-wrap: balance }
+h3 { font: 600 14px/1.3 var(--f-body); margin: 0 }
+.small { font-size: 13px; color: var(--muted) }
+.mono { font-family: var(--f-data); font-variant-numeric: tabular-nums }
+select, button, input[type=text] { font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px }
+button { cursor: pointer }
+button:hover { border-color: var(--accent) }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px }
+nav.tabs { display: flex; gap: 4px; overflow-x: auto }
+nav.tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 10px 12px; color: var(--muted); font-weight: 500 }
+nav.tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent) }
+.badge { display: inline-block; min-width: 20px; padding: 0 6px; border-radius: 10px; background: var(--crit); color: var(--panel); font: 500 12px/20px var(--f-data); text-align: center; margin-left: 4px }
+.banner { padding: 10px 12px; border-radius: var(--r); background: var(--warn-soft); color: var(--warn); margin-top: 16px }
+.banner.crit { background: var(--crit-soft); color: var(--crit) }
+section.view { display: grid; gap: 24px; padding-top: 20px }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr)); gap: 12px }
+.tile { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 12px 14px; display: grid; gap: 4px; min-width: 0 }
+.tile .label { font-size: 12px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted) }
+.tile .value { font: 500 26px/1.1 var(--f-data); font-variant-numeric: tabular-nums }
+.meter { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden }
+.meter > i { display: block; height: 100%; background: var(--accent) }
+.meter.warn > i { background: var(--warn) } .meter.crit > i { background: var(--crit) }
+.block { display: grid; gap: 10px }
+.list { display: grid; gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: var(--r); overflow: hidden }
+.row { background: var(--panel); padding: 10px 14px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; align-items: center }
+.row .main { min-width: 0; overflow-wrap: anywhere }
+.row .side { display: flex; gap: 8px; align-items: center; justify-content: flex-end; flex-wrap: wrap }
+.chip { font: 500 12px/1 var(--f-body); padding: 4px 8px; border-radius: 10px; background: var(--accent-soft); color: var(--accent); white-space: nowrap }
+.chip.ok { background: var(--ok-soft); color: var(--ok) } .chip.warn { background: var(--warn-soft); color: var(--warn) }
+.chip.crit { background: var(--crit-soft); color: var(--crit) } .chip.gate { background: var(--gate-soft); color: var(--gate) }
+.chip.muted { background: var(--bg); color: var(--muted) }
+.chips { display: flex; flex-wrap: wrap; gap: 6px }
+.chips button[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent) }
+a { color: var(--accent) }
+details > summary { cursor: pointer; color: var(--muted); padding: 6px 0 }
+.progress { display: grid; grid-template-columns: 9em minmax(0, 1fr) auto; gap: 8px 12px; align-items: center }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 14px; display: grid; gap: 10px; min-width: 0 }
+.card.gate { border-left: 4px solid var(--gate) }
+.card .body { color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere }
+.opts { display: flex; flex-wrap: wrap; gap: 8px }
+.opt { display: grid; gap: 2px; text-align: left; max-width: 100% }
+.opt.rec { border: 2px solid var(--accent) }
+.opt .cost { font-size: 12px; color: var(--muted) }
+.reply { display: flex; gap: 8px; flex-wrap: wrap } .reply input { flex: 1 1 240px; min-width: 0 }
+.note { font-size: 13px } .note.ok { color: var(--ok) } .note.crit { color: var(--crit) }
+.shots { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(220px, 100%), 1fr)); gap: 12px }
+.shots figure { margin: 0; display: grid; gap: 4px } .shots img { border: 1px solid var(--line); border-radius: 6px; width: 100% }
+.rounds { display: flex; align-items: flex-end; gap: 10px; height: 120px; padding-top: 8px; border-bottom: 1px solid var(--line) }
+.rounds .col { display: grid; justify-items: center; gap: 4px; align-content: end; height: 100% }
+.rounds .col i { width: 28px; background: var(--accent); border-radius: 3px 3px 0 0; display: block }
+.crit-list { display: grid; gap: 6px; padding: 0; margin: 0; list-style: none }
+.crit-list li { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px }
+.empty { padding: 18px; text-align: center; color: var(--muted); background: var(--panel); border: 1px dashed var(--line); border-radius: var(--r) }
+@media (prefers-reduced-motion: no-preference) { .meter > i { transition: width .4s ease } }
+@media (max-width: 520px) { .progress { grid-template-columns: minmax(0, 1fr) auto } .progress .meter { grid-column: 1 / -1 } }
+</style>
+
+<header>
+  <div class="wrap">
+    <div class="bar">
+      <h1 data-l="app_title">Autopilot</h1>
+      <label class="small"><span class="sr" hidden>autopilot</span>
+        <select id="ap-filter" aria-label="autopilot"></select></label>
+      <button id="lang-toggle" type="button" hidden></button>
+    </div>
+    <nav class="tabs" role="tablist">
+      <button id="tab-btn-dashboard" role="tab" data-tab="dashboard" aria-selected="true" data-l="tab_dashboard">Dashboard</button>
+      <button id="tab-btn-tickets" role="tab" data-tab="tickets" aria-selected="false" data-l="tab_tickets">Tickets</button>
+      <button id="tab-btn-decisions" role="tab" data-tab="decisions" aria-selected="false"><span data-l="tab_decisions">Decisions</span><span id="dec-badge" class="badge" hidden></span></button>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <div id="banners"></div>
+  <p id="status-note" class="small" data-l="loading">Loading…</p>
+
+  <section class="view" id="tab-dashboard" role="tabpanel">
+    <div class="tiles" id="tiles"></div>
+    <div class="block"><h2 data-l="running_now">Working now</h2><div id="workers"></div></div>
+    <div class="block"><h2 data-l="progress">Progress</h2><div id="progress" class="card"></div></div>
+    <div class="block"><h2 data-l="latest_report">Latest report</h2><div id="report"></div>
+      <details id="older-wrap"><summary data-l="older_reports">Earlier reports</summary><div id="older" class="block"></div></details></div>
+  </section>
+
+  <section class="view" id="tab-tickets" role="tabpanel" hidden>
+    <div class="chips" id="ticket-filter"></div>
+    <div id="tickets" class="block"></div>
+  </section>
+
+  <section class="view" id="detail" hidden></section>
+
+  <section class="view" id="tab-decisions" role="tabpanel" hidden>
+    <div class="block"><h2 data-l="dec_waiting">Waiting on you</h2><div id="dec-ask" class="block"></div></div>
+    <div class="block"><h2 data-l="dec_gates">Human gates</h2><div id="dec-gate" class="block"></div></div>
+    <div class="block"><h2 data-l="dec_self">Decided by itself</h2><div id="dec-self"></div></div>
+    <details><summary id="dec-answered-h"></summary><div id="dec-answered" class="block"></div></details>
+    <label class="small"><input type="checkbox" id="show-archive"> <span data-l="show_archive">Show archive</span></label>
+    <div id="dec-archive" class="block" hidden></div>
+  </section>
+</main>
+
+<script>
+"use strict";
+const LABELS_EN = /*LABELS_EN*/null;
+const S = { meta: {}, autopilots: {}, tasks: {}, workers: {}, decisions: {}, archive: {}, reports: {}, evidence: {}, replies: {} };
+let lang = "en", filterAp = "", tab = "dashboard", ticketFilter = "all", detailKey = null;
+let db = null, user = null, downloads = null, canWrite = null, loaded = false, unreachable = false;
+const $ = (id) => document.getElementById(id);
+
+function labelsFor(l) {
+  const m = S.meta.labels || {};
+  return Object.assign({}, LABELS_EN || {}, m.en || {}, l !== "en" ? (m[l] || {}) : {});
+}
+function L(key, args) {
+  let s = labelsFor(lang)[key];
+  if (s === undefined) s = key;
+  for (const [k, v] of Object.entries(args || {})) s = s.split("{" + k + "}").join(String(v));
+  return s;
+}
+function T(obj) {
+  if (!obj || typeof obj !== "object") return obj == null ? "" : String(obj);
+  if (obj.key) return L(obj.key, obj.args);
+  return obj[lang] || obj.en || "";
+}
+function el(tag, attrs, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k === "class") e.className = v;
+    else if (k === "text") e.textContent = v;
+    else if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
+    else e.setAttribute(k, v === true ? "" : v);
+  }
+  for (const k of kids.flat()) if (k != null) e.append(k instanceof Node ? k : document.createTextNode(String(k)));
+  return e;
+}
+const inAp = (doc) => !filterAp || doc.ap === filterAp;
+const values = (c) => Object.values(S[c] || {}).filter(inAp);
+function when(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return isNaN(d) ? iso : d.toLocaleString(lang === "en" ? "en-US" : lang, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+function fmtTokens(n) { return n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? Math.round(n / 1e3) + "k" : String(n || 0); }
+
+function renderStatic() {
+  document.querySelectorAll("[data-l]").forEach((e) => { e.textContent = L(e.dataset.l); });
+  document.documentElement.lang = lang;
+  const readerLang = (S.meta.labels || {}).reader_lang || "en";
+  const t = $("lang-toggle");
+  t.hidden = readerLang === "en";
+  if (!t.hidden) t.textContent = (lang === "en" ? labelsFor(readerLang) : labelsFor("en")).lang_name;
+  const sel = $("ap-filter");
+  const names = Object.keys(S.autopilots).sort();
+  const want = ["", ...names].join("|");
+  if (sel.dataset.opts !== want) {
+    sel.replaceChildren(el("option", { value: "", text: L("all") }), ...names.map((n) => el("option", { value: n, text: n })));
+    sel.dataset.opts = want;
+  }
+  sel.options[0].textContent = L("all");
+  sel.value = filterAp;
+  sel.hidden = names.length < 2;
+  $("status-note").hidden = loaded && !unreachable && db;
+  $("status-note").textContent = !db && loaded ? L("signed_out") : unreachable ? L("unreachable") : L("loading");
+}
+
+function renderBanners() {
+  const out = [];
+  const cap = S.meta.cap || {};
+  if (cap.warning) out.push(el("div", { class: "banner", text: L("cap_warning", { active: cap.active, cap: cap.max_workers, waiting: cap.active - cap.max_workers }) }));
+  for (const [ap, err] of Object.entries((S.meta.health || {}).broken || {})) {
+    out.push(el("div", { class: "banner crit", text: L("broken_banner", { ap }) + " " + err }));
+  }
+  $("banners").replaceChildren(...out);
+}
+
+function windowTile(kind, labelKey) {
+  const b = ((S.meta.budget || {}).budget) || {};
+  const w = (b.windows || []).find((x) => (x.kind || "").startsWith(kind)) || null;
+  const pct = w ? Math.round(w.percent || 0) : null;
+  const cls = pct >= 85 ? "crit" : pct >= 70 ? "warn" : "";
+  return el("div", { class: "tile" }, el("span", { class: "label", text: L(labelKey) }),
+    el("span", { class: "value", text: pct == null ? "–" : pct + "%" }),
+    el("div", { class: "meter " + cls }, el("i", { style: "width:" + Math.min(pct || 0, 100) + "%" })),
+    el("span", { class: "small", text: w && w.resets_at ? L("resets", { when: when(w.resets_at) }) : "" }));
+}
+function renderDashboard() {
+  const bud = S.meta.budget || {}, b = bud.budget || {}, a = bud.allowance || {};
+  const used = b.credits_used_usd || 0, limit = b.credits_limit_usd || 0;
+  const statePill = a.allow === 0 ? el("span", { class: "chip crit", text: L("state_paused_budget") })
+    : a.allow === 1 ? el("span", { class: "chip warn", text: L("state_one_at_a_time") })
+    : el("span", { class: "chip ok", text: L("state_running") });
+  $("tiles").replaceChildren(windowTile("session", "tile_session"), windowTile("weekly", "tile_weekly"),
+    el("div", { class: "tile" }, el("span", { class: "label", text: L("tile_credits") }),
+      el("span", { class: "value", text: "$" + used.toFixed(0) + " / $" + limit.toFixed(0) }),
+      el("div", { class: "meter" }, el("i", { style: "width:" + (limit ? Math.min(100, used / limit * 100) : 0) + "%" }))),
+    el("div", { class: "tile" }, el("span", { class: "label", text: L("tile_state") }), statePill,
+      b.stale ? el("span", { class: "small", text: L("stale") }) : null));
+
+  const ws = values("workers").sort((x, y) => (x.started_at || "").localeCompare(y.started_at || ""));
+  $("workers").replaceChildren(ws.length ? el("div", { class: "list" }, ws.map((w) => el("div", { class: "row" },
+    el("div", { class: "main" }, el("div", { class: "mono", text: w.session_name }),
+      el("div", { class: "small", text: L("since", { when: when(w.started_at) }) })),
+    el("div", { class: "side" }, el("span", { class: "chip", text: L("role_" + w.role) }))))) : el("div", { class: "empty", text: L("no_workers") }));
+
+  const aps = Object.values(S.autopilots).filter((x) => !filterAp || x.name === filterAp);
+  $("progress").replaceChildren(...aps.map((x) => {
+    const c = x.counts || {}, total = Object.values(c).reduce((s, n) => s + n, 0) - (c.skipped || 0), done = c.done || 0;
+    const tk = x.tokens || {}, sum = (tk.input || 0) + (tk.output || 0) + (tk.cache_read || 0) + (tk.cache_write || 0);
+    return el("div", { class: "progress" }, el("span", { class: "mono", text: x.name }),
+      el("div", { class: "meter" }, el("i", { style: "width:" + (total ? done / total * 100 : 0) + "%" })),
+      el("span", { class: "small mono", text: done + "/" + total + " · " + L("tokens_line", { total: fmtTokens(sum), output: fmtTokens(tk.output || 0) }) }));
+  }));
+
+  const reps = values("reports").sort((x, y) => (y.slot || "").localeCompare(x.slot || ""));
+  $("report").replaceChildren(reps.length ? reportCard(reps[0]) : el("div", { class: "empty", text: L("no_report") }));
+  $("older").replaceChildren(...reps.slice(1).map(reportCard));
+  $("older-wrap").hidden = reps.length < 2;
+}
+function reportCard(r) {
+  const part = (key, items) => (items && items.length) ? el("div", { class: "block" }, el("h3", { text: L(key) }),
+    el("ul", {}, items.map((i) => el("li", { text: T(i) })))) : null;
+  return el("div", { class: "card" }, el("div", { class: "small mono", text: r.ap + " · " + r.slot }),
+    part("done_h", r.done), part("waiting_h", r.waiting), part("next_h", r.next), part("access_h", r.access),
+    r.budget ? el("div", { class: "small", text: L("budget_h") + ": " + T(r.budget) }) : null);
+}
+
+function taskGroup(t) {
+  if (t.status === "done" || t.status === "skipped") return "done";
+  if (t.status === "in_progress" || t.status === "in_review") return "running";
+  if (t.ready) return "ready";
+  return "waiting";
+}
+function taskRow(t) {
+  const st = { done: "ok", in_review: "", in_progress: "", blocked: "crit", skipped: "muted", todo: "muted" }[t.status];
+  const ev = S.evidence[t.ap + ":" + t.id];
+  const extra = [];
+  if (t.depends_on && t.depends_on.length && t.status === "todo") extra.push(L("after", { list: t.depends_on.join(", ") }));
+  if (t.needs && t.needs.length) extra.push(L("needs", { list: t.needs.join(", ") }));
+  if (t.origin === "found") extra.push(L("found"));
+  return el("div", { class: "row" },
+    el("div", { class: "main" }, el("div", {}, el("span", { class: "mono", text: t.id + " " }), T(t.title)),
+      extra.length ? el("div", { class: "small", text: extra.join(" · ") }) : null),
+    el("div", { class: "side" },
+      filterAp ? null : el("span", { class: "chip muted", text: t.ap }),
+      t.pr ? el("a", { href: String(t.pr).startsWith("http") ? t.pr : null, target: "_blank", rel: "noopener", text: L("pr") + " " + (String(t.pr).match(/\d+$/) || [t.pr])[0] }) : null,
+      t.link ? el("a", { href: t.link, target: "_blank", rel: "noopener", text: L("ticket") }) : null,
+      ev ? el("button", { type: "button", onclick: () => openDetail(t.ap + ":" + t.id), text: L("evidence_link") }) : null,
+      el("span", { class: "chip " + (st || ""), text: L("status_" + t.status) })));
+}
+function renderTickets() {
+  const groups = ["running", "ready", "waiting"];
+  $("ticket-filter").replaceChildren(...["all", ...groups].map((g) => el("button", { type: "button", "aria-pressed": String(ticketFilter === g),
+    onclick: () => { ticketFilter = g; renderTickets(); }, text: g === "all" ? L("all") : L("group_" + g) })));
+  const ts = values("tasks").sort((x, y) => x.id.localeCompare(y.id, undefined, { numeric: true }));
+  if (!ts.length) { $("tickets").replaceChildren(el("div", { class: "empty", text: L("empty_tasks") })); return; }
+  const blocks = [];
+  for (const g of groups) {
+    if (ticketFilter !== "all" && ticketFilter !== g) continue;
+    const rows = ts.filter((t) => taskGroup(t) === g);
+    if (rows.length) blocks.push(el("div", { class: "block" }, el("h2", { text: L("group_" + g) }), el("div", { class: "list" }, rows.map(taskRow))));
+  }
+  const done = ts.filter((t) => taskGroup(t) === "done");
+  if (done.length && ticketFilter === "all") blocks.push(el("details", {}, el("summary", { text: L("group_done", { n: done.length }) }), el("div", { class: "list" }, done.map(taskRow))));
+  $("tickets").replaceChildren(...blocks);
+}
+
+function openDetail(key) { detailKey = key; showTab("tickets"); }
+function renderDetail() {
+  const box = $("detail");
+  box.hidden = !detailKey || tab !== "tickets";
+  $("tab-tickets").hidden = tab !== "tickets" || !!detailKey;
+  if (box.hidden) return;
+  const ev = S.evidence[detailKey], t = S.tasks[detailKey] || {};
+  const back = el("button", { type: "button", onclick: () => { detailKey = null; render(); }, text: L("back") });
+  if (!ev) { box.replaceChildren(back, el("div", { class: "empty", text: L("no_evidence") })); return; }
+  const crit = ev.criteria || [];
+  const okN = crit.filter((c) => c.ok === true || c.status === "pass").length;
+  const rounds = ((ev.prloop || {}).rounds || []).map((r) => (r.findings || []).length);
+  const maxR = Math.max(1, ...rounds);
+  const links = [t.link && el("a", { href: t.link, target: "_blank", rel: "noopener", text: L("ticket") }),
+    t.pr && String(t.pr).startsWith("http") && el("a", { href: t.pr, target: "_blank", rel: "noopener", text: L("pr") })].filter(Boolean);
+  const note = el("span", { class: "note", "aria-live": "polite" });
+  box.replaceChildren(back,
+    el("div", { class: "card" }, el("h2", { text: t.id + " · " + T(t.title) }),
+      ev.verdict ? el("div", {}, el("h3", { text: L("verdict") }), el("div", { class: "body", text: T(ev.verdict) })) : null,
+      ev.what_changed ? el("div", {}, el("h3", { text: L("what_changed") }), el("div", { class: "body", text: T(ev.what_changed) })) : null),
+    crit.length ? el("div", { class: "card" }, el("h3", { text: L("criteria", { ok: okN, n: crit.length }) }),
+      el("ul", { class: "crit-list" }, crit.map((c) => el("li", {},
+        el("span", { class: "chip " + ((c.ok === true || c.status === "pass") ? "ok" : "crit"), text: (c.ok === true || c.status === "pass") ? "✓" : "✗" }),
+        el("div", {}, el("div", { text: T(c.text || c.criterion || c.name) }), c.proof ? el("div", { class: "small", text: T(c.proof) }) : null))))) : null,
+    (ev.screenshots || []).length ? el("div", { class: "card" }, el("h3", { text: L("screenshots") }),
+      el("div", { class: "shots" }, ev.screenshots.map((s) => el("figure", {},
+        s.asset_id ? el("img", { src: "/_blob/" + s.asset_id, loading: "lazy", alt: T(s.caption) }) : el("div", { class: "empty", text: s.path }),
+        el("figcaption", { class: "small", text: T(s.caption) }))))) : null,
+    rounds.length ? el("div", { class: "card" }, el("h3", { text: L("review_rounds") }),
+      el("div", { class: "rounds" }, rounds.map((n, i) => el("div", { class: "col" },
+        el("span", { class: "small mono", text: String(n) }), el("i", { style: "height:" + Math.max(2, n / maxR * 90) + "px" }),
+        el("span", { class: "small", text: L("round_n", { n: i + 1 }) })))) ) : null,
+    el("div", { class: "card" }, el("h3", { text: L("links") }), el("div", { class: "opts" }, links,
+      downloads ? el("button", { type: "button", onclick: () => exportOne(ev, t, note), text: "⤓ " + L("export") }) : null, note)));
+}
+async function exportOne(ev, t, note) {
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const crit = (ev.criteria || []).map((c) => "<li>" + ((c.ok === true || c.status === "pass") ? "✓ " : "✗ ") + esc(T(c.text || c.criterion || c.name)) + (c.proof ? " — " + esc(T(c.proof)) : "") + "</li>").join("");
+  const html = "<!doctype html><meta charset=\"utf-8\"><title>" + esc(t.id) + "</title><body style=\"font:15px/1.5 sans-serif;max-width:760px;margin:24px auto;padding:0 16px\">" +
+    "<h1>" + esc(t.id + " · " + T(t.title)) + "</h1><h2>" + esc(L("verdict")) + "</h2><p>" + esc(T(ev.verdict)) + "</p><h2>" + esc(L("what_changed")) + "</h2><p>" + esc(T(ev.what_changed)) + "</p>" +
+    "<h2>" + esc(L("criteria", { ok: (ev.criteria || []).filter((c) => c.ok === true || c.status === "pass").length, n: (ev.criteria || []).length })) + "</h2><ul>" + crit + "</ul>" +
+    (t.pr && String(t.pr).startsWith("http") ? "<p><a href=\"" + esc(t.pr) + "\">" + esc(L("pr")) + "</a></p>" : "") + "</body>";
+  try { await downloads.save({ filename: t.id + "-" + lang + ".html", data: html }); note.className = "note ok"; note.textContent = L("export_done"); }
+  catch (e) { note.className = "note crit"; note.textContent = L("export_failed", { error: (e && (e.message || e.code)) || e }); }
+}
+
+function pendingFor(key) { return Object.values(S.replies).some((r) => r.decision === key); }
+async function sendReply(key, body, note) {
+  if (!db) return;
+  try {
+    await db.collection("replies").add(Object.assign({ decision: key, at: new Date().toISOString() }, body));
+    note.className = "note ok"; note.textContent = L("sent");
+  } catch (e) { note.className = "note crit"; note.textContent = L("send_failed", { error: (e && (e.message || e.code)) || e }); }
+}
+function askCard(d) {
+  const key = d.ap + ":" + d.id, note = el("span", { class: "note", "aria-live": "polite" });
+  const pending = pendingFor(key), disabled = pending || canWrite === false;
+  const input = el("input", { type: "text", id: "reply-" + key.replace(/[^A-Za-z0-9-]/g, "-"), placeholder: L("reply_placeholder"), disabled });
+  const links = (d.links || []).map((l) => el("a", { href: l.url, target: "_blank", rel: "noopener", text: T(l.label) }));
+  return el("div", { class: "card" + (d.kind === "gate" ? " gate" : "") },
+    el("div", { class: "small mono", text: d.ap + " · " + d.id + (d.task ? " · " + d.task : "") }),
+    el("h3", { text: T(d.title) }), el("div", { class: "body", text: T(d.body) }),
+    links.length ? el("div", { class: "opts" }, links) : null,
+    d.kind === "gate" ? null : el("div", { class: "opts" }, (d.options || []).map((o) => el("button", { type: "button", class: "opt" + (o.recommended ? " rec" : ""), disabled,
+      onclick: () => sendReply(key, { option: o.id }, note) },
+      el("span", { text: T(o.label) + (o.recommended ? " · " + L("recommended") : "") }), o.cost ? el("span", { class: "cost", text: T(o.cost) }) : null))),
+    d.kind === "gate" ? null : el("div", { class: "reply" }, input, el("button", { type: "button", disabled,
+      onclick: () => { if (input.value.trim()) sendReply(key, { text: input.value.trim() }, note); }, text: L("send") })),
+    pending ? el("span", { class: "note ok", text: L("pending") }) : canWrite === false ? el("span", { class: "note", text: L("read_only") }) : note);
+}
+function selfRow(d) {
+  const key = d.ap + ":" + d.id, note = el("span", { class: "note", "aria-live": "polite" });
+  const undone = d.status === "undone", pending = pendingFor(key);
+  return el("div", { class: "row" }, el("div", { class: "main" }, el("div", { text: T(d.title) }), el("div", { class: "small", text: T(d.body) })),
+    el("div", { class: "side" }, filterAp ? null : el("span", { class: "chip muted", text: d.ap }),
+      undone ? el("span", { class: "chip muted", text: L("undone") }) : pending ? el("span", { class: "note ok", text: L("pending") })
+        : el("button", { type: "button", disabled: canWrite === false, onclick: () => sendReply(key, { option: "undo" }, note), text: L("undo") }), note));
+}
+function answeredRow(d) {
+  return el("div", { class: "row" }, el("div", { class: "main" }, el("div", { text: T(d.title) }),
+    el("div", { class: "small", text: d.status === "undone" ? L("undone") : L("answer_was", { answer: d.answer || "" }) })),
+    el("div", { class: "side" }, el("span", { class: "small", text: when(d.answered_at) })));
+}
+function renderDecisions() {
+  const ds = values("decisions");
+  const open = (k) => ds.filter((d) => d.status === "open" && d.kind === k);
+  const asks = open("ask");
+  $("dec-ask").replaceChildren(...(asks.length ? asks.map(askCard) : [el("div", { class: "empty", text: L("empty_decisions") })]));
+  $("dec-gate").replaceChildren(...open("gate").map(askCard));
+  const selfs = ds.filter((d) => d.kind === "self");
+  $("dec-self").replaceChildren(selfs.length ? el("div", { class: "list" }, selfs.map(selfRow)) : "");
+  const answered = ds.filter((d) => d.status !== "open" && d.kind !== "self");
+  $("dec-answered-h").textContent = L("dec_answered", { n: answered.length });
+  $("dec-answered").replaceChildren(answered.length ? el("div", { class: "list" }, answered.map(answeredRow)) : "");
+  const showA = $("show-archive").checked;
+  $("dec-archive").hidden = !showA;
+  if (showA) $("dec-archive").replaceChildren(el("div", { class: "list" }, values("archive").map(answeredRow)));
+  const n = Object.values(S.decisions).filter((d) => d.status === "open" && d.kind === "ask").length;
+  $("dec-badge").hidden = !n; $("dec-badge").textContent = String(n);
+}
+
+function showTab(name) {
+  tab = name;
+  try { if (location.hash !== "#" + name) history.replaceState(null, "", "#" + name); } catch (e) { /* hash is a convenience */ }
+  render();
+}
+function render() {
+  renderStatic(); renderBanners();
+  for (const n of ["dashboard", "tickets", "decisions"]) {
+    $("tab-" + n).hidden = tab !== n;
+    $("tab-btn-" + n).setAttribute("aria-selected", String(tab === n));
+  }
+  if (tab === "dashboard") renderDashboard();
+  if (tab === "tickets") { renderDetail(); if (!detailKey) renderTickets(); }
+  else $("detail").hidden = true;
+  renderDecisions();
+}
+
+document.querySelectorAll("nav.tabs button").forEach((b) => b.addEventListener("click", () => { detailKey = null; showTab(b.dataset.tab); }));
+$("ap-filter").addEventListener("change", (e) => { filterAp = e.target.value; detailKey = null; render(); });
+$("lang-toggle").addEventListener("click", () => {
+  const readerLang = (S.meta.labels || {}).reader_lang || "en";
+  lang = lang === "en" ? readerLang : "en";
+  try { localStorage.setItem("autopilot-lang", lang); } catch (e) { /* per-viewer convenience only */ }
+  render();
+});
+$("show-archive").addEventListener("change", render);
+window.addEventListener("hashchange", () => { const h = location.hash.slice(1); if (["dashboard", "tickets", "decisions"].includes(h)) { detailKey = null; showTab(h); } });
+
+function subscribe(name) {
+  let timer = setTimeout(() => { unreachable = true; render(); }, 10000);
+  db.collection(name).onSnapshot((snap) => {
+    const m = {};
+    for (const d of snap.docs) if (d.exists) m[d.id] = d.data();
+    S[name] = m;
+    if (!snap.metadata.fromCache) { clearTimeout(timer); unreachable = false; }
+    loaded = true;
+    if (name === "meta") {
+      const reader = (m.labels || {}).reader_lang || "en";
+      let saved = null;
+      try { saved = localStorage.getItem("autopilot-lang"); } catch (e) { /* ignore */ }
+      if (!lang || lang === "en") lang = saved === "en" || saved === reader ? saved : reader;
+    }
+    render();
+  }, () => { clearTimeout(timer); unreachable = true; render(); });
+}
+
+async function start() {
+  const h = location.hash.slice(1);
+  if (["dashboard", "tickets", "decisions"].includes(h)) tab = h;
+  render();
+  if (!window.claude || !window.claude.use) { loaded = true; render(); return; }
+  [db, user, downloads] = await Promise.all([window.claude.use("db"), window.claude.use("user"), window.claude.use("downloads")]);
+  if (user) { try { canWrite = await user.can("data.write"); } catch (e) { canWrite = null; } }
+  if (!db) { loaded = true; render(); return; }
+  for (const c of ["meta", "autopilots", "tasks", "workers", "decisions", "archive", "reports", "evidence", "replies"]) subscribe(c);
+}
+start();
+</script>

@@ -4,7 +4,7 @@ import json
 import sys
 from datetime import datetime, timezone
 
-from autopilot import budget, cli, config, paths, state, text
+from autopilot import budget, cli, config, nextwork, paths, state, text, usage
 
 COLLECTIONS = ("meta", "autopilots", "tasks", "workers", "decisions", "archive", "reports", "evidence")
 REPORTS_KEPT = 10
@@ -90,9 +90,11 @@ def collect(aps: list) -> dict:
         out["autopilots"][ap] = {"name": ap, "status": config.status_of(ap), "source": cfg.get("source"),
                                  "counts": counts, "workers": len(st["workers"]),
                                  "waiting": sum(1 for d in st["decisions"] if d["status"] == "open" and d["kind"] == "ask"),
-                                 "last_report": st.get("last_report")}
+                                 "last_report": st.get("last_report"),
+                                 "tokens": usage.autopilot_tokens(ap, [w["session_id"] for w in st["workers"]])}
+        ready = {t["id"] for t in nextwork.ready(st)}
         for t in st["tasks"]:
-            out["tasks"][f"{ap}:{t['id']}"] = dict(t, ap=ap)
+            out["tasks"][f"{ap}:{t['id']}"] = dict(t, ap=ap, ready=t["id"] in ready)
             ev = _evidence(ap, t["id"], assets)
             if ev:
                 out["evidence"][f"{ap}:{t['id']}"] = ev
@@ -164,4 +166,33 @@ def _cmd(args: list) -> int:
     else:
         print("usage: ap publish diff | mark [--assets key=url ...] | url [url]", file=sys.stderr)
         return 2
+    return 0
+
+
+def build_page(stub: str = None):
+    """Write the publishable page: the template with the English labels inlined.
+    With `stub`, also inline a fake runtime serving that JSON file's collections (local preview only)."""
+    html = (paths.package_root() / "templates" / "page.html").read_text()
+    html = html.replace("/*LABELS_EN*/null", json.dumps(text.labels(), ensure_ascii=False))
+    out = paths.data_root() / "page.html"
+    if stub:
+        data = json.loads(open(stub).read())
+        fake = ("<script>window.claude={use:async function(n){if(n!=='db')return null;var D=" + json.dumps(data) +
+                ";return{collection:function(c){return{onSnapshot:function(next){var docs=Object.keys(D[c]||{})"
+                ".map(function(k){return{id:k,exists:true,data:function(){return D[c][k]}}});setTimeout(function()"
+                "{next({docs:docs,metadata:{fromCache:false}})},0);return function(){}},add:async function(){}}}}}};"
+                "</script>")
+        html = fake + html
+        out = paths.data_root() / "page-preview.html"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(html)
+    return out
+
+
+@cli.command("page")
+def _page_cmd(args: list) -> int:
+    if args[:1] != ["build"]:
+        print("usage: ap page build [--stub data.json]", file=sys.stderr)
+        return 2
+    print(build_page(args[args.index("--stub") + 1] if "--stub" in args else None))
     return 0

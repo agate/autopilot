@@ -1,0 +1,37 @@
+{
+  "meta": {
+    "budget": {"budget": {"ok": true, "stale": false, "windows": [{"kind": "session", "percent": 28, "resets_at": "2026-01-02T14:00:00Z"}, {"kind": "weekly_scoped", "model": "Opus", "percent": 41, "resets_at": "2026-01-05T10:00:00Z"}], "credits_used_usd": 12, "credits_limit_usd": 200}, "allowance": {"allow": null}},
+    "cap": {"max_workers": 5, "active": 2, "warning": false},
+    "health": {"broken": {}},
+    "labels": {"reader_lang": "zh", "zh": {"lang_name": "中文", "tab_dashboard": "主页", "tab_tickets": "Ticket", "tab_decisions": "决定", "app_title": "Autopilot"}}
+  },
+  "autopilots": {
+    "checkout": {"name": "checkout", "status": "active", "counts": {"done": 6, "in_progress": 2, "todo": 3}, "workers": 2, "waiting": 1, "tokens": {"input": 120000, "output": 340000, "cache_read": 8100000, "cache_write": 400000}},
+    "search": {"name": "search", "status": "active", "counts": {"done": 1, "todo": 4}, "workers": 0, "waiting": 0, "tokens": {"input": 9000, "output": 21000, "cache_read": 300000, "cache_write": 20000}}
+  },
+  "tasks": {
+    "checkout:PROJ-123": {"ap": "checkout", "id": "PROJ-123", "title": {"en": "Show the saved card on the review step", "zh": "在确认页显示已保存的卡"}, "status": "in_progress", "depends_on": [], "needs": [], "origin": "source", "link": "https://example.com/PROJ-123", "ready": false},
+    "checkout:PROJ-124": {"ap": "checkout", "id": "PROJ-124", "title": {"en": "Retry a failed payment once", "zh": "支付失败时重试一次"}, "status": "in_review", "pr": "https://example.com/pull/4512", "depends_on": [], "needs": ["emulator"], "origin": "source", "link": "https://example.com/PROJ-124", "ready": false},
+    "checkout:PROJ-125": {"ap": "checkout", "id": "PROJ-125", "title": {"en": "Remove the old coupon field", "zh": "去掉旧的优惠券输入框"}, "status": "todo", "depends_on": [], "needs": [], "origin": "source", "ready": true},
+    "checkout:PROJ-126": {"ap": "checkout", "id": "PROJ-126", "title": {"en": "Coupon analytics event", "zh": "优惠券埋点"}, "status": "todo", "depends_on": ["PROJ-125"], "needs": [], "origin": "found", "ready": false},
+    "checkout:PROJ-120": {"ap": "checkout", "id": "PROJ-120", "title": {"en": "Split the payment form", "zh": "拆分支付表单"}, "status": "done", "pr": "https://example.com/pull/4490", "depends_on": [], "needs": [], "origin": "source", "ready": false},
+    "search:PROJ-201": {"ap": "search", "id": "PROJ-201", "title": {"en": "Typo-tolerant search box", "zh": "搜索框容错"}, "status": "todo", "depends_on": [], "needs": [], "origin": "source", "ready": true}
+  },
+  "workers": {
+    "checkout:PROJ-123:implement": {"ap": "checkout", "task": "PROJ-123", "role": "implement", "session_name": "checkout · PROJ-123 · implement", "started_at": "2026-01-02T09:10:00Z"},
+    "checkout:PROJ-124:pr": {"ap": "checkout", "task": "PROJ-124", "role": "pr", "session_name": "checkout · PROJ-124 · pr", "started_at": "2026-01-02T08:40:00Z"}
+  },
+  "decisions": {
+    "checkout:D3": {"ap": "checkout", "id": "D3", "kind": "ask", "task": "PROJ-125", "status": "open", "title": {"en": "Keep the coupon field for old app versions?", "zh": "旧版 app 还要保留优惠券输入框吗？"}, "body": {"en": "Apps older than 5.2 still send the field. Removing it now breaks their checkout.", "zh": "5.2 以前的 app 还会发这个字段。现在删掉，它们的结账会出错。"}, "options": [{"id": "a", "label": {"en": "Keep it until 5.2 is gone", "zh": "保留到 5.2 下线"}, "cost": {"en": "about two more weeks", "zh": "大约再等两周"}, "recommended": true}, {"id": "b", "label": {"en": "Remove it now", "zh": "现在就删"}}], "links": [{"label": {"en": "PROJ-125", "zh": "PROJ-125"}, "url": "https://example.com/PROJ-125"}]},
+    "checkout:D2": {"ap": "checkout", "id": "D2", "kind": "gate", "status": "open", "title": {"en": "PR 4512 needs a teammate's approval", "zh": "PR 4512 需要同事批准"}, "body": {"en": "Everything else is green.", "zh": "其他都通过了。"}, "options": [], "links": [{"label": {"en": "PR 4512", "zh": "PR 4512"}, "url": "https://example.com/pull/4512"}]},
+    "checkout:D1": {"ap": "checkout", "id": "D1", "kind": "self", "status": "open", "title": {"en": "Started PROJ-123 before PROJ-125", "zh": "先做 PROJ-123，后做 PROJ-125"}, "body": {"en": "It is on the critical path.", "zh": "它在关键路径上。"}, "options": [], "links": []}
+  },
+  "archive": {},
+  "reports": {
+    "checkout:2026-01-02-09": {"ap": "checkout", "slot": "2026-01-02-09", "done": [{"en": "PR 4490 merged (PROJ-120)", "zh": "PR 4490 已合并（PROJ-120）"}], "waiting": [{"en": "D3: keep the coupon field?", "zh": "D3：要不要保留优惠券输入框？"}], "next": [{"en": "Finish PROJ-123", "zh": "做完 PROJ-123"}], "budget": {"en": "5-hour window 28%", "zh": "5 小时额度 28%"}, "access": []}
+  },
+  "evidence": {
+    "checkout:PROJ-120": {"ap": "checkout", "task": "PROJ-120", "verdict": {"en": "Ready: all four criteria proven.", "zh": "可以合并：4 条验收标准都有证明。"}, "what_changed": {"en": "The payment form is now two steps.", "zh": "支付表单拆成了两步。"}, "criteria": [{"text": {"en": "Step one keeps the address", "zh": "第一步保留地址"}, "ok": true, "proof": {"en": "form.test.ts fails on base", "zh": "form.test.ts 在旧代码上失败"}}, {"text": {"en": "Back keeps the typed card", "zh": "返回时卡号不丢"}, "ok": true}], "screenshots": [], "prloop": {"rounds": [{"findings": [1, 2, 3]}, {"findings": [1]}, {"findings": []}]}}
+  },
+  "replies": {}
+}

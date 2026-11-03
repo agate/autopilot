@@ -109,17 +109,19 @@ def resume(ap: str, worker: dict) -> dict:
 
 def end(ap: str, task: str, role: str) -> None:
     gcfg = config.load_global()
+    from autopilot import usage
     st = state.load(ap)
-    keep = []
+    keep, tokens = [], usage.zero()
     for w in st["workers"]:
         if w["task"] == task and w["role"] == role:
+            tokens = usage.session_tokens(w.get("session_id"))
             for sub in ("stop", "rm"):
                 subprocess.run([claude_bin(gcfg), sub, w["short_id"]], capture_output=True, timeout=60)
         else:
             keep.append(w)
     st["workers"] = keep
     state.save(ap, st)
-    events.append(ap, "worker_ended", {"task": task, "role": role})
+    events.append(ap, "worker_ended", {"task": task, "role": role, "tokens": tokens})
 
 
 def _opt(args: list, flag: str, default=None):
