@@ -1,0 +1,19 @@
+#!/bin/bash
+# Test stand-in for the claude CLI. Logs argv; answers the calls autopilot makes.
+printf '%s\n' "$*" >> "${FAKE_CLAUDE_LOG:-/dev/null}"
+case "$1" in
+  agents) cat "${FAKE_AGENTS_JSON:-/dev/null}" 2>/dev/null || echo '[]' ;;
+  stop|rm) exit 0 ;;
+  --bg)
+    name=""
+    prev=""
+    for a in "$@"; do
+      if [ "$prev" = "-n" ]; then name="$a"; fi
+      prev="$a"
+    done
+    [ -n "$FAKE_BG_HOOK" ] && "$FAKE_BG_HOOK" "$@"
+    echo "backgrounded · abcd1234 · ${name:-resumed}"
+    ;;
+  -p) echo "OK" ;;
+esac
+exit 0
