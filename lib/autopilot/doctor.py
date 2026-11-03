@@ -8,9 +8,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from autopilot import checkpkg, cli, config, paths
-
-PLIST = Path.home() / "Library" / "LaunchAgents" / "com.autopilot.gate.plist"
-LABEL = "com.autopilot.gate"
+from autopilot.install import LABEL, PLIST
 
 
 def _run(argv: list, timeout: int = 30) -> tuple:
