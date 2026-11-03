@@ -1,0 +1,8 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "autopilot",
+  "version": "0.1.0",
+  "description": "Hand a body of work (a Jira epic, one big ticket, or an idea) to Claude and stay on the loop: it plans, runs workers, reviews, merges where allowed, and keeps one page of what needs you.",
+  "author": {"name": "autopilot contributors"},
+  "skills": ["./"]
+}
