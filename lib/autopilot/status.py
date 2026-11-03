@@ -77,3 +77,27 @@ def _stop(args: list) -> int:
     config.save_ap(name, cfg)
     events.append(name, "stopped", {})
     return 0
+
+
+@cli.command("config")
+def _config(args: list) -> int:
+    """Read or set top-level global settings: `ap config get [key]`, `ap config set key=value ...`."""
+    import json
+    cfg = config.load_global()
+    if args[:1] == ["get"]:
+        print(json.dumps(cfg.get(args[1]) if len(args) > 1 else cfg, indent=1, ensure_ascii=False))
+        return 0
+    if args[:1] == ["set"] and len(args) > 1:
+        for pair in args[1:]:
+            k, _, v = pair.partition("=")
+            if k not in config.DEFAULT_GLOBAL:
+                print(f"unknown setting {k!r}", file=sys.stderr)
+                return 2
+            try:
+                cfg[k] = json.loads(v)
+            except ValueError:
+                cfg[k] = v
+        config.save_global(cfg)
+        return 0
+    print("usage: ap config get [key] | ap config set key=value ...", file=sys.stderr)
+    return 2

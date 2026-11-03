@@ -80,6 +80,9 @@ def _saved_session(ap: str, task: str, role: str) -> str:
 def start(ap: str, task: str, role: str, cwd: str, prompt: str, needs: list = None, resume: bool = False) -> dict:
     """Start a worker. With resume, continue the task's saved session for this role (a fix round)."""
     gcfg, apcfg = config.load_global(), config.load_ap(ap)
+    port_range = ports(gcfg["port_base"], next_slot(all_workers(), gcfg["port_base"]))
+    prompt = (f"{prompt}\n\nYour port range: {port_range[0]}-{port_range[1]}. "
+              f"The autopilot CLI: {paths.package_root() / 'bin' / 'ap'}.")
     argv, env = build_start(gcfg, apcfg, ap, task, role, prompt)
     sid = _saved_session(ap, task, role) if resume else ""
     if resume and not sid:
@@ -92,7 +95,7 @@ def start(ap: str, task: str, role: str, cwd: str, prompt: str, needs: list = No
     found = sessions.find(name, sessions.list_all(claude_bin(gcfg)))
     rec = {"task": task, "role": role, "session_name": name,
            "session_id": (found or {}).get("sessionId") or "", "short_id": short,
-           "ports": ports(gcfg["port_base"], next_slot(all_workers(), gcfg["port_base"])),
+           "ports": port_range,
            "needs": list(needs or []), "started_at": events.now_iso(), "resumes": 0}
     st = state.load(ap)
     st["workers"] = [w for w in st["workers"] if not (w["task"] == task and w["role"] == role)] + [rec]

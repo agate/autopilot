@@ -1,0 +1,69 @@
+---
+name: autopilot
+description: Hand a body of work (a Jira epic, one big ticket, or an idea) to Claude and stay on the loop. Talk to a running autopilot, set one up, pause it, or check its health.
+disable-model-invocation: true
+---
+
+# /autopilot
+
+An autopilot drives one body of work to done by itself: a gate checks every 5 minutes, a short
+dispatcher pass starts workers, and workers implement, review and ship each task. The user stays on
+the loop: they watch one page, answer what only they can, and can undo what the autopilot decided.
+
+`ap` below means `bin/ap` in this skill's base directory (shown above as "Base directory for this
+skill"). Run it with its absolute path. Its data lives in `$AUTOPILOT_DATA`, default
+`~/.claude/autopilot-data/`.
+
+Reply in the language the user's default prompt asks for. Explain simply.
+
+## Route the request first
+
+The first word after `/autopilot` decides:
+
+| First word | Do |
+|---|---|
+| `off` | The hook already unbound the session. Confirm in one line. |
+| `status` | Run `ap status` and explain it. No binding needed. |
+| `init` | Follow `references/init.md`. |
+| `doctor` | Run `ap doctor`. For each failure, give the fix line it prints. |
+| `pause <name>` / `resume <name>` | Run `ap pause <name>` / `ap resume <name>`, confirm. |
+| `tick [name]` | Run `ap tick <name>`: a dispatcher pass now. Say it takes a few minutes. |
+| `stop <name>` | Ask first. On yes, run `ap stop <name> --yes`. |
+| `uninstall` | Ask first. On yes, run `ap uninstall`; if that is blocked, give the user the line to run with `!`. |
+| an autopilot's name | The hook bound this session to it. Talk (below). |
+| anything else, or nothing | Choose the autopilot (below), then talk. |
+
+Saying "pause checkout" or "run checkout now" in any language means the same as the verb.
+
+## Choose the autopilot when no name was given
+
+1. Run `ap status` to list the autopilots.
+2. None: offer `/autopilot init`. Stop.
+3. Exactly one: say "we're using `<name>`", bind (step 5) and continue.
+4. Several: ask with a multiple-choice question. One option per autopilot, each with its status line
+   ("checkout · 4 running · 2 waiting on you"). If the request mentions a task id, PR number or
+   branch that belongs to one autopilot, put that one first and mark it "looks like this one". Wait
+   for the answer. Never guess.
+5. Bind: the hook put a line `autopilot: session_id=<id>` in your context. Run
+   `ap bind <id> <name>`. From now on every message in this session carries that autopilot's latest
+   snapshot.
+
+## Talk
+
+Follow `references/talk.md`. In short:
+
+- The newest `autopilot snapshot` in your context is the truth. It is newer than anything earlier in
+  this chat. For detail, read the autopilot's files or run `ap` commands; never answer from memory.
+- Stay on the bound autopilot. A question about another autopilot's task: say whose it is and ask
+  whether to switch (`/autopilot <other>`).
+- Change state only through `ap` commands (`ap task set`, `ap decision resolve`, `ap decision add`,
+  `ap pause`), never by editing `state.json`.
+- A new rule from the user: ask its scope first (this autopilot or all), show the exact line, and
+  write it only after they say yes.
+
+## Never
+
+- Send a chat message, create a ticket, or post a comment for the user without their yes to that
+  exact item.
+- Edit `RUNBOOK.md` or anything in this skill's folder as part of a conversation.
+- Install the launchd job yourself; `references/init.md` hands that command to the user.

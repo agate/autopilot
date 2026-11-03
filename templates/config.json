@@ -1,0 +1,13 @@
+{
+  "name": "checkout",
+  "source": {"preset": "jira-epic", "key": "PROJ-100"},
+  "repo": "/absolute/path/to/repo",
+  "branch_pattern": "{prefix}.{task}.{short}",
+  "branch_prefix": "dev",
+  "resources": [],
+  "authority": {"merge": true},
+  "merge_method": "squash",
+  "report_times": ["09:00", "17:00", "21:00"],
+  "watches": [],
+  "extra_hosts": []
+}
