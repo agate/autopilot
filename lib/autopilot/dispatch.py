@@ -20,8 +20,11 @@ def build_command(gcfg: dict, repo: str, aps: list) -> tuple:
     runbook = paths.package_root() / "RUNBOOK.md"
     prompt = (f"Run one autopilot dispatcher pass for: {', '.join(aps)}. "
               f"Read {runbook} first and follow it exactly.")
+    settings = paths.data_root() / "settings-dispatcher.json"
+    if not settings.exists():
+        settings = paths.package_root() / "settings" / "dispatcher.json"
     argv = [workers.claude_bin(gcfg), "--bg", "-n", NAME, "--permission-mode", gcfg["permission_mode"],
-            "--settings", str(paths.package_root() / "settings" / "dispatcher.json")]
+            "--settings", str(settings)]
     if gcfg["models"].get("dispatcher"):
         argv += ["--model", gcfg["models"]["dispatcher"]]
     argv.append(prompt)

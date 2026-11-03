@@ -36,9 +36,11 @@ def _env(role: str) -> dict:
 
 
 def build_start(gcfg: dict, apcfg: dict, ap: str, task: str, role: str, prompt: str) -> tuple:
+    settings = paths.ap_dir(ap) / "settings.json"
+    if not settings.exists():
+        settings = paths.package_root() / "settings" / "worker.json"
     argv = [claude_bin(gcfg), "--bg", "-n", sessions.name_for(ap, task, role),
-            "--permission-mode", gcfg["permission_mode"],
-            "--settings", str(paths.ap_dir(ap) / "settings.json")]
+            "--permission-mode", gcfg["permission_mode"], "--settings", str(settings)]
     if role in AGENTS:
         argv += ["--agent", AGENTS[role]]
     else:

@@ -35,7 +35,13 @@ class WorkersTest(unittest.TestCase):
         ws = [{"ports": [7100, 7109]}, {"ports": [7120, 7129]}]
         self.assertEqual(workers.next_slot(ws, 7100), 1)
 
+    def test_build_start_falls_back_to_package_settings(self):
+        argv, _ = workers.build_start(config.load_global(), config.load_ap("checkout"), "checkout",
+                                      "PROJ-123", "implement", "do it")
+        self.assertEqual(argv[argv.index("--settings") + 1], str(ROOT / "settings" / "worker.json"))
+
     def test_build_start_implement(self):
+        (self.data / "checkout" / "settings.json").write_text("{}")
         argv, env = workers.build_start(config.load_global(), config.load_ap("checkout"), "checkout",
                                         "PROJ-123", "implement", "do it")
         self.assertEqual(argv[0], FAKE)

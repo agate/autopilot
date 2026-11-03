@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "deny": [
+      "Edit(**/autopilot-data/**/RULES.md)",
+      "Write(**/autopilot-data/**/RULES.md)",
+      "Edit(**/autopilot-data/RULES.md)",
+      "Write(**/autopilot-data/RULES.md)",
+      "Bash(gh pr comment:*)",
+      "Bash(gh pr review:*)",
+      "Bash(gh issue comment:*)",
+      "Bash(gh pr edit --add-reviewer:*)"
+    ]
+  }
+}
