@@ -1,0 +1,6 @@
+[
+  {"id": "aaaa1111", "name": "checkout · PROJ-123 · implement", "status": "idle", "state": "done", "pid": 999999, "sessionId": "11111111-0000-0000-0000-000000000001", "cwd": "/tmp", "kind": "background", "startedAt": 1000},
+  {"id": "bbbb2222", "name": "checkout · PROJ-123 · implement", "status": "busy", "state": "working", "pid": 1, "sessionId": "11111111-0000-0000-0000-000000000001", "cwd": "/tmp", "kind": "background", "startedAt": 2000},
+  {"id": "cccc3333", "name": "checkout · PROJ-124 · review", "status": "waiting", "state": "blocked", "pid": 1, "sessionId": "11111111-0000-0000-0000-000000000002", "cwd": "/tmp", "kind": "background", "startedAt": 1500},
+  {"name": "some interactive session", "status": "idle", "pid": 1, "sessionId": "11111111-0000-0000-0000-000000000009", "cwd": "/tmp", "kind": "interactive"}
+]
