@@ -56,7 +56,7 @@ def _evidence(ap: str, task: str, assets: dict):
     shots = []
     for s in ev.get("screenshots") or []:
         key = f"{ap}/{task}/{s['path'].split('/')[-1]}"
-        shots.append(dict(s, key=key, asset_url=assets.get(key)))
+        shots.append(dict(s, key=key, asset_id=assets.get(key)))
     ev["screenshots"] = shots
     hb = parts["handback"] or {}
     ev["criteria"] = ev.get("criteria") or hb.get("criteria")
@@ -132,7 +132,7 @@ def diff(prev: dict, cur: dict) -> dict:
     assets = []
     for ev in (cur.get("evidence") or {}).values():
         for s in ev.get("screenshots") or []:
-            if not s.get("asset_url"):
+            if not s.get("asset_id"):
                 assets.append({"key": s["key"], "local_path": str(paths.ap_dir(ev["ap"]) / "runs" / ev["task"] / s["path"])})
     return {"set": sets, "delete": dels, "assets": assets}
 

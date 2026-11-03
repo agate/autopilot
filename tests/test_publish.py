@@ -60,11 +60,11 @@ class PublishTest(unittest.TestCase):
             {"path": "media/after.png", "caption": {"en": "after"}}]}))
         d = publish.diff({}, publish.collect(["checkout"]))
         self.assertEqual([a["key"] for a in d["assets"]], ["checkout/PROJ-123/after.png"])
-        publish.mark(publish.collect(["checkout"]), {"checkout/PROJ-123/after.png": "https://claude.ai/asset/x"})
+        publish.mark(publish.collect(["checkout"]), {"checkout/PROJ-123/after.png": "0123456789abcdef0123456789abcdef"})
         d2 = publish.diff(publish.published(), publish.collect(["checkout"]))
         self.assertEqual(d2["assets"], [])
         ev = publish.collect(["checkout"])["evidence"]["checkout:PROJ-123"]
-        self.assertEqual(ev["screenshots"][0]["asset_url"], "https://claude.ai/asset/x")
+        self.assertEqual(ev["screenshots"][0]["asset_id"], "0123456789abcdef0123456789abcdef")
 
     def test_labels_merged_with_reader_lang(self):
         g = config.load_global()
