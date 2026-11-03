@@ -1,0 +1,10 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {"hooks": [{"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/ap\" hook-prompt"}]}
+    ],
+    "PreToolUse": [
+      {"matcher": "Bash", "hooks": [{"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/ap\" hook-guard"}]}
+    ]
+  }
+}
