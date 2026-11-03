@@ -35,8 +35,15 @@ def usage() -> str:
     return "usage: ap <command> [args]\ncommands: " + ", ".join(sorted(COMMANDS))
 
 
+# Hooks run on every message or tool call, so they load only their own module.
+FAST = {"hook-prompt": "autopilot.snapshot", "hook-guard": "autopilot.guard"}
+
+
 def main(argv: list) -> int:
-    load_all()
+    if argv and argv[0] in FAST:
+        importlib.import_module(FAST[argv[0]])
+    else:
+        load_all()
     if not argv or argv[0] not in COMMANDS:
         print(usage(), file=sys.stderr)
         return 2
