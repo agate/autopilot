@@ -1,0 +1,7 @@
+{
+  "dispatcher_stuck": "The dispatcher is stuck: there is free capacity and ready work, but two passes in a row started nothing.",
+  "worker_blocked": "A worker is waiting for a permission nobody can give: {session}.",
+  "worker_died_twice": "A worker stopped twice without finishing: {session}.",
+  "state_broken": "The state file of {ap} is broken: {error}",
+  "cap_warning": "{active} autopilots are running but at most {cap} workers can run at once, so at least {waiting} has to wait."
+}
