@@ -20,6 +20,7 @@ DEFAULT_GLOBAL: dict = {
     "models": {"dispatcher": None, "worker": None},
     "worker_effort": "xhigh",
     "dispatch_timeout_s": 1800,
+    "worktree_root": "~/worktrees",
     "reader_lang": "en",
     "tools": {"claude": None, "gh": None, "git": None, "python3": None},
 }
@@ -32,6 +33,7 @@ DEFAULT_AP: dict = {
     "report_times": None,
     "watches": [],
     "extra_hosts": [],
+    "merge_method": "squash",
     "stopped": False,
 }
 

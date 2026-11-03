@@ -62,13 +62,20 @@ def snapshots(names: list) -> list:
 
 @cli.command("next")
 def _cmd(args: list) -> int:
+    from datetime import datetime, timezone
+    from autopilot import budget
     names = [a for a in args if not a.startswith("--")] or config.active_aps()
     snaps = snapshots(names)
     g = config.load_global()
-    live = [w for _, _, st in snaps for w in st.get("workers", [])]
+    live = [w for _, _, st in snapshots(config.list_aps()) for w in st.get("workers", [])]
+    allow = budget.allowance(budget.read(), g, datetime.now(timezone.utc))["allow"]
+    ready_map = {n: [t["id"] for t in ready(st)] for n, _, st in snaps}
     out = {
-        "ready": {n: [t["id"] for t in ready(st)] for n, _, st in snaps},
-        "starts": plan_starts(snaps, live, g["max_workers"], None),
+        "ready": ready_map,
+        "ready_count": sum(len(v) for v in ready_map.values()),
+        "free": g["max_workers"] - len(live),
+        "allow": allow,
+        "starts": plan_starts(snaps, live, g["max_workers"], allow),
     }
     print(json.dumps(out, indent=1) if "--json" in args else
           "\n".join(f"{n}: {', '.join(ids) or '-'}" for n, ids in out["ready"].items()))

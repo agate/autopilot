@@ -7,6 +7,29 @@ from datetime import datetime, timedelta, timezone
 
 from autopilot import cli, config, events, paths, state, text
 
+def _locked(fn):
+    """Talk sessions (no AUTOPILOT_ROLE) take the dispatcher lock while they change state."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*a, lock_wait_s: float = 120, **kw):
+        if os.environ.get("AUTOPILOT_ROLE"):
+            return fn(*a, **kw)
+        from autopilot import lock
+        import time
+        lk = paths.data_root() / "lock"
+        deadline = time.monotonic() + lock_wait_s
+        while not lock.acquire(lk, f"talk {fn.__name__}"):
+            if time.monotonic() >= deadline:
+                raise TimeoutError("a dispatcher pass is running; try again in a few minutes")
+            time.sleep(2)
+        try:
+            return fn(*a, **kw)
+        finally:
+            lock.release(lk)
+    return wrapper
+
+
 SOURCE_WINS = ("title", "status", "depends_on", "link", "assignee", "needs", "critical", "phase")
 REPORT_KEYS = {"slot", "done", "waiting", "next", "budget", "access"}
 
@@ -18,6 +41,7 @@ def _write_json(path, obj) -> None:
     os.replace(tmp, path)
 
 
+@_locked
 def tasks_sync(ap: str, tasks: list) -> None:
     st = state.load(ap)
     by_id = {t["id"]: t for t in st["tasks"]}
@@ -40,6 +64,7 @@ def tasks_sync(ap: str, tasks: list) -> None:
     events.append(ap, "tasks_synced", {"count": len(tasks)})
 
 
+@_locked
 def task_set(ap: str, task_id: str, fields: dict) -> None:
     st = state.load(ap)
     t = next((t for t in st["tasks"] if t["id"] == task_id), None)
@@ -50,6 +75,7 @@ def task_set(ap: str, task_id: str, fields: dict) -> None:
     events.append(ap, "task_set", {"task": task_id, "fields": fields})
 
 
+@_locked
 def task_add(ap: str, task: dict) -> None:
     st = state.load(ap)
     if any(t["id"] == task["id"] for t in st["tasks"]):
@@ -61,6 +87,7 @@ def task_add(ap: str, task: dict) -> None:
     events.append(ap, "task_added", {"task": task["id"]})
 
 
+@_locked
 def decision_add(ap: str, d: dict) -> str:
     st = state.load(ap)
     nums = [int(x["id"][1:]) for x in st["decisions"] if x["id"][1:].isdigit()]
@@ -77,6 +104,7 @@ def decision_add(ap: str, d: dict) -> str:
     return new["id"]
 
 
+@_locked
 def decision_resolve(ap: str, did: str, answer: str, status: str = "answered") -> None:
     st = state.load(ap)
     d = next((d for d in st["decisions"] if d["id"] == did), None)
@@ -94,6 +122,7 @@ def _archive_lines(ap: str) -> list:
     return [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
 
 
+@_locked
 def archive(ap: str) -> int:
     days = config.load_global()["archive_after_days"]
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
@@ -112,6 +141,7 @@ def archive(ap: str) -> int:
     return len(moved)
 
 
+@_locked
 def report_write(ap: str, rep: dict) -> None:
     langs = state.langs()
     errs = [f"report: unknown key {k}" for k in set(rep) - REPORT_KEYS]
@@ -177,6 +207,9 @@ def _tasks(args):
 def _task(args):
     if len(args) >= 3 and args[0] == "set":
         task_set(args[1], args[2], _kv(args[3:]))
+    elif len(args) == 3 and args[0] == "cleanup":
+        from autopilot import workers
+        print(len(workers.cleanup(args[1], args[2])))
     elif len(args) == 3 and args[0] == "add":
         task_add(args[1], _load_arg(args[2]))
     else:
@@ -206,8 +239,14 @@ def _archive(args):
 
 @cli.command("report")
 def _report(args):
+    if args[:1] == ["due"] and len(args) == 2:
+        from autopilot import gate
+        gcfg, apcfg, st = config.load_global(), config.load_ap(args[1]), state.load(args[1])
+        print(gate.report_due(apcfg.get("report_times") or gcfg["report_times"], st.get("last_report"),
+                              datetime.now()) or "")
+        return 0
     if args[:1] != ["write"] or len(args) != 3:
-        print("usage: ap report write <ap> <file.json>", file=sys.stderr)
+        print("usage: ap report write <ap> <file.json> | ap report due <ap>", file=sys.stderr)
         return 2
     report_write(args[1], _load_arg(args[2]))
     return 0

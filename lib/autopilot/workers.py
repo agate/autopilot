@@ -72,9 +72,21 @@ def _launch(argv: list, cwd: str, env: dict) -> str:
     return m.group(1)
 
 
-def start(ap: str, task: str, role: str, cwd: str, prompt: str, needs: list = None) -> dict:
+def _saved_session(ap: str, task: str, role: str) -> str:
+    t = next((t for t in state.load(ap)["tasks"] if t["id"] == task), {})
+    return (t.get("sessions") or {}).get(role) or ""
+
+
+def start(ap: str, task: str, role: str, cwd: str, prompt: str, needs: list = None, resume: bool = False) -> dict:
+    """Start a worker. With resume, continue the task's saved session for this role (a fix round)."""
     gcfg, apcfg = config.load_global(), config.load_ap(ap)
     argv, env = build_start(gcfg, apcfg, ap, task, role, prompt)
+    sid = _saved_session(ap, task, role) if resume else ""
+    if resume and not sid:
+        raise RuntimeError(f"{ap} {task}: no saved {role} session to resume")
+    if sid:
+        argv = [argv[0], "--bg", "--resume", sid] + argv[argv.index("--permission-mode"):argv.index("--settings") + 2]
+        argv.append(prompt if role in AGENTS else "/autopilot:pr-loop " + prompt)
     short = _launch(argv, cwd, env)
     name = sessions.name_for(ap, task, role)
     found = sessions.find(name, sessions.list_all(claude_bin(gcfg)))
@@ -109,19 +121,44 @@ def resume(ap: str, worker: dict) -> dict:
 
 def end(ap: str, task: str, role: str) -> None:
     gcfg = config.load_global()
+    """Stop a worker and keep its conversation on the task, so a fix round can resume it."""
     from autopilot import usage
     st = state.load(ap)
     keep, tokens = [], usage.zero()
     for w in st["workers"]:
         if w["task"] == task and w["role"] == role:
             tokens = usage.session_tokens(w.get("session_id"))
-            for sub in ("stop", "rm"):
-                subprocess.run([claude_bin(gcfg), sub, w["short_id"]], capture_output=True, timeout=60)
+            subprocess.run([claude_bin(gcfg), "stop", w["short_id"]], capture_output=True, timeout=60)
+            for t in st["tasks"]:
+                if t["id"] == task and w.get("session_id"):
+                    t.setdefault("sessions", {})[role] = w["session_id"]
         else:
             keep.append(w)
     st["workers"] = keep
     state.save(ap, st)
     events.append(ap, "worker_ended", {"task": task, "role": role, "tokens": tokens})
+
+
+def cleanup(ap: str, task: str) -> list:
+    """Delete every saved session of a finished task."""
+    gcfg = config.load_global()
+    st = state.load(ap)
+    removed = []
+    for t in st["tasks"]:
+        if t["id"] == task:
+            for sid in (t.pop("sessions", None) or {}).values():
+                subprocess.run([claude_bin(gcfg), "rm", sid], capture_output=True, timeout=60)
+                removed.append(sid)
+    state.save(ap, st)
+    events.append(ap, "task_cleaned", {"task": task, "sessions": len(removed)})
+    return removed
+
+
+def listing(ap: str) -> list:
+    gcfg = config.load_global()
+    all_s = sessions.list_all(claude_bin(gcfg))
+    runs = paths.ap_dir(ap) / "runs"
+    return [dict(w, state=sessions.classify(w, all_s, runs / w["task"])) for w in state.load(ap)["workers"]]
 
 
 def _opt(args: list, flag: str, default=None):
@@ -133,15 +170,24 @@ def _opt(args: list, flag: str, default=None):
 
 @cli.command("worker")
 def _cmd(args: list) -> int:
+    if args[:1] == ["list"] and len(args) >= 2:
+        rows = listing(args[1])
+        if "--json" in args:
+            import json
+            print(json.dumps(rows, indent=1, ensure_ascii=False))
+        else:
+            for w in rows:
+                print(f"{w['session_name']}: {w['state']} (resumes {w['resumes']})")
+        return 0
     if len(args) < 4:
-        print("usage: ap worker start|resume|end <ap> <task> <role> [--cwd P --prompt-file F --needs a,b]",
-              file=sys.stderr)
+        print("usage: ap worker start|resume|end <ap> <task> <role> [--cwd P --prompt-file F --needs a,b --resume]"
+              " | ap worker list <ap> [--json]", file=sys.stderr)
         return 2
     sub, ap, task, role = args[:4]
     if sub == "start":
         prompt = open(_opt(args, "--prompt-file")).read()
         needs = [n for n in (_opt(args, "--needs", "") or "").split(",") if n]
-        rec = start(ap, task, role, _opt(args, "--cwd", os.getcwd()), prompt, needs)
+        rec = start(ap, task, role, _opt(args, "--cwd", os.getcwd()), prompt, needs, resume="--resume" in args)
         print(rec["session_name"], rec["short_id"], rec["ports"])
     elif sub == "resume":
         w = next(w for w in state.load(ap)["workers"] if w["task"] == task and w["role"] == role)

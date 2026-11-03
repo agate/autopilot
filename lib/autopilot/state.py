@@ -7,7 +7,7 @@ from autopilot import config, paths, text
 
 TOP = {"version", "tasks", "workers", "decisions", "last_report", "paused_until"}
 TASK_REQ = {"id", "title", "depends_on", "status", "link", "needs", "critical", "phase", "origin"}
-TASK_OPT = {"pr", "branch", "worktree", "spec", "assignee", "evidence"}
+TASK_OPT = {"pr", "branch", "worktree", "spec", "assignee", "evidence", "sessions"}
 TASK_STATUS = {"todo", "in_progress", "in_review", "done", "blocked", "skipped"}
 ORIGINS = {"source", "found"}
 WORKER_REQ = {"task", "role", "session_name", "session_id", "short_id", "ports", "needs", "started_at", "resumes"}

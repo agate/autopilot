@@ -77,7 +77,7 @@ class WorkersTest(unittest.TestCase):
         workers.start("checkout", "PROJ-123", "implement", str(self.data), "do it")
         workers.end("checkout", "PROJ-123", "implement")
         self.assertEqual(state.load("checkout")["workers"], [])
-        self.assertIn("rm abcd1234", self.log.read_text())
+        self.assertIn("stop abcd1234", self.log.read_text())
 
 
 if __name__ == "__main__":
