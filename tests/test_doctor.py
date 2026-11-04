@@ -35,14 +35,16 @@ class DoctorSpecChecksTest(unittest.TestCase):
 
 
 class DoctorLoginTest(unittest.TestCase):
-    def _login_check(self, status_out, rc=0):
+    def _login_check(self, status_out, rc=0, text_out=""):
         from unittest import mock
         with TempData():
             g = config.load_global()
             g["tools"]["claude"] = "/bin/echo"
             config.save_global(g)
             def run(argv, timeout=30):
-                return (rc, status_out) if argv[1:3] == ["auth", "status"] else (0, "")
+                if argv[1:3] == ["auth", "status"]:
+                    return (rc, text_out) if "--text" in argv else (rc, status_out)
+                return (0, "")
             with mock.patch.object(doctor, "_run", side_effect=run), \
                     mock.patch.object(doctor, "_run_in", return_value=(0, "")):
                 return {c["name"]: c for c in doctor.checks(config.load_global())}["claude login"]
@@ -62,6 +64,15 @@ class DoctorLoginTest(unittest.TestCase):
         c = self._login_check(self._status(24 * 6))
         self.assertTrue(c["ok"])
         self.assertIn("ends", c["detail"])
+
+    def test_earliest_end_from_text_wins(self):
+        from datetime import date, timedelta
+        soon = (date.today() + timedelta(days=1)).isoformat()
+        text = f"Login method: Claude Enterprise account\nSign-in ends: between {soon} and 2099-01-01 (x)"
+        c = self._login_check(self._status(24 * 6), text_out=text)
+        self.assertFalse(c["ok"])
+        self.assertIn(soon, c["detail"])
+        self.assertIn(soon, c["fix"])
 
     def test_logged_out_fails(self):
         c = self._login_check('{"loggedIn": false}')

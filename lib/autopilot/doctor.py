@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -32,8 +33,9 @@ def _c(name, ok, detail="", fix="") -> dict:
     return {"name": name, "ok": bool(ok), "detail": detail, "fix": fix}
 
 
-def _login_check(rc: int, msg: str) -> dict:
-    """`claude auth status` prints JSON with `loginExpiresAt`. Workers stop when the sign-in ends."""
+def _login_check(rc: int, msg: str, text: str = "") -> dict:
+    """`claude auth status` prints JSON with `loginExpiresAt`, the latest end; `--text` can also say
+    "between <earliest> and <latest>". Workers stop when the sign-in ends, so the earliest counts."""
     fix = "run `claude auth login` in your own terminal"
     try:
         status = json.loads(msg)
@@ -48,10 +50,16 @@ def _login_check(rc: int, msg: str) -> dict:
         when = datetime.fromisoformat(end.replace("Z", "+00:00")).astimezone()
     except ValueError:
         return _c("claude login", True, f"ends {end}")
+    latest = f"{when:%Y-%m-%d %H:%M}"
+    m = re.search(r"between (\d{4}-\d{2}-\d{2}) and", text or "")
+    first = datetime.fromisoformat(m.group(1)).astimezone() if m else None
+    if first and first < when:
+        when, detail, by = first, f"sign-in ends between {m.group(1)} and {latest}", m.group(1)
+    else:
+        detail, by = f"sign-in ends {latest}", latest
     soon = when - datetime.now().astimezone() < timedelta(days=2)
-    detail = f"sign-in ends {when:%Y-%m-%d %H:%M}"
     return _c("claude login", not soon, detail,
-              f"{fix} before {when:%Y-%m-%d %H:%M}: workers stop when the sign-in ends" if soon else "")
+              f"{fix} before {by}: workers stop when the sign-in ends" if soon else "")
 
 
 def checks(gcfg: dict) -> list:
@@ -82,7 +90,7 @@ def checks(gcfg: dict) -> list:
         out.append(_c(f"state {name}", False, err, f"fix or restore {paths.ap_dir(name) / 'state.json'}"))
     if tools.get("claude"):
         rc, msg = _run([tools["claude"], "auth", "status"])
-        out.append(_login_check(rc, msg))
+        out.append(_login_check(rc, msg, _run([tools["claude"], "auth", "status", "--text"])[1]))
     if tools.get("gh"):
         rc, msg = _run([tools["gh"], "auth", "status"])
         out.append(_c("gh login", rc == 0, "", "" if rc == 0 else "run `gh auth login`"))
