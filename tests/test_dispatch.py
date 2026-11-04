@@ -75,7 +75,8 @@ class DispatchTest(unittest.TestCase):
         write_ap(self.data, "alpha", repo=str(repo))
         self.agents.write_text(json.dumps([{"id": "abcd1234", "name": "autopilot · dispatch", "kind": "background",
                                             "status": "busy", "state": "working", "pid": 1, "startedAt": 1}]))
-        res = dispatch.run(config.load_global(), ["alpha"], poll_s=0, timeout_s=0)
+        with mock.patch.object(dispatch, "_live_dispatcher", return_value=None):
+            res = dispatch.run(config.load_global(), ["alpha"], poll_s=0, timeout_s=0)
         self.assertTrue(res[0]["timeout"])
         self.assertIn("stop abcd1234", self.log.read_text())
 
@@ -84,8 +85,8 @@ class DispatchTest(unittest.TestCase):
         repo.mkdir()
         write_ap(self.data, "alpha", repo=str(repo))
         with mock.patch.object(dispatch.workers, "_launch", side_effect=RuntimeError("boom")):
-            with self.assertRaises(RuntimeError):
-                dispatch.run(config.load_global(), ["alpha"], poll_s=0)
+            res = dispatch.run(config.load_global(), ["alpha"], poll_s=0)
+        self.assertIn("boom", res[0]["error"])
         self.assertIsNone(lock.held(paths.data_root() / "lock"))
 
     def test_pass_begun_before_start(self):

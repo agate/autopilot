@@ -47,7 +47,7 @@ class LockTest(unittest.TestCase):
         with TempData() as d:
             write_ap(d, "checkout")
             with state.mutate("checkout") as st:
-                st["paused_until"] = None
+                st["last_report"] = None
             code = (f"import os,sys; os.environ['AUTOPILOT_DATA']={str(d)!r}; sys.path.insert(0,{str(LIB)!r}); "
                     f"from autopilot import state; import time\n"
                     f"with state.mutate('checkout') as st:\n    print('in', flush=True); time.sleep(1.5)")

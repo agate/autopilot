@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 
 from autopilot import budget, cli, config, events, lock, nextwork, ops, paths, sessions, state, workers
@@ -28,13 +30,36 @@ def _hash(s: str) -> str:
     return hashlib.sha1(s.encode("utf-8", "replace")).hexdigest()[:12]
 
 
+GREEN = {"SUCCESS", "NEUTRAL", "SKIPPED"}
+RED = {"FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"}
+
+
+def pr_summary(data: dict) -> str:
+    """What about a PR should wake the dispatcher: head, overall CI state, review decision, each reviewer's
+    latest review. Check timestamps and per-check progress are left out on purpose."""
+    vals = [(c.get("conclusion") or c.get("state") or "").upper() for c in data.get("statusCheckRollup") or []]
+    if not vals:
+        ci = "none"
+    elif any(v in RED for v in vals):
+        ci = "red"
+    elif all(v in GREEN for v in vals):
+        ci = "green"
+    else:
+        ci = "pending"
+    latest = {}
+    for r in data.get("latestReviews") or []:
+        latest[(r.get("author") or {}).get("login") or "?"] = f"{r.get('state')}@{(r.get('commit') or {}).get('oid')}"
+    return json.dumps({"head": data.get("headRefOid"), "ci": ci, "decision": data.get("reviewDecision"),
+                       "reviews": sorted(latest.items())}, sort_keys=True)
+
+
 def pr_fingerprint(gh_bin: str, repo: str, pr) -> str:
     try:
         out = subprocess.run([gh_bin, "pr", "view", str(pr), "--json",
                               "headRefOid,reviewDecision,statusCheckRollup,latestReviews"],
                              cwd=repo, capture_output=True, text=True, timeout=60)
-        return _hash(out.stdout) if out.returncode == 0 else "err"
-    except (OSError, subprocess.SubprocessError):
+        return _hash(pr_summary(json.loads(out.stdout))) if out.returncode == 0 else "err"
+    except (OSError, ValueError, subprocess.SubprocessError):
         return "err"
 
 
@@ -46,30 +71,36 @@ def watch_fingerprint(cmd: str, cwd: str) -> str:
         return "err"
 
 
-def fingerprint(ap: str, apcfg: dict, st: dict, all_sessions: list, now: datetime, gh_bin: str,
-                free: int, gcfg: dict) -> dict:
+def fingerprint(ap: str, apcfg: dict, st: dict, all_sessions, now: datetime, gh_bin: str,
+                free: int, gcfg: dict, hide_after: float = None) -> dict:
+    """What the gate compares between runs. With hide_after (epoch seconds), result files written after
+    that moment are left out, so results that land during a pass still count as new next time."""
     runs = paths.ap_dir(ap) / "runs"
     files = []
     if runs.exists():
         for f in sorted(runs.glob("*/*.json")):
             if f.name in sessions.RESULT_FILES.values():
-                files.append(f"{f.parent.name}/{f.name}:{int(f.stat().st_mtime)}")
-    wk = sorted(f"{w['session_name']}={sessions.classify(w, all_sessions, runs / w['task'])}"
-                for w in st["workers"])
+                mt = f.stat().st_mtime
+                if hide_after is None or mt < hide_after:
+                    files.append(f"{f.parent.name}/{f.name}:{int(mt)}")
+    wk = []
+    for w in st["workers"]:
+        cls = sessions.classify(w, all_sessions, runs / w["task"])
+        if cls == "done" and hide_after is not None:
+            rf = runs / w["task"] / sessions.result_file(w["role"])
+            if rf.exists() and rf.stat().st_mtime >= hide_after:
+                cls = "running"
+        wk.append(f"{w['session_name']}={cls}")
+    busy = {w["task"] for w in st["workers"]}
     ready = [t["id"] for t in nextwork.ready(st)] if free > 0 else []
     prs = {t["id"]: pr_fingerprint(gh_bin, apcfg["repo"], t["pr"])
-           for t in st["tasks"] if t.get("pr") and t["status"] == "in_review"}
+           for t in st["tasks"] if t.get("pr") and t["status"] == "in_review" and t["id"] not in busy}
     watches = {w["name"]: watch_fingerprint(w["cmd"], apcfg["repo"]) for w in apcfg.get("watches") or []}
-    resume = None
-    if st.get("paused_until"):
-        try:
-            if now.astimezone(timezone.utc) >= datetime.fromisoformat(st["paused_until"]):
-                resume = "resume"
-        except ValueError:
-            resume = "bad"
-    times = apcfg.get("report_times") or gcfg["report_times"]
-    return {"files": _hash("|".join(files)), "workers": wk, "ready": ready, "prs": prs, "watches": watches,
-            "report": report_due(times, st.get("last_report"), now), "budget_resume": resume}
+    times = apcfg.get("report_times")
+    if times is None:
+        times = gcfg["report_times"]
+    return {"files": _hash("|".join(files)), "workers": sorted(wk), "ready": ready, "prs": prs,
+            "watches": watches, "report": report_due(times, st.get("last_report"), now)}
 
 
 def should_dispatch(prev, cur: dict, last_pass_at, now: datetime, forced_min: int) -> tuple:
@@ -84,6 +115,7 @@ def should_dispatch(prev, cur: dict, last_pass_at, now: datetime, forced_min: in
 
 
 def idle_failed(last_pass: dict) -> bool:
+    """The dispatcher's own numbers say it had room and work but started nothing."""
     if not last_pass or last_pass.get("timeout"):
         return False
     return (last_pass.get("free", 0) > 0 and last_pass.get("ready", 0) > 0
@@ -98,8 +130,12 @@ def notify(msg: str) -> None:
         pass
 
 
-def _sessions(gcfg: dict) -> list:
+def _sessions(gcfg: dict):
     return sessions.list_all(workers.claude_bin(gcfg))
+
+
+def _allowance(gcfg: dict, now: datetime) -> dict:
+    return budget.allowance(budget.read(), gcfg, now.astimezone(timezone.utc))
 
 
 def _gh(gcfg: dict) -> str:
@@ -110,9 +146,9 @@ def _gate_file():
     return paths.data_root() / "gate.json"
 
 
-def _read_gate() -> dict:
+def _read_json(p) -> dict:
     try:
-        return json.loads(_gate_file().read_text())
+        return json.loads(p.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
 
@@ -120,24 +156,38 @@ def _read_gate() -> dict:
 def _write_gate(g: dict) -> None:
     p = _gate_file()
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(g, indent=1, sort_keys=True) + "\n")
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(g, indent=1, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8")
+    os.replace(tmp, p)
 
 
 def _local_now() -> datetime:
     return datetime.now().astimezone()
 
 
-def _fingerprints(gcfg: dict, names: list, now: datetime, gs: dict) -> tuple:
+def _load_all(gcfg: dict, now: datetime, hide_after: float = None) -> tuple:
+    """Load and fingerprint every active autopilot. Anything wrong with one autopilot marks it broken
+    and never stops the others."""
     all_sessions = _sessions(gcfg)
     loaded, broken = {}, {}
-    for n in names:
+    for n in config.list_aps():
         try:
-            loaded[n] = (config.load_ap(n), state.load(n))
-        except (state.StateError, FileNotFoundError, ValueError) as e:
-            broken[n] = str(e)
+            if config.status_of(n) != "active":
+                continue
+            apcfg = config.load_ap(n)
+            if not apcfg.get("repo"):
+                raise ValueError("config.json has no repo")
+            loaded[n] = (apcfg, state.load(n))
+        except Exception as e:  # noqa: BLE001 - one bad autopilot must not stop the gate
+            broken[n] = f"{type(e).__name__}: {e}"
     live = sum(len(st["workers"]) for _, st in loaded.values())
     free = gcfg["max_workers"] - live
-    fps = {n: fingerprint(n, c, st, all_sessions, now, _gh(gcfg), free, gcfg) for n, (c, st) in loaded.items()}
+    fps = {}
+    for n, (c, st) in loaded.items():
+        try:
+            fps[n] = fingerprint(n, c, st, all_sessions, now, _gh(gcfg), free, gcfg, hide_after)
+        except Exception as e:  # noqa: BLE001
+            broken[n] = f"{type(e).__name__}: {e}"
     return fps, broken
 
 
@@ -154,34 +204,102 @@ def _flag_stuck(names: list) -> None:
     notify("The dispatcher is stuck: free capacity and ready work, but nothing started.")
 
 
+def _idle(aps: list, begun_at: str, gcfg: dict, now: datetime) -> bool:
+    """Checked by the gate itself on fresh state: work could start now, but the pass started none."""
+    snaps = nextwork.snapshots(aps)
+    live = workers.all_workers()
+    planned = nextwork.plan_starts(snaps, live, gcfg["max_workers"], _allowance(gcfg, now)["allow"])
+    if not planned:
+        return False
+    started = 0
+    for a in aps:
+        evs, _ = events.since(a, 0)
+        started += sum(1 for e in evs if e.get("type") == "worker_started" and (e.get("at") or "") >= (begun_at or ""))
+    return started == 0
+
+
+def _assess(results: list, todo: list, gcfg: dict, now: datetime) -> bool:
+    """Record problems a pass reports; True when it has to be run again."""
+    failed = False
+    for r in results:
+        aps = r.get("aps") or todo
+        if r.get("skipped"):
+            continue
+        for flag, msg in (("blocked", "The autopilot dispatcher stopped at a permission prompt. Run /autopilot doctor."),
+                          ("timeout", "An autopilot dispatcher pass ran past its time limit."),
+                          ("error", "An autopilot dispatcher pass failed to run.")):
+            if r.get(flag):
+                for a in aps:
+                    events.append(a, f"dispatcher_{flag}" if flag != "error" else "dispatch_error",
+                                  {"detail": str(r.get(flag))})
+                notify(msg)
+                break
+        else:
+            if "ended_at" not in r or _idle(aps, r.get("begun_at"), gcfg, now):
+                failed = True
+    return failed
+
+
+def _epoch(iso: str):
+    try:
+        return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+    except (AttributeError, ValueError):
+        return None
+
+
 def run(now: datetime = None, dispatch_fn=None) -> int:
     gcfg = config.load_global()
     if lock.held(paths.data_root() / "lock"):
         return 0
     now = now or _local_now()
-    gs = _read_gate()
-    names = config.active_aps()
-    fps, broken = _fingerprints(gcfg, names, now, gs)
+    gs = _read_json(_gate_file())
+    fps, broken = _load_all(gcfg, now)
     for n, err in broken.items():
         if (gs.get("broken") or {}).get(n) != err:
-            events.append(n, "state_broken", {"error": err})
-            notify(f"autopilot {n}: state file is broken")
-    last_at = gs.get("last_pass_at")
-    last_at = datetime.fromisoformat(last_at) if last_at else None
+            try:
+                events.append(n, "state_broken", {"error": err})
+            except OSError:
+                pass
+            notify(f"autopilot {n} cannot run: {err[:120]}")
+    tick_file = paths.data_root() / "tick.json"
+    ticked = set(_read_json(tick_file).get("aps") or [])
+    allow = _allowance(gcfg, now)
+    gs["paused_until"] = allow.get("paused_until") if allow["reason"] == "window" else None
+    last = gs.get("last_pass_at") if isinstance(gs.get("last_pass_at"), dict) else {}
     prev = gs.get("fps") or {}
-    todo = [n for n in fps if should_dispatch(prev.get(n), fps[n], last_at, now, gcfg["forced_pass_min"])[0]]
+    todo = []
+    for n, fp in fps.items():
+        at = last.get(n)
+        go, why = should_dispatch(prev.get(n), fp, datetime.fromisoformat(at) if at else None, now,
+                                  gcfg["forced_pass_min"])
+        due = fp.get("report") is not None
+        if allow["reason"] == "credits":
+            go = due or n in ticked
+        elif allow["reason"] == "window":
+            go = (go and why != "forced") or due or n in ticked
+        else:
+            go = go or n in ticked
+        if go:
+            todo.append(n)
     if todo:
         if dispatch_fn is None:
             from autopilot import dispatch
             dispatch_fn = dispatch.run
         results = dispatch_fn(gcfg, todo)
-        if any(idle_failed(r) for r in results):
+        begun = [e for e in (_epoch(r.get("begun_at")) for r in results) if e]
+        if _assess(results, todo, gcfg, now):
             results = dispatch_fn(gcfg, todo)
-            if any(idle_failed(r) for r in results):
+            begun += [e for e in (_epoch(r.get("begun_at")) for r in results) if e]
+            if _assess(results, todo, gcfg, now):
                 _flag_stuck(todo)
-        gs["last_pass_at"] = now.isoformat()
-        fps, _ = _fingerprints(gcfg, names, now, gs)
-    gs.update(fps=fps, broken=broken, last_run_at=now.isoformat())
+        for n in todo:
+            last[n] = now.isoformat()
+        fps, broken = _load_all(gcfg, now, hide_after=min(begun) if begun else None)
+        try:
+            tick_file.unlink()
+        except FileNotFoundError:
+            pass
+    gs.update(fps=fps, broken=broken, last_pass_at=last, last_run_at=now.isoformat())
     _write_gate(gs)
     return 0
 
@@ -193,8 +311,17 @@ def _cmd(args: list) -> int:
 
 @cli.command("tick")
 def _tick(args: list) -> int:
-    from autopilot import dispatch
+    """Queue a pass for the gate to run now. Never runs the pass in the calling session."""
+    from autopilot import install
     names = args or config.active_aps()
-    results = dispatch.run(config.load_global(), names)
-    print(json.dumps(results, indent=1))
+    unknown = [n for n in names if n not in config.list_aps()]
+    if unknown:
+        print(f"no autopilot named {', '.join(unknown)}", file=sys.stderr)
+        return 2
+    p = paths.data_root() / "tick.json"
+    queued = set(_read_json(p).get("aps") or []) | set(names)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"aps": sorted(queued), "at": events.now_iso()}))
+    install.kick()
+    print(f"queued a pass for {', '.join(sorted(queued))}; the gate starts it within seconds")
     return 0

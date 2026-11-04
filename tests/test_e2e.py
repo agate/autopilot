@@ -51,9 +51,10 @@ class EndToEndTest(unittest.TestCase):
         self.agents.write_text(json.dumps(rows))
 
     def _dispatcher_writes(self, started, free, ready):
-        body = json.dumps({"started": started, "free": free, "ready": ready, "allow": None})
-        self.hook.write_text(f"#!/bin/bash\ncase \"$*\" in *'autopilot · dispatch'*) "
-                             f"echo '{body}' > \"$AUTOPILOT_DATA/last_pass.json\" ;; esac\n")
+        ap = str(ROOT / "bin" / "ap")
+        starts = "".join(f"\"{ap}\" event checkout worker_started '{{}}'; " for _ in range(started))
+        self.hook.write_text(f"#!/bin/bash\ncase \"$*\" in *'autopilot · dispatch'*) {starts}"
+                             f"\"{ap}\" pass end --started {started} --free {free} --ready {ready} --allow none ;; esac\n")
         self.hook.chmod(0o755)
         self._agents([{"id": "abcd1234", "name": "autopilot · dispatch", "kind": "background", "status": "idle",
                        "state": "done", "pid": 1, "startedAt": 1}])

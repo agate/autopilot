@@ -12,7 +12,12 @@ NAME = "autopilot · dispatch"
 def groups(active: list) -> dict:
     out = {}
     for n in active:
-        out.setdefault(config.load_ap(n)["repo"], []).append(n)
+        try:
+            repo = config.load_ap(n).get("repo")
+        except Exception:  # noqa: BLE001 - the gate already marked it broken
+            continue
+        if repo:
+            out.setdefault(repo, []).append(n)
     return {k: sorted(v) for k, v in sorted(out.items())}
 
 
@@ -39,21 +44,34 @@ def _last_pass() -> dict:
         return {}
 
 
-def _cleanup(claude: str, short: str) -> None:
-    for sub in ("stop", "rm"):
+def _cleanup(claude: str, short: str, remove: bool = True) -> None:
+    for sub in (("stop", "rm") if remove else ("stop",)):
         subprocess.run([claude, sub, short], capture_output=True, timeout=60)
 
 
+def _live_dispatcher(claude: str):
+    """A dispatcher session that is still working, from this or any earlier pass."""
+    s = sessions.find(NAME, sessions.list_all(claude) or [])
+    if s and s.get("status") in ("busy", "waiting") and sessions.pid_alive(s.get("pid")):
+        return s
+    return None
+
+
 def run(gcfg: dict, active: list, poll_s: float = 10, timeout_s: float = None) -> list:
+    """One pass per repo, one after another, under the global lock. Never two dispatchers at once."""
     timeout_s = gcfg["dispatch_timeout_s"] if timeout_s is None else timeout_s
     claude = workers.claude_bin(gcfg)
     results = []
     for repo, aps in groups(active).items():
         lk = paths.data_root() / "lock"
         if not lock.acquire(lk, f"dispatch {','.join(aps)}"):
-            results.append({"skipped": "locked"})
+            results.append({"skipped": "locked", "aps": aps})
             continue
+        short, blocked = None, False
         try:
+            if _live_dispatcher(claude):
+                results.append({"skipped": "dispatcher_running", "aps": aps})
+                continue
             ops.pass_begin()
             argv, env = build_command(gcfg, repo, aps)
             short = workers._launch(argv, repo, env)
@@ -61,7 +79,12 @@ def run(gcfg: dict, active: list, poll_s: float = 10, timeout_s: float = None) -
             deadline = began + timeout_s
             timed_out, seen_busy = True, False
             while True:
-                s = sessions.find(NAME, sessions.list_all(claude))
+                s = sessions.find(NAME, sessions.list_all(claude) or [])
+                if s is not None and s.get("id"):
+                    short = s["id"]
+                if s is not None and s.get("state") == "blocked":
+                    blocked, timed_out = True, False
+                    break
                 if s is not None and s.get("status") == "busy":
                     seen_busy = True
                 finished = s is not None and (s.get("state") == "done" or s.get("status") == "idle")
@@ -72,13 +95,17 @@ def run(gcfg: dict, active: list, poll_s: float = 10, timeout_s: float = None) -
                 if time.monotonic() >= deadline:
                     break
                 time.sleep(poll_s)
-            _cleanup(claude, (s or {}).get("id") or short)
             res = _last_pass()
-            res["repo"] = repo
-            res["aps"] = aps
+            res.update(repo=repo, aps=aps)
             if timed_out:
                 res["timeout"] = True
+            if blocked:
+                res["blocked"] = True
             results.append(res)
+        except Exception as e:  # noqa: BLE001 - one repo failing must not stop the next
+            results.append({"error": f"{type(e).__name__}: {e}", "repo": repo, "aps": aps})
         finally:
+            if short:
+                _cleanup(claude, short, remove=not blocked)
             lock.release(lk)
     return results

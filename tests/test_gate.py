@@ -65,12 +65,15 @@ class RunTest(unittest.TestCase):
         self.data = self.td.__enter__()
         self.p1 = mock.patch.object(gate, "_sessions", lambda g: [])
         self.p2 = mock.patch.object(gate, "notify", lambda msg: None)
+        self.p3 = mock.patch.object(gate, "_allowance", lambda g, now: {"allow": None, "paused_until": None, "reason": "ok"})
         self.p1.start()
         self.p2.start()
+        self.p3.start()
 
     def tearDown(self):
         self.p1.stop()
         self.p2.stop()
+        self.p3.stop()
         self.td.__exit__(None, None, None)
 
     def test_broken_state_isolated(self):
@@ -81,11 +84,12 @@ class RunTest(unittest.TestCase):
 
         def fake(g, aps):
             calls.append(list(aps))
-            return [{"started": 0, "free": 0, "ready": 0, "allow": None}]
+            return [{"started": 0, "free": 0, "ready": 0, "allow": None, "ended_at": "x"}]
 
         self.assertEqual(gate.run(dispatch_fn=fake), 0)
         self.assertEqual(calls, [["alpha"]])
         self.assertIn("state_broken", (self.data / "beta" / "events.jsonl").read_text())
+        self.assertIn("beta", json.loads((self.data / "gate.json").read_text())["broken"])
 
     def test_lock_held_skips(self):
         write_ap(self.data, "alpha")
@@ -97,7 +101,7 @@ class RunTest(unittest.TestCase):
     def test_no_change_no_dispatch(self):
         write_ap(self.data, "alpha")
         calls = []
-        fake = lambda g, aps: calls.append(aps) or [{"started": 0, "free": 0, "ready": 0, "allow": None}]
+        fake = lambda g, aps: calls.append(aps) or [{"started": 0, "free": 0, "ready": 0, "allow": None, "ended_at": "x"}]
         gate.run(dispatch_fn=fake)
         gate.run(dispatch_fn=fake)
         self.assertEqual(len(calls), 1)

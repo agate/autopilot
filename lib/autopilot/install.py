@@ -83,9 +83,14 @@ def _uninstall(args: list) -> int:
     return 0
 
 
-@cli.command("kick")
-def _kick(args: list) -> int:
+def kick() -> int:
+    """Ask launchd to run the gate now. Never -k: a running gate is left alone."""
     rc, msg = _launchctl("kickstart", f"gui/{os.getuid()}/{LABEL}")
     if rc != 0:
         print(msg, file=sys.stderr)
     return rc
+
+
+@cli.command("kick")
+def _kick(args: list) -> int:
+    return kick()

@@ -7,7 +7,7 @@ import os
 
 from autopilot import config, paths, text
 
-TOP = {"version", "tasks", "workers", "decisions", "last_report", "paused_until"}
+TOP = {"version", "tasks", "workers", "decisions", "last_report"}
 TASK_REQ = {"id", "title", "depends_on", "status", "link", "needs", "critical", "phase", "origin"}
 TASK_OPT = {"pr", "branch", "worktree", "spec", "assignee", "evidence", "sessions"}
 TASK_STATUS = {"todo", "in_progress", "in_review", "done", "blocked", "skipped"}
@@ -25,10 +25,12 @@ class StateError(Exception):
 
 
 def empty() -> dict:
-    return {"version": 1, "tasks": [], "workers": [], "decisions": [], "last_report": None, "paused_until": None}
+    return {"version": 1, "tasks": [], "workers": [], "decisions": [], "last_report": None}
 
 
-def _keys(obj: dict, req: set, opt: set, where: str) -> list:
+def _keys(obj, req: set, opt: set, where: str) -> list:
+    if not isinstance(obj, dict):
+        return [f"{where}: must be an object"]
     errs = [f"{where}: missing {k}" for k in sorted(req - set(obj))]
     errs += [f"{where}: unknown key {k}" for k in sorted(set(obj) - req - opt)]
     return errs
@@ -40,6 +42,17 @@ def validate(st: dict, langs: set) -> list:
     errs = _keys(st, TOP, set(), "state")
     if st.get("version") != 1:
         errs.append("state: version must be 1")
+    for k in ("tasks", "workers", "decisions"):
+        if not isinstance(st.get(k), list):
+            return errs + [f"state: {k} must be a list"]
+    for k in ("tasks", "workers", "decisions"):
+        for i, x in enumerate(st[k]):
+            if not isinstance(x, dict):
+                return errs + [f"{k}[{i}]: must be an object"]
+    for i, d in enumerate(st["decisions"]):
+        for f in ("options", "links"):
+            if not isinstance(d.get(f, []), list) or not all(isinstance(o, dict) for o in d.get(f, [])):
+                return errs + [f"decisions[{i}].{f}: must be a list of objects"]
     seen = set()
     for i, t in enumerate(st.get("tasks") or []):
         w = f"tasks[{i}]"
