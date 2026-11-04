@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 
@@ -104,3 +106,20 @@ def save(name: str, st: dict) -> None:
     tmp = p.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(st, indent=2, ensure_ascii=False) + "\n")
     os.replace(tmp, p)
+
+
+@contextlib.contextmanager
+def mutate(name: str):
+    """Load, let the caller change, validate and save one autopilot's state, holding its file lock.
+    Every writer (dispatcher, talk session, gate, worker commands) goes through here."""
+    lk = paths.ap_dir(name) / "state.lock"
+    lk.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lk), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        st = load(name)
+        yield st
+        save(name, st)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)

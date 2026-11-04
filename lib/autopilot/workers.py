@@ -97,9 +97,8 @@ def start(ap: str, task: str, role: str, cwd: str, prompt: str, needs: list = No
            "session_id": (found or {}).get("sessionId") or "", "short_id": short,
            "ports": port_range,
            "needs": list(needs or []), "started_at": events.now_iso(), "resumes": 0}
-    st = state.load(ap)
-    st["workers"] = [w for w in st["workers"] if not (w["task"] == task and w["role"] == role)] + [rec]
-    state.save(ap, st)
+    with state.mutate(ap) as st:
+        st["workers"] = [w for w in st["workers"] if not (w["task"] == task and w["role"] == role)] + [rec]
     events.append(ap, "worker_started", {"task": task, "role": role, "short_id": short})
     return rec
 
@@ -110,14 +109,13 @@ def resume(ap: str, worker: dict) -> dict:
               "check your worktree and run files first.")
     argv = [claude_bin(gcfg), "--bg", "--resume", worker["session_id"], prompt]
     short = _launch(argv, paths.ap_dir(ap), _env("worker"))
-    st = state.load(ap)
-    for w in st["workers"]:
-        if w["task"] == worker["task"] and w["role"] == worker["role"]:
-            w["short_id"] = short
-            w["resumes"] = w.get("resumes", 0) + 1
-            w["started_at"] = events.now_iso()
-            worker = w
-    state.save(ap, st)
+    with state.mutate(ap) as st:
+        for w in st["workers"]:
+            if w["task"] == worker["task"] and w["role"] == worker["role"]:
+                w["short_id"] = short
+                w["resumes"] = w.get("resumes", 0) + 1
+                w["started_at"] = events.now_iso()
+                worker = w
     events.append(ap, "worker_resumed", {"task": worker["task"], "role": worker["role"], "short_id": short})
     return worker
 
@@ -126,33 +124,31 @@ def end(ap: str, task: str, role: str) -> None:
     gcfg = config.load_global()
     """Stop a worker and keep its conversation on the task, so a fix round can resume it."""
     from autopilot import usage
-    st = state.load(ap)
-    keep, tokens = [], usage.zero()
-    for w in st["workers"]:
-        if w["task"] == task and w["role"] == role:
-            tokens = usage.session_tokens(w.get("session_id"))
-            subprocess.run([claude_bin(gcfg), "stop", w["short_id"]], capture_output=True, timeout=60)
-            for t in st["tasks"]:
-                if t["id"] == task and w.get("session_id"):
-                    t.setdefault("sessions", {})[role] = w["session_id"]
-        else:
-            keep.append(w)
-    st["workers"] = keep
-    state.save(ap, st)
+    with state.mutate(ap) as st:
+        keep, tokens = [], usage.zero()
+        for w in st["workers"]:
+            if w["task"] == task and w["role"] == role:
+                tokens = usage.session_tokens(w.get("session_id"))
+                subprocess.run([claude_bin(gcfg), "stop", w["short_id"]], capture_output=True, timeout=60)
+                for t in st["tasks"]:
+                    if t["id"] == task and w.get("session_id"):
+                        t.setdefault("sessions", {})[role] = w["session_id"]
+            else:
+                keep.append(w)
+        st["workers"] = keep
     events.append(ap, "worker_ended", {"task": task, "role": role, "tokens": tokens})
 
 
 def cleanup(ap: str, task: str) -> list:
     """Delete every saved session of a finished task."""
     gcfg = config.load_global()
-    st = state.load(ap)
     removed = []
-    for t in st["tasks"]:
-        if t["id"] == task:
-            for sid in (t.pop("sessions", None) or {}).values():
-                subprocess.run([claude_bin(gcfg), "rm", sid], capture_output=True, timeout=60)
-                removed.append(sid)
-    state.save(ap, st)
+    with state.mutate(ap) as st:
+        for t in st["tasks"]:
+            if t["id"] == task:
+                for sid in (t.pop("sessions", None) or {}).values():
+                    subprocess.run([claude_bin(gcfg), "rm", sid], capture_output=True, timeout=60)
+                    removed.append(sid)
     events.append(ap, "task_cleaned", {"task": task, "sessions": len(removed)})
     return removed
 

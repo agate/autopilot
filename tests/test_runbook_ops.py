@@ -94,12 +94,12 @@ class RunbookOpsTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertRegex(out.strip(), r"^(\d{4}-\d\d-\d\d-\d\d)?$")
 
-    def test_talk_session_waits_for_lock(self):
+    def test_talk_session_write_during_a_pass(self):
         lock.acquire(paths.data_root() / "lock", "dispatcher")
-        with self.assertRaises(TimeoutError):
-            ops.task_set("checkout", "PROJ-123", {"status": "blocked"}, lock_wait_s=0)
-        os.environ["AUTOPILOT_ROLE"] = "dispatcher"
-        ops.task_set("checkout", "PROJ-123", {"status": "blocked"}, lock_wait_s=0)
+        try:
+            ops.task_set("checkout", "PROJ-123", {"status": "blocked"})
+        finally:
+            lock.release(paths.data_root() / "lock")
         self.assertEqual(state.load("checkout")["tasks"][0]["status"], "blocked")
 
 

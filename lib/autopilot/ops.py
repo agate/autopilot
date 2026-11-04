@@ -7,29 +7,6 @@ from datetime import datetime, timedelta, timezone
 
 from autopilot import cli, config, events, paths, state, text
 
-def _locked(fn):
-    """Talk sessions (no AUTOPILOT_ROLE) take the dispatcher lock while they change state."""
-    import functools
-
-    @functools.wraps(fn)
-    def wrapper(*a, lock_wait_s: float = 120, **kw):
-        if os.environ.get("AUTOPILOT_ROLE"):
-            return fn(*a, **kw)
-        from autopilot import lock
-        import time
-        lk = paths.data_root() / "lock"
-        deadline = time.monotonic() + lock_wait_s
-        while not lock.acquire(lk, f"talk {fn.__name__}"):
-            if time.monotonic() >= deadline:
-                raise TimeoutError("a dispatcher pass is running; try again in a few minutes")
-            time.sleep(2)
-        try:
-            return fn(*a, **kw)
-        finally:
-            lock.release(lk)
-    return wrapper
-
-
 SOURCE_WINS = ("title", "status", "depends_on", "link", "assignee", "needs", "critical", "phase")
 REPORT_KEYS = {"slot", "done", "waiting", "next", "budget", "access"}
 
@@ -41,9 +18,13 @@ def _write_json(path, obj) -> None:
     os.replace(tmp, path)
 
 
-@_locked
 def tasks_sync(ap: str, tasks: list) -> None:
-    st = state.load(ap)
+    with state.mutate(ap) as st:
+        _sync(ap, st, tasks)
+    events.append(ap, "tasks_synced", {"count": len(tasks)})
+
+
+def _sync(ap: str, st: dict, tasks: list) -> None:
     by_id = {t["id"]: t for t in st["tasks"]}
     incoming = {t["id"] for t in tasks}
     for t in tasks:
@@ -60,58 +41,48 @@ def tasks_sync(ap: str, tasks: list) -> None:
         if t["origin"] == "source" and t["id"] not in incoming and t["status"] != "skipped":
             t["status"] = "skipped"
             events.append(ap, "task_removed_from_source", {"task": t["id"]})
-    state.save(ap, st)
-    events.append(ap, "tasks_synced", {"count": len(tasks)})
 
 
-@_locked
 def task_set(ap: str, task_id: str, fields: dict) -> None:
-    st = state.load(ap)
-    t = next((t for t in st["tasks"] if t["id"] == task_id), None)
-    if t is None:
-        raise state.StateError(f"{ap}: no task {task_id}")
-    t.update(fields)
-    state.save(ap, st)
+    with state.mutate(ap) as st:
+        t = next((t for t in st["tasks"] if t["id"] == task_id), None)
+        if t is None:
+            raise state.StateError(f"{ap}: no task {task_id}")
+        t.update(fields)
     events.append(ap, "task_set", {"task": task_id, "fields": fields})
 
 
-@_locked
 def task_add(ap: str, task: dict) -> None:
-    st = state.load(ap)
-    if any(t["id"] == task["id"] for t in st["tasks"]):
-        raise state.StateError(f"{ap}: task {task['id']} already exists")
-    new = dict(task)
-    new["origin"] = "found"
-    st["tasks"].append(new)
-    state.save(ap, st)
+    with state.mutate(ap) as st:
+        if any(t["id"] == task["id"] for t in st["tasks"]):
+            raise state.StateError(f"{ap}: task {task['id']} already exists")
+        new = dict(task)
+        new["origin"] = "found"
+        st["tasks"].append(new)
     events.append(ap, "task_added", {"task": task["id"]})
 
 
-@_locked
 def decision_add(ap: str, d: dict) -> str:
-    st = state.load(ap)
-    nums = [int(x["id"][1:]) for x in st["decisions"] if x["id"][1:].isdigit()]
-    for line in _archive_lines(ap):
-        if line.get("id", "")[1:].isdigit():
-            nums.append(int(line["id"][1:]))
-    new = dict(d)
-    new["id"] = f"D{max(nums, default=0) + 1}"
-    new["status"] = "open"
-    new["created_at"] = events.now_iso()
-    st["decisions"].append(new)
-    state.save(ap, st)
+    with state.mutate(ap) as st:
+        nums = [int(x["id"][1:]) for x in st["decisions"] if x["id"][1:].isdigit()]
+        for line in _archive_lines(ap):
+            if line.get("id", "")[1:].isdigit():
+                nums.append(int(line["id"][1:]))
+        new = dict(d)
+        new["id"] = f"D{max(nums, default=0) + 1}"
+        new["status"] = "open"
+        new["created_at"] = events.now_iso()
+        st["decisions"].append(new)
     events.append(ap, "decision_added", {"id": new["id"], "kind": new.get("kind")})
     return new["id"]
 
 
-@_locked
 def decision_resolve(ap: str, did: str, answer: str, status: str = "answered") -> None:
-    st = state.load(ap)
-    d = next((d for d in st["decisions"] if d["id"] == did), None)
-    if d is None:
-        raise state.StateError(f"{ap}: no decision {did}")
-    d.update(status=status, answer=answer, answered_at=events.now_iso())
-    state.save(ap, st)
+    with state.mutate(ap) as st:
+        d = next((d for d in st["decisions"] if d["id"] == did), None)
+        if d is None:
+            raise state.StateError(f"{ap}: no decision {did}")
+        d.update(status=status, answer=answer, answered_at=events.now_iso())
     events.append(ap, "decision_resolved", {"id": did, "status": status, "answer": answer})
 
 
@@ -122,26 +93,23 @@ def _archive_lines(ap: str) -> list:
     return [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
 
 
-@_locked
 def archive(ap: str) -> int:
     days = config.load_global()["archive_after_days"]
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-    st = state.load(ap)
-    keep, moved = [], []
-    for d in st["decisions"]:
-        at = d.get("answered_at")
-        old = at and datetime.fromisoformat(at.replace("Z", "+00:00")) < cutoff
-        (moved if d["status"] != "open" and old else keep).append(d)
-    if moved:
-        with open(paths.ap_dir(ap) / "archive.jsonl", "a") as f:
-            for d in moved:
-                f.write(json.dumps(d, ensure_ascii=False) + "\n")
-        st["decisions"] = keep
-        state.save(ap, st)
+    with state.mutate(ap) as st:
+        keep, moved = [], []
+        for d in st["decisions"]:
+            at = d.get("answered_at")
+            old = at and datetime.fromisoformat(at.replace("Z", "+00:00")) < cutoff
+            (moved if d["status"] != "open" and old else keep).append(d)
+        if moved:
+            with open(paths.ap_dir(ap) / "archive.jsonl", "a", encoding="utf-8") as f:
+                for d in moved:
+                    f.write(json.dumps(d, ensure_ascii=False) + "\n")
+            st["decisions"] = keep
     return len(moved)
 
 
-@_locked
 def report_write(ap: str, rep: dict) -> None:
     langs = state.langs()
     errs = [f"report: unknown key {k}" for k in set(rep) - REPORT_KEYS]
@@ -154,9 +122,8 @@ def report_write(ap: str, rep: dict) -> None:
     if errs:
         raise state.StateError("; ".join(errs[:5]))
     _write_json(paths.ap_dir(ap) / "reports" / f"{rep['slot']}.json", rep)
-    st = state.load(ap)
-    st["last_report"] = rep["slot"]
-    state.save(ap, st)
+    with state.mutate(ap) as st:
+        st["last_report"] = rep["slot"]
     events.append(ap, "report_written", {"slot": rep["slot"]})
 
 

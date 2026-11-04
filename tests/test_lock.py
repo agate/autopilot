@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-import json
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
-from autopilot import lock
+from tests.helpers import LIB, TempData, write_ap
+from autopilot import lock, state
 
 
 class LockTest(unittest.TestCase):
@@ -17,13 +20,44 @@ class LockTest(unittest.TestCase):
         lock.release(p)
         self.assertIsNone(lock.held(p))
         self.assertTrue(lock.acquire(p, "three"))
+        lock.release(p)
 
-    def test_lock_stale_replaced(self):
+    def test_lock_freed_when_holder_dies(self):
         p = Path(tempfile.mkdtemp()) / "lock"
-        p.write_text(json.dumps({"pid": 999999, "label": "dead", "at": "x"}))
+        code = (f"import sys,time; sys.path.insert(0,{str(LIB)!r}); from autopilot import lock; "
+                f"lock.acquire({str(p)!r}, 'child'); print('held', flush=True); time.sleep(30)")
+        child = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+        self.assertEqual(child.stdout.readline().strip(), "held")
+        self.assertEqual(lock.held(p)["label"], "child")
+        self.assertFalse(lock.acquire(p, "parent"))
+        child.kill()
+        child.wait()
+        self.assertIsNone(lock.held(p))
+        self.assertTrue(lock.acquire(p, "parent"))
+        lock.release(p)
+
+    def test_old_pid_file_is_not_a_lock(self):
+        p = Path(tempfile.mkdtemp()) / "lock"
+        p.write_text('{"pid": 1, "label": "left over after a reboot", "at": "x"}')
         self.assertIsNone(lock.held(p))
         self.assertTrue(lock.acquire(p, "fresh"))
-        self.assertEqual(lock.held(p)["label"], "fresh")
+        lock.release(p)
+
+    def test_state_mutate_serializes_writers(self):
+        with TempData() as d:
+            write_ap(d, "checkout")
+            with state.mutate("checkout") as st:
+                st["paused_until"] = None
+            code = (f"import os,sys; os.environ['AUTOPILOT_DATA']={str(d)!r}; sys.path.insert(0,{str(LIB)!r}); "
+                    f"from autopilot import state; import time\n"
+                    f"with state.mutate('checkout') as st:\n    print('in', flush=True); time.sleep(1.5)")
+            child = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+            self.assertEqual(child.stdout.readline().strip(), "in")
+            t0 = time.monotonic()
+            with state.mutate("checkout"):
+                waited = time.monotonic() - t0
+            child.wait()
+            self.assertGreater(waited, 0.5)
 
 
 if __name__ == "__main__":
