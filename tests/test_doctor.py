@@ -34,6 +34,30 @@ class DoctorSpecChecksTest(unittest.TestCase):
         self.assertIn("page published", names)
 
 
+class DoctorReplyCheckTest(unittest.TestCase):
+    G = {"reply_check": {"every_s": 60}}
+
+    def test_three_failures_in_a_row_fail(self):
+        c = doctor._reply_check({"replies": {"errors": 3, "error": "no ArtifactData read"}}, self.G)
+        self.assertFalse(c["ok"])
+        self.assertIn("no ArtifactData read", c["detail"])
+        self.assertIn("claude auth status", c["fix"])
+
+    def test_working_or_not_run_yet_is_ok(self):
+        self.assertTrue(doctor._reply_check({"replies": {"errors": 0, "ok_at": "2026-01-02T12:00:00-08:00"}}, self.G)["ok"])
+        self.assertTrue(doctor._reply_check({}, self.G)["ok"])
+        self.assertTrue(doctor._reply_check({"replies": {"errors": 1, "error": "x"}}, self.G)["ok"])
+
+    def test_turned_off_is_ok(self):
+        c = doctor._reply_check({}, {"reply_check": {"every_s": 0}})
+        self.assertTrue(c["ok"])
+        self.assertIn("off", c["detail"])
+
+    def test_listed_in_checks(self):
+        with TempData():
+            self.assertIn("reply check", [c["name"] for c in doctor.checks(config.load_global())])
+
+
 class DoctorLoginTest(unittest.TestCase):
     def _login_check(self, status_out, rc=0, text_out=""):
         from unittest import mock

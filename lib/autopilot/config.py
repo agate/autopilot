@@ -11,7 +11,10 @@ DEFAULT_GLOBAL: dict = {
     "max_workers": 5,
     "budget": {"window_pct": 85, "stale_min": 60, "credit_pct": 90, "resume_after_min": 5},
     "forced_pass_min": 30,
-    "gate_interval_s": 300,
+    # The gate wakes every minute: its own checks use no tokens, and the reply check (Haiku, ~$0.0008 a run at
+    # list price) answers within a minute outside the quiet hours. At night the forced pass picks answers up.
+    "gate_interval_s": 60,
+    "reply_check": {"every_s": 60, "quiet": ["22:00", "06:00"], "model": "haiku", "timeout_s": 120},
     "report_times": ["09:00", "17:00", "21:00"],
     "port_base": 7100,
     "archive_after_days": 7,

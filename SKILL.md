@@ -6,7 +6,7 @@ disable-model-invocation: true
 
 # /autopilot
 
-An autopilot drives one body of work to done by itself: a gate checks every 5 minutes, a short
+An autopilot drives one body of work to done by itself: a gate checks every minute, a short
 dispatcher pass starts workers, and workers implement, review and ship each task. The user stays on
 the loop: they watch one page, answer what only they can, and can undo what the autopilot decided.
 

@@ -8,7 +8,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 
-from autopilot import budget, cli, config, events, lock, nextwork, ops, paths, sessions, state, workers
+from autopilot import budget, cli, config, events, lock, nextwork, ops, paths, replies, sessions, state, workers
 
 
 def report_due(times: list, last_slot, now: datetime):
@@ -264,6 +264,7 @@ def run(now: datetime = None, dispatch_fn=None) -> int:
     tick_file = paths.data_root() / "tick.json"
     ticked = set(_read_json(tick_file).get("aps") or [])
     allow = _allowance(gcfg, now)
+    ticked |= replies.step(gcfg, gs, now, allow)   # a new answer on the page queues its autopilot
     gs["paused_until"] = allow.get("paused_until") if allow["reason"] == "window" else None
     last = gs.get("last_pass_at") if isinstance(gs.get("last_pass_at"), dict) else {}
     prev = gs.get("fps") or {}

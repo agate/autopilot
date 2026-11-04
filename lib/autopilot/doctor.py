@@ -62,6 +62,18 @@ def _login_check(rc: int, msg: str, text: str = "") -> dict:
               f"{fix} before {by}: workers stop when the sign-in ends" if soon else "")
 
 
+def _reply_check(gate: dict, gcfg: dict) -> dict:
+    """The minute check for page answers fails only after three failures in a row (one can be a blip)."""
+    if not (gcfg.get("reply_check") or {}).get("every_s"):
+        return _c("reply check", True, "off: answers wait for the next forced pass")
+    rs = gate.get("replies") or {}
+    if int(rs.get("errors") or 0) >= 3:
+        return _c("reply check", False, f"{rs['errors']} failures in a row: {rs.get('error')}",
+                  "answers on the page still arrive with the forced pass; check `claude auth status` (the check "
+                  "needs the claude.ai sign-in), then run `ap doctor` again")
+    return _c("reply check", True, f"last read {rs['ok_at']}" if rs.get("ok_at") else "not run yet")
+
+
 def checks(gcfg: dict) -> list:
     out = []
     tools = gcfg.get("tools") or {}
@@ -86,6 +98,7 @@ def checks(gcfg: dict) -> list:
         except ValueError:
             fresh = False
     out.append(_c("gate ran recently", fresh, last or "never", "" if fresh else "check gate.log in the data folder"))
+    out.append(_reply_check(gate, gcfg))
     for name, err in (gate.get("broken") or {}).items():
         out.append(_c(f"state {name}", False, err, f"fix or restore {paths.ap_dir(name) / 'state.json'}"))
     if tools.get("claude"):

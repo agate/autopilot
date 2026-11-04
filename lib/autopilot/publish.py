@@ -83,6 +83,13 @@ def collect(aps: list) -> dict:
     out["meta"]["labels"] = _labels(gcfg)
     gate = _read_json(paths.data_root() / "gate.json") or {}
     out["meta"]["health"] = {"broken": gate.get("broken") or {}, "last_gate_at": gate.get("last_run_at")}
+    rc = gcfg.get("reply_check") or {}
+    offset = datetime.now().astimezone().utcoffset()
+    # The page tells the reader when an answer is picked up: within a minute, or at the next forced pass
+    # in the quiet hours (machine time, hence the offset) or when the check is off.
+    out["meta"]["reply_check"] = {"every_s": rc.get("every_s") or 0, "quiet": rc.get("quiet") or [],
+                                  "forced_pass_min": gcfg["forced_pass_min"],
+                                  "utc_offset_min": int(offset.total_seconds() // 60) if offset else 0}
     for ap in aps:
         try:
             cfg, st = config.load_ap(ap), state.load(ap)
