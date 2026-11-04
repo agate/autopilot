@@ -41,7 +41,8 @@ Read the whole configuration back in plain words. On the user's yes:
 1. Write `$AUTOPILOT_DATA/<name>/config.json` from `templates/config.json` with the answers.
 2. If `reader_lang` is not `en` and `$AUTOPILOT_DATA/labels.<lang>.json` does not exist, translate every
    value of `templates/labels.en.json` (keep keys and `{placeholders}`) into that file, plus
-   `lang_name` in that language.
+   `lang_name` in that language and `lang_short`, its one- or two-character name for the language
+   switch (`中`, `日`, `FR`).
 3. Run `ap perms write <name>` (it discovers this repo's tools and writes the permission floor).
 4. The page, first init only (`ap publish url` prints nothing yet):
    - run `ap page build`, copy the file it prints into your scratchpad directory, and publish it with

@@ -27,10 +27,11 @@ class Ids(HTMLParser):
 
 
 class PageTest(unittest.TestCase):
-    def test_parses_and_has_tabs(self):
+    def test_parses_and_has_the_three_views(self):
+        # Inbox layout: what needs you, the tasks, the status panel; a bottom tab bar on phones.
         p = Ids()
         p.feed(PAGE)
-        for i in ("tab-dashboard", "tab-tickets", "tab-decisions", "detail"):
+        for i in ("v-needs", "v-tasks", "v-status", "tabbar", "filters", "lang", "status-note"):
             self.assertIn(i, p.ids)
 
     def test_every_label_key_defined(self):
@@ -39,9 +40,31 @@ class PageTest(unittest.TestCase):
         self.assertEqual(sorted(k for k in keys if k not in LABELS), [])
         for prefix, names in (("role_", ("implement", "review", "pr")),
                               ("status_", ("todo", "in_progress", "in_review", "done", "blocked", "skipped")),
-                              ("group_", ("running", "ready", "waiting"))):
+                              ("group_", ("running", "ready", "waiting")),
+                              ("tab_", ("needs", "tickets", "status"))):
             for n in names:
                 self.assertIn(prefix + n, LABELS)
+        self.assertEqual(LABELS["lang_short"], "EN")
+
+    def test_english_by_default_and_the_choice_is_remembered(self):
+        self.assertIn('let lang = "en"', PAGE)
+        self.assertIn('localStorage.getItem("autopilot-lang")', PAGE)
+        self.assertIn('localStorage.setItem("autopilot-lang"', PAGE)
+
+    def test_a_reply_names_who_sent_it_and_only_the_owner_answers(self):
+        self.assertIn('db.collection("replies").add(', PAGE)
+        self.assertIn("by: myId", PAGE)
+        self.assertIn("user.isOwner()", PAGE)
+
+    def test_says_when_an_answer_is_picked_up(self):
+        self.assertIn("S.meta.reply_check", PAGE)
+        for k in ("pickup_minute", "pickup_later", "pickup_paused"):
+            self.assertIn(f'L("{k}"', PAGE)
+            self.assertIn(k, LABELS)
+
+    def test_no_prototype_leftovers(self):
+        for s in ("SAMPLE", "/*@SHARED@*/", "LABELS_EXTRA", "proto_note", "原型", "Prototype"):
+            self.assertNotIn(s, PAGE)
 
     def test_only_allowed_script_hosts(self):
         p = Ids()
