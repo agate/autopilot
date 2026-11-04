@@ -8,8 +8,10 @@ default. Write nothing until the user confirms the playback.
 
 - Read the user's default prompt (`~/.claude/CLAUDE.md`). Take the reader's language from it, without
   asking, and run `ap config set reader_lang=<code>` (`en`, `zh`, `ja`, ...).
-- Offer to import rules the user already has (a runbook or memory files they point to). Show each
-  proposed line in the format of `templates/RULES.md` and keep only the lines they say yes to.
+- Do not offer to import rules from elsewhere. The dispatcher runs in the repo and workers in its
+  worktrees, and both already load the repo's `CLAUDE.md`/`AGENTS.md`, its `.claude` settings and
+  skills, and the user's memory for that repo; a copy in `RULES.md` would drift from them. Rules that
+  exist nowhere else come later, in talk (`references/talk.md`, "New rules").
 
 ## The questions
 

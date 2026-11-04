@@ -67,6 +67,13 @@ class DocsTest(unittest.TestCase):
         init = (ROOT / "references" / "init.md").read_text()
         self.assertIn('{"path": "replies", "read": "view", "write": "owner"}', init)
 
+    def test_init_does_not_import_rules(self):
+        # Sessions in the repo and its worktrees already load its CLAUDE.md/AGENTS.md, .claude settings and
+        # skills, and the user's memory for that repo (checked live 2026-11-04); copying them would drift.
+        init = (ROOT / "references" / "init.md").read_text()
+        self.assertNotIn("- Offer to import rules", init)
+        self.assertIn("Do not offer to import rules", init)
+
     def test_presets_exist(self):
         for name in ("jira-epic", "jira-ticket", "idea", "custom"):
             self.assertTrue((ROOT / "presets" / f"{name}.md").exists(), name)
