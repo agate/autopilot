@@ -11,6 +11,10 @@ from autopilot import cli, config, paths
 
 LABEL = "com.autopilot.gate"
 PLIST = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
+# Outside any synced folder: macOS refuses a login item whose program sits in a cloud-synced folder
+# (Dropbox, iCloud Drive, ...), and the package often does, through a synced ~/.claude.
+LAUNCHER = Path.home() / "Library" / "Application Support" / "autopilot" / "autopilot-gate"
+LAUNCHER_SRC = Path(__file__).with_name("gate_launcher.c")
 SYSTEM_PATH = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
 
 
@@ -22,14 +26,14 @@ def capture_tools() -> dict:
     return tools
 
 
-def render_plist(program: str, interval: int, path_dirs: list, log_dir: Path) -> bytes:
+def render_plist(argv: list, interval: int, path_dirs: list, log_dir: Path) -> bytes:
     path = []
     for d in list(path_dirs) + SYSTEM_PATH:
         if d and d not in path:
             path.append(d)
     return plistlib.dumps({
         "Label": LABEL,
-        "ProgramArguments": [program, "gate"],
+        "ProgramArguments": list(argv),
         "StartInterval": interval,
         "RunAtLoad": True,
         "StandardOutPath": str(Path(log_dir) / "gate.log"),
@@ -54,20 +58,48 @@ def is_installed() -> bool:
     return rc == 0
 
 
+def _c_string(s: str) -> str:
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def build_launcher(ap: str, dest=None):
+    """Compile the launcher with `ap`'s path built in. None when no C compiler works."""
+    dest = Path(dest or LAUNCHER)
+    cc = shutil.which("clang") or shutil.which("cc")
+    if not cc:
+        return None
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.name + ".new")
+    try:
+        out = subprocess.run([cc, "-O2", "-Wall", "-Werror", f"-DAP_PROGRAM={_c_string(ap)}", "-o", str(tmp),
+                              str(LAUNCHER_SRC)], capture_output=True, text=True, timeout=120,
+                             stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0 or not tmp.exists():
+        return None
+    os.replace(tmp, dest)
+    return dest
+
+
 def install() -> str:
     tools = capture_tools()
     dirs = [str(Path(p).parent) for p in tools.values() if p]
     gcfg = config.load_global()
     paths.data_root().mkdir(parents=True, exist_ok=True)
     PLIST.parent.mkdir(parents=True, exist_ok=True)
-    PLIST.write_bytes(render_plist(str(paths.package_root() / "bin" / "ap"), gcfg["gate_interval_s"], dirs,
-                                   paths.data_root()))
+    ap = str(paths.package_root() / "bin" / "ap")
+    launcher = build_launcher(ap)
+    argv = [str(launcher)] if launcher else [ap, "gate"]
+    PLIST.write_bytes(render_plist(argv, gcfg["gate_interval_s"], dirs, paths.data_root()))
     domain = f"gui/{os.getuid()}"
     _launchctl("bootout", f"{domain}/{LABEL}")
     rc, msg = _launchctl("bootstrap", domain, str(PLIST))
     if rc != 0:
         raise RuntimeError(f"launchctl bootstrap failed: {msg}")
-    return f"installed {PLIST}; tools: " + ", ".join(f"{k}={v}" for k, v in tools.items())
+    note = "" if launcher else ("; no C compiler, so the gate runs bin/ap directly: macOS refuses that when the "
+                                "package is in a cloud-synced folder (install Xcode command line tools, then rerun)")
+    return f"installed {PLIST}; tools: " + ", ".join(f"{k}={v}" for k, v in tools.items()) + note
 
 
 @cli.command("install")
@@ -86,11 +118,12 @@ def _install(args: list) -> int:
 @cli.command("uninstall")
 def _uninstall(args: list) -> int:
     _launchctl("bootout", f"gui/{os.getuid()}/{LABEL}")
-    try:
-        PLIST.unlink()
-    except FileNotFoundError:
-        pass
-    print(f"removed {PLIST}")
+    for f in (PLIST, LAUNCHER):
+        try:
+            f.unlink()
+        except FileNotFoundError:
+            pass
+    print(f"removed {PLIST} and {LAUNCHER}")
     return 0
 
 
