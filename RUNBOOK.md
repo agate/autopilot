@@ -28,7 +28,12 @@ a field missing a language.
 - Something only a person can pass (a required approval, a teammate's review) is a `kind: gate` card,
   added once. Keep other work moving.
 - Never wait for a reply. Add the card and continue.
-- Never edit any `RULES.md`, this file, or the skill folder.
+- Never edit any `RULES.md`, this file, the skill folder, or any `config.json`, `settings*.json` or
+  `state.json`: state changes go through `ap` commands.
+- The authority above is what the user recorded at `init`. It is their standing answer to any
+  "confirm before changing a repo" instruction in their default prompt: do not stop to ask that.
+- Save only technical facts as `reference` memories. Never write `feedback` memories or rules; a new
+  principle becomes a card proposing a rule.
 
 ## A decision card
 
@@ -36,8 +41,9 @@ a field missing a language.
 task until answered), `title`, `body` (what it is in plain words, why the user must decide, what each
 option costs, your recommendation), `options` (`[{id, label, cost?, recommended?}]`), `links`
 (`[{label, url}]`: every ticket, PR, run or page the user must look at; a card without links is not
-done), and `action` (`{tool, prompt}`) when a "yes" should carry out one outward action, with the exact
-prompt that does it.
+done), and `action` (`{tool, option, prompt}`) when one answer should carry out one outward action:
+`option` is the id of the approving option, `prompt` the exact instruction that does it (also quote it
+in `body`, so the user sees what will run).
 
 ## The pass
 
@@ -47,7 +53,7 @@ prompt that does it.
 
 2. **Check workers.** For each autopilot run `ap worker list <ap> --json` and handle each worker by
    its `state`:
-   - `running`: leave it.
+   - `running` or `unknown` (the session list could not be read): leave it.
    - `blocked` (waiting for a permission nobody can give): add an `ask` card (title
      `{"key": "worker_blocked", "args": {"session": "<name>"}}`) unless one is open; tell the user they
      can `claude attach "<name>"` to answer it.
@@ -56,31 +62,40 @@ prompt that does it.
    - `done`: handle by role, below.
 
 3. **Implementer done** (`runs/<task>/handback.json`):
+   - Run `ap worker end <ap> <task> implement` first: never run git in a worktree while its worker runs.
    - Check `git -C <worktree> log -1 --format=%s` starts with `wip(`; if the work is only in the tree,
      commit it yourself as `wip(<ap>): <task>`.
    - Answer `open_questions` from the spec and rules, or decide reversibly (`self` card), or add an
      `ask` card.
-   - Run `ap worker end <ap> <task> implement`, write the review brief (below), and
-     `ap worker start <ap> <task> review --cwd <worktree> --prompt-file <brief>`.
+   - Write the review brief (below), then
+     `ap worker start <ap> <task> review --cwd <worktree> --prompt-file <brief> --needs <needs>`.
 
 4. **Reviewer done** (`runs/<task>/review.json`), then `ap worker end <ap> <task> review`:
    - `verdict: fix`: if the same problem appears in two rounds, the spec is wrong:
      `ap task set <ap> <task> status=blocked` and an `ask` card. Otherwise write the fixes verbatim
-     into a brief and `ap worker start <ap> <task> implement --resume --cwd <worktree> --prompt-file <brief>`.
+     into a brief and `ap worker start <ap> <task> implement --resume --cwd <worktree> --prompt-file <brief> --needs <needs>`.
    - `verdict: pass`: ship. Squash to one conventional commit (product files only, never run files),
      rebase on fresh `origin/main`, diff any lockfile against main, push, and open the PR. The PR body has a summary, a
      criteria checklist and an evidence summary, and ends with the Claude Code line. Then
      `ap task set <ap> <task> pr=<url> status=in_review`, move the source ticket to review, and
-     `ap worker start <ap> <task> pr --cwd <worktree> --prompt-file <brief>`.
+     `ap worker start <ap> <task> pr --cwd <worktree> --prompt-file <brief> --needs <needs>`.
 
 5. **PR loop done** (`runs/<task>/prloop.json`), then `ap worker end <ap> <task> pr`:
    - Not converged or stopped: an `ask` card with its reason.
-   - Clean: run `ap merge-check <ap> <pr-number>`.
-     - Exit 0 and `authority.merge`: `gh pr merge <n> --<merge_method>`, mark the source ticket done,
+   - Clean: run `ap evidence check <ap> <task>`. If it lists problems, resume the PR worker
+     (`ap worker start <ap> <task> pr --resume ...`) with those lines as its brief. Otherwise go on to
+     the merge check below.
+
+   **Merge check** (also, every pass, for each `in_review` task with a PR and no worker):
+   run `ap merge-check <ap> <pr-number>`.
+     - Exit 0 and `authority.merge`: `gh pr merge <n> --<merge_method> --match-head-commit <head sha>`,
+       mark the source ticket done,
        `ap task set <ap> <task> status=done`, `git -C <repo> worktree remove <worktree>`,
        `ap task cleanup <ap> <task>`.
-     - `approval_missing` or `approval_not_on_head`: one `gate` card with the PR link. The gate wakes
-       you when a review arrives.
+     - `approval_missing` or `approval_not_on_head`: one `gate` card with the PR link, unless one is
+       open. The gate wakes you when a review arrives.
+     - `changes_requested`: start the PR loop again for what the reviewer asked; anything you may not
+       answer becomes an `ask` card with a drafted reply.
      - `rerun_ci_on_current_main`: rebase on fresh main, push with `--force-with-lease`, and leave it;
        CI reruns and the next pass checks again.
      - `unresolved_human_thread` or `checks_not_green`: start the PR loop again (`pr` role) if the cause is
@@ -91,12 +106,14 @@ prompt that does it.
    - `option: "undo"` on a `self` card: reverse what it did, then
      `ap decision resolve <ap> <D-id> --answer undo --status undone`.
    - Otherwise: `ap decision resolve <ap> <D-id> --answer "<option id or text>"`. If the card has an
-     `action` and the answer approves it, run `ap oneoff <ap> <D-id>`. Then act on the answer.
+     `action`, run `ap oneoff <ap> <D-id>`: it runs only when the answer is the action's `option`, and
+     only once. Then act on the answer.
    - Delete each handled reply document.
 
 7. **Sync the source.** Follow `presets/<preset>.md` for each autopilot. It ends in `ap tasks sync`.
 
-8. **Fill every free slot.** Run `ap next --json`. For each pair in `starts`:
+8. **Fill every free slot.** Run `ap next --json <the autopilots in your prompt>`. For each pair in
+   `starts`:
    - Write `$AUTOPILOT_DATA/<ap>/specs/<task>.md` from the ticket and the code at fresh `origin/main`:
      Scope (paths it may touch), 3-9 Criteria (each a behavior with a `path:line` it changes and how it
      is proven), Existing tests, Related decisions.
@@ -135,4 +152,5 @@ the worktree (absolute path), the base SHA, the spec path, the run directory, wh
 
 - **implement**: the spec. On a fix round, the reviewer's `fixes` verbatim.
 - **review**: the spec, and that `handback.json` and `journal.md` are in the run directory.
-- **pr**: the PR URL, the run directory, and that `prloop.json` and `evidence.json` go there.
+- **pr**: the PR URL, the run directory, the reader's language (`ap config get reader_lang`), and
+  that `evidence.json` and then `prloop.json` go there.

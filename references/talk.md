@@ -24,11 +24,10 @@ Answer with the facts and the file or command they came from. Say plainly what y
 | undo a decision the autopilot made | `ap decision resolve <name> <D-id> --answer undo --status undone`, then reverse it or leave it for the next pass |
 | skip / block / reopen a task | `ap task set <name> <task> status=skipped` (or `blocked`, `todo`) |
 | add work inside the scope | write the task as JSON, then `ap task add <name> <file>` |
-| start now | `ap tick <name>` |
+| start now | `ap tick <name>` (queues a pass; it starts within seconds) |
 | approve an outward action shown on a card | resolve the decision, then `ap oneoff <name> <D-id>` |
 
-A command that fails with "a dispatcher pass is running" holds nothing: tell the user to try again in a
-few minutes.
+`ap` commands wait their turn for the autopilot's state lock, so they work while a pass runs.
 
 ## New rules
 

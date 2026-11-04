@@ -30,7 +30,8 @@ default. Write nothing until the user confirms the playback.
 6. **Report times.** Default 09:00, 17:00, 21:00 local.
 7. **Anything to watch?** Outside events that should wake the dispatcher (a nightly run finishing).
    Propose watch commands you can infer, each `{"name", "cmd"}` where `cmd` prints something that
-   changes when the event happens. Default: none.
+   changes only when the event happens (no ages or timestamps, or every gate run wakes the
+   dispatcher). Default: none.
 8. **Also publish to a company host?** Default no.
 
 ## Playback and writing
@@ -56,4 +57,5 @@ Read the whole configuration back in plain words. On the user's yes:
    `ap doctor` and walk through what fails.
 7. If the worker cap is below the number of active autopilots, say so ("`ap status` shows the
    warning").
-8. Bind this session with `ap bind <session_id> <name>` and offer `ap tick <name>` for a first pass now.
+8. Bind this session with `ap bind <session_id> <name>` and offer `ap tick <name>` to queue a first
+   pass now.

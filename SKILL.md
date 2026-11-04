@@ -27,7 +27,7 @@ The first word after `/autopilot` decides:
 | `init` | Follow `references/init.md`. |
 | `doctor` | Run `ap doctor`. For each failure, give the fix line it prints. |
 | `pause <name>` / `resume <name>` | Run `ap pause <name>` / `ap resume <name>`, confirm. |
-| `tick [name]` | Run `ap tick <name>`: a dispatcher pass now. Say it takes a few minutes. |
+| `tick [name]` | Run `ap tick <name>`. It queues a pass that the gate starts within seconds; say the pass itself takes a few minutes. |
 | `stop <name>` | Ask first. On yes, run `ap stop <name> --yes`. |
 | `uninstall` | Ask first. On yes, run `ap uninstall`; if that is blocked, give the user the line to run with `!`. |
 | an autopilot's name | The hook bound this session to it. Talk (below). |

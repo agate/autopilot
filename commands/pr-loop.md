@@ -14,7 +14,7 @@ Argument: $ARGUMENTS
 ## Step 0: Resolve the PR
 
 The argument holds the PR URL and the worker brief (run directory, worktree, path of `ap`). Without a
-PR URL, write `prloop.json` with `"result": "stopped", "reason": "no PR given"` and stop.
+PR URL, write `prloop.json` with `"result": "stopped", "reason": "no PR given"` and end the loop as `stopped`.
 
 Then collect:
 
@@ -29,7 +29,7 @@ Hard stops (say why and end):
 
 Use the worktree from the brief. Every fixer in every round uses it. Before round 1:
 `git -C <path> fetch origin <headRefName> && git -C <path> status`. If local and remote diverged, stop
-and stop.
+and end the loop as `stopped`.
 
 ## Step 2: Classify the PR and choose the review angles
 
@@ -148,17 +148,7 @@ A round with no behavior finding for the second time in a row also ends the loop
 
 ## Final report
 
-Write `prloop.json` in the run directory:
-
-```json
-{
-  "result": "clean|converged|stopped", "reason": "why it stopped, if it did",
-  "head": "<SHA>", "ci": "green|red", "rounds": [{"n": 1, "roles": ["..."], "findings": ["id"], "fixed": ["id"], "commit": "<SHA or null>"}],
-  "followups": ["real, out of scope"], "questions": ["needs the owner"]
-}
-```
-
-Then write `evidence.json` in the run directory. Every text field is `{"en": "...", "<reader_lang>": "..."}`
+First write `evidence.json` in the run directory. Every text field is `{"en": "...", "<reader_lang>": "..."}`
 (only `en` when the reader's language is English; the brief says which):
 
 ```json
@@ -171,7 +161,19 @@ Then write `evidence.json` in the run directory. Every text field is `{"en": "..
 ```
 
 Pick at most 10 screenshots from `media/`, the ones that show the change (before and after where it
-helps). Then run `<ap> kick` and end with one line naming both files.
+helps).
+
+Then write `prloop.json` in the run directory (it tells the dispatcher you are done, so it comes last):
+
+```json
+{
+  "result": "clean|converged|stopped", "reason": "why it stopped, if it did",
+  "head": "<SHA>", "ci": "green|red", "rounds": [{"n": 1, "roles": ["..."], "findings": ["id"], "fixed": ["id"], "commit": "<SHA or null>"}],
+  "followups": ["real, out of scope"], "questions": ["needs the owner"]
+}
+```
+
+Then run `<ap> kick` and end with one line naming both files.
 
 ## Never
 

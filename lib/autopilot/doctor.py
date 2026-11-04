@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timedelta
@@ -14,6 +15,14 @@ from autopilot.install import LABEL, PLIST
 def _run(argv: list, timeout: int = 30) -> tuple:
     try:
         out = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+        return out.returncode, (out.stdout + out.stderr).strip()
+    except (OSError, subprocess.SubprocessError) as e:
+        return 1, str(e)
+
+
+def _run_in(argv: list, cwd, timeout: int = 30) -> tuple:
+    try:
+        out = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
         return out.returncode, (out.stdout + out.stderr).strip()
     except (OSError, subprocess.SubprocessError) as e:
         return 1, str(e)
@@ -69,6 +78,34 @@ def checks(gcfg: dict) -> list:
     active = len(config.active_aps())
     out.append(_c("worker cap", gcfg["max_workers"] >= active, f"cap {gcfg['max_workers']}, active {active}",
                   "" if gcfg["max_workers"] >= active else "raise max_workers or pause an autopilot"))
+    if tools.get("claude"):
+        for n in config.active_aps():
+            try:
+                repo = config.load_ap(n).get("repo")
+            except Exception as e:  # noqa: BLE001
+                out.append(_c(f"mcp servers {n}", False, str(e), "fix this autopilot's config.json"))
+                continue
+            rc, msg = _run_in([tools["claude"], "mcp", "list"], repo, timeout=90)
+            bad = [l for l in msg.splitlines() if "✗" in l or "Failed" in l or "failed" in l or "Needs authentication" in l]
+            out.append(_c(f"mcp servers {n}", rc == 0 and not bad, "; ".join(bad)[:300] or "all connected",
+                          "" if rc == 0 and not bad else "run /mcp in a session in that repo to reconnect"))
+    free = shutil.disk_usage(paths.data_root() if paths.data_root().exists() else Path.home()).free
+    out.append(_c("disk space", free > 1 << 30, f"{free >> 30} GiB free", "" if free > 1 << 30 else "free some disk space"))
+    page = {}
+    try:
+        page = json.loads((paths.data_root() / "page.json").read_text())
+    except (OSError, ValueError):
+        pass
+    at = page.get("published_at")
+    recent = False
+    if at:
+        try:
+            recent = datetime.now().astimezone() - datetime.fromisoformat(at.replace("Z", "+00:00")) < timedelta(hours=2)
+        except ValueError:
+            recent = False
+    needed = bool(config.active_aps())
+    out.append(_c("page published", recent or not needed, f"{page.get('url') or 'no page yet'}, last {at or 'never'}",
+                  "" if recent or not needed else "a dispatcher pass publishes the page; check the access lines in the latest report"))
     sub = os.environ.get("CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS")
     out.append(_c("subagents per session", True, sub or "Claude Code default"))
     leaks = checkpkg.scan(paths.package_root(), checkpkg.identities())
