@@ -43,6 +43,14 @@ class DocsTest(unittest.TestCase):
                     "ap publish diff", "ap publish mark", "ap pass end", "ap report due", "ap tasks sync"):
             self.assertIn(cmd, rb, cmd)
 
+    def test_init_asks_then_installs(self):
+        text = (ROOT / "references" / "init.md").read_text()
+        self.assertIn("`ap install --check`", text)
+        self.assertIn("run `ap install` with the Bash tool", text)
+        self.assertIn("`ap install --print`", text)
+        self.assertNotIn("First init only: run `ap install --print`", text)
+        self.assertNotIn("Install the launchd job yourself", (ROOT / "SKILL.md").read_text())
+
     def test_presets_exist(self):
         for name in ("jira-epic", "jira-ticket", "idea", "custom"):
             self.assertTrue((ROOT / "presets" / f"{name}.md").exists(), name)

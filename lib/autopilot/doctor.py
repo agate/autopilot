@@ -69,10 +69,10 @@ def checks(gcfg: dict) -> list:
         p = tools.get(t)
         ok = bool(p) and os.access(p, os.X_OK)
         out.append(_c(f"tool {t}", ok, p or "not recorded",
-                      "" if ok else "run `ap install` from your own terminal so the gate knows where the tools are"))
+                      "" if ok else "run `ap install` so the gate knows where the tools are"))
     rc, msg = _run(["launchctl", "print", f"gui/{os.getuid()}/{LABEL}"])
     out.append(_c("launchd job", PLIST.exists() and rc == 0, str(PLIST) if PLIST.exists() else "not installed",
-                  "" if rc == 0 else "run the command that `ap install --print` shows, in your own terminal"))
+                  "" if rc == 0 else "say yes when `/autopilot doctor` offers to install it, or run `ap install`"))
     gate = {}
     try:
         gate = json.loads((paths.data_root() / "gate.json").read_text())

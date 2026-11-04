@@ -25,7 +25,7 @@ The first word after `/autopilot` decides:
 | `off` | The hook already unbound the session. Confirm in one line. |
 | `status` | Run `ap status` and explain it. No binding needed. |
 | `init` | Follow `references/init.md`. |
-| `doctor` | Run `ap doctor`. For each failure, give the fix line it prints. |
+| `doctor` | Run `ap doctor`. For each failure, give the fix line it prints. If `launchd job` fails, offer to install it as in `references/init.md` step 6. |
 | `pause <name>` / `resume <name>` | Run `ap pause <name>` / `ap resume <name>`, confirm. |
 | `tick [name]` | Run `ap tick <name>`. It queues a pass that the gate starts within seconds; say the pass itself takes a few minutes. |
 | `stop <name>` | Ask first. On yes, run `ap stop <name> --yes`. |
@@ -66,4 +66,5 @@ Follow `references/talk.md`. In short:
 - Send a chat message, create a ticket, or post a comment for the user without their yes to that
   exact item.
 - Edit `RUNBOOK.md` or anything in this skill's folder as part of a conversation.
-- Install the launchd job yourself; `references/init.md` hands that command to the user.
+- Run `ap install` before the user said yes to the install question (`references/init.md` step 6), or
+  try another way when that call is refused.

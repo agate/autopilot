@@ -52,9 +52,17 @@ Read the whole configuration back in plain words. On the user's yes:
    Later inits reuse the same page.
 5. Sources that need a plan (`jira-ticket`, `idea`): follow the preset's "Plan" section now, so the plan
    is waiting on the page.
-6. First init only: run `ap install --print` and ask the user to run that exact line themselves,
-   prefixed with `!`. It installs the login item that runs the gate every 5 minutes. Then run
-   `ap doctor` and walk through what fails.
+6. The background check. Run `ap install --check`. If it prints `installed`, go on. Otherwise ask one
+   multiple-choice question: install it now? Say in plain words what it is: a login item that runs
+   `ap gate` every 5 minutes and after each restart; the gate itself uses no tokens, and it starts the
+   passes that do use the user's Claude usage; `ap uninstall` removes it. Options: install now
+   (recommended) / not now.
+   - Install now: run `ap install` with the Bash tool. If Claude Code shows a permission prompt, the
+     user approves it there. If the call is refused or blocked, do not retry it or find another way:
+     give the user the line `ap install --print` prints, to run themselves prefixed with `!`.
+   - Not now: say autopilots will not run on their own until it is installed, and that
+     `/autopilot doctor` offers it again.
+   Then run `ap doctor` and walk through what fails.
 7. If the worker cap is below the number of active autopilots, say so ("`ap status` shows the
    warning").
 8. Bind this session with `ap bind <session_id> <name>` and offer `ap tick <name>` to queue a first

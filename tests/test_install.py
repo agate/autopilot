@@ -33,5 +33,37 @@ class InstallTest(unittest.TestCase):
         self.assertTrue(cmd.endswith('/bin/ap" install'))
 
 
+class InstallCheckTest(unittest.TestCase):
+    def _check(self, plist_exists, launchctl_rc):
+        import io
+        from contextlib import redirect_stdout
+        from unittest import mock
+        with TempData() as d:
+            plist = d / "LaunchAgents" / "com.autopilot.gate.plist"
+            if plist_exists:
+                plist.parent.mkdir(parents=True)
+                plist.write_text("x")
+            buf = io.StringIO()
+            with mock.patch.object(install, "PLIST", plist), \
+                    mock.patch.object(install, "_launchctl", return_value=(launchctl_rc, "")), redirect_stdout(buf):
+                rc = install._install(["--check"])
+            return rc, buf.getvalue()
+
+    def test_check_missing_plist(self):
+        rc, out = self._check(False, 0)
+        self.assertEqual(rc, 1)
+        self.assertIn("not installed", out)
+
+    def test_check_plist_not_loaded(self):
+        rc, out = self._check(True, 113)
+        self.assertEqual(rc, 1)
+        self.assertIn("not installed", out)
+
+    def test_check_installed(self):
+        rc, out = self._check(True, 0)
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.strip(), "installed")
+
+
 if __name__ == "__main__":
     unittest.main()

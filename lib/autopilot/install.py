@@ -47,6 +47,13 @@ def _launchctl(*args) -> tuple:
     return out.returncode, (out.stdout + out.stderr).strip()
 
 
+def is_installed() -> bool:
+    if not PLIST.exists():
+        return False
+    rc, _ = _launchctl("print", f"gui/{os.getuid()}/{LABEL}")
+    return rc == 0
+
+
 def install() -> str:
     tools = capture_tools()
     dirs = [str(Path(p).parent) for p in tools.values() if p]
@@ -68,6 +75,10 @@ def _install(args: list) -> int:
     if "--print" in args:
         print(command_for_user())
         return 0
+    if "--check" in args:
+        ok = is_installed()
+        print("installed" if ok else "not installed")
+        return 0 if ok else 1
     print(install())
     return 0
 
