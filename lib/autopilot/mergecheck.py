@@ -14,14 +14,24 @@ reviewThreads(first:100){nodes{isResolved comments(first:1){nodes{author{__typen
 """
 
 
+def latest_reviews(reviews: list) -> dict:
+    """Each reviewer's last review that took a stand (comments alone do not replace an earlier verdict)."""
+    out = {}
+    for r in sorted(reviews or [], key=lambda r: r.get("submittedAt") or ""):
+        if r.get("state") in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
+            out[(r.get("author") or {}).get("login") or "?"] = r
+    return out
+
+
 def evaluate(pr: dict, threads: list, stale_overlap: list, approval_required: bool) -> tuple:
     why = []
-    for c in pr.get("statusCheckRollup") or []:
-        val = (c.get("conclusion") or c.get("state") or "").upper()
-        if val not in GREEN:
-            why.append("checks_not_green")
-            break
-    approvals = [r for r in pr.get("reviews") or [] if r.get("state") == "APPROVED"]
+    rollup = pr.get("statusCheckRollup") or []
+    if not rollup or any((c.get("conclusion") or c.get("state") or "").upper() not in GREEN for c in rollup):
+        why.append("checks_not_green")
+    latest = latest_reviews(pr.get("reviews"))
+    if any(r.get("state") == "CHANGES_REQUESTED" for r in latest.values()):
+        why.append("changes_requested")
+    approvals = [r for r in latest.values() if r.get("state") == "APPROVED"]
     if approval_required:
         if not approvals:
             why.append("approval_missing")

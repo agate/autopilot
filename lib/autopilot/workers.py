@@ -38,7 +38,7 @@ def _env(role: str) -> dict:
 def build_start(gcfg: dict, apcfg: dict, ap: str, task: str, role: str, prompt: str) -> tuple:
     settings = paths.ap_dir(ap) / "settings.json"
     if not settings.exists():
-        settings = paths.package_root() / "settings" / "worker.json"
+        raise RuntimeError(f"{ap}: no permission floor yet; run `ap perms write {ap}` first")
     argv = [claude_bin(gcfg), "--bg", "-n", sessions.name_for(ap, task, role),
             "--permission-mode", gcfg["permission_mode"], "--settings", str(settings)]
     if role in AGENTS:
@@ -92,11 +92,12 @@ def start(ap: str, task: str, role: str, cwd: str, prompt: str, needs: list = No
         argv.append(prompt if role in AGENTS else "/autopilot:pr-loop " + prompt)
     short = _launch(argv, cwd, env)
     name = sessions.name_for(ap, task, role)
-    found = sessions.find(name, sessions.list_all(claude_bin(gcfg)))
+    listed = sessions.list_all(claude_bin(gcfg))
+    found = sessions.find_by_id(short, listed) or sessions.find(name, listed)
     rec = {"task": task, "role": role, "session_name": name,
            "session_id": (found or {}).get("sessionId") or "", "short_id": short,
            "ports": port_range,
-           "needs": list(needs or []), "started_at": events.now_iso(), "resumes": 0}
+           "needs": list(needs or []), "started_at": events.now_iso(), "resumes": 0, "cwd": str(cwd)}
     with state.mutate(ap) as st:
         st["workers"] = [w for w in st["workers"] if not (w["task"] == task and w["role"] == role)] + [rec]
     events.append(ap, "worker_started", {"task": task, "role": role, "short_id": short})
@@ -108,7 +109,7 @@ def resume(ap: str, worker: dict) -> dict:
     prompt = ("Your session was interrupted. Continue the task from where you stopped; "
               "check your worktree and run files first.")
     argv = [claude_bin(gcfg), "--bg", "--resume", worker["session_id"], prompt]
-    short = _launch(argv, paths.ap_dir(ap), _env("worker"))
+    short = _launch(argv, worker.get("cwd") or str(paths.ap_dir(ap)), _env("worker"))
     with state.mutate(ap) as st:
         for w in st["workers"]:
             if w["task"] == worker["task"] and w["role"] == worker["role"]:

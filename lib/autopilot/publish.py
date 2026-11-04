@@ -55,8 +55,12 @@ def _evidence(ap: str, task: str, assets: dict):
     ev = dict(parts["evidence"] or {})
     shots = []
     for s in ev.get("screenshots") or []:
-        key = f"{ap}/{task}/{s['path'].split('/')[-1]}"
-        shots.append(dict(s, key=key, asset_id=assets.get(key)))
+        try:
+            inside = (run / s["path"]).resolve().relative_to(run.resolve())
+        except (KeyError, TypeError, ValueError):
+            continue  # a path outside the run directory is never uploaded
+        key = f"{ap}/{task}/{inside.name}"
+        shots.append(dict(s, path=str(inside), key=key, asset_id=assets.get(key)))
     ev["screenshots"] = shots
     hb = parts["handback"] or {}
     ev["criteria"] = ev.get("criteria") or hb.get("criteria")
@@ -196,3 +200,32 @@ def _page_cmd(args: list) -> int:
         return 2
     print(build_page(args[args.index("--stub") + 1] if "--stub" in args else None))
     return 0
+
+
+def evidence_errors(ap: str, task: str) -> list:
+    """evidence.json must exist and carry every reader-facing text in every required language."""
+    p = paths.ap_dir(ap) / "runs" / task / "evidence.json"
+    ev = _read_json(p)
+    if not isinstance(ev, dict):
+        return [f"{p}: missing or not valid JSON"]
+    langs = text.required_langs(config.load_global())
+    errs = []
+    for k in ("verdict", "what_changed"):
+        errs += text.check(ev.get(k), langs, k)
+    for i, c in enumerate(ev.get("criteria") or []):
+        errs += text.check(c.get("text"), langs, f"criteria[{i}].text")
+        if "proof" in c:
+            errs += text.check(c["proof"], langs, f"criteria[{i}].proof")
+    for i, sh in enumerate(ev.get("screenshots") or []):
+        errs += text.check(sh.get("caption"), langs, f"screenshots[{i}].caption")
+    return errs
+
+
+@cli.command("evidence")
+def _evidence_cmd(args: list) -> int:
+    if args[:1] != ["check"] or len(args) != 3:
+        print("usage: ap evidence check <ap> <task>", file=sys.stderr)
+        return 2
+    errs = evidence_errors(args[1], args[2])
+    print("\n".join(errs) if errs else "ok")
+    return 1 if errs else 0

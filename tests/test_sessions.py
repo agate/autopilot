@@ -47,12 +47,12 @@ class SessionsTest(unittest.TestCase):
     def test_find_ignores_interactive(self):
         self.assertIsNone(sessions.find("some interactive session", ALL))
 
-    def test_list_all_bad_json_returns_empty(self):
+    def test_list_all_bad_json_returns_none(self):
         d = Path(tempfile.mkdtemp())
         fake = d / "claude"
         fake.write_text("#!/bin/bash\necho not-json\n")
         fake.chmod(0o755)
-        self.assertEqual(sessions.list_all(str(fake)), [])
+        self.assertIsNone(sessions.list_all(str(fake)))
 
 
 if __name__ == "__main__":

@@ -7,7 +7,16 @@ from datetime import datetime, timedelta, timezone
 
 from autopilot import cli, config, events, paths, state, text
 
-SOURCE_WINS = ("title", "status", "depends_on", "link", "assignee", "needs", "critical", "phase")
+SOURCE_WINS = ("title", "depends_on", "link", "assignee", "needs", "critical", "phase")
+RANK = {"todo": 0, "blocked": 0, "in_progress": 1, "in_review": 2, "done": 3, "skipped": 3}
+
+
+def _merge_status(local: str, source: str) -> str:
+    """The source wins when it finishes a task or moves it forward; it never moves local progress back
+    (a workflow without an In Review column would otherwise drop a PR that is under review)."""
+    if source in ("done", "skipped") or RANK.get(source, 0) > RANK.get(local, 0) or local in ("todo", "blocked"):
+        return source
+    return local
 REPORT_KEYS = {"slot", "done", "waiting", "next", "budget", "access"}
 
 
@@ -37,6 +46,8 @@ def _sync(ap: str, st: dict, tasks: list) -> None:
             for k in SOURCE_WINS:
                 if k in t:
                     cur[k] = t[k]
+            if "status" in t:
+                cur["status"] = _merge_status(cur["status"], t["status"])
     for t in st["tasks"]:
         if t["origin"] == "source" and t["id"] not in incoming and t["status"] != "skipped":
             t["status"] = "skipped"

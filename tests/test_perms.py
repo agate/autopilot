@@ -20,7 +20,7 @@ class PermsTest(unittest.TestCase):
     def test_generate_includes_static_rules(self):
         deny = perms.generate(["mcp__X__createJiraIssue"])["permissions"]["deny"]
         self.assertIn("mcp__X__createJiraIssue", deny)
-        self.assertIn("Write(**/autopilot-data/**/RULES.md)", deny)
+        self.assertTrue(any(d.startswith("Write(//") and d.endswith("/**/RULES.md)") for d in deny))
         self.assertIn("Bash(gh pr comment:*)", deny)
 
     def test_one_off_excludes_tool(self):
@@ -32,7 +32,8 @@ class PermsTest(unittest.TestCase):
     def test_settings_files_valid_json(self):
         for name in ("dispatcher.json", "worker.json"):
             data = json.loads((ROOT / "settings" / name).read_text())
-            self.assertIn("Write(**/autopilot-data/**/RULES.md)", data["permissions"]["deny"])
+            self.assertIn("Write(~/.claude/autopilot-data/**/RULES.md)", data["permissions"]["deny"])
+            self.assertIn(data["env"]["AUTOPILOT_ROLE"], ("dispatcher", "worker"))
 
     def test_discover_reads_init_tools(self):
         line = json.dumps({"type": "system", "subtype": "init", "tools": ["Read", "mcp__X__createJiraIssue"]})

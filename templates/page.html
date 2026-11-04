@@ -170,6 +170,8 @@ function el(tag, attrs, ...kids) {
   for (const k of kids.flat()) if (k != null) e.append(k instanceof Node ? k : document.createTextNode(String(k)));
   return e;
 }
+// Links come from tickets, PRs and workers: untrusted. Only http(s) becomes a link.
+function safeUrl(u) { return typeof u === "string" && /^https?:\/\//i.test(u) ? u : null; }
 const inAp = (doc) => !filterAp || doc.ap === filterAp;
 const values = (c) => Object.values(S[c] || {}).filter(inAp);
 function when(iso) {
@@ -279,8 +281,8 @@ function taskRow(t) {
       extra.length ? el("div", { class: "small", text: extra.join(" · ") }) : null),
     el("div", { class: "side" },
       filterAp ? null : el("span", { class: "chip muted", text: t.ap }),
-      t.pr ? el("a", { href: String(t.pr).startsWith("http") ? t.pr : null, target: "_blank", rel: "noopener", text: L("pr") + " " + (String(t.pr).match(/\d+$/) || [t.pr])[0] }) : null,
-      t.link ? el("a", { href: t.link, target: "_blank", rel: "noopener", text: L("ticket") }) : null,
+      t.pr ? el("a", { href: safeUrl(String(t.pr)), target: "_blank", rel: "noopener", text: L("pr") + " " + (String(t.pr).match(/\d+$/) || [t.pr])[0] }) : null,
+      safeUrl(t.link) ? el("a", { href: safeUrl(t.link), target: "_blank", rel: "noopener", text: L("ticket") }) : null,
       ev ? el("button", { type: "button", onclick: () => openDetail(t.ap + ":" + t.id), text: L("evidence_link") }) : null,
       el("span", { class: "chip " + (st || ""), text: L("status_" + t.status) })));
 }
@@ -314,8 +316,8 @@ function renderDetail() {
   const okN = crit.filter((c) => c.ok === true || c.status === "pass").length;
   const rounds = ((ev.prloop || {}).rounds || []).map((r) => (r.findings || []).length);
   const maxR = Math.max(1, ...rounds);
-  const links = [t.link && el("a", { href: t.link, target: "_blank", rel: "noopener", text: L("ticket") }),
-    t.pr && String(t.pr).startsWith("http") && el("a", { href: t.pr, target: "_blank", rel: "noopener", text: L("pr") })].filter(Boolean);
+  const links = [safeUrl(t.link) && el("a", { href: safeUrl(t.link), target: "_blank", rel: "noopener", text: L("ticket") }),
+    safeUrl(String(t.pr || "")) && el("a", { href: safeUrl(String(t.pr)), target: "_blank", rel: "noopener", text: L("pr") })].filter(Boolean);
   const note = el("span", { class: "note", "aria-live": "polite" });
   box.replaceChildren(back,
     el("div", { class: "card" }, el("h2", { text: t.id + " · " + T(t.title) }),
@@ -342,7 +344,7 @@ async function exportOne(ev, t, note) {
   const html = "<!doctype html><meta charset=\"utf-8\"><title>" + esc(t.id) + "</title><body style=\"font:15px/1.5 sans-serif;max-width:760px;margin:24px auto;padding:0 16px\">" +
     "<h1>" + esc(t.id + " · " + T(t.title)) + "</h1><h2>" + esc(L("verdict")) + "</h2><p>" + esc(T(ev.verdict)) + "</p><h2>" + esc(L("what_changed")) + "</h2><p>" + esc(T(ev.what_changed)) + "</p>" +
     "<h2>" + esc(L("criteria", { ok: (ev.criteria || []).filter((c) => c.ok === true || c.status === "pass").length, n: (ev.criteria || []).length })) + "</h2><ul>" + crit + "</ul>" +
-    (t.pr && String(t.pr).startsWith("http") ? "<p><a href=\"" + esc(t.pr) + "\">" + esc(L("pr")) + "</a></p>" : "") + "</body>";
+    (safeUrl(String(t.pr || "")) ? "<p><a href=\"" + esc(t.pr) + "\">" + esc(L("pr")) + "</a></p>" : "") + "</body>";
   try { await downloads.save({ filename: t.id + "-" + lang + ".html", data: html }); note.className = "note ok"; note.textContent = L("export_done"); }
   catch (e) { note.className = "note crit"; note.textContent = L("export_failed", { error: (e && (e.message || e.code)) || e }); }
 }
@@ -359,7 +361,7 @@ function askCard(d) {
   const key = d.ap + ":" + d.id, note = el("span", { class: "note", "aria-live": "polite" });
   const pending = pendingFor(key), disabled = pending || canWrite === false;
   const input = el("input", { type: "text", id: "reply-" + key.replace(/[^A-Za-z0-9-]/g, "-"), placeholder: L("reply_placeholder"), disabled });
-  const links = (d.links || []).map((l) => el("a", { href: l.url, target: "_blank", rel: "noopener", text: T(l.label) }));
+  const links = (d.links || []).filter((l) => safeUrl(l.url)).map((l) => el("a", { href: safeUrl(l.url), target: "_blank", rel: "noopener", text: T(l.label) }));
   return el("div", { class: "card" + (d.kind === "gate" ? " gate" : "") },
     el("div", { class: "small mono", text: d.ap + " · " + d.id + (d.task ? " · " + d.task : "") }),
     el("h3", { text: T(d.title) }), el("div", { class: "body", text: T(d.body) }),

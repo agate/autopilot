@@ -38,4 +38,6 @@ def write_ap(data: Path, name: str, **cfg) -> Path:
     base = {"name": name, "source": {"preset": "jira-epic", "key": "PROJ-100"}, "repo": str(data)}
     base.update(cfg)
     (d / "config.json").write_text(json.dumps(base))
+    if not (d / "settings.json").exists():
+        (d / "settings.json").write_text("{}")  # init writes the permission floor before any worker starts
     return d

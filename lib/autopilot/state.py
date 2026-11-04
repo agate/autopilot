@@ -13,6 +13,7 @@ TASK_OPT = {"pr", "branch", "worktree", "spec", "assignee", "evidence", "session
 TASK_STATUS = {"todo", "in_progress", "in_review", "done", "blocked", "skipped"}
 ORIGINS = {"source", "found"}
 WORKER_REQ = {"task", "role", "session_name", "session_id", "short_id", "ports", "needs", "started_at", "resumes"}
+WORKER_OPT = {"cwd"}
 ROLES = {"implement", "review", "pr"}
 DEC_REQ = {"id", "kind", "title", "body", "options", "links", "status", "created_at"}
 DEC_OPT = {"task", "answer", "action", "answered_at"}
@@ -68,7 +69,7 @@ def validate(st: dict, langs: set) -> list:
             errs += text.check(t["title"], langs, f"{w}.title")
     for i, wk in enumerate(st.get("workers") or []):
         w = f"workers[{i}]"
-        errs += _keys(wk, WORKER_REQ, set(), w)
+        errs += _keys(wk, WORKER_REQ, WORKER_OPT, w)
         if wk.get("role") not in ROLES:
             errs.append(f"{w}: bad role {wk.get('role')!r}")
     for i, d in enumerate(st.get("decisions") or []):
