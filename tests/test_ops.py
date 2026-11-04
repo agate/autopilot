@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import unittest
 from datetime import datetime, timedelta, timezone
 
 from tests.helpers import TempData, write_ap
-from autopilot import ops, paths, state
+from autopilot import cli, events, ops, paths, state
 
 
 def src(id, status="todo", **kw):
@@ -68,6 +70,46 @@ class OpsTest(unittest.TestCase):
         ops.decision_resolve("checkout", "D1", "a", "answered")
         d = state.load("checkout")["decisions"][0]
         self.assertEqual((d["status"], d["answer"]), ("answered", "a"))
+
+    def test_same_answer_twice_is_unchanged(self):
+        # A pass that stopped after resolving but before deleting the reply sees it again.
+        ops.decision_add("checkout", dec())
+        self.assertEqual(ops.decision_resolve("checkout", "D1", "a"), "resolved")
+        first = state.load("checkout")["decisions"][0]["answered_at"]
+        self.assertEqual(ops.decision_resolve("checkout", "D1", "a"), "unchanged")
+        self.assertEqual(state.load("checkout")["decisions"][0]["answered_at"], first)
+        resolved = [e for e in events.since("checkout", 0)[0] if e.get("type") == "decision_resolved"]
+        self.assertEqual(len(resolved), 1)
+
+    def test_different_answer_is_a_conflict(self):
+        # Two devices answered the same card differently: the second never silently wins.
+        ops.decision_add("checkout", dec())
+        ops.decision_resolve("checkout", "D1", "a")
+        with self.assertRaises(ops.AnswerConflict):
+            ops.decision_resolve("checkout", "D1", "b")
+        self.assertEqual(state.load("checkout")["decisions"][0]["answer"], "a")
+
+    def test_replace_overwrites_on_purpose(self):
+        ops.decision_add("checkout", dec())
+        ops.decision_resolve("checkout", "D1", "a")
+        self.assertEqual(ops.decision_resolve("checkout", "D1", "b", replace=True), "resolved")
+        self.assertEqual(state.load("checkout")["decisions"][0]["answer"], "b")
+
+    def test_undo_twice_is_unchanged(self):
+        ops.decision_add("checkout", dec(kind="self", options=[]))
+        self.assertEqual(ops.decision_resolve("checkout", "D1", "undo", "undone"), "resolved")
+        self.assertEqual(ops.decision_resolve("checkout", "D1", "undo", "undone"), "unchanged")
+
+    def test_resolve_cli_exit_codes(self):
+        ops.decision_add("checkout", dec())
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            codes = [cli.main(["decision", "resolve", "checkout", "D1", "--answer", "a"]),
+                     cli.main(["decision", "resolve", "checkout", "D1", "--answer", "a"]),
+                     cli.main(["decision", "resolve", "checkout", "D1", "--answer", "b"]),
+                     cli.main(["decision", "resolve", "checkout", "D1", "--answer", "b", "--replace"])]
+        self.assertEqual(codes, [0, 0, 3, 0])
+        self.assertEqual(out.getvalue().split(), ["resolved", "unchanged", "resolved"])
 
     def test_archive_only_old_answered(self):
         for _ in range(3):

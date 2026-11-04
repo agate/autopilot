@@ -51,6 +51,22 @@ class DocsTest(unittest.TestCase):
         self.assertNotIn("First init only: run `ap install --print`", text)
         self.assertNotIn("Install the launchd job yourself", (ROOT / "SKILL.md").read_text())
 
+    def test_replies_are_handled_once(self):
+        rb = (ROOT / "RUNBOOK.md").read_text()
+        step = rb[rb.index("**Replies.**"):rb.index("7. **Sync the source.**")]
+        self.assertIn("`unchanged`", step)          # a reply seen twice is not acted on again
+        self.assertIn("Exit 3", step)               # a second, different answer becomes a card
+        self.assertIn("two_answers", step)
+        self.assertIn("--replace", step)
+        talk = (ROOT / "references" / "talk.md").read_text()
+        self.assertIn("--replace", talk)
+        labels = (ROOT / "templates" / "labels.en.json").read_text()
+        self.assertIn('"two_answers"', labels)
+
+    def test_only_the_owner_writes_replies(self):
+        init = (ROOT / "references" / "init.md").read_text()
+        self.assertIn('{"path": "replies", "read": "view", "write": "owner"}', init)
+
     def test_presets_exist(self):
         for name in ("jira-epic", "jira-ticket", "idea", "custom"):
             self.assertTrue((ROOT / "presets" / f"{name}.md").exists(), name)

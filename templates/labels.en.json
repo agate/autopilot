@@ -3,6 +3,7 @@
   "worker_blocked": "A worker is waiting for a permission nobody can give: {session}.",
   "worker_died_twice": "A worker stopped twice without finishing: {session}.",
   "state_broken": "The state file of {ap} is broken: {error}",
+  "two_answers": "Two different answers arrived for {id}. Which one counts?",
   "cap_warning": "{active} autopilots are running but at most {cap} workers can run at once, so at least {waiting} has to wait.",
   "lang_name": "English",
   "app_title": "Autopilot",

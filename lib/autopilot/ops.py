@@ -88,13 +88,24 @@ def decision_add(ap: str, d: dict) -> str:
     return new["id"]
 
 
-def decision_resolve(ap: str, did: str, answer: str, status: str = "answered") -> None:
+class AnswerConflict(Exception):
+    """The decision already has a different answer; only an explicit replace changes it."""
+
+
+def decision_resolve(ap: str, did: str, answer: str, status: str = "answered", replace: bool = False) -> str:
+    """Record an answer once. "unchanged" when the same answer is already recorded (a reply seen twice),
+    AnswerConflict when a different one is, unless `replace` (the user asked to change it)."""
     with state.mutate(ap) as st:
         d = next((d for d in st["decisions"] if d["id"] == did), None)
         if d is None:
             raise state.StateError(f"{ap}: no decision {did}")
+        if d["status"] != "open" and not replace:
+            if d["status"] == status and d.get("answer") == answer:
+                return "unchanged"
+            raise AnswerConflict(f"{ap}: {did} already has the answer {d.get('answer')!r} ({d['status']})")
         d.update(status=status, answer=answer, answered_at=events.now_iso())
     events.append(ap, "decision_resolved", {"id": did, "status": status, "answer": answer})
+    return "resolved"
 
 
 def _archive_lines(ap: str) -> list:
@@ -201,9 +212,14 @@ def _decision(args):
     if len(args) == 3 and args[0] == "add":
         print(decision_add(args[1], _load_arg(args[2])))
     elif len(args) >= 3 and args[0] == "resolve":
-        decision_resolve(args[1], args[2], _flag(args, "--answer", ""), _flag(args, "--status", "answered"))
+        try:
+            print(decision_resolve(args[1], args[2], _flag(args, "--answer", ""), _flag(args, "--status", "answered"),
+                                   replace="--replace" in args))
+        except AnswerConflict as e:
+            print(f"conflict: {e}", file=sys.stderr)
+            return 3
     else:
-        print("usage: ap decision add <ap> <file> | resolve <ap> <id> --answer X [--status answered|undone]",
+        print("usage: ap decision add <ap> <file> | resolve <ap> <id> --answer X [--status answered|undone] [--replace]",
               file=sys.stderr)
         return 2
     return 0

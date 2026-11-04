@@ -45,8 +45,9 @@ Read the whole configuration back in plain words. On the user's yes:
 3. Run `ap perms write <name>` (it discovers this repo's tools and writes the permission floor).
 4. The page, first init only (`ap publish url` prints nothing yet):
    - run `ap page build`, copy the file it prints into your scratchpad directory, and publish it with
-     the Artifact tool, `capabilities: {"db": {}, "user": {}, "assets": {}, "downloads": true}`,
-     icon `gauge`;
+     the Artifact tool, icon `gauge`, and
+     `capabilities: {"db": {"rules": [{"path": "replies", "read": "view", "write": "owner"}]}, "user": {}, "assets": {}, "downloads": true}`
+     (only the page's owner can answer cards, even after the page is shared);
    - run `ap publish url <url>`;
    - run `ap publish diff`, send its `set` rows with one `ArtifactData` batch, then `ap publish mark`.
    Later inits reuse the same page.

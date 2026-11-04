@@ -102,13 +102,21 @@ in `body`, so the user sees what will run).
        fixable; a human's thread you may not answer becomes an `ask` card with a drafted reply.
 
 6. **Replies.** Read the page's `replies` collection with `ArtifactData` (`ap publish url` prints the
-   page). Each reply has `decision` (`<ap>:<D-id>`) and `option` or `text`:
-   - `option: "undo"` on a `self` card: reverse what it did, then
-     `ap decision resolve <ap> <D-id> --answer undo --status undone`.
-   - Otherwise: `ap decision resolve <ap> <D-id> --answer "<option id or text>"`. If the card has an
-     `action`, run `ap oneoff <ap> <D-id>`: it runs only when the answer is the action's `option`, and
-     only once. Then act on the answer.
-   - Delete each handled reply document.
+   page). Each reply has `decision` (`<ap>:<D-id>`), `option` or `text`, and `by`. Record the answer
+   first, then act on it:
+   - `option: "undo"` on a `self` card: `ap decision resolve <ap> <D-id> --answer undo --status undone`.
+   - Otherwise: `ap decision resolve <ap> <D-id> --answer "<option id or text>"`.
+   - It prints `resolved`: if the card has an `action`, run `ap oneoff <ap> <D-id>` (it runs only when
+     the answer is the action's `option`, and only once). Then act on the answer (for undo: reverse what
+     the card did), or leave it for the next pass and say so.
+   - It prints `unchanged`: the same answer was recorded before (a pass stopped before deleting this
+     reply). Do only what the answer asks that is not done yet; never repeat a step that already happened.
+   - Exit 3: the card already has a different answer (two devices, or the page and a talk session).
+     Change nothing. Add an `ask` card with title `{"key": "two_answers", "args": {"id": "<D-id>"}}`,
+     both answers as options and the original card's links. When that card is answered, run
+     `ap decision resolve <ap> <D-id> --answer "<the chosen one>" --replace` and act on it.
+   - Delete each handled reply document, by its id (never the whole collection: a reply that arrived
+     during this pass waits for the next one).
 
 7. **Sync the source.** Follow `presets/<preset>.md` for each autopilot. It ends in `ap tasks sync`.
 
