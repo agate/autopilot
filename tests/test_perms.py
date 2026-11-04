@@ -20,7 +20,7 @@ class PermsTest(unittest.TestCase):
     def test_generate_includes_static_rules(self):
         deny = perms.generate(["mcp__X__createJiraIssue"])["permissions"]["deny"]
         self.assertIn("mcp__X__createJiraIssue", deny)
-        self.assertTrue(any(d.startswith("Write(//") and d.endswith("/**/RULES.md)") for d in deny))
+        self.assertTrue(any(d.startswith("Edit(//") and d.endswith("/**/RULES.md)") for d in deny))
         self.assertIn("Bash(gh pr comment:*)", deny)
 
     def test_one_off_excludes_tool(self):
@@ -32,8 +32,19 @@ class PermsTest(unittest.TestCase):
     def test_settings_files_valid_json(self):
         for name in ("dispatcher.json", "worker.json"):
             data = json.loads((ROOT / "settings" / name).read_text())
-            self.assertIn("Write(~/.claude/autopilot-data/**/RULES.md)", data["permissions"]["deny"])
+            self.assertIn("Edit(~/.claude/autopilot-data/**/RULES.md)", data["permissions"]["deny"])
             self.assertIn(data["env"]["AUTOPILOT_ROLE"], ("dispatcher", "worker"))
+
+    def test_floor_has_no_write_rules(self):
+        # Claude Code matches only Edit(path) rules for file tools (they cover Write too) and warns on every
+        # session start about each Write(path) rule.
+        deny = perms.generate([])["permissions"]["deny"] + perms.static_settings("worker")["permissions"]["deny"]
+        self.assertEqual([d for d in deny if d.startswith("Write(")], [])
+
+    def test_static_settings_files_match_generator(self):
+        for role in ("dispatcher", "worker"):
+            data = json.loads((ROOT / "settings" / f"{role}.json").read_text())
+            self.assertEqual(data, perms.static_settings(role))
 
     def test_discover_reads_init_tools(self):
         line = json.dumps({"type": "system", "subtype": "init", "tools": ["Read", "mcp__X__createJiraIssue"]})

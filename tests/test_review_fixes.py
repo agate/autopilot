@@ -46,9 +46,9 @@ class PermissionFloorTest(Env):
         deny = perms.generate([])["permissions"]["deny"]
         root = str(paths.data_root())
         self.assertIn(f"Edit(/{root}/**/RULES.md)", deny)
-        self.assertIn(f"Write(/{root}/**/config.json)", deny)
+        self.assertIn(f"Edit(/{root}/**/config.json)", deny)
         self.assertIn(f"Edit(/{root}/**/settings*.json)", deny)
-        self.assertIn(f"Write(/{root}/**/state.json)", deny)
+        self.assertIn(f"Edit(/{root}/**/state.json)", deny)
         self.assertIn(f"Edit(/{paths.package_root()}/**)", deny)
 
     def test_settings_carry_role_env(self):

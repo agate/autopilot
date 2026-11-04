@@ -32,6 +32,28 @@ def _c(name, ok, detail="", fix="") -> dict:
     return {"name": name, "ok": bool(ok), "detail": detail, "fix": fix}
 
 
+def _login_check(rc: int, msg: str) -> dict:
+    """`claude auth status` prints JSON with `loginExpiresAt`. Workers stop when the sign-in ends."""
+    fix = "run `claude auth login` in your own terminal"
+    try:
+        status = json.loads(msg)
+    except ValueError:
+        return _c("claude login", rc == 0, msg.splitlines()[0] if msg else "", "" if rc == 0 else fix)
+    if rc != 0 or not status.get("loggedIn"):
+        return _c("claude login", False, "not logged in", fix)
+    end = status.get("loginExpiresAt")
+    if not end:
+        return _c("claude login", True, status.get("authMethod") or "")
+    try:
+        when = datetime.fromisoformat(end.replace("Z", "+00:00")).astimezone()
+    except ValueError:
+        return _c("claude login", True, f"ends {end}")
+    soon = when - datetime.now().astimezone() < timedelta(days=2)
+    detail = f"sign-in ends {when:%Y-%m-%d %H:%M}"
+    return _c("claude login", not soon, detail,
+              f"{fix} before {when:%Y-%m-%d %H:%M}: workers stop when the sign-in ends" if soon else "")
+
+
 def checks(gcfg: dict) -> list:
     out = []
     tools = gcfg.get("tools") or {}
@@ -60,7 +82,7 @@ def checks(gcfg: dict) -> list:
         out.append(_c(f"state {name}", False, err, f"fix or restore {paths.ap_dir(name) / 'state.json'}"))
     if tools.get("claude"):
         rc, msg = _run([tools["claude"], "auth", "status"])
-        out.append(_c("claude login", rc == 0, msg.splitlines()[0] if msg else "", "" if rc == 0 else "run `claude auth login`"))
+        out.append(_login_check(rc, msg))
     if tools.get("gh"):
         rc, msg = _run([tools["gh"], "auth", "status"])
         out.append(_c("gh login", rc == 0, "", "" if rc == 0 else "run `gh auth login`"))

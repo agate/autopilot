@@ -25,12 +25,12 @@ def denied_tools(tools: list) -> list:
 
 def deny_rules(data_root: str, package_root: str) -> list:
     """File rules use `//` (absolute) or `~/` (home) paths: a bare path would be read relative to the
-    session's working folder, which is a repo or worktree, never the data folder."""
+    session's working folder, which is a repo or worktree, never the data folder. Only Edit(path) rules:
+    Claude Code applies them to every file-editing tool (Write included) and follows symlinks both ways."""
     out = []
     for name in PROTECTED:
-        for verb in ("Edit", "Write"):
-            out += [f"{verb}({data_root}/**/{name})", f"{verb}({data_root}/{name})"]
-    out += [f"Edit({package_root}/**)", f"Write({package_root}/**)"]
+        out += [f"Edit({data_root}/**/{name})", f"Edit({data_root}/{name})"]
+    out += [f"Edit({package_root}/**)"]
     return out + BASH_DENY
 
 
