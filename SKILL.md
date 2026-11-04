@@ -26,6 +26,7 @@ The first word after `/autopilot` decides:
 | `status` | Run `ap status` and explain it. No binding needed. |
 | `init` | Follow `references/init.md`. |
 | `doctor` | Run `ap doctor`. For each failure, give the fix line it prints. If `launchd job` fails, offer to install it as in `references/init.md` step 6. |
+| `config` | Run `ap config list` and explain the settings in plain words, the changed ones (`*`) first. Change one only on the user's word: `ap config set key=value` (dotted keys for nested settings), `ap config reset key` for the default. `gate_interval_s` takes effect after `ap install`. All settings: `references/config.md`. |
 | `pause <name>` / `resume <name>` | Run `ap pause <name>` / `ap resume <name>`, confirm. |
 | `tick [name]` | Run `ap tick <name>`. It queues a pass that the gate starts within seconds; say the pass itself takes a few minutes. |
 | `stop <name>` | Ask first. On yes, run `ap stop <name> --yes`. |

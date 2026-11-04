@@ -28,6 +28,36 @@ DEFAULT_GLOBAL: dict = {
     "tools": {"claude": None, "gh": None, "git": None, "python3": None},
 }
 
+# One line per setting, shown by `ap config list` and in references/config.md (a test keeps both complete).
+DESCRIBE: dict = {
+    "max_workers": "Most workers running at once, across all autopilots.",
+    "budget.window_pct": "Start no new work once a usage window reaches this percent.",
+    "budget.stale_min": "Usage numbers older than this many minutes count as unknown: one new worker at a time.",
+    "budget.credit_pct": "Start no new work once extra credits reach this percent of the monthly limit.",
+    "budget.resume_after_min": "Minutes to wait after a usage window resets before work starts again.",
+    "forced_pass_min": "Run a dispatcher pass at least this often, in minutes, even when nothing changed.",
+    "gate_interval_s": "How often the background gate wakes, in seconds. Takes effect after `ap install`.",
+    "reply_check.every_s": "How often to read answers from the page, in seconds. 0 turns it off.",
+    "reply_check.quiet": "No answer reads between these two times (this computer's clock); the forced pass picks answers up then.",
+    "reply_check.model": "Model for the answer read.",
+    "reply_check.timeout_s": "Give up on one answer read after this many seconds.",
+    "report_times": "When reports are written, local time. An autopilot can set its own.",
+    "port_base": "First port handed to workers; each worker gets a block of 10.",
+    "archive_after_days": "Answered decisions older than this many days move to the archive.",
+    "permission_mode": "Claude Code permission mode for the dispatcher and workers.",
+    "page_host": "Where the page is published.",
+    "models.dispatcher": "Model for dispatcher passes; null uses Claude Code's default.",
+    "models.worker": "Model for workers; null uses Claude Code's default.",
+    "worker_effort": "Effort level for workers.",
+    "dispatch_timeout_s": "Stop a dispatcher pass that runs longer than this many seconds.",
+    "worktree_root": "Folder where task worktrees are created.",
+    "reader_lang": "The reader's language for the page and reports; set at the first init.",
+    "tools.claude": "Path to claude that the gate uses; `ap install` records it.",
+    "tools.gh": "Path to gh that the gate uses; `ap install` records it.",
+    "tools.git": "Path to git that the gate uses; `ap install` records it.",
+    "tools.python3": "Path to python3 that the gate uses; `ap install` records it.",
+}
+
 DEFAULT_AP: dict = {
     "branch_pattern": "{prefix}.{task}.{short}",
     "branch_prefix": None,
@@ -68,8 +98,86 @@ def load_global() -> dict:
     return _merge(DEFAULT_GLOBAL, _read(paths.data_root() / "config.json"))
 
 
+def _overrides(cfg: dict, base: dict) -> dict:
+    """What differs from the defaults, nested dicts compared key by key."""
+    out = {}
+    for k, v in (cfg or {}).items():
+        b = base.get(k) if isinstance(base, dict) else None
+        if isinstance(v, dict) and isinstance(b, dict):
+            sub = _overrides(v, b)
+            if sub:
+                out[k] = sub
+        elif not isinstance(base, dict) or k not in base or v != b:
+            out[k] = v
+    return out
+
+
 def save_global(cfg: dict) -> None:
-    _write(paths.data_root() / "config.json", cfg)
+    """Saves only what the user changed, so a new default in a later version reaches this install."""
+    _write(paths.data_root() / "config.json", _overrides(cfg, DEFAULT_GLOBAL))
+
+
+def _leaves(d: dict, prefix: str = "") -> list:
+    out = []
+    for k, v in d.items():
+        out += _leaves(v, prefix + k + ".") if isinstance(v, dict) and v else [prefix + k]
+    return out
+
+
+def lookup(d: dict, key: str):
+    for part in key.split("."):
+        d = d[part]
+    return d
+
+
+def is_setting(key: str) -> bool:
+    return key in DESCRIBE
+
+
+def set_setting(key: str, value) -> None:
+    cfg = load_global()
+    *parents, last = key.split(".")
+    node = cfg
+    for p in parents:
+        node = node[p]
+    node[last] = value
+    save_global(cfg)
+
+
+def reset_setting(key: str) -> None:
+    raw = _read(paths.data_root() / "config.json")
+    *parents, last = key.split(".")
+    node = raw
+    for p in parents:
+        node = node.get(p) if isinstance(node, dict) else None
+    if isinstance(node, dict):
+        node.pop(last, None)
+    save_global(_merge(DEFAULT_GLOBAL, raw))
+
+
+def rows() -> list:
+    """Every setting with this install's value, the default, whether it differs, and what it does."""
+    cfg = load_global()
+    out = []
+    for key in _leaves(DEFAULT_GLOBAL):
+        value, default = lookup(cfg, key), lookup(DEFAULT_GLOBAL, key)
+        out.append({"key": key, "value": value, "default": default, "changed": value != default,
+                    "description": DESCRIBE.get(key, "")})
+    return out
+
+
+def markdown() -> str:
+    """references/config.md, generated from the defaults and DESCRIBE."""
+    lines = ["# Settings", "",
+             "Every global setting, its default and what it does. `ap config list` shows this install's values",
+             "next to the defaults and marks the ones you changed with `*`. `ap config set key=value` changes one",
+             "(dotted keys for nested settings, values as JSON); `ap config reset key` goes back to the default.",
+             "Only changed settings are saved, so a new default in a later version reaches you unless you changed",
+             "that setting.", "",
+             "| Setting | Default | What it does |", "|---|---|---|"]
+    for key in _leaves(DEFAULT_GLOBAL):
+        lines.append(f"| `{key}` | `{json.dumps(lookup(DEFAULT_GLOBAL, key), ensure_ascii=False)}` | {DESCRIBE[key]} |")
+    return "\n".join(lines) + "\n"
 
 
 def load_ap(name: str) -> dict:

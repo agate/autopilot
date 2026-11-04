@@ -81,23 +81,45 @@ def _stop(args: list) -> int:
 
 @cli.command("config")
 def _config(args: list) -> int:
-    """Read or set top-level global settings: `ap config get [key]`, `ap config set key=value ...`."""
+    """Global settings: `ap config list [--json]`, `get [key]`, `set key=value ...`, `reset key ...`.
+    Keys may be dotted (`reply_check.every_s`); values are JSON, or plain text when not valid JSON."""
     import json
-    cfg = config.load_global()
+    known = lambda k: config.is_setting(k) or k in config.DEFAULT_GLOBAL
+    if args[:1] == ["list"]:
+        rows = config.rows()
+        if "--json" in args:
+            print(json.dumps(rows, indent=1, ensure_ascii=False))
+            return 0
+        dump = lambda v: json.dumps(v, ensure_ascii=False)
+        w = max(len(r["key"]) for r in rows)
+        for r in rows:
+            print(f"{'*' if r['changed'] else ' '} {r['key']:<{w}}  {dump(r['value'])}"
+                  + (f"  (default {dump(r['default'])})" if r["changed"] else "") + f"  — {r['description']}")
+        return 0
     if args[:1] == ["get"]:
-        print(json.dumps(cfg.get(args[1]) if len(args) > 1 else cfg, indent=1, ensure_ascii=False))
+        cfg = config.load_global()
+        try:
+            value = config.lookup(cfg, args[1]) if len(args) > 1 else cfg
+        except (KeyError, TypeError):
+            print(f"unknown setting {args[1]!r}", file=sys.stderr)
+            return 2
+        print(json.dumps(value, indent=1, ensure_ascii=False))
         return 0
-    if args[:1] == ["set"] and len(args) > 1:
-        for pair in args[1:]:
-            k, _, v = pair.partition("=")
-            if k not in config.DEFAULT_GLOBAL:
-                print(f"unknown setting {k!r}", file=sys.stderr)
-                return 2
+    if args[:1] in (["set"], ["reset"]) and len(args) > 1:
+        pairs = [a.partition("=") for a in args[1:]]
+        bad = [k for k, _, _ in pairs if not known(k)]
+        if bad:
+            print(f"unknown setting {bad[0]!r}; `ap config list` shows them all", file=sys.stderr)
+            return 2
+        for k, _, v in pairs:
+            if args[0] == "reset":
+                config.reset_setting(k)
+                continue
             try:
-                cfg[k] = json.loads(v)
+                value = json.loads(v)
             except ValueError:
-                cfg[k] = v
-        config.save_global(cfg)
+                value = v
+            config.set_setting(k, value)
         return 0
-    print("usage: ap config get [key] | ap config set key=value ...", file=sys.stderr)
+    print("usage: ap config list [--json] | get [key] | set key=value ... | reset key ...", file=sys.stderr)
     return 2
