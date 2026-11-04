@@ -1,0 +1,4 @@
+#!/bin/bash
+# Test stand-in for gh: logs argv, prints an empty JSON object.
+printf '%s\n' "$*" >> "${FAKE_GH_LOG:-/dev/null}"
+echo '{}'
