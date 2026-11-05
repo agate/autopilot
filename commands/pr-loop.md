@@ -156,12 +156,16 @@ First write `evidence.json` in the run directory. Every text field is `{"en": ".
   "verdict": {"en": "one line: ready or not, and why"},
   "what_changed": {"en": "what changed and why, in plain words"},
   "criteria": [{"text": {"en": "..."}, "ok": true, "proof": {"en": "test name that fails on base, CI run, screenshot"}}],
-  "screenshots": [{"path": "media/after.png", "caption": {"en": "what to look at"}}]
+  "screenshots": [{"path": "media/after.png", "caption": {"en": "what to look at"}}],
+  "logs": [{"path": "media/suite.tap", "caption": {"en": "what it shows"}}]
 }
 ```
 
 Pick at most 10 screenshots from `media/`, the ones that show the change (before and after where it
-helps).
+helps). A screenshot is an image (png, jpg, jpeg, gif, webp, svg): the page shows each one as a picture.
+A log or test output (txt, log, tap, json, md) goes under `logs`, at most 10: the page shows each one as
+text. Leave a list empty when there is nothing for it. To bring a new capture into `media/`, run
+`<ap> evidence add <autopilot> <task> <file> ...`.
 
 Then write `prloop.json` in the run directory (it tells the dispatcher you are done, so it comes last):
 

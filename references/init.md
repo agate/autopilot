@@ -53,7 +53,11 @@ Read the whole configuration back in plain words. On the user's yes:
      (only the page's owner can answer cards, even after the page is shared);
    - run `ap publish url <url>`;
    - run `ap publish diff`, send its `set` rows with one `ArtifactData` batch, then `ap publish mark`.
-   Later inits reuse the same page.
+   Later inits reuse the same page. When the package's `templates/page.html` has changed since the page
+   was published, update it in place: add any key of `templates/labels.en.json` that
+   `labels.<lang>.json` lacks, translated; run `ap page build`, copy the file into your scratchpad,
+   read the live page with the Artifact tool, and publish the copy to the `ap publish url` page
+   without `capabilities` and without `icon`, so it keeps the ones it has. Its database is untouched.
 5. Sources that need a plan (`jira-ticket`, `idea`): follow the preset's "Plan" section now, so the plan
    is waiting on the page.
 6. The background check. Run `ap install --check`. If it prints `installed`, go on. Otherwise ask one

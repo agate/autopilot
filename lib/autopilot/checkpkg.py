@@ -54,6 +54,8 @@ def scan(root: Path, idents: list) -> list:
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
         for fn in filenames:
+            if fn == ".git":
+                continue  # a git worktree's .git is a file naming the main checkout's path
             p = Path(dirpath) / fn
             try:
                 text = p.read_text(encoding="utf-8")

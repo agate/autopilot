@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 from autopilot import budget, cli, config, nextwork, paths, state, text, usage
 
 COLLECTIONS = ("meta", "autopilots", "tasks", "workers", "decisions", "archive", "reports", "evidence")
 REPORTS_KEPT = 10
 ARCHIVE_KEPT = 200
+# The page shows each screenshot as an <img>, so only these are screenshots (the asset store takes them all).
+IMAGE_EXT = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")
+# The page shows each log as text. The asset store refuses .log and .tap, so those go up under a .txt name.
+LOG_EXT = (".txt", ".log", ".tap", ".json", ".md")
+UPLOAD_EXT = IMAGE_EXT + (".txt", ".json", ".md")
 
 
 def _page_file():
@@ -47,23 +54,46 @@ def _labels(gcfg: dict) -> dict:
     return out
 
 
+def _inside(run, entry):
+    """The entry's path relative to the run directory, or None when it points outside it."""
+    try:
+        return (run / entry["path"]).resolve().relative_to(run.resolve())
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _files(ap: str, task: str, run, entries, exts: tuple, assets: dict) -> list:
+    out = []
+    for s in entries or []:
+        inside = _inside(run, s)
+        if inside is None or inside.suffix.lower() not in exts:
+            continue  # a path outside the run directory is never uploaded; a log is no <img>, nor a picture a log
+        key = f"{ap}/{task}/{inside.name}"
+        out.append(dict(s, path=str(inside), key=key, asset_id=assets.get(key)))
+    return out
+
+
+def _handback_criteria(hb: dict, review) -> list:
+    """The hand-back's criteria in the page's shape, with the reviewer's status where it gave one."""
+    seen = (review or {}).get("criteria")
+    seen = seen if isinstance(seen, dict) else {}
+    out = []
+    for c in hb.get("criteria") or []:
+        status = (seen.get(c.get("id")) or {}).get("status") or c.get("status")
+        out.append({"text": c.get("id"), "ok": status == "met", "proof": c.get("evidence")})
+    return out
+
+
 def _evidence(ap: str, task: str, assets: dict):
     run = paths.ap_dir(ap) / "runs" / task
     parts = {k: _read_json(run / f"{k}.json") for k in ("handback", "review", "prloop", "evidence")}
     if not any(parts.values()):
         return None
     ev = dict(parts["evidence"] or {})
-    shots = []
-    for s in ev.get("screenshots") or []:
-        try:
-            inside = (run / s["path"]).resolve().relative_to(run.resolve())
-        except (KeyError, TypeError, ValueError):
-            continue  # a path outside the run directory is never uploaded
-        key = f"{ap}/{task}/{inside.name}"
-        shots.append(dict(s, path=str(inside), key=key, asset_id=assets.get(key)))
-    ev["screenshots"] = shots
+    ev["screenshots"] = _files(ap, task, run, ev.get("screenshots"), IMAGE_EXT, assets)
+    ev["logs"] = _files(ap, task, run, ev.get("logs"), LOG_EXT, assets)
     hb = parts["handback"] or {}
-    ev["criteria"] = ev.get("criteria") or hb.get("criteria")
+    ev["criteria"] = ev.get("criteria") or _handback_criteria(hb, parts["review"])
     ev["checks"] = hb.get("checks")
     ev["review"] = parts["review"]
     ev["prloop"] = parts["prloop"]
@@ -144,15 +174,25 @@ def diff(prev: dict, cur: dict) -> dict:
                 dels.append({"collection": c, "doc_id": k})
     assets = []
     for ev in (cur.get("evidence") or {}).values():
-        for s in ev.get("screenshots") or []:
+        for s in (ev.get("screenshots") or []) + (ev.get("logs") or []):
             if not s.get("asset_id"):
-                assets.append({"key": s["key"], "local_path": str(paths.ap_dir(ev["ap"]) / "runs" / ev["task"] / s["path"])})
+                name = Path(s["path"]).name
+                assets.append({"key": s["key"], "local_path": str(paths.ap_dir(ev["ap"]) / "runs" / ev["task"] / s["path"]),
+                               "upload_name": name if name.lower().endswith(UPLOAD_EXT) else name + ".txt"})
     return {"set": sets, "delete": dels, "assets": assets}
 
 
-def mark(cur: dict, new_assets: dict) -> None:
+def record_assets(new_assets: dict) -> None:
+    """Remember uploaded asset ids by key, so the next diff's rows carry them. Publishes nothing."""
     p = _page()
-    p.setdefault("assets", {}).update(new_assets)
+    # Keep the bare id: the page builds "/_blob/<id>" itself, so a stored url would double the prefix.
+    p.setdefault("assets", {}).update({k: v.rsplit("/", 1)[-1] for k, v in new_assets.items()})
+    _save_page(p)
+
+
+def mark(cur: dict, new_assets: dict) -> None:
+    record_assets(new_assets)
+    p = _page()
     p["published"] = cur
     p["published_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     _save_page(p)
@@ -165,6 +205,8 @@ def _cmd(args: list) -> int:
         d = diff(published(), collect(aps))
         d["url"] = _page().get("url")
         print(json.dumps(d, indent=1, ensure_ascii=False))
+    elif args[:1] == ["assets"]:
+        record_assets(dict(a.split("=", 1) for a in args[1:] if "=" in a))
     elif args[:1] == ["mark"]:
         new = dict(a.split("=", 1) for a in args[1:] if a != "--assets" and "=" in a)
         mark(collect(aps), new)
@@ -175,7 +217,8 @@ def _cmd(args: list) -> int:
             _save_page(p)
         print(_page().get("url") or "")
     else:
-        print("usage: ap publish diff | mark [--assets key=url ...] | url [url]", file=sys.stderr)
+        print("usage: ap publish diff | assets key=<asset id> ... | mark [--assets key=<asset id> ...] | url [url]",
+              file=sys.stderr)
         return 2
     return 0
 
@@ -223,15 +266,48 @@ def evidence_errors(ap: str, task: str) -> list:
         errs += text.check(c.get("text"), langs, f"criteria[{i}].text")
         if "proof" in c:
             errs += text.check(c["proof"], langs, f"criteria[{i}].proof")
-    for i, sh in enumerate(ev.get("screenshots") or []):
-        errs += text.check(sh.get("caption"), langs, f"screenshots[{i}].caption")
+    for field, exts, kind, other in (("screenshots", IMAGE_EXT, "an image", "logs"),
+                                     ("logs", LOG_EXT, "a log", "screenshots")):
+        for i, sh in enumerate(ev.get(field) or []):
+            errs += text.check(sh.get("caption"), langs, f"{field}[{i}].caption")
+            inside = _inside(p.parent, sh)
+            if inside is None or not (p.parent / inside).is_file():
+                errs.append(f"{field}[{i}].path: {sh.get('path')} is not a file in the run directory")
+            elif inside.suffix.lower() not in exts:
+                errs.append(f"{field}[{i}].path: {sh.get('path')} is not {kind} ({' '.join(exts)}); "
+                            f"list it under {other} instead")
     return errs
+
+
+def add_media(ap: str, task: str, files: list) -> list:
+    """Copy files into the task's media/ folder. A worker's shell may not write into the data folder and its
+    Write tool cannot write a binary file, so a screenshot comes in through this command."""
+    if not paths.valid_name(ap) or task not in {t["id"] for t in state.load(ap)["tasks"]}:
+        raise ValueError(f"{ap}: no task {task}")
+    srcs = [Path(f) for f in files]
+    for s in srcs:
+        if not s.is_file():
+            raise ValueError(f"{s}: not a file")
+    if len({s.name for s in srcs}) < len(srcs):
+        raise ValueError("two files share a name")
+    media = paths.ap_dir(ap) / "runs" / task / "media"
+    media.mkdir(parents=True, exist_ok=True)
+    for s in srcs:
+        shutil.copyfile(s, media / s.name)
+    return [f"media/{s.name}" for s in srcs]
 
 
 @cli.command("evidence")
 def _evidence_cmd(args: list) -> int:
+    if args[:1] == ["add"] and len(args) >= 4:
+        try:
+            print("\n".join(add_media(args[1], args[2], args[3:])))
+        except (ValueError, OSError, state.StateError) as e:
+            print(e, file=sys.stderr)
+            return 1
+        return 0
     if args[:1] != ["check"] or len(args) != 3:
-        print("usage: ap evidence check <ap> <task>", file=sys.stderr)
+        print("usage: ap evidence check <ap> <task> | add <ap> <task> <file> ...", file=sys.stderr)
         return 2
     errs = evidence_errors(args[1], args[2])
     print("\n".join(errs) if errs else "ok")

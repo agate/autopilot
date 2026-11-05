@@ -35,8 +35,10 @@ spec first, then the repo's agent instructions for the paths you touch.
    lost, workaround).
 4. Run the checks CI runs for every package the diff touches (lint, types, tests, generators), timing
    each. Fix what fails. A check you cannot run locally is `skipped` with the reason.
-5. Capture evidence into `media/` in the run directory. Look at every image: a blank frame or an error
-   page is a failed capture.
+5. Capture evidence into `media/` in the run directory. Your shell cannot write there, so save a capture
+   anywhere outside the data folder and copy it in with `<ap> evidence add <autopilot> <task> <file> ...`
+   (the autopilot is the folder above `runs/` in your run directory). Look at every image: a blank frame
+   or an error page is a failed capture.
 6. Check the diff against each criterion and say plainly when one is not met.
 
 ## Hand back
@@ -58,8 +60,25 @@ Write `handback.json` in the run directory:
 }
 ```
 
+If the spec says `No PR` (research, a spike), no PR worker follows you, so the page gets its evidence
+from you: also write `evidence.json` in the run directory. Every text field is
+`{"en": "...", "<reader_lang>": "..."}` (only `en` when the brief's reader language is English):
+
+```json
+{
+  "verdict": {"en": "one line: the answer, and how sure"},
+  "what_changed": {"en": "what you found and why it matters, in plain words"},
+  "criteria": [{"text": {"en": "..."}, "ok": true, "proof": {"en": "the run, file or screenshot that shows it"}}],
+  "screenshots": [{"path": "media/after.png", "caption": {"en": "what to look at"}}],
+  "logs": [{"path": "media/run.txt", "caption": {"en": "what it shows"}}]
+}
+```
+
+At most 10 screenshots (png, jpg, jpeg, gif, webp, svg) and 10 logs (txt, log, tap, json, md), each a
+file inside the run directory. Run `<ap> evidence check <autopilot> <task>` and fix what it lists.
+
 Then run `<ap> kick` (the path of `ap` from your brief) so the dispatcher looks at it now, and end with
 one line naming the file.
 
 On a fix round you get the reviewer's list: fix each item, re-run the checks it touches, amend the
-commit, update `handback.json`, kick, and hand back the same way.
+commit, update `handback.json` (and `evidence.json` for a `No PR` task), kick, and hand back the same way.

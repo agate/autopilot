@@ -63,6 +63,39 @@ class DocsTest(unittest.TestCase):
         labels = (ROOT / "templates" / "labels.en.json").read_text()
         self.assertIn('"two_answers"', labels)
 
+    def test_a_task_without_a_pr_gets_evidence(self):
+        # Only the PR worker wrote evidence.json, so a research task closed with nothing on the page.
+        rb = (ROOT / "RUNBOOK.md").read_text()
+        self.assertIn("`No PR`", rb[rb.index("8. **Fill every free slot.**"):rb.index("9. **Report.**")])
+        review = rb[rb.index("4. **Reviewer done**"):rb.index("5. **PR loop done**")]
+        self.assertIn("`No PR`", review)
+        self.assertIn("`ap evidence check <ap> <task>`", review)
+        impl = (ROOT / "agents" / "implementer.md").read_text()
+        self.assertIn("`No PR`", impl)
+        self.assertIn("evidence.json", impl)
+        self.assertIn("evidence add", impl)
+
+    def test_logs_go_up_under_their_upload_name(self):
+        rb = (ROOT / "RUNBOOK.md").read_text()
+        self.assertIn("`upload_name`", rb[rb.index("10. **Tidy and publish.**"):])
+
+    def test_publish_records_uploads_before_the_batch(self):
+        # Two passes stalled improvising this step: ids missing from the rows, versions read into a refused folder.
+        rb = (ROOT / "RUNBOOK.md").read_text()
+        step = rb[rb.index("10. **Tidy and publish.**"):rb.index("11. **End.**")]
+        for s in ("`ap publish assets", "`ap publish diff` again", "`if_version`", "without `out_dir`", "`ap publish mark`"):
+            self.assertIn(s, step, s)
+        self.assertLess(step.index("`ap publish assets"), step.index("`ap publish diff` again"))
+        self.assertLess(step.index("`ap publish diff` again"), step.index("`ap publish mark`"))
+        loop = (ROOT / "commands" / "pr-loop.md").read_text()
+        self.assertIn('"logs": [{"path": "media/', loop)
+
+    def test_page_update_is_republished_in_place(self):
+        init = (ROOT / "references" / "init.md").read_text()
+        step = init[init.index("4. The page"):init.index("5. Sources")]
+        self.assertIn("`ap page build`", step[step.index("Later inits"):])
+        self.assertIn("without `capabilities`", step)
+
     def test_only_the_owner_writes_replies(self):
         init = (ROOT / "references" / "init.md").read_text()
         self.assertIn('{"path": "replies", "read": "view", "write": "owner"}', init)

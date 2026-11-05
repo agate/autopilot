@@ -62,6 +62,15 @@ class PageTest(unittest.TestCase):
             self.assertIn(f'L("{k}"', PAGE)
             self.assertIn(k, LABELS)
 
+    def test_logs_load_as_text_never_as_images(self):
+        self.assertIn("(ev.logs || []).length", PAGE)
+        self.assertIn('L("logs")', PAGE)
+        body = PAGE[PAGE.index("function logItem"):PAGE.index("function renderDetail")]
+        self.assertIn('fetch("/_blob/"', body)
+        self.assertIn(".textContent = await", body)
+        self.assertNotIn('"img"', body)
+        self.assertNotIn("innerHTML", body)
+
     def test_no_prototype_leftovers(self):
         for s in ("SAMPLE", "/*@SHARED@*/", "LABELS_EXTRA", "proto_note", "原型", "Prototype"):
             self.assertNotIn(s, PAGE)
