@@ -9,6 +9,9 @@ from tests.helpers import ROOT, TempData, write_ap
 from autopilot import paths, perms
 
 
+MERGE = "Bash(gh pr merge --match-head-commit:*)"
+
+
 class PermsTest(unittest.TestCase):
     def test_patterns_match_generic_names(self):
         tools = ["mcp__X__createJiraIssue", "mcp__X__addCommentToJiraIssue", "mcp__chat__slack_send_message",
@@ -112,6 +115,39 @@ class PermsTest(unittest.TestCase):
     def test_floor_protects_the_access_record(self):
         deny = perms.generate([])["permissions"]["deny"]
         self.assertTrue(any(d.endswith("/**/access.json)") for d in deny))
+
+
+    def test_merge_rule_requires_the_head_sha_guard(self):
+        # A prefix rule: every merge it allows starts with --match-head-commit, so it merges only the
+        # head the merge check saw. A bare `gh pr merge <n>` is not matched by it.
+        self.assertEqual(MERGE, "Bash(gh pr merge --match-head-commit:*)")
+        allow = perms.generate([], role="dispatcher", authority={"merge": True})["permissions"]["allow"]
+        self.assertNotIn("Bash(gh pr merge:*)", allow)
+        self.assertIn(MERGE, allow)
+
+    def test_merge_rule_only_when_merge_authority_is_true(self):
+        ap_end = f"Bash({paths.package_root() / 'bin' / 'ap'} worker end:*)"
+        on = perms.generate([], role="dispatcher", authority={"merge": True})["permissions"]["allow"]
+        self.assertEqual(on, ["Bash(gh pr ready:*)", MERGE, ap_end])
+        for auth in ({}, {"merge": False}, {"merge": "yes"}, None):
+            allow = perms.generate([], role="dispatcher", authority=auth)["permissions"]["allow"]
+            self.assertNotIn(MERGE, allow, auth)
+        self.assertNotIn("allow", perms.generate([], role="worker", authority={"merge": True})["permissions"])
+
+    def test_shared_floor_merges_only_when_every_autopilot_may(self):
+        def disp_allow(data):
+            with mock.patch.object(perms, "discover", return_value=([], [])):
+                perms.write_for("alpha")
+            return json.loads((data / "settings-dispatcher.json").read_text())["permissions"]["allow"]
+        with TempData() as data:
+            write_ap(data, "alpha", authority={"merge": True})
+            write_ap(data, "beta", authority={"merge": True})
+            self.assertIn(MERGE, disp_allow(data))
+            write_ap(data, "beta", authority={})
+            self.assertNotIn(MERGE, disp_allow(data))
+            write_ap(data, "beta", authority={"merge": True})
+            (data / "beta" / "config.json").write_text("{ broken")
+            self.assertNotIn(MERGE, disp_allow(data))
 
 
 if __name__ == "__main__":
