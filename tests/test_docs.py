@@ -152,5 +152,19 @@ class DocsTest(unittest.TestCase):
         self.assertIn("System access", (ROOT / "README.md").read_text())
 
 
+    def test_runbook_runs_the_merge_on_its_own(self):
+        rb = (ROOT / "RUNBOOK.md").read_text()
+        head = rb[:rb.index("## Authority")]
+        for cmd in ("`ap worker end`", "`gh pr ready`", "`gh pr merge`"):
+            self.assertIn(cmd, head)
+        step = rb[rb.index("**Merge check**"):]
+        self.assertIn("as its own command, written out in full", step)
+        self.assertIn("`gh pr merge --match-head-commit <head sha> --<merge_method> <n>`", step)
+        self.assertNotIn("gh pr merge <n>", rb)
+        rd = (ROOT / "README.md").read_text()
+        self.assertIn("`gh pr merge --match-head-commit`", rd)
+        self.assertIn("`authority.merge`", rd)
+
+
 if __name__ == "__main__":
     unittest.main()

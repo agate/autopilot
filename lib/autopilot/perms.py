@@ -36,13 +36,17 @@ def status_tools(tools: list) -> list:
 def allow_rules(tools: list, authority: dict, role: str) -> list:
     """Steps the dispatcher takes on every pass, allowed by rule so the auto-mode classifier never judges
     them: a pass is a fresh session and its prompt names no ticket, PR or worker, so the classifier blocks
-    a close, a ready-for-review or a stop as unrequested. Workers get none: they never take these steps.
-    Each `authority` key can only take a rule away."""
+    a close, a ready-for-review, a merge or a stop as unrequested. Workers get none: they never take these
+    steps. `source_status` and `open_prs` are on unless set to false; the merge rule needs `merge: true`."""
     if role != "dispatcher":
         return []
     out = status_tools(tools) if authority.get("source_status", True) else []
     if authority.get("open_prs", True):
         out.append("Bash(gh pr ready:*)")
+    if authority.get("merge") is True:
+        # The pass merges only after `ap merge-check` passes; the classifier sees neither that nor this authority.
+        # The prefix makes every allowed merge carry the head-SHA guard, so it merges only the checked head.
+        out.append("Bash(gh pr merge --match-head-commit:*)")
     # Stops only the sessions this autopilot's state records; never a raw `claude stop`.
     out.append(f"Bash({paths.package_root() / 'bin' / 'ap'} worker end:*)")
     return out
@@ -71,15 +75,17 @@ def generate(tools: list, exclude: set = frozenset(), role: str = "worker", auth
 
 
 def shared_authority() -> dict:
-    """The dispatcher floor is shared by every autopilot, so a key one autopilot turns off is off for all."""
+    """The dispatcher floor is shared by every autopilot, so a key one autopilot turns off is off for all.
+    Merging is granted only when every autopilot sets `merge: true`."""
     out = {}
     for n in config.list_aps():
         try:
             auth = config.load_ap(n).get("authority") or {}
         except Exception:  # noqa: BLE001 - a broken config grants nothing
-            auth = {"source_status": False, "open_prs": False}
+            auth = {"source_status": False, "open_prs": False, "merge": False}
         for k in ("source_status", "open_prs"):
             out[k] = out.get(k, True) and auth.get(k, True) is not False
+        out["merge"] = out.get("merge", True) and auth.get("merge") is True
     return out
 
 
