@@ -4,6 +4,8 @@ import json
 import re
 import subprocess
 import sys
+import time
+from datetime import datetime
 
 from autopilot import cli, config, events, paths, state, workers
 
@@ -15,6 +17,7 @@ DENY_TOOL_PATTERNS = [re.compile(p, re.I) for p in (
 )]
 PROTECTED = ("RULES.md", "config.json", "settings*.json", "oneoff-*.json", "state.json", "page.json", "gate.json",
              "tick.json", "lock", "state.lock")
+ONEOFF_TIMEOUT_S = 600
 BASH_DENY = ["Bash(gh pr comment:*)", "Bash(gh pr review:*)", "Bash(gh issue comment:*)", "Bash(gh issue create:*)",
              "Bash(gh pr edit --add-reviewer:*)"]
 # The ticket-status tool, matched on its own name: a dispatcher moves its tickets (start, review, done).
@@ -147,19 +150,52 @@ def run_one_off(ap: str, decision_id: str) -> str:
         raise ValueError(f"{decision_id} was not answered with {action['option']!r}")
     if action.get("done_at"):
         raise ValueError(f"{decision_id} already ran at {action['done_at']}")
+    since = _epoch(action.get("running_since"))
+    if since and time.time() - since < ONEOFF_TIMEOUT_S + 60:
+        raise ValueError(f"{decision_id} is running since {action['running_since']}")
     gcfg, apcfg = config.load_global(), config.load_ap(ap)
     settings = one_off_settings(ap, action["tool"])
+    _set_action(ap, decision_id, running_since=events.now_iso())
+    # `--allowedTools` takes a list: give it one value with `=` and end the options with `--`, or it
+    # reads the prompt as a second tool and claude exits asking for a prompt.
+    argv = [workers.claude_bin(gcfg), "-p", "--permission-mode", "dontAsk", "--settings", str(settings),
+            f"--allowedTools={action['tool']}", "--", action["prompt"]]
+    try:
+        out = subprocess.run(argv, cwd=apcfg["repo"], capture_output=True, text=True, timeout=ONEOFF_TIMEOUT_S,
+                             stdin=subprocess.DEVNULL, env=workers._env("oneoff"))
+        code, stdout, stderr = out.returncode, out.stdout, out.stderr
+    except subprocess.TimeoutExpired as e:
+        code, stdout, stderr = -1, _text(e.stdout), _text(e.stderr) + f"\ntimed out after {ONEOFF_TIMEOUT_S}s"
+    events.append(ap, "oneoff_done", {"decision": decision_id, "tool": action["tool"], "exit": code,
+                                      "output": stdout[-1500:], "error": stderr[-1500:]})
+    if code != 0:
+        # Not done: the card stays answered, so the next pass (or a talk session) can run it again.
+        _set_action(ap, decision_id, running_since=None, failed_at=events.now_iso())
+        raise RuntimeError(f"{decision_id}: claude exited {code}: {(stderr or stdout).strip()[-500:]}")
+    _set_action(ap, decision_id, running_since=None, done_at=events.now_iso())
+    return stdout
+
+
+def _set_action(ap: str, decision_id: str, **fields) -> None:
     with state.mutate(ap) as cur:
         for x in cur["decisions"]:
             if x["id"] == decision_id:
-                x["action"]["done_at"] = events.now_iso()
-    out = subprocess.run([workers.claude_bin(gcfg), "-p", "--permission-mode", "dontAsk",
-                          "--settings", str(settings), "--allowedTools", action["tool"], action["prompt"]],
-                         cwd=apcfg["repo"], capture_output=True, text=True, timeout=600,
-                         stdin=subprocess.DEVNULL, env=workers._env("oneoff"))
-    events.append(ap, "oneoff_done", {"decision": decision_id, "tool": action["tool"],
-                                      "exit": out.returncode, "output": out.stdout[-1500:]})
-    return out.stdout
+                for k, v in fields.items():
+                    if v is None:
+                        x["action"].pop(k, None)
+                    else:
+                        x["action"][k] = v
+
+
+def _text(b) -> str:
+    return b.decode(errors="replace") if isinstance(b, bytes) else (b or "")
+
+
+def _epoch(iso):
+    try:
+        return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+    except (AttributeError, ValueError):
+        return None
 
 
 @cli.command("perms")
@@ -176,5 +212,9 @@ def _perms(args: list) -> int:
 
 @cli.command("oneoff")
 def _oneoff(args: list) -> int:
-    print(run_one_off(args[0], args[1]))
+    try:
+        print(run_one_off(args[0], args[1]))
+    except (ValueError, RuntimeError) as e:
+        print(f"ap oneoff: {e}", file=sys.stderr)
+        return 1
     return 0

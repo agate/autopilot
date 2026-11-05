@@ -350,6 +350,11 @@ function el(tag, attrs, ...kids) {
   for (const k of kids.flat()) if (k != null && k !== false) e.append(k instanceof Node ? k : document.createTextNode(String(k)));
   return e;
 }
+// Set a node's children the way el() adds them. DOM replaceChildren turns null into the text "null",
+// and a list of cards has null for every card a task does not have.
+function fill(node, ...kids) {
+  node.replaceChildren(...kids.flat().filter((k) => k != null && k !== false));
+}
 // Links come from tickets, PRs and workers: untrusted. Only http(s) becomes a link.
 function safeUrl(u) { return typeof u === "string" && /^https?:\/\//i.test(u) ? u : null; }
 const inAp = (doc) => !filterAp || doc.ap === filterAp;
@@ -417,7 +422,7 @@ function renderHeader() {
   const reader = (S.meta.labels || {}).reader_lang || "en";
   const lt = $("lang");
   lt.hidden = reader === "en";
-  lt.replaceChildren(el("span", { class: lang === "en" ? "on" : null }, labelsFor("en").lang_short || "EN"),
+  fill(lt, el("span", { class: lang === "en" ? "on" : null }, labelsFor("en").lang_short || "EN"),
     el("span", { class: "sl", "aria-hidden": "true" }, "/"),
     el("span", { class: lang !== "en" ? "on" : null }, labelsFor(reader).lang_short || reader));
   lt.setAttribute("aria-label", L("switch_lang"));
@@ -429,7 +434,7 @@ function renderHeader() {
   const names = Object.keys(S.autopilots).sort();
   const f = $("filters");
   f.hidden = names.length < 2;
-  f.replaceChildren(...["", ...names].map((n) => {
+  fill(f, ...["", ...names].map((n) => {
     const c = openAsks(n).length;
     return el("button", { type: "button", class: "fchip", "aria-pressed": String(filterAp === n),
       onclick: () => { filterAp = n; detailKey = null; render(); } },
@@ -445,7 +450,7 @@ function renderBanners() {
   for (const [ap, err] of Object.entries((S.meta.health || {}).broken || {})) {
     out.push(el("div", { class: "banner crit" }, "■ " + L("broken_banner", { ap }) + " " + err));
   }
-  $("banners").replaceChildren(...out);
+  fill($("banners"), ...out);
 }
 
 /* ---------- needs you ---------- */
@@ -533,16 +538,16 @@ function renderNeeds() {
   const asks = open("ask"), gates = open("gate");
   const pendingN = asks.filter((d) => replyFor(d.ap + ":" + d.id)).length, n = asks.length - pendingN;
   const subs = [gates.length ? L("hero_gates", { n: gates.length }) : null, pendingN ? L("hero_pending", { n: pendingN }) : null].filter(Boolean);
-  $("hero").replaceChildren(
+  fill($("hero"),
     el("div", { class: "hero-n" + (n ? "" : " zero"), "aria-hidden": n ? null : "true" }, n ? String(n) : "✓"),
     el("div", {},
       el("h2", { class: "hero-t", id: "hero-t" }, n === 1 ? L("hero_one") : n ? L("hero_many") : L("hero_none")),
       el("div", { class: "hero-s" }, subs.length ? subs.join(" · ") : n ? pickup() : L("hero_sub_none"))));
-  $("asks").replaceChildren(...asks.map(askCard));
-  $("gates").replaceChildren(...gates.map(askCard));
+  fill($("asks"), ...asks.map(askCard));
+  fill($("gates"), ...gates.map(askCard));
 
   const selfs = ds.filter((d) => d.kind === "self").sort((x, y) => byCreated(y, x));
-  $("selfs").replaceChildren(...(selfs.length ? [
+  fill($("selfs"), ...(selfs.length ? [
     el("div", { class: "sec-h" }, el("h2", {}, L("dec_self")), el("span", { class: "hint" }, L("self_hint"))),
     el("div", { class: "list" }, selfs.map(selfRow))] : []));
 
@@ -552,7 +557,7 @@ function renderNeeds() {
   archBox.hidden = !showArchive;
   const cb = el("input", { type: "checkbox", onchange: (e) => { showArchive = e.target.checked; archBox.hidden = !showArchive; } });
   cb.checked = showArchive;
-  $("answered").replaceChildren(
+  fill($("answered"),
     el("details", { class: "fold" }, el("summary", {}, L("dec_answered", { n: answered.length })),
       answered.length ? el("div", { class: "list" }, answered.map(answeredRow)) : el("div", { class: "empty" }, "–")),
     el("label", { class: "check" }, cb, L("show_archive")), archBox);
@@ -587,14 +592,14 @@ function taskRow(t) {
 }
 function renderTasks() {
   const box = $("v-tasks");
-  if (detailKey) { box.replaceChildren(...renderDetail()); return; }
+  if (detailKey) { fill(box, ...renderDetail()); return; }
   const groups = ["running", "ready", "waiting"];
   const ts = values("tasks").sort((x, y) => x.id.localeCompare(y.id, undefined, { numeric: true }));
   const kids = [el("div", { class: "sec-h" }, el("h2", {}, L("tab_tickets")))];
   kids.push(el("div", { class: "tfilter" }, ["all", ...groups].map((g) => el("button", { type: "button", class: "fchip", "aria-pressed": String(ticketFilter === g),
     onclick: () => { ticketFilter = g; renderTasks(); } }, g === "all" ? L("all") : L("group_" + g),
     el("span", { class: "mono", style: "opacity:.7" }, String(g === "all" ? ts.filter((t) => taskGroup(t) !== "done").length : ts.filter((t) => taskGroup(t) === g).length))))));
-  if (!ts.length) { box.replaceChildren(...kids, el("div", { class: "empty" }, L("empty_tasks"))); return; }
+  if (!ts.length) { fill(box, ...kids, el("div", { class: "empty" }, L("empty_tasks"))); return; }
   for (const g of groups) {
     if (ticketFilter !== "all" && ticketFilter !== g) continue;
     const rows = ts.filter((t) => taskGroup(t) === g);
@@ -602,7 +607,7 @@ function renderTasks() {
   }
   const done = ts.filter((t) => taskGroup(t) === "done");
   if (done.length && ticketFilter === "all") kids.push(el("details", { class: "fold" }, el("summary", {}, L("group_done", { n: done.length })), el("div", { class: "list" }, done.map(taskRow))));
-  box.replaceChildren(...kids);
+  fill(box, ...kids);
 }
 function openDetail(key) {
   detailKey = key;
@@ -633,6 +638,10 @@ function logItem(s) {
   });
   return d;
 }
+// A card the task does not have yet: its heading, and one muted line on what it would show and why not.
+function emptyCard(title, why) {
+  return el("article", { class: "card" }, el("h3", {}, title), el("div", { class: "note" }, why));
+}
 function renderDetail() {
   const ev = S.evidence[detailKey], t = S.tasks[detailKey] || {};
   const back = el("button", { type: "button", class: "btn ghost back", onclick: () => { detailKey = null; render(); } }, L("back"));
@@ -643,6 +652,7 @@ function renderDetail() {
   const rounds = ((ev.prloop || {}).rounds || []).map((r) => (r.findings || []).length);
   const maxR = Math.max(1, ...rounds);
   const note = el("span", { class: "note", "aria-live": "polite" });
+  const ticketPill = linkPill(L("ticket"), t.link), prPill = t.pr ? linkPill(L("pr"), t.pr) : null;
   return [back,
     el("article", { class: "card" },
       el("div", { class: "card-head" }, statusChip(t.status), el("span", { class: "meta mono" }, (filterAp ? "" : t.ap + " · ") + t.id)),
@@ -652,21 +662,26 @@ function renderDetail() {
     crit.length ? el("article", { class: "card" }, el("h3", {}, L("criteria", { ok: okN, n: crit.length })),
       el("ul", { class: "crit-list" }, crit.map((c) => el("li", {},
         el("span", { class: "mark " + (pass(c) ? "ok" : "crit"), "aria-label": pass(c) ? "pass" : "fail" }, pass(c) ? "✓" : "✗"),
-        el("div", {}, el("div", {}, T(c.text || c.criterion || c.name)), c.proof ? el("div", { class: "meta" }, T(c.proof)) : null))))) : null,
+        el("div", {}, el("div", {}, T(c.text || c.criterion || c.name)), c.proof ? el("div", { class: "meta" }, T(c.proof)) : null)))))
+      : emptyCard(L("criteria_title"), L("none_criteria")),
     (ev.screenshots || []).length ? el("article", { class: "card" }, el("h3", {}, L("screenshots")),
       el("div", { class: "shots" }, ev.screenshots.map((s) => el("figure", {},
         (s.src || s.asset_id) ? el("img", { src: s.src || "/_blob/" + s.asset_id, loading: "lazy", alt: T(s.caption) }) : el("div", { class: "empty" }, s.path),
-        el("figcaption", {}, T(s.caption)))))) : null,
+        el("figcaption", {}, T(s.caption))))))
+      : emptyCard(L("screenshots"), L("none_screenshots")),
     (ev.logs || []).length ? el("article", { class: "card" }, el("h3", {}, L("logs")),
-      el("div", { class: "logs" }, ev.logs.map(logItem))) : null,
+      el("div", { class: "logs" }, ev.logs.map(logItem)))
+      : emptyCard(L("logs"), L("none_logs")),
     rounds.length ? el("article", { class: "card" }, el("h3", {}, L("review_rounds")),
       el("div", { class: "rounds-wrap" }, el("div", { class: "rounds", role: "img",
         "aria-label": rounds.map((n, i) => L("round_n", { n: i + 1 }) + ": " + L("findings_n", { n })).join(", ") },
         rounds.map((n, i) => el("div", { class: "rcol", title: L("round_n", { n: i + 1 }) + " · " + L("findings_n", { n }) },
           el("span", { class: "rval mono" }, String(n)), el("i", { style: "height:" + Math.max(3, n / maxR * 96) + "px" }),
-          el("span", { class: "rlab" }, L("round_n", { n: i + 1 }))))))) : null,
+          el("span", { class: "rlab" }, L("round_n", { n: i + 1 })))))))
+      : emptyCard(L("review_rounds"), L("none_rounds")),
     el("article", { class: "card" }, el("h3", {}, L("links")),
-      el("div", { class: "links" }, linkPill(L("ticket"), t.link), t.pr ? linkPill(L("pr"), t.pr) : null,
+      ticketPill || prPill ? null : el("div", { class: "note" }, L("none_links")),
+      el("div", { class: "links" }, ticketPill, prPill,
         downloads ? el("button", { type: "button", class: "btn small", onclick: () => exportOne(ev, t, note) }, "⤓ " + L("export")) : null, note)),
   ];
 }
@@ -753,7 +768,7 @@ function renderStatus() {
     reps.length ? reportCard(reps[0]) : el("div", { class: "empty" }, L("no_report")),
     reps.length > 1 ? el("details", { class: "fold" }, el("summary", {}, L("older_reports")), el("div", { class: "sec" }, reps.slice(1).map((r) => reportCard(r, true)))) : null);
 
-  $("v-status").replaceChildren(el("div", { class: "panel" }, stateSec, usageSec, progressSec, workerSec), report);
+  fill($("v-status"), el("div", { class: "panel" }, stateSec, usageSec, progressSec, workerSec), report);
 }
 
 /* ---------- tabs and render ---------- */
@@ -761,7 +776,7 @@ function renderTabbar() {
   const n = openAsks(filterAp).length;
   const st = runState((S.meta.budget || {}).allowance || {}, filterAp ? S.autopilots[filterAp] : null);
   const defs = [["needs", "inbox", "tab_needs"], ["tasks", "list", "tab_tickets"], ["status", "pulse", "tab_status"]];
-  $("tabbar").replaceChildren(...defs.map(([v, ic, lk]) => el("button", { type: "button", role: "tab", "aria-selected": String(tab === v),
+  fill($("tabbar"), ...defs.map(([v, ic, lk]) => el("button", { type: "button", role: "tab", "aria-selected": String(tab === v),
     onclick: () => { detailKey = null; showTab(v); window.scrollTo(0, 0); } },
     icon(ic), el("span", {}, L(lk)), v === "needs" && n ? el("span", { class: "badge" }, String(n)) : null,
     v === "status" && st.cls !== "ok" ? el("span", { class: "tmark " + st.cls, "aria-label": st.text }, st.glyph) : null)));

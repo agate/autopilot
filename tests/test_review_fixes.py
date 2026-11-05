@@ -4,13 +4,14 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from tests.helpers import ROOT, TempData, write_ap
-from autopilot import cli, config, guard, mergecheck, ops, paths, perms, publish, sessions, state, workers
+from autopilot import cli, config, events, guard, mergecheck, ops, paths, perms, publish, sessions, state, workers
 
 FAKE = str(ROOT / "tests" / "bin" / "fake-claude")
 
@@ -160,9 +161,58 @@ class OneOffTest(Env):
         perms.run_one_off("checkout", did)
         argv = self.log.read_text()
         self.assertIn("--permission-mode dontAsk", argv)
-        self.assertIn("--allowedTools mcp__x__createJiraIssue", argv)
+        self.assertIn("--allowedTools=mcp__x__createJiraIssue", argv)
         with self.assertRaises(ValueError):
             perms.run_one_off("checkout", did)
+
+    def _run(self, code, out="", err=""):
+        return mock.patch.object(perms.subprocess, "run", return_value=subprocess.CompletedProcess([], code, out, err))
+
+    def _action(self, did):
+        return next(d for d in state.load("checkout")["decisions"] if d["id"] == did)["action"]
+
+    def test_prompt_is_not_read_as_a_tool(self):
+        # --allowedTools takes a list: a bare value after it swallows the prompt as a second tool.
+        did = self._decision("yes")
+        with self._run(0, "done") as run:
+            perms.run_one_off("checkout", did)
+        argv = run.call_args[0][0]
+        self.assertIn("--allowedTools=mcp__x__createJiraIssue", argv)
+        self.assertNotIn("--allowedTools", argv)
+        self.assertEqual(argv[-2:], ["--", "Create exactly this issue: ..."])
+
+    def test_failed_run_records_stderr_and_can_run_again(self):
+        did = self._decision("yes")
+        with self._run(1, "", "Error: Input must be provided"):
+            with self.assertRaises(RuntimeError):
+                perms.run_one_off("checkout", did)
+        self.assertNotIn("done_at", self._action(did))
+        ev = [json.loads(l) for l in (self.data / "checkout" / "events.jsonl").read_text().splitlines()]
+        done = [e for e in ev if e["type"] == "oneoff_done"][-1]["data"]
+        self.assertEqual(done["exit"], 1)
+        self.assertIn("Input must be provided", done["error"])
+        with self._run(0, "done"):
+            perms.run_one_off("checkout", did)
+        self.assertIn("done_at", self._action(did))
+        with self.assertRaises(ValueError):
+            perms.run_one_off("checkout", did)
+
+    def test_cli_reports_a_failed_run(self):
+        did = self._decision("yes")
+        err = io.StringIO()
+        with self._run(1, "", "boom"), contextlib.redirect_stderr(err):
+            self.assertEqual(cli.main(["oneoff", "checkout", did]), 1)
+        self.assertIn("boom", err.getvalue())
+
+    def test_a_run_in_flight_is_not_started_twice(self):
+        did = self._decision("yes")
+        with state.mutate("checkout") as st:
+            for d in st["decisions"]:
+                if d["id"] == did:
+                    d["action"]["running_since"] = events.now_iso()
+        with self._run(0, "done") as run, self.assertRaises(ValueError):
+            perms.run_one_off("checkout", did)
+        run.assert_not_called()
 
 
 class MergeCheckTest(unittest.TestCase):

@@ -128,5 +128,11 @@
   "d_ago": "{n} d ago",
   "in_min": "in {n} min",
   "in_h": "in {n} h",
-  "in_d": "in {n} days"
+  "in_d": "in {n} days",
+  "criteria_title": "Acceptance criteria",
+  "none_criteria": "No acceptance criteria yet: the task's hand-back has not listed any.",
+  "none_screenshots": "No screenshots: this task changed no UI.",
+  "none_logs": "No logs: this task's evidence lists no log files.",
+  "none_rounds": "This task had no PR review loop, so there are no review rounds yet.",
+  "none_links": "No links: this task has no ticket and no PR yet."
 }

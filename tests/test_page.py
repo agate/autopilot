@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+import subprocess
 import unittest
 from html.parser import HTMLParser
 
@@ -87,6 +89,39 @@ class PageTest(unittest.TestCase):
             self.assertNotIn("/*LABELS_EN*/null", html)
             self.assertIn('"tab_dashboard"', html)
             self.assertEqual(out, d / "page.html")
+
+
+    def test_children_are_set_only_through_fill(self):
+        # DOM replaceChildren turns a null child into the text "null"; renderDetail returns null for every
+        # missing card. fill() drops null and false, like el() does.
+        self.assertEqual(PAGE.count("replaceChildren("), 1)
+        body = PAGE[PAGE.index("function fill("):]
+        self.assertIn("replaceChildren(", body[:body.index("\n}")])
+        self.assertIn("fill(box, ...renderDetail())", PAGE)
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_fill_drops_missing_cards(self):
+        src = PAGE[PAGE.index("function fill("):]
+        src = src[:src.index("\n}") + 2]
+        js = src + """
+const got = [];
+fill({ replaceChildren: (...k) => got.push(...k) }, "a", null, ["b", null, false], false, "c");
+console.log(JSON.stringify(got));
+"""
+        out = subprocess.run(["node", "-e", js], capture_output=True, text=True, timeout=30)
+        self.assertEqual(out.stdout.strip(), '["a","b","c"]', out.stderr)
+
+
+    def test_a_missing_card_says_why_it_is_empty(self):
+        # Every card the detail view can leave out keeps its heading and says, in one muted line, what
+        # it would show and why it is empty for now.
+        body = PAGE[PAGE.index("function renderDetail"):PAGE.index("async function exportOne")]
+        for key in ("none_criteria", "none_screenshots", "none_logs", "none_rounds", "none_links"):
+            self.assertIn(f'L("{key}")', body)
+            self.assertTrue(LABELS.get(key), key)
+        self.assertIn("function emptyCard(", PAGE)
+        self.assertEqual(LABELS["criteria_title"], "Acceptance criteria")
+        self.assertNotIn(") : null,\n    (ev.logs", body)
 
 
 if __name__ == "__main__":
