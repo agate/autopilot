@@ -1,0 +1,448 @@
+<!doctype html>
+<html lang="en" data-lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>autopilot · Claude Code plugin</title>
+    <meta name="description" content="Hand Claude a body of work and stay on the loop. autopilot is a fresh-session loop for Claude Code: every step is a new, empty session that reads its memory from files." />
+    <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter:wght@400;500&family=JetBrains+Mono&display=swap"
+    />
+    <!-- Chinese: LXGW WenKai from jsDelivr. Google Fonts only has the Traditional (TC) build, whose punctuation sits mid-line. -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/lxgw-wenkai-webfont@1.7.0/lxgwwenkai-regular.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/lxgw-wenkai-webfont@1.7.0/lxgwwenkai-bold.css" />
+    <script>
+      // Same mechanism as the main site: ?lang= wins, then the saved choice (shared across the domain), then the browser.
+      (function () {
+        var lang = new URLSearchParams(location.search).get('lang');
+        if (lang !== 'en' && lang !== 'zh') {
+          try {
+            lang = localStorage.getItem('lang');
+          } catch (e) {}
+        }
+        if (lang !== 'en' && lang !== 'zh') {
+          lang = /^zh/i.test(navigator.language || '') ? 'zh' : 'en';
+        }
+        document.documentElement.dataset.lang = lang;
+        document.documentElement.lang = lang === 'zh' ? 'zh-CN' : 'en';
+      })();
+    </script>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="wrap">
+      <nav class="mono">
+        <a href="./" class="home">autopilot</a>
+        <div class="links">
+          <a href="#why" class="hide-sm"><span lang="en">Why</span><span lang="zh">为什么</span></a>
+          <a href="#how" class="hide-sm"><span lang="en">How it works</span><span lang="zh">原理</span></a>
+          <a href="#install"><span lang="en">Install</span><span lang="zh">安装</span></a>
+          <a href="https://github.com/agate/autopilot">GitHub</a> <!-- checkpkg: ignore -->
+          <span class="toggle" role="group" aria-label="Language">
+            <button type="button" data-set-lang="en">EN</button>
+            <button type="button" data-set-lang="zh">中</button>
+          </span>
+        </div>
+      </nav>
+    </header>
+
+    <main class="wrap">
+      <!-- Hero -->
+      <section class="hero">
+        <div class="mono">
+          <span lang="en">Claude Code plugin · macOS · v0.1.0</span>
+          <span lang="zh">Claude Code 插件 · macOS · v0.1.0</span>
+        </div>
+        <h1 lang="en">Hand Claude a body of work.<br /><em>Stay on the loop, not in it.</em></h1>
+        <h1 lang="zh">把一整块活交给 Claude，<br />你只管看着、拍板。</h1>
+        <p class="lede" lang="en">
+          autopilot drives a Jira epic, one big ticket or an idea to done. It plans the work, runs workers, reviews
+          them, merges where you allow it, and keeps one page of what needs you.
+        </p>
+        <p class="lede" lang="zh">
+          autopilot 把一个 Jira 史诗、一张大工单或者一个想法一路推到完成。它自己做计划、派会话干活、做审查，在你允许的地方合并，还维护一个网页，上面放的都是需要你的事。
+        </p>
+        <p class="lede" lang="en">
+          It is a fresh-session loop: every step is a new, empty Claude session that reads its memory from files.
+        </p>
+        <p class="lede" lang="zh">它是一个新会话循环：每一步都是一个全新的、空白的 Claude 会话，从文件里读记忆。</p>
+        <div class="cta">
+          <a class="btn solid" href="#install"><span lang="en">Install</span><span lang="zh">安装</span></a>
+          <a class="btn" href="#how"><span lang="en">How it works</span><span lang="zh">看看原理</span></a>
+          <span class="mono">
+            <span lang="en">The minute check uses no tokens</span>
+            <span lang="zh">每分钟的检查不花令牌</span>
+          </span>
+        </div>
+        <figure class="hero-art">
+          <img src="art/hero.svg" width="420" height="300" alt="" />
+          <figcaption class="mono">
+            <span lang="en">Fig. 1 — A pilot's checklist. Pilots don't fly from memory: every phase starts by reading the list. Every autopilot pass starts the same way, empty, and reads its steps, your rules and where things stand from files.</span>
+            <span lang="zh">图 1 — 飞行员的检查单。飞行员不靠记忆飞行：每个阶段都从读检查单开始。autopilot 的每一轮也这样开始：从空白起步，从文件里读出要走的步骤、你的规则和现在的进展。</span>
+          </figcaption>
+        </figure>
+      </section>
+
+      <!-- 01 Why -->
+      <section class="sec" id="why">
+        <div class="mono num">01</div>
+        <div>
+          <h2><span lang="en">Why a fresh-session loop</span><span lang="zh">为什么是新会话循环</span></h2>
+
+          <div class="prose" lang="en">
+            <p>
+              Say you want Claude to keep working on a project for days while you do other things. The obvious way is
+              to leave one Claude session running and prompt it on a timer. That is a single-session loop.
+            </p>
+            <p>
+              The longer it runs, the more it forgets what you told it, even with memory files. The conversation keeps
+              growing, so Claude Code compacts it again and again: it squeezes the older part into a summary and keeps
+              going. In a long chat your rules are a few lines against a huge conversation, and memory only reminds;
+              nothing makes the next step follow it. The timer lives inside the session too: close it, or restart the
+              computer, and every scheduled job is gone.
+            </p>
+            <p>
+              autopilot is a fresh-session loop. Every step is a pass: a brand-new, empty session that reads its memory
+              from files, does the step, writes down where things stand, and exits. Your rules are read at the start of
+              every pass, while the context is still small, so they arrive at full strength every time. The rules that
+              matter most are not left to memory at all: code and permissions enforce them, and a pass can change
+              neither.
+            </p>
+            <p>
+              The price is that no session sits there waiting for you. When you have questions, you open one.
+            </p>
+          </div>
+
+          <div class="prose" lang="zh">
+            <p>
+              假设你想让 Claude 连续好几天推进一个项目，而你去忙别的。最直接的做法是开着一个 Claude 会话，按时给它发提示词。这就是单会话循环。
+            </p>
+            <p>
+              它跑得越久，就越会忘掉你跟它说过的话，有记忆文件也一样。对话一直在变长，Claude Code 只好一次又一次地压缩它：把前面的部分挤成一段摘要，然后接着跑。在长对话里，你的规则只是几行字，对面是一整个巨大的对话；记忆也只能提醒，没有东西逼着下一步照做。而且定时器住在会话里面：把会话关掉，或者重启电脑，所有定时任务就都没了。
+            </p>
+            <p>
+              autopilot 是一个新会话循环。每一步都是一轮：开一个全新的空白会话，从文件里读记忆，做完这一步，写下现在的进展，然后退出。你的规则在每一轮一开始就读进来，那时上下文还很小，所以每次都以完整的样子出现。最要紧的规则根本不靠记忆：由代码和权限来执行，每一轮都改不了。
+            </p>
+            <p>代价是没有一个会话一直守着等你。有问题时，你自己开一个。</p>
+          </div>
+
+          <div class="compare">
+            <figure>
+              <img src="art/single.svg" width="360" height="260" alt="" />
+              <figcaption>
+                <b><span lang="en">Single-session loop</span><span lang="zh">单会话循环</span></b>
+                <span class="mono">
+                  <span lang="en">One conversation piles up for days. Your rules sit at the bottom, and each compaction keeps a little less of them.</span>
+                  <span lang="zh">一个对话连着堆好几天。你的规则压在最底下，每压缩一次就少记住一点。</span>
+                </span>
+              </figcaption>
+            </figure>
+            <figure>
+              <img src="art/fresh.svg" width="360" height="260" alt="" />
+              <figcaption>
+                <b><span lang="en">Fresh-session loop</span><span lang="zh">新会话循环</span></b>
+                <span class="mono">
+                  <span lang="en">Every pass starts on a clean page and reads its memory from files, so your rules come first, at full strength.</span>
+                  <span lang="zh">每一轮都从一张白纸开始，从文件里读记忆，所以你的规则每次都排在最前面，完整无缺。</span>
+                </span>
+              </figcaption>
+            </figure>
+          </div>
+
+          <p class="note mono">
+            <span lang="en">It is also cheap when nothing happens: the minute check uses no tokens, and Claude starts only when something changed, or every 30 minutes.</span>
+            <span lang="zh">没事的时候也很省：每分钟的检查不花令牌，只有出现变化，或者满 30 分钟，才启动 Claude。</span>
+          </p>
+        </div>
+      </section>
+
+      <!-- 02 How it works -->
+      <section class="sec" id="how">
+        <div class="mono num">02</div>
+        <div>
+          <h2><span lang="en">How it works</span><span lang="zh">它是怎么转起来的</span></h2>
+          <p class="intro">
+            <span lang="en">Four parts turn the loop. Only the pass and the workers are Claude sessions, and each starts empty: everything it needs is in files it reads at the start.</span>
+            <span lang="zh">转动这个循环的有四个部分。只有「一轮」和「干活的会话」是 Claude 会话，而且每个都从空白开始：它需要知道的一切，都在开局要读的文件里。</span>
+          </p>
+          <figure class="wide-art">
+            <img src="art/cycle.svg" width="640" height="260" loading="lazy" alt="" />
+            <figcaption class="mono">
+              <span lang="en">Fig. 2 — The clock is a login item that runs the check every minute. When something changed, the check starts a pass, which reads its checklist from files and hands tasks to workers. Each worker kicks the check when it is done.</span>
+              <span lang="zh">图 2 — 闹钟是一个登录项，每分钟跑一次检查。有变化时，检查就启动一轮；这一轮从文件里读出检查单，把任务交给干活的会话。每个干活的会话做完，就踢一下检查。</span>
+            </figcaption>
+          </figure>
+
+          <ol class="turn">
+            <li>
+              <span class="mono">1</span>
+              <span lang="en"><b>The check.</b> Every minute, and again after each restart, a login item (launchd, the macOS service manager) runs <code>ap gate</code>. It is plain code and uses no tokens. It builds a fingerprint of everything that could need Claude: finished work, workers that died, ready tasks and free worker slots, CI and reviews on open PRs, and any watch commands you set up.</span>
+              <span lang="zh"><b>检查。</b>每分钟一次，重启后也照常，一个登录项（launchd，macOS 管后台任务的系统服务）运行 <code>ap gate</code>。这是普通代码，不花令牌。它算出一个指纹：把所有可能需要 Claude 的东西压成一段简短的摘要，比如做完的活、意外退出的会话、准备好的任务和空闲的位置、合并请求的测试和审查状态，以及你设置的监视命令。</span>
+            </li>
+            <li>
+              <span class="mono">2</span>
+              <span lang="en"><b>Your answers.</b> From 06:00 to 22:00, while any card on the page can be answered, the check also reads your answers on the page with one tiny Haiku session, about $0.0008 a read at list price. At night, the 30-minute pass picks them up.</span>
+              <span lang="zh"><b>你的回答。</b>06:00 到 22:00 之间，只要网页上还有能回答的卡片，检查还会开一个很小的 Haiku 会话，看看你在网页上回答了没有，按标价每次大约 0.0008 美元。夜里则由每 30 分钟一次的那一轮来取。</span>
+            </li>
+            <li>
+              <span class="mono">3</span>
+              <span lang="en"><b>The pass.</b> If the fingerprint changed, or 30 minutes passed, the check starts a pass: a new background Claude session that reads the runbook (how a pass works), your rules and the state file. It handles finished work, resumes a worker that died (once), records your answers, fills every free worker slot within the usage budget, writes a report when one is due, publishes the changed rows to the page, and exits. A lock keeps it to one pass at a time.</span>
+              <span lang="zh"><b>一轮。</b>指纹变了，或者满 30 分钟，检查就启动一轮：一个新的后台 Claude 会话，开局先读说明书（一轮怎么走）、你的规则和状态文件。这一轮处理做完的活，把意外退出的会话恢复一次，记下你的回答，在用量预算之内把空闲的位置都派上活，到点了就写汇报，把有变化的行发布到网页，然后退出。一把锁保证同一时间只跑一轮。</span>
+            </li>
+            <li>
+              <span class="mono">4</span>
+              <span lang="en"><b>The workers.</b> Each task gets background sessions of its own, one per role, in its own git worktree (a separate copy of the repo). The implementer writes tests first; the reviewer checks the work cold, without having seen it made; the PR worker takes the PR through CI and adversarial review until both are clean. Each writes its report and kicks the check, so the next pass starts within seconds.</span>
+              <span lang="zh"><b>干活的会话。</b>每个任务都有自己的后台会话，每种角色一个，各用自己的 git 工作区（仓库的一份独立副本）。实现者先写测试再写代码；审查者没看过实现的过程，冷着眼审查；负责合并请求的会话把它推过自动测试和对抗式审查，直到都干净。每个会话写好报告就踢一下检查，所以下一轮几秒内就会开始。</span>
+            </li>
+          </ol>
+
+          <h3><span lang="en">Where the memory lives</span><span lang="zh">记忆放在哪里</span></h3>
+          <table class="table">
+            <thead>
+              <tr class="mono">
+                <th><span lang="en">File</span><span lang="zh">文件</span></th>
+                <th><span lang="en">What it holds</span><span lang="zh">装的是什么</span></th>
+                <th><span lang="en">Who changes it</span><span lang="zh">谁能改</span></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>RUNBOOK.md</code></td>
+                <td><span lang="en">How a pass works, step by step</span><span lang="zh">一轮怎么走，一步一步写清楚</span></td>
+                <td><span lang="en">Only a code change</span><span lang="zh">只有改代码才能改</span></td>
+              </tr>
+              <tr>
+                <td><code>RULES.md</code></td>
+                <td><span lang="en">Your standing rules, for every autopilot or for one</span><span lang="zh">你的长期规则，管所有 autopilot 或者其中一个</span></td>
+                <td><span lang="en">Only you, in a session you open, after you say yes to the exact line. Passes and workers are denied.</span><span lang="zh">只有你，在你自己开的会话里，对那一行字点头之后才写。每一轮和干活的会话都被禁止修改。</span></td>
+              </tr>
+              <tr>
+                <td><code>state.json</code></td>
+                <td><span lang="en">Where things stand: tasks, workers, open decisions. A fixed format that code checks.</span><span lang="zh">现在进展到哪：任务、干活的会话、待回答的问题。格式固定，由代码校验。</span></td>
+                <td><span lang="en">Passes, only through <code>ap</code> commands</span><span lang="zh">每一轮，只能通过 <code>ap</code> 命令</span></td>
+              </tr>
+              <tr>
+                <td><code>events.jsonl</code></td>
+                <td><span lang="en">Everything that happened, only ever added to</span><span lang="zh">发生过的每件事，只往里加，从不修改</span></td>
+                <td><span lang="en"><code>ap</code> commands append to it</span><span lang="zh"><code>ap</code> 命令往里追加</span></td>
+              </tr>
+              <tr>
+                <td><code>runs/&lt;task&gt;/</code></td>
+                <td><span lang="en">Each worker's hand-back, review, PR loop result and evidence</span><span lang="zh">每个干活会话的交接报告、审查结果、合并请求循环的结果和证据</span></td>
+                <td><span lang="en">The workers</span><span lang="zh">干活的会话</span></td>
+              </tr>
+              <tr>
+                <td><span lang="en">The page</span><span lang="zh">网页</span></td>
+                <td><span lang="en">One row per thing the page shows, plus your answers</span><span lang="zh">网页上每样东西一行，外加你的回答</span></td>
+                <td><span lang="en">Passes publish only changed rows; only the page's owner can answer</span><span lang="zh">每一轮只发布有变化的行；只有网页的主人能回答</span></td>
+              </tr>
+            </tbody>
+          </table>
+          <p class="note mono">
+            <span lang="en">Your data lives in <code>~/.claude/autopilot-data/</code>, apart from the plugin's code. Every pass and worker also loads the repo's own instructions, skills and your memory for that repo, as any Claude Code session there does.</span>
+            <span lang="zh">你的数据放在 <code>~/.claude/autopilot-data/</code>，和插件的代码分开。每一轮和每个干活的会话，也会像那个仓库里的任何 Claude Code 会话一样，加载仓库自带的说明、技能，以及你在这个仓库的记忆。</span>
+          </p>
+        </div>
+      </section>
+
+      <!-- 03 Features -->
+      <section class="sec" id="features">
+        <div class="mono num">03</div>
+        <div>
+          <h2><span lang="en">What it does</span><span lang="zh">它能做什么</span></h2>
+          <!-- Every cell is a generated drawing (site/gen_art.py), never a screenshot. -->
+          <div class="grid">
+            <div class="cell">
+              <div class="shot"><img src="art/clock.svg" width="400" height="250" loading="lazy" alt="" /></div>
+              <b><span lang="en">Keeps going after a restart</span><span lang="zh">重启也不怕</span></b>
+              <p lang="en">A login item runs the check every minute and again after each restart, so nothing has to stay open. Workers that a restart killed are seen as dead and resumed once.</p>
+              <p lang="zh">一个登录项每分钟跑一次检查，重启后也会自动接着跑，什么都不用一直开着。被重启打断的干活会话会被认出来，并恢复一次。</p>
+            </div>
+            <div class="cell">
+              <div class="shot"><img src="art/folders.svg" width="400" height="250" loading="lazy" alt="" /></div>
+              <b><span lang="en">A worktree for every task</span><span lang="zh">每个任务一个工作区</span></b>
+              <p lang="en">Each task runs in its own git worktree, under <code>~/worktrees</code> by default: tests first, then a cold review, then a PR loop until CI is green and no reviewer finds anything. At most 5 workers run at once, shared in turn across all your autopilots.</p>
+              <p lang="zh">每个任务都在自己的 git 工作区里做，默认放在 <code>~/worktrees</code> 下：先写测试，再冷审查，然后反复处理合并请求，直到自动测试全部通过、审查者再也挑不出问题。同时最多跑 5 个干活的会话，所有 autopilot 轮流分配位置。</p>
+            </div>
+            <div class="cell">
+              <div class="shot"><img src="art/tray.svg" width="400" height="250" loading="lazy" alt="" /></div>
+              <b><span lang="en">One page of what needs you</span><span lang="zh">一个网页，放需要你的事</span></b>
+              <p lang="en">A page on claude.ai puts the cards that wait on you first, each in plain words, with its links and big answer buttons. Decisions it can undo, it makes itself and lists with a one-click undo. Your answer takes effect within a minute by day and within 30 minutes at night.</p>
+              <p lang="zh">claude.ai 上的一个网页，把等你处理的卡片放在最前面，每张都用大白话写清楚，带着相关链接和大大的回答按钮。能撤销的决定它自己做，列出来，一键就能撤销。你的回答白天 1 分钟内生效，夜里 30 分钟内生效。</p>
+            </div>
+            <div class="cell">
+              <div class="shot"><img src="art/lock.svg" width="400" height="250" loading="lazy" alt="" /></div>
+              <b><span lang="en">Rules it cannot change</span><span lang="zh">它改不了的规则</span></b>
+              <p lang="en">Its own sessions are blocked from editing your rules, its runbook, its settings and its state, and from posting comments, creating tickets or requesting reviewers. A chat message, a ticket or a comment goes out only after you say yes to that exact item on a card.</p>
+              <p lang="zh">它自己的会话被禁止修改你的规则、它的说明书、设置和状态，也被禁止发评论、建工单和请人审查。一条聊天消息、一张工单或者一条评论，只有你在卡片上对那一件事点了头，才会发出去。</p>
+            </div>
+            <div class="cell">
+              <div class="shot"><img src="art/stamp.svg" width="400" height="250" loading="lazy" alt="" /></div>
+              <b><span lang="en">Merges only when it is safe</span><span lang="zh">只在安全时合并</span></b>
+              <p lang="en">If you allowed merging at setup, it merges only after the PR loop is clean and a merge check passes: any required approval is on the latest commit, no human review thread is left unhandled, and CI is green on current main. What only a person can pass waits on your page.</p>
+              <p lang="zh">如果你在设置时允许合并，它只会在合并请求的循环处理干净、并且合并检查通过之后才合并：需要的批准落在最新的提交上，没有没处理的人工审查意见，并且在最新的主分支上自动测试全部通过。只有人能放行的那一步，会在你的网页上等着。</p>
+            </div>
+            <div class="cell">
+              <div class="shot"><img src="art/gauge.svg" width="400" height="250" loading="lazy" alt="" /></div>
+              <b><span lang="en">Stays inside your usage</span><span lang="zh">不超用量</span></b>
+              <p lang="en">It starts no new work once a usage window reaches 85%, or extra credits reach 90% of the monthly limit, and lets running work finish. Work starts again 5 minutes after the window resets. Usage numbers older than an hour allow one new worker at a time.</p>
+              <p lang="zh">只要任何一个用量窗口到了 85%，或者额外额度用到月度上限的 90%，它就不再开新活，正在跑的照常做完。窗口重置 5 分钟后再继续。用量数据超过一个小时没更新时，一次只开一个新的干活会话。</p>
+            </div>
+            <div class="cell wide">
+              <div class="shot"><img src="art/bell.svg" width="400" height="250" loading="lazy" alt="" /></div>
+              <b><span lang="en">Ring when you want to talk</span><span lang="zh">想聊的时候摇铃</span></b>
+              <p lang="en">Nobody is on call, so you ring: in any Claude Code session, type <code>/autopilot</code> and the autopilot's name. A hook (a script Claude Code runs on every message you send) adds a fresh snapshot to each message: tasks, running workers, what waits on you, the usage budget, and what changed since your last message. Ask for changes in plain words, such as “pause for today” or “skip that task”; they go through the same commands every pass uses. Close the session when you are done. The loop keeps going.</p>
+              <p lang="zh">没有人值班，所以你自己摇铃：在任何一个 Claude Code 会话里，输入 <code>/autopilot</code> 加上它的名字。钩子（Claude Code 在你每次发消息时自动运行的脚本）会给每条消息加上最新快照：任务、正在跑的会话、等你处理的事、用量预算，以及你上一条消息之后发生了什么。用大白话提改动，比如「今天先暂停」或者「跳过那个任务」，改动走的是每一轮都在用的命令。用完就关掉会话，循环照常运行。</p>
+            </div>
+          </div>
+          <p class="note mono">
+            <span lang="en">Also: reports at 09:00, 17:00 and 21:00 with a desktop notification; tasks from a Jira epic, one Jira ticket, an idea, or a source you describe at setup; the page and reports in your language next to English; and a check that the plugin itself names nobody.</span>
+            <span lang="zh">还有：每天 09:00、17:00、21:00 写汇报并弹出桌面通知；任务可以来自一个 Jira 史诗、一张 Jira 工单、一个想法，或者设置时你自己描述的来源；网页和汇报用你的语言，同时附上英文；另有一项检查，确保插件本身不提到任何人。</span>
+          </p>
+        </div>
+      </section>
+
+      <!-- 04 Commands -->
+      <section class="sec" id="commands">
+        <div class="mono num">04</div>
+        <div>
+          <h2><span lang="en">Commands</span><span lang="zh">命令</span></h2>
+          <p class="intro">
+            <span lang="en">Everything starts with <code>/autopilot</code>. The first word decides what happens; anything else is a conversation with an autopilot.</span>
+            <span lang="zh">一切都从 <code>/autopilot</code> 开始。第一个词决定做什么；其他任何内容，都是在和某个 autopilot 对话。</span>
+          </p>
+          <table class="table cmds">
+            <tbody>
+              <tr>
+                <td><code>/autopilot init</code></td>
+                <td><span lang="en">Set up an autopilot. One multiple-choice question at a time, each with a default; it reads the whole setup back and writes files only after your yes.</span><span lang="zh">设置一个 autopilot。一次只问一个选择题，每题都有默认答案；最后把整套设置念给你听，你点头之后才写文件。</span></td>
+              </tr>
+              <tr>
+                <td><code>/autopilot &lt;name&gt;</code></td>
+                <td><span lang="en">Bind this session to that autopilot and talk: ask anything, answer its cards, change things in plain words.</span><span lang="zh">把这个会话绑定到那个 autopilot，然后对话：随便问，回答它的卡片，用大白话改东西。</span></td>
+              </tr>
+              <tr>
+                <td><code>/autopilot</code></td>
+                <td><span lang="en">With no name, it asks which autopilot first, or says which one it uses when there is only one.</span><span lang="zh">不带名字时，先问你用哪一个；只有一个时，直接告诉你用的是它。</span></td>
+              </tr>
+              <tr>
+                <td><code>/autopilot status</code></td>
+                <td><span lang="en">One line per autopilot (running, waiting on you, done), plus the usage budget.</span><span lang="zh">每个 autopilot 一行（在跑几个、等你几件、完成多少），再加一行用量预算。</span></td>
+              </tr>
+              <tr>
+                <td><code>/autopilot doctor</code></td>
+                <td><span lang="en">A health check: the login item, logins, settings files, MCP servers, disk space and more. Each failure comes with the line that fixes it.</span><span lang="zh">健康检查：登录项、各处登录、设置文件、MCP 服务器、磁盘空间等等。每一项失败都附上修好它的那一行命令。</span></td>
+              </tr>
+              <tr>
+                <td><code>/autopilot config</code></td>
+                <td><span lang="en">List the settings, the changed ones first, and change one on your word.</span><span lang="zh">列出所有设置，改过的排在前面；你说改哪个，它才改哪个。</span></td>
+              </tr>
+              <tr>
+                <td><code>/autopilot tick [name]</code></td>
+                <td><span lang="en">Queue a pass now. The check starts it within seconds.</span><span lang="zh">马上排一轮。检查会在几秒内启动它。</span></td>
+              </tr>
+              <tr>
+                <td><code>/autopilot pause &lt;name&gt;</code><br /><code>/autopilot resume &lt;name&gt;</code></td>
+                <td><span lang="en">Pause an autopilot, or let it run again.</span><span lang="zh">暂停一个 autopilot，或者让它继续跑。</span></td>
+              </tr>
+              <tr>
+                <td><code>/autopilot stop &lt;name&gt;</code></td>
+                <td><span lang="en">Asks first, then ends its workers and marks it stopped.</span><span lang="zh">先问你，然后结束它所有干活的会话，并把它标成已停止。</span></td>
+              </tr>
+              <tr>
+                <td><code>/autopilot off</code></td>
+                <td><span lang="en">Unbind this session.</span><span lang="zh">解除这个会话的绑定。</span></td>
+              </tr>
+              <tr>
+                <td><code>/autopilot uninstall</code></td>
+                <td><span lang="en">Asks first, then removes the login item.</span><span lang="zh">先问你，然后删掉登录项。</span></td>
+              </tr>
+            </tbody>
+          </table>
+          <p class="note mono">
+            <span lang="en">Plain words work too: “pause checkout” or “run checkout now”, in any language, mean the same as the command. To talk to one worker directly, attach to its background session with <code>claude attach</code> and the session's name.</span>
+            <span lang="zh">大白话也行：「暂停 checkout」或者「现在跑一下 checkout」，用什么语言说都一样。想直接和某一个干活的会话说话，就用 <code>claude attach</code> 加上会话名字，连上它的后台会话。</span>
+          </p>
+        </div>
+      </section>
+
+      <!-- 05 Install -->
+      <section class="sec" id="install">
+        <div class="mono num">05</div>
+        <div>
+          <h2><span lang="en">Install</span><span lang="zh">安装</span></h2>
+          <div class="steps">
+            <div>
+              <b><span class="mono step">1</span><span lang="en">Clone it into your skills folder</span><span lang="zh">克隆到插件文件夹</span></b>
+              <p lang="en">Claude Code loads a plugin it finds in <code>~/.claude/skills/&lt;name&gt;/</code> in every new session, so <code>/autopilot</code> works everywhere with no extra flags.</p>
+              <p lang="zh">Claude Code 会在每个新会话里，自动加载 <code>~/.claude/skills/&lt;name&gt;/</code> 下的插件，所以在哪里都能直接用 <code>/autopilot</code>，不用加任何参数。</p>
+              <pre><code>git clone https://github.com/agate/autopilot.git ~/.claude/skills/autopilot<!-- checkpkg: ignore --></code></pre>
+            </div>
+            <div>
+              <b><span class="mono step">2</span><span lang="en">Set up your first autopilot</span><span lang="zh">设置第一个 autopilot</span></b>
+              <p lang="en">Start a new Claude Code session and run <code>/autopilot init</code>. It reads the source first (the Jira epic or ticket, the repo) and offers what it found as each default. On the first setup it also publishes your page, and asks before it installs the login item.</p>
+              <p lang="zh">开一个新的 Claude Code 会话，运行 <code>/autopilot init</code>。它会先读任务来源（Jira 史诗或工单、代码仓库），把读到的东西当作每道题的默认答案。第一次设置时，它还会发布你的网页，并在装登录项之前先问你。</p>
+              <pre><code>/autopilot init</code></pre>
+            </div>
+            <div>
+              <b><span class="mono step">3</span><span lang="en">Check its health</span><span lang="zh">检查一下</span></b>
+              <p lang="en">Each failure comes with the line that fixes it. If the login item is not installed yet, it offers to install it again.</p>
+              <p lang="zh">每一项失败都附上修好它的那一行命令。如果登录项还没装，它会再问你一次要不要装。</p>
+              <pre><code>/autopilot doctor</code></pre>
+            </div>
+          </div>
+          <p class="note mono">
+            <span lang="en">Requires macOS (the check is a launchd login item); Claude Code, signed in, with claude.ai for the page; the GitHub CLI, signed in; git and python3. Jira sources also need Jira tools (an MCP server) in Claude Code. The Xcode command line tools are recommended: without a C compiler, the login item cannot start when the plugin sits in a cloud-synced folder.</span>
+            <span lang="zh">需要 macOS（检查靠 launchd 登录项来跑）；已登录的 Claude Code，并能用 claude.ai 来放网页；已登录的 GitHub 命令行工具；git 和 python3。用 Jira 当任务来源时，Claude Code 里还要有 Jira 工具（一个 MCP 服务器）。建议装上 Xcode 命令行工具：没有 C 编译器的话，插件放在云同步文件夹里时，登录项启动不了。</span>
+          </p>
+          <p class="note mono">
+            <span lang="en">To remove it: <code>/autopilot uninstall</code> removes the login item; then delete <code>~/.claude/skills/autopilot</code>. Your data stays in <code>~/.claude/autopilot-data/</code> until you delete it.</span>
+            <span lang="zh">卸载：先运行 <code>/autopilot uninstall</code> 删掉登录项，再删除 <code>~/.claude/skills/autopilot</code>。你的数据留在 <code>~/.claude/autopilot-data/</code>，直到你自己删掉。</span>
+          </p>
+        </div>
+      </section>
+    </main>
+
+    <footer class="wrap mono">
+      <!-- Home link is relative ("/") so it follows the main domain if it ever changes; the label shows the live host. -->
+      <div class="foot">
+        <a href="/" class="home-link">← <span data-host>honghao.me</span></a> ·
+        <span lang="en">Made by <a href="/">Hong, Hao</a></span>
+        <span lang="zh"><a href="/">Hong, Hao</a> 制作</span>
+        · <a href="https://github.com/agate/autopilot">github.com/agate/autopilot</a> <!-- checkpkg: ignore -->
+      </div>
+    </footer>
+
+    <script>
+      (function () {
+        var root = document.documentElement;
+        var buttons = document.querySelectorAll('[data-set-lang]');
+        function apply(lang) {
+          root.dataset.lang = lang;
+          root.lang = lang === 'zh' ? 'zh-CN' : 'en';
+          buttons.forEach(function (b) {
+            b.setAttribute('aria-pressed', String(b.dataset.setLang === lang));
+          });
+        }
+        apply(root.dataset.lang || 'en');
+        if (location.protocol.indexOf('http') === 0) {
+          document.querySelectorAll('[data-host]').forEach(function (el) {
+            el.textContent = location.host;
+          });
+        }
+        buttons.forEach(function (b) {
+          b.addEventListener('click', function () {
+            apply(b.dataset.setLang);
+            try {
+              localStorage.setItem('lang', b.dataset.setLang);
+            } catch (e) {}
+          });
+        });
+      })();
+    </script>
+  </body>
+</html>

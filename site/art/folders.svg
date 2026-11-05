@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-75.0 -47.9 172.4 107.8" width="400" height="250" role="img" aria-label="A desk file sorter holding three folders, one per worker" stroke-linejoin="round" stroke-linecap="round">
+    <polygon points="-37.2,21.5 22.5,55.9 22.5,53.3 -37.2,18.9" fill="#f1f1f1" stroke="#171717" stroke-width="1" />
+    <polygon points="59.7,34.4 22.5,55.9 22.5,53.3 59.7,31.8" fill="#e6e6e6" stroke="#171717" stroke-width="1" />
+    <polygon points="0.0,-2.6 59.7,31.8 22.5,53.3 -37.2,18.9" fill="#ffffff" stroke="#171717" stroke-width="1" />
+    <polygon points="-37.2,18.9 -35.5,19.8 -35.5,0.3 -37.2,-0.6" fill="#f1f1f1" stroke="#171717" stroke-width="1" />
+    <polygon points="1.7,-1.6 -35.5,19.8 -35.5,0.3 1.7,-21.1" fill="#e6e6e6" stroke="#171717" stroke-width="1" />
+    <polygon points="0.0,-22.1 1.7,-21.1 -35.5,0.3 -37.2,-0.6" fill="#ffffff" stroke="#171717" stroke-width="1" />
+    <polygon points="-2.3,2.6 49.5,32.5 49.5,-9.1 -2.3,-39.0" fill="#f1f1f1" stroke="#171717" stroke-width="1" />
+    <polygon points="51.2,31.5 49.5,32.5 49.5,-9.1 51.2,-10.1" fill="#e6e6e6" stroke="#171717" stroke-width="1" />
+    <polygon points="-0.6,-40.0 51.2,-10.1 49.5,-9.1 -2.3,-39.0" fill="#ffffff" stroke="#171717" stroke-width="1" />
+    <polygon points="1.1,-37.0 15.8,-28.6 15.8,-34.5 1.1,-42.9" fill="#f1f1f1" stroke="#171717" stroke-width="1" />
+    <polygon points="17.5,-29.6 15.8,-28.6 15.8,-34.5 17.5,-35.4" fill="#e6e6e6" stroke="#171717" stroke-width="1" />
+    <polygon points="2.8,-43.9 17.5,-35.4 15.8,-34.5 1.1,-42.9" fill="#ffffff" stroke="#171717" stroke-width="1" />
+    <line x1="3.4" y1="-25.4" x2="32.6" y2="-8.5" stroke="#8f8f8f" stroke-width="1" />
+    <line x1="3.4" y1="-19.5" x2="23.6" y2="-7.8" stroke="#8f8f8f" stroke-width="1" />
+    <polygon points="-12.4,8.4 39.4,38.3 39.4,-3.3 -12.4,-33.2" fill="#f1f1f1" stroke="#171717" stroke-width="1" />
+    <polygon points="41.1,37.4 39.4,38.3 39.4,-3.3 41.1,-4.2" fill="#e6e6e6" stroke="#171717" stroke-width="1" />
+    <polygon points="-10.7,-34.1 41.1,-4.2 39.4,-3.3 -12.4,-33.2" fill="#ffffff" stroke="#171717" stroke-width="1" />
+    <polygon points="7.3,-21.8 22.0,-13.3 22.0,-19.2 7.3,-27.6" fill="#f1f1f1" stroke="#171717" stroke-width="1" />
+    <polygon points="23.6,-14.3 22.0,-13.3 22.0,-19.2 23.6,-20.2" fill="#e6e6e6" stroke="#171717" stroke-width="1" />
+    <polygon points="9.0,-28.6 23.6,-20.2 22.0,-19.2 7.3,-27.6" fill="#ffffff" stroke="#171717" stroke-width="1" />
+    <line x1="-6.8" y1="-19.5" x2="22.5" y2="-2.6" stroke="#8f8f8f" stroke-width="1" />
+    <line x1="-6.8" y1="-13.6" x2="13.5" y2="-1.9" stroke="#8f8f8f" stroke-width="1" />
+    <polygon points="-22.5,14.3 29.3,44.2 29.3,2.6 -22.5,-27.3" fill="#f1f1f1" stroke="#171717" stroke-width="1" />
+    <polygon points="31.0,43.2 29.3,44.2 29.3,2.6 31.0,1.6" fill="#e6e6e6" stroke="#171717" stroke-width="1" />
+    <polygon points="-20.8,-28.3 31.0,1.6 29.3,2.6 -22.5,-27.3" fill="#ffffff" stroke="#171717" stroke-width="1" />
+    <polygon points="13.5,-6.5 28.1,2.0 28.1,-3.9 13.5,-12.4" fill="#f1f1f1" stroke="#171717" stroke-width="1" />
+    <polygon points="29.8,1.0 28.1,2.0 28.1,-3.9 29.8,-4.9" fill="#e6e6e6" stroke="#171717" stroke-width="1" />
+    <polygon points="15.2,-13.3 29.8,-4.9 28.1,-3.9 13.5,-12.4" fill="#ffffff" stroke="#171717" stroke-width="1" />
+    <line x1="-16.9" y1="-13.7" x2="12.4" y2="3.2" stroke="#8f8f8f" stroke-width="1" />
+    <line x1="-16.9" y1="-7.8" x2="3.4" y2="3.9" stroke="#8f8f8f" stroke-width="1" />
+    <polygon points="20.8,52.3 22.5,53.3 22.5,33.8 20.8,32.8" fill="#f1f1f1" stroke="#171717" stroke-width="1" />
+    <polygon points="59.7,31.9 22.5,53.3 22.5,33.8 59.7,12.4" fill="#e6e6e6" stroke="#171717" stroke-width="1" />
+    <polygon points="58.0,11.4 59.7,12.4 22.5,33.8 20.8,32.8" fill="#ffffff" stroke="#171717" stroke-width="1" />
+    <polygon points="-37.2,18.9 22.5,53.3 22.5,33.8 -37.2,-0.6" fill="#f1f1f1" stroke="#171717" stroke-width="1" />
+    <polygon points="24.2,52.3 22.5,53.3 22.5,33.8 24.2,32.8" fill="#e6e6e6" stroke="#171717" stroke-width="1" />
+    <polygon points="-35.5,-1.6 24.2,32.8 22.5,33.8 -37.2,-0.6" fill="#ffffff" stroke="#171717" stroke-width="1" />
+  </svg>
