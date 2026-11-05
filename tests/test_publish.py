@@ -136,6 +136,20 @@ class PublishTest(unittest.TestCase):
         self.assertIn("media/teeth.txt is not an image", errs[0])
         self.assertIn("media/gone.png is not a file in the run directory", errs[1])
 
+    def test_recorded_assets_reach_the_next_diff_before_anything_is_published(self):
+        # The batch goes out after the uploads, so its rows must carry the new ids; mark comes only after it.
+        self._evidence(["after.png"], ["after.png"])
+        self.assertEqual([a["key"] for a in publish.diff({}, publish.collect(["checkout"]))["assets"]],
+                         ["checkout/PROJ-123/after.png"])
+        aid = "0123456789abcdef0123456789abcdef"
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(["publish", "assets", "checkout/PROJ-123/after.png=/_blob/" + aid]), 0)
+        self.assertEqual(publish.published(), {})
+        d = publish.diff(publish.published(), publish.collect(["checkout"]))
+        self.assertEqual(d["assets"], [])
+        row = next(s for s in d["set"] if s["collection"] == "evidence")
+        self.assertEqual(row["data"]["screenshots"][0]["asset_id"], aid)
+
     def test_mark_stores_the_asset_id_when_given_its_url(self):
         # The page builds "/_blob/<id>" itself, so a stored url would double the prefix.
         self._evidence(["after.png"], ["after.png"])

@@ -182,10 +182,17 @@ def diff(prev: dict, cur: dict) -> dict:
     return {"set": sets, "delete": dels, "assets": assets}
 
 
-def mark(cur: dict, new_assets: dict) -> None:
+def record_assets(new_assets: dict) -> None:
+    """Remember uploaded asset ids by key, so the next diff's rows carry them. Publishes nothing."""
     p = _page()
     # Keep the bare id: the page builds "/_blob/<id>" itself, so a stored url would double the prefix.
     p.setdefault("assets", {}).update({k: v.rsplit("/", 1)[-1] for k, v in new_assets.items()})
+    _save_page(p)
+
+
+def mark(cur: dict, new_assets: dict) -> None:
+    record_assets(new_assets)
+    p = _page()
     p["published"] = cur
     p["published_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     _save_page(p)
@@ -198,6 +205,8 @@ def _cmd(args: list) -> int:
         d = diff(published(), collect(aps))
         d["url"] = _page().get("url")
         print(json.dumps(d, indent=1, ensure_ascii=False))
+    elif args[:1] == ["assets"]:
+        record_assets(dict(a.split("=", 1) for a in args[1:] if "=" in a))
     elif args[:1] == ["mark"]:
         new = dict(a.split("=", 1) for a in args[1:] if a != "--assets" and "=" in a)
         mark(collect(aps), new)
@@ -208,7 +217,8 @@ def _cmd(args: list) -> int:
             _save_page(p)
         print(_page().get("url") or "")
     else:
-        print("usage: ap publish diff | mark [--assets key=<asset id> ...] | url [url]", file=sys.stderr)
+        print("usage: ap publish diff | assets key=<asset id> ... | mark [--assets key=<asset id> ...] | url [url]",
+              file=sys.stderr)
         return 2
     return 0
 

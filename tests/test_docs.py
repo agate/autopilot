@@ -78,6 +78,15 @@ class DocsTest(unittest.TestCase):
     def test_logs_go_up_under_their_upload_name(self):
         rb = (ROOT / "RUNBOOK.md").read_text()
         self.assertIn("`upload_name`", rb[rb.index("10. **Tidy and publish.**"):])
+
+    def test_publish_records_uploads_before_the_batch(self):
+        # Two passes stalled improvising this step: ids missing from the rows, versions read into a refused folder.
+        rb = (ROOT / "RUNBOOK.md").read_text()
+        step = rb[rb.index("10. **Tidy and publish.**"):rb.index("11. **End.**")]
+        for s in ("`ap publish assets", "`ap publish diff` again", "`if_version`", "without `out_dir`", "`ap publish mark`"):
+            self.assertIn(s, step, s)
+        self.assertLess(step.index("`ap publish assets"), step.index("`ap publish diff` again"))
+        self.assertLess(step.index("`ap publish diff` again"), step.index("`ap publish mark`"))
         loop = (ROOT / "commands" / "pr-loop.md").read_text()
         self.assertIn('"logs": [{"path": "media/', loop)
 

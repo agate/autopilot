@@ -148,10 +148,15 @@ in `body`, so the user sees what will run).
 
 10. **Tidy and publish.** Run `ap archive <ap>` for each autopilot, then:
     - Run `ap publish diff`. For each entry in `assets`, copy `local_path` into your scratchpad as
-      `upload_name` and upload that copy with the Artifact tool (`url` = the page, `asset: true`); note
-      its id.
-    - Send every `set` and `delete` in one `ArtifactData` batch to the page.
-    - Run `ap publish mark --assets <key>=<asset id> ...`.
+      `upload_name` and upload that copy with the Artifact tool (`url` = the page, `asset: true`;
+      `file_paths` takes up to 25 images in one call). Then run
+      `ap publish assets <key>=<asset id> ...` for every upload, and run `ap publish diff` again: only
+      now do its `set` rows carry the new ids. Do not edit the rows yourself.
+    - Read the current `version` of every document a `set` or `delete` touches, with `ArtifactData`
+      `list` (or `get`) without `out_dir`; a document that is not there yet takes no version.
+    - Send every `set` and `delete` in one `ArtifactData` batch to the page, each existing document
+      pinned with `if_version`. A row's `data` can go in as `file_path` (a JSON file in your scratchpad).
+    - Run `ap publish mark`.
     - If the Artifact tools are unavailable, skip publishing, run `ap event <ap> publish_skipped '{}'`,
       and list it under `access` in the next report. Never publish anywhere else.
 
