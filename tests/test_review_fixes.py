@@ -225,15 +225,15 @@ class MergeCheckTest(unittest.TestCase):
                             for who, s, oid, at in reviews]}
 
     def test_changes_requested_without_branch_protection(self):
-        ok, why = mergecheck.evaluate(self.pr([("t", "CHANGES_REQUESTED", "abc", "1")]), [], [], False)
+        ok, why = mergecheck.evaluate(self.pr([("t", "CHANGES_REQUESTED", "abc", "1")]), [], [])
         self.assertIn("changes_requested", why)
 
     def test_latest_review_per_author_counts(self):
         p = self.pr([("t", "APPROVED", "abc", "1"), ("t", "CHANGES_REQUESTED", "abc", "2")], decision="CHANGES_REQUESTED")
-        self.assertFalse(mergecheck.evaluate(p, [], [], True)[0])
+        self.assertFalse(mergecheck.evaluate(p, [], [])[0])
 
     def test_no_checks_yet_is_not_green(self):
-        self.assertIn("checks_not_green", mergecheck.evaluate(self.pr([], checks=()), [], [], False)[1])
+        self.assertIn("checks_not_green", mergecheck.evaluate(self.pr([], checks=()), [], [])[1])
 
 
 class NextNamesTest(Env):
