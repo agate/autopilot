@@ -116,6 +116,9 @@ in `body`, so the user sees what will run).
        `ap task cleanup <ap> <task>`.
      - `approval_missing` or `approval_not_on_head`: one `gate` card with the PR link, unless one is
        open. The gate wakes you when a review arrives.
+     - `review_required`: GitHub still needs a required review (for example a code owner's), even if
+       someone else approved. One `gate` card with the PR link that says so, unless one is open. The
+       gate wakes you when a review arrives.
      - `changes_requested`: start the PR loop again for what the reviewer asked; anything you may not
        answer becomes an `ask` card with a drafted reply.
      - `rerun_ci_on_current_main`: rebase on fresh main, push with `--force-with-lease`, and leave it;

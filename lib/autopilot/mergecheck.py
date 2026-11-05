@@ -23,7 +23,7 @@ def latest_reviews(reviews: list) -> dict:
     return out
 
 
-def evaluate(pr: dict, threads: list, stale_overlap: list, approval_required: bool) -> tuple:
+def evaluate(pr: dict, threads: list, stale_overlap: list) -> tuple:
     why = []
     rollup = pr.get("statusCheckRollup") or []
     if not rollup or any((c.get("conclusion") or c.get("state") or "").upper() not in GREEN for c in rollup):
@@ -32,7 +32,11 @@ def evaluate(pr: dict, threads: list, stale_overlap: list, approval_required: bo
     if any(r.get("state") == "CHANGES_REQUESTED" for r in latest.values()):
         why.append("changes_requested")
     approvals = [r for r in latest.values() if r.get("state") == "APPROVED"]
-    if approval_required:
+    decision = pr.get("reviewDecision") or ""  # empty when the repo requires no review
+    if decision == "REVIEW_REQUIRED":
+        # GitHub still wants a review that counts (for example a code owner's), whoever else approved.
+        why.append("review_required")
+    elif decision:
         if not approvals:
             why.append("approval_missing")
         elif not any((r.get("commit") or {}).get("oid") == pr.get("headRefOid") for r in approvals):
@@ -67,7 +71,7 @@ def gather(gh_bin: str, repo: str, number: int) -> tuple:
     mb = _run(["git", "merge-base", pr["headRefOid"], f"origin/{base}"], repo).strip()
     moved = set(_run(["git", "diff", "--name-only", f"{mb}..origin/{base}"], repo).split())
     mine = {f["path"] for f in pr.get("files") or []}
-    return pr, threads, sorted(moved & mine), bool(pr.get("reviewDecision"))
+    return pr, threads, sorted(moved & mine)
 
 
 @cli.command("merge-check")
@@ -77,7 +81,7 @@ def _cmd(args: list) -> int:
         return 2
     gcfg, apcfg = config.load_global(), config.load_ap(args[0])
     gh = gcfg["tools"].get("gh") or shutil.which("gh") or "gh"
-    pr, threads, overlap, required = gather(gh, apcfg["repo"], int(args[1]))
-    ok, why = evaluate(pr, threads, overlap, required)
+    pr, threads, overlap = gather(gh, apcfg["repo"], int(args[1]))
+    ok, why = evaluate(pr, threads, overlap)
     print(json.dumps({"ok": ok, "reasons": why, "overlap": overlap}))
     return 0 if ok else 1
