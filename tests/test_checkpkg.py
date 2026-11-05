@@ -34,6 +34,12 @@ class CheckPkgTest(unittest.TestCase):
         d = self._tree('<link href="https://cdn.jsdelivr.net/npm/some-webfont@1.7.0/regular.css">\n')
         self.assertEqual(checkpkg.scan(d, ["nobody-here"]), [])
 
+    def test_worktree_git_file_is_skipped(self):
+        # In a git worktree, .git is a file naming the main checkout's path; it is never part of the package.
+        d = self._tree("clean\n")
+        (d / ".git").write_text("gitdir: /home/Jane Roe/repo/.git/worktrees/x\n")  # checkpkg: ignore
+        self.assertEqual(checkpkg.scan(d, ["Jane Roe"]), [])  # checkpkg: ignore
+
     def test_package_itself_clean(self):
         found = checkpkg.scan(ROOT, checkpkg.identities())
         self.assertEqual(found, [], found[:5])
