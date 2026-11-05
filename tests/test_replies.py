@@ -200,7 +200,7 @@ class StepTest(Env):
 
     def test_a_broken_autopilot_does_not_stop_the_check(self):
         ops.decision_add("checkout", dec())
-        (self.data / "perf" / "config.json").write_text("{nope")
+        (self.data / "projects" / "perf" / "config.json").write_text("{nope")
         self.result = {"ok": True, "replies": [{"id": "r1", "ap": "checkout"}]}
         self.assertEqual(replies.step(config.load_global(), {}, self.NOON), {"checkout"})
 

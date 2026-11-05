@@ -58,17 +58,17 @@ class StateTest(unittest.TestCase):
         with TempData() as d:
             write_ap(d, "checkout")
             state.save("checkout", state.empty())
-            before = (d / "checkout" / "state.json").read_text()
+            before = (d / "projects" / "checkout" / "state.json").read_text()
             bad = state.empty()
             bad["bogus"] = True
             with self.assertRaises(state.StateError):
                 state.save("checkout", bad)
-            self.assertEqual((d / "checkout" / "state.json").read_text(), before)
+            self.assertEqual((d / "projects" / "checkout" / "state.json").read_text(), before)
 
     def test_corrupt_json_raises(self):
         with TempData() as d:
             write_ap(d, "checkout")
-            (d / "checkout" / "state.json").write_text("{not json")
+            (d / "projects" / "checkout" / "state.json").write_text("{not json")
             with self.assertRaises(state.StateError):
                 state.load("checkout")
 
