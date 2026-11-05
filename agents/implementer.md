@@ -35,8 +35,10 @@ spec first, then the repo's agent instructions for the paths you touch.
    lost, workaround).
 4. Run the checks CI runs for every package the diff touches (lint, types, tests, generators), timing
    each. Fix what fails. A check you cannot run locally is `skipped` with the reason.
-5. Capture evidence into `media/` in the run directory. Look at every image: a blank frame or an error
-   page is a failed capture.
+5. Capture evidence into `media/` in the run directory. Your shell cannot write there, so save a capture
+   anywhere outside the data folder and copy it in with `<ap> evidence add <autopilot> <task> <file> ...`
+   (the autopilot is the folder above `runs/` in your run directory). Look at every image: a blank frame
+   or an error page is a failed capture.
 6. Check the diff against each criterion and say plainly when one is not met.
 
 ## Hand back

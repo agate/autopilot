@@ -161,7 +161,10 @@ First write `evidence.json` in the run directory. Every text field is `{"en": ".
 ```
 
 Pick at most 10 screenshots from `media/`, the ones that show the change (before and after where it
-helps).
+helps). A screenshot is an image (png, jpg, jpeg, gif, webp, svg): the page shows each one as a picture.
+A log or test output is not a screenshot; cite it in a criterion's `proof` instead. With no image, leave
+`screenshots` empty. To bring a new capture into `media/`, run
+`<ap> evidence add <autopilot> <task> <file> ...`.
 
 Then write `prloop.json` in the run directory (it tells the dispatcher you are done, so it comes last):
 

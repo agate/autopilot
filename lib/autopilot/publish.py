@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 from autopilot import budget, cli, config, nextwork, paths, state, text, usage
 
 COLLECTIONS = ("meta", "autopilots", "tasks", "workers", "decisions", "archive", "reports", "evidence")
 REPORTS_KEPT = 10
 ARCHIVE_KEPT = 200
+# The page shows each screenshot as an <img>, so only these are screenshots (the asset store takes them all).
+IMAGE_EXT = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")
 
 
 def _page_file():
@@ -47,6 +51,14 @@ def _labels(gcfg: dict) -> dict:
     return out
 
 
+def _inside(run, shot):
+    """The screenshot's path relative to the run directory, or None when it points outside it."""
+    try:
+        return (run / shot["path"]).resolve().relative_to(run.resolve())
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def _evidence(ap: str, task: str, assets: dict):
     run = paths.ap_dir(ap) / "runs" / task
     parts = {k: _read_json(run / f"{k}.json") for k in ("handback", "review", "prloop", "evidence")}
@@ -55,10 +67,9 @@ def _evidence(ap: str, task: str, assets: dict):
     ev = dict(parts["evidence"] or {})
     shots = []
     for s in ev.get("screenshots") or []:
-        try:
-            inside = (run / s["path"]).resolve().relative_to(run.resolve())
-        except (KeyError, TypeError, ValueError):
-            continue  # a path outside the run directory is never uploaded
+        inside = _inside(run, s)
+        if inside is None or inside.suffix.lower() not in IMAGE_EXT:
+            continue  # a path outside the run directory is never uploaded, and a log is no <img>
         key = f"{ap}/{task}/{inside.name}"
         shots.append(dict(s, path=str(inside), key=key, asset_id=assets.get(key)))
     ev["screenshots"] = shots
@@ -152,7 +163,8 @@ def diff(prev: dict, cur: dict) -> dict:
 
 def mark(cur: dict, new_assets: dict) -> None:
     p = _page()
-    p.setdefault("assets", {}).update(new_assets)
+    # Keep the bare id: the page builds "/_blob/<id>" itself, so a stored url would double the prefix.
+    p.setdefault("assets", {}).update({k: v.rsplit("/", 1)[-1] for k, v in new_assets.items()})
     p["published"] = cur
     p["published_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     _save_page(p)
@@ -175,7 +187,7 @@ def _cmd(args: list) -> int:
             _save_page(p)
         print(_page().get("url") or "")
     else:
-        print("usage: ap publish diff | mark [--assets key=url ...] | url [url]", file=sys.stderr)
+        print("usage: ap publish diff | mark [--assets key=<asset id> ...] | url [url]", file=sys.stderr)
         return 2
     return 0
 
@@ -225,13 +237,44 @@ def evidence_errors(ap: str, task: str) -> list:
             errs += text.check(c["proof"], langs, f"criteria[{i}].proof")
     for i, sh in enumerate(ev.get("screenshots") or []):
         errs += text.check(sh.get("caption"), langs, f"screenshots[{i}].caption")
+        inside = _inside(p.parent, sh)
+        if inside is None or not (p.parent / inside).is_file():
+            errs.append(f"screenshots[{i}].path: {sh.get('path')} is not a file in the run directory")
+        elif inside.suffix.lower() not in IMAGE_EXT:
+            errs.append(f"screenshots[{i}].path: {sh.get('path')} is not an image ({' '.join(IMAGE_EXT)}); "
+                        "cite logs and test output in a criterion's proof instead")
     return errs
+
+
+def add_media(ap: str, task: str, files: list) -> list:
+    """Copy files into the task's media/ folder. A worker's shell may not write into the data folder and its
+    Write tool cannot write a binary file, so a screenshot comes in through this command."""
+    if not paths.valid_name(ap) or task not in {t["id"] for t in state.load(ap)["tasks"]}:
+        raise ValueError(f"{ap}: no task {task}")
+    srcs = [Path(f) for f in files]
+    for s in srcs:
+        if not s.is_file():
+            raise ValueError(f"{s}: not a file")
+    if len({s.name for s in srcs}) < len(srcs):
+        raise ValueError("two files share a name")
+    media = paths.ap_dir(ap) / "runs" / task / "media"
+    media.mkdir(parents=True, exist_ok=True)
+    for s in srcs:
+        shutil.copyfile(s, media / s.name)
+    return [f"media/{s.name}" for s in srcs]
 
 
 @cli.command("evidence")
 def _evidence_cmd(args: list) -> int:
+    if args[:1] == ["add"] and len(args) >= 4:
+        try:
+            print("\n".join(add_media(args[1], args[2], args[3:])))
+        except (ValueError, OSError, state.StateError) as e:
+            print(e, file=sys.stderr)
+            return 1
+        return 0
     if args[:1] != ["check"] or len(args) != 3:
-        print("usage: ap evidence check <ap> <task>", file=sys.stderr)
+        print("usage: ap evidence check <ap> <task> | add <ap> <task> <file> ...", file=sys.stderr)
         return 2
     errs = evidence_errors(args[1], args[2])
     print("\n".join(errs) if errs else "ok")
