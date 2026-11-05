@@ -280,7 +280,7 @@ class IdleCheckTest(Base):
         self.ap("alpha")
         gate.run(dispatch_fn=lambda g, aps: [{"blocked": True, "aps": aps}])
         self.assertTrue(any("permission" in n for n in self.notes))
-        self.assertIn("dispatcher_blocked", (self.data / "alpha" / "events.jsonl").read_text())
+        self.assertIn("dispatcher_blocked", (self.data / "projects" / "alpha" / "events.jsonl").read_text())
 
     def test_blocked_message_says_the_session_is_waiting(self):
         self.ap("alpha")

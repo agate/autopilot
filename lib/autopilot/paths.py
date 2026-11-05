@@ -16,8 +16,18 @@ def data_root() -> Path:
     return Path(env) if env else Path.home() / ".claude" / "autopilot-data"
 
 
+def projects_root() -> Path:
+    return data_root() / "projects"
+
+
 def ap_dir(name: str) -> Path:
-    return data_root() / name
+    """One autopilot's folder. An autopilot made before projects/ existed stays at the top of the data
+    root until `config.migrate_legacy` moves it."""
+    new = projects_root() / name
+    old = data_root() / name
+    if not new.exists() and (old / "config.json").exists():
+        return old
+    return new
 
 
 def valid_name(name: str) -> bool:
