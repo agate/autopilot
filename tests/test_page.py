@@ -112,5 +112,17 @@ console.log(JSON.stringify(got));
         self.assertEqual(out.stdout.strip(), '["a","b","c"]', out.stderr)
 
 
+    def test_a_missing_card_says_why_it_is_empty(self):
+        # Every card the detail view can leave out keeps its heading and says, in one muted line, what
+        # it would show and why it is empty for now.
+        body = PAGE[PAGE.index("function renderDetail"):PAGE.index("async function exportOne")]
+        for key in ("none_criteria", "none_screenshots", "none_logs", "none_rounds", "none_links"):
+            self.assertIn(f'L("{key}")', body)
+            self.assertTrue(LABELS.get(key), key)
+        self.assertIn("function emptyCard(", PAGE)
+        self.assertEqual(LABELS["criteria_title"], "Acceptance criteria")
+        self.assertNotIn(") : null,\n    (ev.logs", body)
+
+
 if __name__ == "__main__":
     unittest.main()
