@@ -10,14 +10,15 @@ from autopilot import cli, paths
 
 SKIP_DIRS = {".git", "__pycache__", ".superpowers"}
 IGNORE_MARK = "checkpkg: ignore"
-EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+# An address's domain has a letter in it; `name@1.7.0` is a pinned package version, not an address.
+EMAIL = re.compile(r"[\w.+-]+@(?![\d.]+\b)[\w-]+(?:\.[\w-]+)+")
 EMAIL_OK = ("@example.com", "noreply@anthropic.com")
 TICKET = re.compile(r"\b[A-Z][A-Z0-9]{1,9}-\d+\b")  # checkpkg: ignore
 TICKET_OK = re.compile(r"^(PROJ-\d+|UTF-8|SHA-1|SHA-256|ISO-8601)$")
 URL = re.compile(r"https?://([A-Za-z0-9.-]+)")
 HOSTS_OK = ("example.com", "claude.ai", "claude.com", "anthropic.com", "apple.com", "github.com",
             "fonts.googleapis.com", "fonts.gstatic.com", "cdnjs.cloudflare.com", "cdn.jsdelivr.net", "unpkg.com",
-            "localhost")
+            "localhost", "w3.org")
 
 
 def _git(key: str) -> str:

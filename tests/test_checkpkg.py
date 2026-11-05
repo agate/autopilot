@@ -24,6 +24,16 @@ class CheckPkgTest(unittest.TestCase):
                        "https://claude.ai/artifact https://github.com/org/repo UTF-8 CLAUDE_CODE_MAX-1\n")
         self.assertEqual(checkpkg.scan(d, ["nobody-here"]), [])
 
+    def test_svg_namespace_is_not_a_leak(self):
+        # Every SVG file names this standards namespace; it says nothing about who wrote the package.
+        d = self._tree('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"></svg>\n')
+        self.assertEqual(checkpkg.scan(d, ["nobody-here"]), [])
+
+    def test_package_version_is_not_an_email(self):
+        # A pinned CDN package reads like an address (name@1.7.0) but its "domain" is all digits.
+        d = self._tree('<link href="https://cdn.jsdelivr.net/npm/some-webfont@1.7.0/regular.css">\n')
+        self.assertEqual(checkpkg.scan(d, ["nobody-here"]), [])
+
     def test_package_itself_clean(self):
         found = checkpkg.scan(ROOT, checkpkg.identities())
         self.assertEqual(found, [], found[:5])
