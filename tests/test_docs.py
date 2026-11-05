@@ -115,5 +115,31 @@ class DocsTest(unittest.TestCase):
         self.assertEqual(checkpkg.scan(ROOT, checkpkg.identities()), [])
 
 
+    def test_runbook_end_line_asks_nothing(self):
+        # Claude Code labels a background session "blocked" when its last message asks the user for
+        # something, so the pass's last line must not; the user's to-dos live on cards.
+        end = (ROOT / "RUNBOOK.md").read_text().split("**End.**", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("asks nothing of the user", end)
+        self.assertIn("card", end)
+
+    def test_runbook_runs_floor_commands_on_their_own(self):
+        rb = (ROOT / "RUNBOOK.md").read_text()
+        self.assertIn("gh pr ready <n>", rb)
+        self.assertIn("authority.open_prs", rb)
+        self.assertIn("Never run `claude stop`", rb)
+        self.assertIn("written out in full", rb)
+
+    def test_jira_epic_jql_has_the_project_clause(self):
+        pre = (ROOT / "presets" / "jira-epic.md").read_text()
+        self.assertIn("`project = <project> AND parent = <key>`", pre)
+        self.assertIn("before the last `-`", pre)
+        self.assertNotIn("JQL `parent = <key>`", pre)
+
+    def test_readme_names_the_dispatcher_allow_rules(self):
+        rd = (ROOT / "README.md").read_text()
+        for word in ("gh pr ready", "ap worker end", "authority.source_status", "authority.open_prs"):
+            self.assertIn(word, rd)
+
+
 if __name__ == "__main__":
     unittest.main()

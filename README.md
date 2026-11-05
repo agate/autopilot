@@ -136,6 +136,17 @@ main. Passes and workers run with a permission floor that denies edits to
 `gh pr edit --add-reviewer`. Something you approve on a card runs once, in a
 separate session allowed only that tool.
 
+The dispatcher's floor also allows, by rule, the three steps a pass takes on
+work it did not start itself: the tracker's ticket-status tool (found by tool
+discovery), `gh pr ready`, and `ap worker end` (which stops only the workers
+this autopilot started; a raw `claude stop` is never allowed). A pass starts
+with a fresh context, so without these rules the auto-mode classifier sees no
+request from you naming that ticket, PR or session and blocks the step. Set
+`authority.source_status` or `authority.open_prs` to `false` in an
+autopilot's `config.json` to drop the first or the second; the floor is shared,
+so one autopilot turning a rule off turns it off for every pass. Run
+`ap perms write <ap>` after changing either.
+
 ## Configuration
 
 `/autopilot config` lists every global setting with its default and marks the

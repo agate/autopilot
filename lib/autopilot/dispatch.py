@@ -82,7 +82,13 @@ def run(gcfg: dict, active: list, poll_s: float = 10, timeout_s: float = None) -
                 s = sessions.find(NAME, sessions.list_all(claude) or [])
                 if s is not None and s.get("id"):
                     short = s["id"]
-                if s is not None and s.get("state") == "blocked":
+                # `ap pass end` is the pass's own end marker (pass_begin cleared it), so it wins over the label.
+                if "ended_at" in _last_pass():
+                    timed_out = False
+                    break
+                # Claude Code also labels a finished session "blocked" when its last message asks the user
+                # something; only status "waiting" means it is stopped at a prompt.
+                if s is not None and s.get("state") == "blocked" and s.get("status") == "waiting":
                     blocked, timed_out = True, False
                     break
                 if s is not None and s.get("status") == "busy":

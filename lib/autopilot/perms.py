@@ -17,10 +17,32 @@ PROTECTED = ("RULES.md", "config.json", "settings*.json", "oneoff-*.json", "stat
              "tick.json", "lock", "state.lock")
 BASH_DENY = ["Bash(gh pr comment:*)", "Bash(gh pr review:*)", "Bash(gh issue comment:*)", "Bash(gh issue create:*)",
              "Bash(gh pr edit --add-reviewer:*)"]
+# The ticket-status tool, matched on its own name: a dispatcher moves its tickets (start, review, done).
+STATUS_TOOL_PATTERNS = [re.compile(r"(^|[_-])transition[_-]?(jira[_-]?)?issues?$", re.I)]
 
 
 def denied_tools(tools: list) -> list:
     return [t for t in tools if t.startswith("mcp__") and any(p.search(t.split("__")[-1]) for p in DENY_TOOL_PATTERNS)]
+
+
+def status_tools(tools: list) -> list:
+    return [t for t in tools
+            if t.startswith("mcp__") and any(p.search(t.split("__")[-1]) for p in STATUS_TOOL_PATTERNS)]
+
+
+def allow_rules(tools: list, authority: dict, role: str) -> list:
+    """Steps the dispatcher takes on every pass, allowed by rule so the auto-mode classifier never judges
+    them: a pass is a fresh session and its prompt names no ticket, PR or worker, so the classifier blocks
+    a close, a ready-for-review or a stop as unrequested. Workers get none: they never take these steps.
+    Each `authority` key can only take a rule away."""
+    if role != "dispatcher":
+        return []
+    out = status_tools(tools) if authority.get("source_status", True) else []
+    if authority.get("open_prs", True):
+        out.append("Bash(gh pr ready:*)")
+    # Stops only the sessions this autopilot's state records; never a raw `claude stop`.
+    out.append(f"Bash({paths.package_root() / 'bin' / 'ap'} worker end:*)")
+    return out
 
 
 def deny_rules(data_root: str, package_root: str) -> list:
@@ -34,11 +56,28 @@ def deny_rules(data_root: str, package_root: str) -> list:
     return out + BASH_DENY
 
 
-def generate(tools: list, exclude: set = frozenset(), role: str = "worker") -> dict:
+def generate(tools: list, exclude: set = frozenset(), role: str = "worker", authority: dict = None) -> dict:
     deny = [t for t in denied_tools(tools) if t not in exclude]
     deny += deny_rules("/" + str(paths.data_root()), "/" + str(paths.package_root()))
-    return {"permissions": {"deny": deny},
+    perms = {"deny": deny}
+    allow = [a for a in allow_rules(tools, authority or {}, role) if a not in deny]
+    if allow:
+        perms["allow"] = allow
+    return {"permissions": perms,
             "env": {"AUTOPILOT_ROLE": role, "AUTOPILOT_DATA": str(paths.data_root())}}
+
+
+def shared_authority() -> dict:
+    """The dispatcher floor is shared by every autopilot, so a key one autopilot turns off is off for all."""
+    out = {}
+    for n in config.list_aps():
+        try:
+            auth = config.load_ap(n).get("authority") or {}
+        except Exception:  # noqa: BLE001 - a broken config grants nothing
+            auth = {"source_status": False, "open_prs": False}
+        for k in ("source_status", "open_prs"):
+            out[k] = out.get(k, True) and auth.get(k, True) is not False
+    return out
 
 
 def static_settings(role: str) -> dict:
@@ -81,8 +120,10 @@ def write_for(ap: str) -> list:
     disp = paths.data_root() / "settings-dispatcher.json"
     known = set()
     if disp.exists():
-        known = {t for t in json.loads(disp.read_text())["permissions"]["deny"] if t.startswith("mcp__")}
-    _write(disp, generate(sorted(known | set(denied_tools(tools))), role="dispatcher"))
+        cur = json.loads(disp.read_text())["permissions"]
+        known = {t for t in cur["deny"] + cur.get("allow", []) if t.startswith("mcp__")}
+    _write(disp, generate(sorted(known | set(denied_tools(tools)) | set(status_tools(tools))), role="dispatcher",
+                          authority=shared_authority()))
     return denied_tools(tools)
 
 

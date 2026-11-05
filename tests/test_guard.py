@@ -29,5 +29,18 @@ class GuardTest(unittest.TestCase):
         self.assertIsNone(guard.decide({"tool_name": "Read", "tool_input": {"file_path": "RULES.md"}}, self.W))
 
 
+    def test_guard_allows_reads_with_stderr_redirects(self):
+        for cmd in ("ls -la ~/.claude/autopilot-data/x/runs/PROJ-1 2>&1",
+                    "cat $HOME/.claude/autopilot-data/replies-check 2>/dev/null",
+                    "ls ~/.claude/autopilot-data/ >/dev/null 2>&1",
+                    "rg -n x ~/.claude/autopilot-data/x &>/dev/null"):
+            self.assertIsNone(guard.decide(bash(cmd), self.W), cmd)
+
+    def test_guard_still_denies_a_write_next_to_a_redirect(self):
+        for cmd in ("echo x > ~/.claude/autopilot-data/RULES.md 2>&1",
+                    "echo x 2>/dev/null >> ~/.claude/autopilot-data/RULES.md"):
+            self.assertIsNotNone(guard.decide(bash(cmd), self.W), cmd)
+
+
 if __name__ == "__main__":
     unittest.main()

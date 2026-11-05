@@ -225,7 +225,9 @@ def _assess(results: list, todo: list, gcfg: dict, now: datetime) -> bool:
         aps = r.get("aps") or todo
         if r.get("skipped"):
             continue
-        for flag, msg in (("blocked", "The autopilot dispatcher stopped at a permission prompt. Run /autopilot doctor."),
+        for flag, msg in (("blocked", "An autopilot dispatcher pass is waiting at a permission prompt nobody can "
+                                      "answer in the background; its session is kept for `claude attach`. "
+                                      "Run /autopilot doctor."),
                           ("timeout", "An autopilot dispatcher pass ran past its time limit."),
                           ("error", "An autopilot dispatcher pass failed to run.")):
             if r.get(flag):

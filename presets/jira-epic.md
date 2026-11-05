@@ -5,7 +5,8 @@
 ## Sync (every pass)
 
 1. Find the user's Jira account with the Atlassian user-info tool (once per pass).
-2. List the epic's children: JQL `parent = <key>` with fields `summary, status, assignee, issuelinks,
+2. List the epic's children: JQL `project = <project> AND parent = <key>`, where `<project>` is the
+   part of the epic key before the last `-`, with fields `summary, status, assignee, issuelinks,
    issuetype, priority`. Page through all results.
 3. Keep a child only if it is unassigned or assigned to the user, and not In Progress under someone
    else. A child that is not code work (a discussion, a decision, a design review) becomes an `ask`
