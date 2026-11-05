@@ -13,6 +13,9 @@ REPORTS_KEPT = 10
 ARCHIVE_KEPT = 200
 # The page shows each screenshot as an <img>, so only these are screenshots (the asset store takes them all).
 IMAGE_EXT = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")
+# The page shows each log as text. The asset store refuses .log and .tap, so those go up under a .txt name.
+LOG_EXT = (".txt", ".log", ".tap", ".json", ".md")
+UPLOAD_EXT = IMAGE_EXT + (".txt", ".json", ".md")
 
 
 def _page_file():
@@ -51,12 +54,34 @@ def _labels(gcfg: dict) -> dict:
     return out
 
 
-def _inside(run, shot):
-    """The screenshot's path relative to the run directory, or None when it points outside it."""
+def _inside(run, entry):
+    """The entry's path relative to the run directory, or None when it points outside it."""
     try:
-        return (run / shot["path"]).resolve().relative_to(run.resolve())
+        return (run / entry["path"]).resolve().relative_to(run.resolve())
     except (KeyError, TypeError, ValueError):
         return None
+
+
+def _files(ap: str, task: str, run, entries, exts: tuple, assets: dict) -> list:
+    out = []
+    for s in entries or []:
+        inside = _inside(run, s)
+        if inside is None or inside.suffix.lower() not in exts:
+            continue  # a path outside the run directory is never uploaded; a log is no <img>, nor a picture a log
+        key = f"{ap}/{task}/{inside.name}"
+        out.append(dict(s, path=str(inside), key=key, asset_id=assets.get(key)))
+    return out
+
+
+def _handback_criteria(hb: dict, review) -> list:
+    """The hand-back's criteria in the page's shape, with the reviewer's status where it gave one."""
+    seen = (review or {}).get("criteria")
+    seen = seen if isinstance(seen, dict) else {}
+    out = []
+    for c in hb.get("criteria") or []:
+        status = (seen.get(c.get("id")) or {}).get("status") or c.get("status")
+        out.append({"text": c.get("id"), "ok": status == "met", "proof": c.get("evidence")})
+    return out
 
 
 def _evidence(ap: str, task: str, assets: dict):
@@ -65,16 +90,10 @@ def _evidence(ap: str, task: str, assets: dict):
     if not any(parts.values()):
         return None
     ev = dict(parts["evidence"] or {})
-    shots = []
-    for s in ev.get("screenshots") or []:
-        inside = _inside(run, s)
-        if inside is None or inside.suffix.lower() not in IMAGE_EXT:
-            continue  # a path outside the run directory is never uploaded, and a log is no <img>
-        key = f"{ap}/{task}/{inside.name}"
-        shots.append(dict(s, path=str(inside), key=key, asset_id=assets.get(key)))
-    ev["screenshots"] = shots
+    ev["screenshots"] = _files(ap, task, run, ev.get("screenshots"), IMAGE_EXT, assets)
+    ev["logs"] = _files(ap, task, run, ev.get("logs"), LOG_EXT, assets)
     hb = parts["handback"] or {}
-    ev["criteria"] = ev.get("criteria") or hb.get("criteria")
+    ev["criteria"] = ev.get("criteria") or _handback_criteria(hb, parts["review"])
     ev["checks"] = hb.get("checks")
     ev["review"] = parts["review"]
     ev["prloop"] = parts["prloop"]
@@ -155,9 +174,11 @@ def diff(prev: dict, cur: dict) -> dict:
                 dels.append({"collection": c, "doc_id": k})
     assets = []
     for ev in (cur.get("evidence") or {}).values():
-        for s in ev.get("screenshots") or []:
+        for s in (ev.get("screenshots") or []) + (ev.get("logs") or []):
             if not s.get("asset_id"):
-                assets.append({"key": s["key"], "local_path": str(paths.ap_dir(ev["ap"]) / "runs" / ev["task"] / s["path"])})
+                name = Path(s["path"]).name
+                assets.append({"key": s["key"], "local_path": str(paths.ap_dir(ev["ap"]) / "runs" / ev["task"] / s["path"]),
+                               "upload_name": name if name.lower().endswith(UPLOAD_EXT) else name + ".txt"})
     return {"set": sets, "delete": dels, "assets": assets}
 
 
@@ -235,14 +256,16 @@ def evidence_errors(ap: str, task: str) -> list:
         errs += text.check(c.get("text"), langs, f"criteria[{i}].text")
         if "proof" in c:
             errs += text.check(c["proof"], langs, f"criteria[{i}].proof")
-    for i, sh in enumerate(ev.get("screenshots") or []):
-        errs += text.check(sh.get("caption"), langs, f"screenshots[{i}].caption")
-        inside = _inside(p.parent, sh)
-        if inside is None or not (p.parent / inside).is_file():
-            errs.append(f"screenshots[{i}].path: {sh.get('path')} is not a file in the run directory")
-        elif inside.suffix.lower() not in IMAGE_EXT:
-            errs.append(f"screenshots[{i}].path: {sh.get('path')} is not an image ({' '.join(IMAGE_EXT)}); "
-                        "cite logs and test output in a criterion's proof instead")
+    for field, exts, kind, other in (("screenshots", IMAGE_EXT, "an image", "logs"),
+                                     ("logs", LOG_EXT, "a log", "screenshots")):
+        for i, sh in enumerate(ev.get(field) or []):
+            errs += text.check(sh.get("caption"), langs, f"{field}[{i}].caption")
+            inside = _inside(p.parent, sh)
+            if inside is None or not (p.parent / inside).is_file():
+                errs.append(f"{field}[{i}].path: {sh.get('path')} is not a file in the run directory")
+            elif inside.suffix.lower() not in exts:
+                errs.append(f"{field}[{i}].path: {sh.get('path')} is not {kind} ({' '.join(exts)}); "
+                            f"list it under {other} instead")
     return errs
 
 

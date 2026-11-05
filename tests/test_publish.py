@@ -70,13 +70,55 @@ class PublishTest(unittest.TestCase):
         ev = publish.collect(["checkout"])["evidence"]["checkout:PROJ-123"]
         self.assertEqual(ev["screenshots"][0]["asset_id"], "0123456789abcdef0123456789abcdef")
 
-    def _evidence(self, shots, files):
+    def _evidence(self, shots, files, logs=()):
         run = self.data / "checkout" / "runs" / "PROJ-123"
         (run / "media").mkdir(parents=True, exist_ok=True)
         for f in files:
             (run / "media" / f).write_bytes(b"x")
-        (run / "evidence.json").write_text(json.dumps({"verdict": {"en": "ok"}, "what_changed": {"en": "x"}, "screenshots": [
-            {"path": "media/" + f, "caption": {"en": f}} for f in shots]}))
+        entry = lambda f: {"path": "media/" + f, "caption": {"en": f}}
+        (run / "evidence.json").write_text(json.dumps({"verdict": {"en": "ok"}, "what_changed": {"en": "x"},
+                                                       "screenshots": [entry(f) for f in shots],
+                                                       "logs": [entry(f) for f in logs]}))
+        return run
+
+    def test_logs_are_listed_and_uploaded_as_text(self):
+        # A log is shown as text. The asset store refuses .tap and .log, so those go up under a .txt name.
+        names = ["teeth.txt", "suite.tap", "run.log", "data.json", "notes.md", "after.png"]
+        self._evidence([], names, logs=names)
+        ev = publish.collect(["checkout"])["evidence"]["checkout:PROJ-123"]
+        self.assertEqual([s["path"] for s in ev["logs"]], ["media/" + n for n in names[:5]])
+        d = publish.diff({}, publish.collect(["checkout"]))
+        self.assertEqual([(a["key"].split("/")[-1], a["upload_name"]) for a in d["assets"]],
+                         [("teeth.txt", "teeth.txt"), ("suite.tap", "suite.tap.txt"), ("run.log", "run.log.txt"),
+                          ("data.json", "data.json"), ("notes.md", "notes.md")])
+
+    def test_a_log_reuses_the_asset_it_had_as_a_screenshot(self):
+        # Moving an entry from screenshots to logs keeps its key, so nothing is uploaded twice.
+        aid = "0123456789abcdef0123456789abcdef"
+        publish.mark({}, {"checkout/PROJ-123/teeth.txt": aid})
+        self._evidence([], ["teeth.txt"], logs=["teeth.txt"])
+        d = publish.diff({}, publish.collect(["checkout"]))
+        self.assertEqual(d["assets"], [])
+        ev = publish.collect(["checkout"])["evidence"]["checkout:PROJ-123"]
+        self.assertEqual(ev["logs"][0]["asset_id"], aid)
+
+    def test_evidence_check_wants_text_files_as_logs(self):
+        self._evidence([], ["teeth.txt", "after.png"], logs=["teeth.txt", "after.png", "gone.log"])
+        errs = publish.evidence_errors("checkout", "PROJ-123")
+        self.assertEqual(len(errs), 2, errs)
+        self.assertIn("logs[1].path: media/after.png is not a log", errs[0])
+        self.assertIn("logs[2].path: media/gone.log is not a file in the run directory", errs[1])
+
+    def test_handback_criteria_show_as_criteria(self):
+        # Before evidence.json exists the page shows the hand-back's criteria, with the reviewer's status.
+        run = self.data / "checkout" / "runs" / "PROJ-123"
+        run.mkdir(parents=True)
+        (run / "handback.json").write_text(json.dumps({"criteria": [
+            {"id": "c1", "status": "met", "evidence": "test_a"}, {"id": "c2", "status": "met", "evidence": "test_b"}]}))
+        (run / "review.json").write_text(json.dumps({"criteria": {"c2": {"status": "partial", "note": "n"}}}))
+        ev = publish.collect(["checkout"])["evidence"]["checkout:PROJ-123"]
+        self.assertEqual(ev["criteria"], [{"text": "c1", "ok": True, "proof": "test_a"},
+                                          {"text": "c2", "ok": False, "proof": "test_b"}])
 
     def test_only_images_become_screenshots(self):
         # The page shows every screenshot as an <img>: a log or test output there is a broken image.

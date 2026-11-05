@@ -74,6 +74,10 @@ in `body`, so the user sees what will run).
    - `verdict: fix`: if the same problem appears in two rounds, the spec is wrong:
      `ap task set <ap> <task> status=blocked` and an `ask` card. Otherwise write the fixes verbatim
      into a brief and `ap worker start <ap> <task> implement --resume --cwd <worktree> --prompt-file <brief> --needs <needs>`.
+   - `verdict: pass` and the spec says `No PR`: run `ap evidence check <ap> <task>`. If it lists
+     problems, resume the implementer (`ap worker start <ap> <task> implement --resume ...`) with those
+     lines as its brief. Otherwise move the source ticket to done, `ap task set <ap> <task> status=done`,
+     `git -C <repo> worktree remove <worktree>`, `ap task cleanup <ap> <task>`.
    - `verdict: pass`: ship. Squash to one conventional commit (product files only, never run files),
      rebase on fresh `origin/main`, diff any lockfile against main, push, and open the PR. The PR body has a summary, a
      criteria checklist and an evidence summary, and ends with the Claude Code line. Then
@@ -124,7 +128,8 @@ in `body`, so the user sees what will run).
    `starts`:
    - Write `$AUTOPILOT_DATA/<ap>/specs/<task>.md` from the ticket and the code at fresh `origin/main`:
      Scope (paths it may touch), 3-9 Criteria (each a behavior with a `path:line` it changes and how it
-     is proven), Existing tests, Related decisions.
+     is proven), Existing tests, Related decisions. A task that ships no code (research, a spike) gets
+     a line `No PR` near the top.
    - `git -C <repo> fetch origin main`, then
      `git -C <repo> worktree add <worktree_root>/<ap>-<task> -b <branch> origin/main`. The branch comes
      from `branch_pattern`.
@@ -142,8 +147,9 @@ in `body`, so the user sees what will run).
    Send one `PushNotification` that leads with how many things wait on the user.
 
 10. **Tidy and publish.** Run `ap archive <ap>` for each autopilot, then:
-    - Run `ap publish diff`. For each entry in `assets`, copy `local_path` into your scratchpad and
-      upload it with the Artifact tool (`url` = the page, `asset: true`); note its id.
+    - Run `ap publish diff`. For each entry in `assets`, copy `local_path` into your scratchpad as
+      `upload_name` and upload that copy with the Artifact tool (`url` = the page, `asset: true`); note
+      its id.
     - Send every `set` and `delete` in one `ArtifactData` batch to the page.
     - Run `ap publish mark --assets <key>=<asset id> ...`.
     - If the Artifact tools are unavailable, skip publishing, run `ap event <ap> publish_skipped '{}'`,
@@ -158,7 +164,8 @@ Write each brief to `$AUTOPILOT_DATA/<ap>/runs/<task>/brief-<role>.md`. Always i
 the worktree (absolute path), the base SHA, the spec path, the run directory, which single-use resources the worker holds, and the autopilot's
 `RULES.md` lines that apply. `ap worker start` adds the port range and the path of `ap` itself.
 
-- **implement**: the spec. On a fix round, the reviewer's `fixes` verbatim.
+- **implement**: the spec. On a fix round, the reviewer's `fixes` verbatim. For a `No PR` task, also
+  the reader's language (`ap config get reader_lang`), since its implementer writes `evidence.json`.
 - **review**: the spec, and that `handback.json` and `journal.md` are in the run directory.
 - **pr**: the PR URL, the run directory, the reader's language (`ap config get reader_lang`), and
   that `evidence.json` and then `prloop.json` go there.
