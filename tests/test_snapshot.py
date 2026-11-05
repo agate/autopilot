@@ -62,7 +62,7 @@ class SnapshotTest(unittest.TestCase):
         self.assertNotIn("worker_started", second)
 
     def test_rules_change_included_once(self):
-        (self.data / "checkout" / "RULES.md").write_text("- 2026-01-01 — \"be careful\" — why: test\n")
+        (self.data / "projects" / "checkout" / "RULES.md").write_text("- 2026-01-01 — \"be careful\" — why: test\n")
         first = snapshot.handle(P("/autopilot checkout"))
         second = snapshot.handle(P("again"))
         self.assertIn("be careful", first)

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import copy
+import fcntl
 import json
 import os
 from pathlib import Path
 
-from autopilot import paths
+from autopilot import events, paths
 
 DEFAULT_GLOBAL: dict = {
     "max_workers": 5,
@@ -195,11 +196,76 @@ def save_ap(name: str, cfg: dict) -> None:
     _write(paths.ap_dir(name) / "config.json", cfg)
 
 
-def list_aps() -> list:
-    root = paths.data_root()
+def _names_in(root: Path) -> list:
     if not root.exists():
         return []
-    return sorted(p.name for p in root.iterdir() if (p / "config.json").exists() and paths.valid_name(p.name))
+    return [p.name for p in root.iterdir() if (p / "config.json").exists() and paths.valid_name(p.name)]
+
+
+def list_aps() -> list:
+    return sorted(set(_names_in(paths.projects_root())) | set(_names_in(paths.data_root())))
+
+
+def _workers(folder: Path):
+    """The workers recorded in a folder's state.json, or None when it cannot be read."""
+    try:
+        return json.loads((folder / "state.json").read_text()).get("workers") or []
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def _rebase(value, old: str, new: str):
+    if isinstance(value, str):
+        return new + value[len(old):] if value.startswith(old + "/") else value
+    if isinstance(value, list):
+        return [_rebase(v, old, new) for v in value]
+    if isinstance(value, dict):
+        return {k: _rebase(v, old, new) for k, v in value.items()}
+    return value
+
+
+def _move(name: str) -> bool:
+    root, dest = paths.data_root(), paths.projects_root()
+    old, new = root / name, dest / name
+    if name != "projects" and new.exists():
+        return False
+    fd = os.open(str(old / "state.lock"), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        if _workers(old) != []:
+            return False
+        if name == "projects":
+            # Its folder is the one the others move into: step aside, then move in.
+            tmp = root / ".projects-moving"
+            os.rename(old, tmp)
+            dest.mkdir()
+            os.rename(tmp, new)
+        else:
+            dest.mkdir(exist_ok=True)
+            os.rename(old, new)
+        state_file = new / "state.json"
+        if state_file.exists():
+            _write(state_file, _rebase(json.loads(state_file.read_text()), str(old), str(new)))
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+    events.append(name, "moved", {"from": str(old), "to": str(new)})
+    return True
+
+
+def migrate_legacy() -> list:
+    """Move each autopilot made before projects/ existed into projects/<name>/, once none of its workers
+    runs (a running worker holds paths into the old folder). Returns the names moved."""
+    moved = []
+    for name in sorted(_names_in(paths.data_root()), key=lambda n: (n != "projects", n)):
+        try:
+            if _move(name):
+                moved.append(name)
+        except OSError:
+            continue  # left where it is; ap_dir still finds it there
+    return moved
 
 
 def status_of(name: str) -> str:

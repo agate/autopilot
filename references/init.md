@@ -40,7 +40,7 @@ default. Write nothing until the user confirms the playback.
 
 Read the whole configuration back in plain words. On the user's yes:
 
-1. Write `$AUTOPILOT_DATA/<name>/config.json` from `templates/config.json` with the answers.
+1. Write `$AUTOPILOT_DATA/projects/<name>/config.json` from `templates/config.json` with the answers.
 2. If `reader_lang` is not `en` and `$AUTOPILOT_DATA/labels.<lang>.json` does not exist, translate every
    value of `templates/labels.en.json` (keep keys and `{placeholders}`) into that file, plus
    `lang_name` in that language and `lang_short`, its one- or two-character name for the language

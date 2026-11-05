@@ -37,7 +37,7 @@ class ConfigTest(unittest.TestCase):
             write_ap(d, "alpha")
             write_ap(d, "beta")
             write_ap(d, "gamma", stopped=True)
-            (d / "beta" / "paused").write_text("")
+            (d / "projects" / "beta" / "paused").write_text("")
             self.assertEqual(config.list_aps(), ["alpha", "beta", "gamma"])
             self.assertEqual(config.status_of("beta"), "paused")
             self.assertEqual(config.status_of("gamma"), "stopped")

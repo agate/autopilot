@@ -253,6 +253,7 @@ def run(now: datetime = None, dispatch_fn=None) -> int:
     gcfg = config.load_global()
     if lock.held(paths.data_root() / "lock"):
         return 0
+    config.migrate_legacy()
     now = now or _local_now()
     gs = _read_json(_gate_file())
     fps, broken = _load_all(gcfg, now)

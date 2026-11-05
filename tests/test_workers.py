@@ -45,7 +45,7 @@ class WorkersTest(unittest.TestCase):
         self.assertEqual(argv[argv.index("-n") + 1], "checkout · PROJ-123 · implement")
         self.assertEqual(argv[argv.index("--agent") + 1], "autopilot:implementer")
         self.assertEqual(argv[argv.index("--permission-mode") + 1], "auto")
-        self.assertEqual(argv[argv.index("--settings") + 1], str(self.data / "checkout" / "settings.json"))
+        self.assertEqual(argv[argv.index("--settings") + 1], str(self.data / "projects" / "checkout" / "settings.json"))
         self.assertEqual(argv[-1], "do it")
         self.assertEqual(env["AUTOPILOT_ROLE"], "worker")
         self.assertEqual(env["AUTOPILOT_DATA"], str(self.data))
