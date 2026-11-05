@@ -22,6 +22,37 @@ class PermsTest(unittest.TestCase):
                                                      "mcp__chat__slack_schedule_message",
                                                      "mcp__chat__slack_create_canvas"])
 
+    def test_atlassian_tool_names_old_and_new(self):
+        # The newer Atlassian MCP server renamed its tools; the older server's names must stay caught.
+        table = [
+            # newer server
+            ("addOrEditJiraIssueComment", "deny"), ("createConfluenceContent", "deny"),
+            ("updateConfluenceContent", "deny"), ("executeWrite", "deny"), ("executeDestructive", "deny"),
+            ("createJiraIssue", "deny"), ("transitionJiraIssue", "status"),
+            ("addGraphContext", None), ("atlassianUserInfo", None), ("discover", None), ("editJiraIssue", None),
+            ("executeRead", None), ("getAccessibleAtlassianResources", None), ("getCollaborators", None),
+            ("getConfluenceContent", None), ("getGraphContext", None), ("getGraphObject", None),
+            ("getJiraIssue", None), ("getLoomObjectsContent", None), ("getPeopleInfo", None),
+            ("getWorkActivity", None), ("getWorkPortfolio", None), ("listJiraIssueComments", None),
+            ("search", None), ("searchConfluence", None), ("searchJiraIssuesUsingJql", None),
+            # older server
+            ("addCommentToJiraIssue", "deny"), ("createConfluencePage", "deny"), ("updateConfluencePage", "deny"),
+            ("createConfluenceFooterComment", "deny"), ("createConfluenceInlineComment", "deny"),
+            ("getConfluencePageFooterComments", None), ("getConfluencePageInlineComments", None),
+            ("getConfluenceCommentChildren", None), ("getTransitionsForJiraIssue", None),
+            # other servers the patterns already catch
+            ("slack_send_message", "deny"), ("slack_send_message_draft", "deny"),
+            ("slack_schedule_message", "deny"), ("slack_create_canvas", "deny"), ("slack_update_canvas", "deny"),
+            ("notion-create-comment", "deny"), ("notion-create-pages", "deny"), ("notion-update-page", "deny"),
+            ("appstore_reply_review", "deny"), ("playstore_reply_review", "deny"),
+            ("slack_read_channel", None), ("notion-get-comments", None), ("appstore_reviews", None),
+        ]
+        for name, kind in table:
+            with self.subTest(name):
+                tool = f"mcp__X__{name}"
+                self.assertEqual(perms.denied_tools([tool]), [tool] if kind == "deny" else [])
+                self.assertEqual(perms.status_tools([tool]), [tool] if kind == "status" else [])
+
     def test_generate_includes_static_rules(self):
         deny = perms.generate(["mcp__X__createJiraIssue"])["permissions"]["deny"]
         self.assertIn("mcp__X__createJiraIssue", deny)
