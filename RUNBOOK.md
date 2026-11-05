@@ -116,8 +116,9 @@ in `body`, so the user sees what will run).
    - `option: "undo"` on a `self` card: `ap decision resolve <ap> <D-id> --answer undo --status undone`.
    - Otherwise: `ap decision resolve <ap> <D-id> --answer "<option id or text>"`.
    - It prints `resolved`: if the card has an `action`, run `ap oneoff <ap> <D-id>` (it runs only when
-     the answer is the action's `option`, and only once). Then act on the answer (for undo: reverse what
-     the card did), or leave it for the next pass and say so.
+     the answer is the action's `option`, and only until it succeeds once). Exit 1 prints the error:
+     record it as an `access_failure` and run `ap oneoff` again on the next pass. Then act on the
+     answer (for undo: reverse what the card did), or leave it for the next pass and say so.
    - It prints `unchanged`: the same answer was recorded before (a pass stopped before deleting this
      reply). Do only what the answer asks that is not done yet; never repeat a step that already happened.
    - Exit 3: the card already has a different answer (two devices, or the page and a talk session).
