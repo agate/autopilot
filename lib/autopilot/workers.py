@@ -9,7 +9,7 @@ import sys
 from autopilot import cli, config, events, paths, sessions, state
 
 AGENTS = {"implement": "autopilot:implementer", "review": "autopilot:reviewer"}
-_BG = re.compile(r"backgrounded · (\w+) · ")
+_BG = re.compile(r"backgrounded · (\w+)")  # a resumed copy prints no name after the id
 
 
 def claude_bin(gcfg: dict) -> str:
@@ -88,7 +88,9 @@ def start(ap: str, task: str, role: str, cwd: str, prompt: str, needs: list = No
     if resume and not sid:
         raise RuntimeError(f"{ap} {task}: no saved {role} session to resume")
     if sid:
-        argv = [argv[0], "--bg", "--resume", sid] + argv[argv.index("--permission-mode"):argv.index("--settings") + 2]
+        # Flags on --resume start a copy under a new id; -n keeps the worker's name on that copy.
+        argv = ([argv[0], "--bg", "--resume", sid, "-n", sessions.name_for(ap, task, role)]
+                + argv[argv.index("--permission-mode"):argv.index("--settings") + 2])
         argv.append(prompt if role in AGENTS else "/autopilot:pr-loop " + prompt)
     short = _launch(argv, cwd, env)
     name = sessions.name_for(ap, task, role)

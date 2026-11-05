@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests.helpers import ROOT, TempData, write_ap
 from autopilot import config, state, workers
@@ -72,6 +74,42 @@ class WorkersTest(unittest.TestCase):
         workers.end("checkout", "PROJ-123", "implement")
         self.assertEqual(state.load("checkout")["workers"], [])
         self.assertIn("stop abcd1234", self.log.read_text())
+
+    def test_launch_reads_id_when_output_has_no_name(self):
+        # A resumed copy prints the id with no name after it (seen 2026-11-04).
+        out = ("backgrounded · 5aca4bb2\n  claude agents             list sessions\n"
+               "  claude attach 5aca4bb2    open in this terminal\n")
+        done = subprocess.CompletedProcess([], 0, stdout=out, stderr="")
+        with mock.patch.object(workers.subprocess, "run", return_value=done):
+            self.assertEqual(workers._launch(["claude"], str(self.data), {}), "5aca4bb2")
+
+    def test_launch_reads_id_after_copy_note(self):
+        out = ("note: background session f0e6bc79 keeps its own saved options, so the flags you passed "
+               "started a copy as 079f331b.\nbackgrounded · 079f331b · checkout · PROJ-1 · implement\n")
+        done = subprocess.CompletedProcess([], 0, stdout=out, stderr="")
+        with mock.patch.object(workers.subprocess, "run", return_value=done):
+            self.assertEqual(workers._launch(["claude"], str(self.data), {}), "079f331b")
+
+    def test_start_resume_keeps_the_worker_name(self):
+        # Resuming with flags starts a copy; without -n the copy gets an auto title.
+        with state.mutate("checkout") as st:
+            st["tasks"] = [{"id": "PROJ-1", "title": {"en": "t"}, "depends_on": [], "status": "in_progress", "link": "",
+                            "needs": [], "critical": False, "phase": "", "origin": "source",
+                            "sessions": {"implement": "sid-old"}}]
+        with mock.patch.object(workers, "_launch", return_value="new11111") as launch:
+            workers.start("checkout", "PROJ-1", "implement", str(self.data), "fix it", resume=True)
+        argv = launch.call_args[0][0]
+        self.assertEqual(argv[argv.index("--resume") + 1], "sid-old")
+        self.assertEqual(argv[argv.index("-n") + 1], "checkout · PROJ-1 · implement")
+
+    def test_resume_passes_no_flags(self):
+        # Any flag on --resume starts a copy with a new id; resume() must continue the same session.
+        rec = workers.start("checkout", "PROJ-1", "implement", str(self.data), "do it")
+        with mock.patch.object(workers, "_launch", return_value="abcd1234") as launch:
+            workers.resume("checkout", rec)
+        argv = launch.call_args[0][0]
+        self.assertEqual(argv[1:3], ["--bg", "--resume"])
+        self.assertEqual(len(argv), 5)
 
 
 if __name__ == "__main__":
