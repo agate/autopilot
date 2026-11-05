@@ -11,6 +11,8 @@ _WRITE = re.compile(r"(>>?|\btee\b|\bsed\s+(-[a-zA-Z]*\s+)*-i|\bperl\s+-[a-zA-Z]
                     r"\bln\b|\binstall\b|\bdd\b[^|;&]*\bof=|\bopen\([^)]*,\s*['\"][wax+]|\.write\(|write_text|"
                     r"\bchmod\b|\btouch\b)")
 _SPLIT = re.compile(r"\n|;|&&|\|\||\|")
+# Redirects that write nowhere: a descriptor copy (2>&1) or output thrown away (>/dev/null, &>/dev/null).
+_HARMLESS = re.compile(r"\d*>&\d+|&>>?\s*/dev/null|\d*>>?\s*/dev/null")
 REASON = ("autopilot data and code change only through `ap` commands, or through a talk session after the "
           "user says yes")
 
@@ -36,7 +38,7 @@ def decide(payload: dict, env) -> dict:
     for seg in _SPLIT.split(cmd):
         if not seg.strip() or _is_ap(seg):
             continue
-        if any(m in seg for m in marks) and _WRITE.search(seg):
+        if any(m in seg for m in marks) and _WRITE.search(_HARMLESS.sub(" ", seg)):
             return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                            "permissionDecisionReason": REASON}}
     return None

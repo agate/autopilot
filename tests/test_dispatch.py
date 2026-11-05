@@ -99,5 +99,62 @@ class DispatchTest(unittest.TestCase):
         self.assertNotIn("started", res[0])
 
 
+    def _agents(self, status, st):
+        self.agents.write_text(json.dumps([{"id": "abcd1234", "name": "autopilot · dispatch", "kind": "background",
+                                            "status": status, "state": st, "pid": os.getpid(), "startedAt": 1}]))
+
+    def _ending_hook(self):
+        hook = self.tmp / "hook"
+        hook.write_text('#!/bin/bash\necho \'{"begun_at": "x", "ended_at": "y", "started": 0}\' > "$AUTOPILOT_DATA/last_pass.json"\n')
+        hook.chmod(0o755)
+        os.environ["FAKE_BG_HOOK"] = str(hook)
+        self.addCleanup(os.environ.pop, "FAKE_BG_HOOK", None)
+
+    def test_pass_that_ended_is_finished_even_when_labelled_blocked(self):
+        # A finished pass whose last line asks the user for something reads state "blocked", status "idle".
+        repo = self.tmp / "repo"
+        repo.mkdir()
+        write_ap(self.data, "alpha", repo=str(repo))
+        self._agents("idle", "blocked")
+        self._ending_hook()
+        with mock.patch.object(dispatch, "_live_dispatcher", return_value=None):
+            res = dispatch.run(config.load_global(), ["alpha"], poll_s=0, timeout_s=60)
+        self.assertNotIn("blocked", res[0])
+        self.assertEqual(res[0]["ended_at"], "y")
+        self.assertIn("rm abcd1234", self.log.read_text())
+
+    def test_end_marker_wins_over_a_waiting_session(self):
+        repo = self.tmp / "repo"
+        repo.mkdir()
+        write_ap(self.data, "alpha", repo=str(repo))
+        self._agents("waiting", "blocked")
+        self._ending_hook()
+        with mock.patch.object(dispatch, "_live_dispatcher", return_value=None):
+            res = dispatch.run(config.load_global(), ["alpha"], poll_s=0, timeout_s=60)
+        self.assertNotIn("blocked", res[0])
+
+    def test_idle_blocked_label_without_end_is_not_a_prompt(self):
+        repo = self.tmp / "repo"
+        repo.mkdir()
+        write_ap(self.data, "alpha", repo=str(repo))
+        self._agents("idle", "blocked")
+        with mock.patch.object(dispatch, "_live_dispatcher", return_value=None):
+            res = dispatch.run(config.load_global(), ["alpha"], poll_s=0, timeout_s=60)
+        self.assertNotIn("blocked", res[0])
+        self.assertNotIn("timeout", res[0])
+        self.assertIn("rm abcd1234", self.log.read_text())
+
+    def test_waiting_session_is_blocked_and_kept(self):
+        # A real permission prompt reads status "waiting" (waitingFor "permission prompt"), state "blocked".
+        repo = self.tmp / "repo"
+        repo.mkdir()
+        write_ap(self.data, "alpha", repo=str(repo))
+        self._agents("waiting", "blocked")
+        with mock.patch.object(dispatch, "_live_dispatcher", return_value=None):
+            res = dispatch.run(config.load_global(), ["alpha"], poll_s=0, timeout_s=60)
+        self.assertTrue(res[0]["blocked"])
+        self.assertNotIn("rm abcd1234", self.log.read_text())
+
+
 if __name__ == "__main__":
     unittest.main()
