@@ -16,7 +16,7 @@ DENY_TOOL_PATTERNS = [re.compile(p, re.I) for p in (
     r"create[_-]?(confluence[_-]?)?pages?\b|createconfluencepage|(^|[_-])create-pages|update[_-]?(confluence[_-]?)?page",
 )]
 PROTECTED = ("RULES.md", "config.json", "settings*.json", "oneoff-*.json", "state.json", "page.json", "gate.json",
-             "tick.json", "lock", "state.lock")
+             "tick.json", "lock", "state.lock", "access.json")
 ONEOFF_TIMEOUT_S = 600
 BASH_DENY = ["Bash(gh pr comment:*)", "Bash(gh pr review:*)", "Bash(gh issue comment:*)", "Bash(gh issue create:*)",
              "Bash(gh pr edit --add-reviewer:*)"]
@@ -103,11 +103,32 @@ def parse_discovery(stream: str) -> list:
 tools_from_stream = parse_discovery
 
 
-def discover_tools(claude_bin: str, cwd: str) -> list:
+def servers_from_stream(stream: str) -> list:
+    for line in stream.splitlines():
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if d.get("type") == "system" and d.get("subtype") == "init":
+            return [s.get("name") for s in d.get("mcp_servers") or [] if isinstance(s, dict) and s.get("name")]
+    return []
+
+
+def discover(claude_bin: str, cwd: str) -> tuple:
+    """The tools and the MCP server names a session in `cwd` starts with."""
     out = subprocess.run([claude_bin, "-p", "Reply with the single word OK.", "--output-format", "stream-json",
                           "--verbose"], cwd=cwd, capture_output=True, text=True, timeout=180,
                          stdin=subprocess.DEVNULL)
-    return parse_discovery(out.stdout)
+    return parse_discovery(out.stdout), servers_from_stream(out.stdout)
+
+
+def discover_tools(claude_bin: str, cwd: str) -> list:
+    return discover(claude_bin, cwd)[0]
+
+
+def tool_prefix(server: str) -> str:
+    """The `mcp__<prefix>__` Claude Code gives a server's tools."""
+    return "mcp__" + re.sub(r"[^A-Za-z0-9_-]", "_", server) + "__"
 
 
 def _write(path, obj) -> None:
@@ -118,15 +139,20 @@ def _write(path, obj) -> None:
 def write_for(ap: str) -> list:
     """Discover the tools a session in this autopilot's repo has and write its permission floors."""
     gcfg, apcfg = config.load_global(), config.load_ap(ap)
-    tools = discover_tools(workers.claude_bin(gcfg), apcfg["repo"])
+    tools, found = discover(workers.claude_bin(gcfg), apcfg["repo"])
     _write(paths.ap_dir(ap) / "settings.json", generate(tools, role="worker"))
     disp = paths.data_root() / "settings-dispatcher.json"
     known = set()
     if disp.exists():
         cur = json.loads(disp.read_text())["permissions"]
         known = {t for t in cur["deny"] + cur.get("allow", []) if t.startswith("mcp__")}
-    _write(disp, generate(sorted(known | set(denied_tools(tools)) | set(status_tools(tools))), role="dispatcher",
-                          authority=shared_authority()))
+    floor = generate(sorted(known | set(denied_tools(tools)) | set(status_tools(tools))), role="dispatcher",
+                     authority=shared_authority())
+    _write(disp, floor)
+    # The servers whose tools the dispatcher floor allows are the ones a pass needs: their access is checked.
+    from autopilot import access
+    used = [s for s in found if any(a.startswith(tool_prefix(s)) for a in status_tools(tools))]
+    access.record_servers(ap, used)
     return denied_tools(tools)
 
 

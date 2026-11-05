@@ -147,6 +147,14 @@ autopilot's `config.json` to drop the first or the second; the floor is shared,
 so one autopilot turning a rule off turns it off for every pass. Run
 `ap perms write <ap>` after changing either.
 
+## System access
+
+A login or connection every pass needs (GitHub, the page's claude.ai login, the MCP servers the
+passes use, or a cloud login you declare) gets its own card at the top of the page when it breaks:
+what broke, since when, what it blocks and the exact fix. The gate checks one of them before each
+pass, never starts a login itself, and closes the card when a later check sees it working. See
+`references/access.md` to add a check of your own.
+
 ## Configuration
 
 `/autopilot config` lists every global setting with its default and marks the

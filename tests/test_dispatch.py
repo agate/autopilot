@@ -19,6 +19,7 @@ class DispatchTest(unittest.TestCase):
         self.data = self.td.__enter__()
         g = config.load_global()
         g["tools"]["claude"] = FAKE
+        g["tools"]["gh"] = str(ROOT / "tests" / "bin" / "fake-gh")  # the pass's access check
         config.save_global(g)
         self.tmp = Path(tempfile.mkdtemp())
         self.log = self.tmp / "log"
@@ -154,6 +155,30 @@ class DispatchTest(unittest.TestCase):
             res = dispatch.run(config.load_global(), ["alpha"], poll_s=0, timeout_s=60)
         self.assertTrue(res[0]["blocked"])
         self.assertNotIn("rm abcd1234", self.log.read_text())
+
+
+    def test_one_access_check_runs_before_the_pass_starts(self):
+        repo = self.tmp / "repo"
+        repo.mkdir()
+        write_ap(self.data, "alpha", repo=str(repo))
+        write_ap(self.data, "beta", repo=str(repo))
+        self._idle_dispatcher()
+        order = []
+        real = dispatch.workers._launch
+        with mock.patch.object(dispatch.access, "run_due", side_effect=lambda aps: order.append(("check", aps))), \
+                mock.patch.object(dispatch.workers, "_launch",
+                                  side_effect=lambda *a: order.append(("launch",)) or real(*a)):
+            dispatch.run(config.load_global(), ["alpha", "beta"], poll_s=0)
+        self.assertEqual(order, [("check", ["alpha", "beta"]), ("launch",)])
+
+    def test_a_failing_access_check_never_stops_the_pass(self):
+        repo = self.tmp / "repo"
+        repo.mkdir()
+        write_ap(self.data, "alpha", repo=str(repo))
+        self._idle_dispatcher()
+        with mock.patch.object(dispatch.access, "run_due", side_effect=RuntimeError("boom")):
+            res = dispatch.run(config.load_global(), ["alpha"], poll_s=0)
+        self.assertNotIn("error", res[0])
 
 
 if __name__ == "__main__":

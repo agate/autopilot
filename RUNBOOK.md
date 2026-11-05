@@ -39,6 +39,18 @@ a field missing a language.
 - Save only technical facts as `reference` memories. Never write `feedback` memories or rules; a new
   principle becomes a card proposing a rule.
 
+## System access
+
+A login or connection a pass needs (`gh`, the page host's login, an MCP server the passes use, a
+cloud login an autopilot declares in `health_checks`) is system access. The gate checks one of them
+before each pass and keeps one `system` card per broken check at the top of the page; a later check
+that sees it working closes the card. When a step in this pass fails for lack of access, run
+`ap access fail <ap> <check> '{"error": "<the error>", "fix": "<the exact command or step>"}'` once
+and go on without that step: it opens or updates that check's card, never an `ask` card. When you see
+that access working again in a pass, run `ap access ok <ap> <check>`. `<check>` is `gh`, `page`,
+`mcp:<server name>`, `check:<name>` (see `ap access list <ap>`), or `artifact` for the Artifact tools.
+Never start a login yourself. How to add a check: `references/access.md`.
+
 ## A decision card
 
 `ap decision add <ap> <file.json>` with: `kind` (`ask | gate | self`), `task` (optional: blocks that
@@ -163,8 +175,10 @@ in `body`, so the user sees what will run).
     - Send every `set` and `delete` in one `ArtifactData` batch to the page, each existing document
       pinned with `if_version`. A row's `data` can go in as `file_path` (a JSON file in your scratchpad).
     - Run `ap publish mark`.
-    - If the Artifact tools are unavailable, skip publishing, run `ap event <ap> publish_skipped '{}'`,
-      and list it under `access` in the next report. Never publish anywhere else.
+    - If the Artifact tools are unavailable, skip publishing, run `ap event <ap> publish_skipped '{}'`
+      and `ap access fail <ap> artifact '{...}'`, and list it under `access` in the next report. Never
+      publish anywhere else. After a publish that works while an `artifact` card is open, run
+      `ap access ok <ap> artifact`.
 
 11. **End.** Run `ap pass end --started <n> --free <free> --ready <ready_count> --allow <allow or none>`.
     Reply with one line saying what you did, and stop. That line asks nothing of the user and lists

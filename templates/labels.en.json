@@ -134,5 +134,20 @@
   "none_screenshots": "No screenshots: this task changed no UI.",
   "none_logs": "No logs: this task's evidence lists no log files.",
   "none_rounds": "This task had no PR review loop, so there are no review rounds yet.",
-  "none_links": "No links: this task has no ticket and no PR yet."
+  "none_links": "No links: this task has no ticket and no PR yet.",
+  "sys_title": "System access",
+  "sys_hint": "A login or connection every pass needs. Each card closes by itself once a later check sees it working.",
+  "sys_tag": "System",
+  "sys_since": "first failed {when}",
+  "sys_blocks": "Blocks",
+  "sys_fix": "Fix",
+  "sys_checked": "Last checked {when}. No answer needed: fix it, and the next check closes this card.",
+  "sys_restored": "Working again {when}",
+  "hero_systems": "{n} system access problem(s) above",
+  "access_broken": "{name} is not working",
+  "access_body": "Error: {error}",
+  "blocks_gh": "Pushing branches, opening and merging PRs, and the merge check.",
+  "blocks_page": "Publishing this page and reading your answers on it.",
+  "blocks_mcp": "Every step that uses the {name} tools, such as syncing and moving tickets.",
+  "blocks_check": "Every step that needs {name}."
 }

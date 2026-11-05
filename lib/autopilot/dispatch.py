@@ -4,7 +4,7 @@ import json
 import subprocess
 import time
 
-from autopilot import config, lock, ops, paths, sessions, workers
+from autopilot import access, config, lock, ops, paths, sessions, workers
 
 NAME = "autopilot · dispatch"
 
@@ -73,6 +73,10 @@ def run(gcfg: dict, active: list, poll_s: float = 10, timeout_s: float = None) -
                 results.append({"skipped": "dispatcher_running", "aps": aps})
                 continue
             ops.pass_begin()
+            try:
+                access.run_due(aps)  # one system-access check per pass; its card is on the page this pass
+            except Exception:  # noqa: BLE001 - a broken check must never stop the pass
+                pass
             argv, env = build_command(gcfg, repo, aps)
             short = workers._launch(argv, repo, env)
             began = time.monotonic()

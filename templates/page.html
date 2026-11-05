@@ -95,10 +95,14 @@ h1 { font-size: 16px; font-weight: 700; letter-spacing: -.01em }
 .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); padding: 16px; box-shadow: var(--shadow); display: grid; gap: 12px; min-width: 0 }
 .card > h2 { font-size: 15px }
 .dec.gate { border-left: 5px solid var(--gate) }
+.dec.system { border-left: 5px solid var(--crit) }
+.sys-line { margin-top: 6px }
+.sys-line b { font-weight: 600 }
 .card-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px }
 .tag { display: inline-flex; align-items: center; gap: 5px; padding: 1px 9px; border-radius: 999px; font-size: 12px; font-weight: 650 }
 .tag.ask { background: var(--accent-soft); color: var(--accent) }
 .tag.gate { background: var(--gate-soft); color: var(--gate) }
+.tag.system { background: var(--crit-soft); color: var(--crit) }
 .meta { color: var(--muted); font-size: 12px; overflow-wrap: anywhere }
 .age { margin-left: auto }
 .body { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink-2) }
@@ -296,6 +300,7 @@ details.fold > summary + * { margin-top: 8px }
     <div id="banners"></div>
     <p id="status-note" class="note" hidden></p>
     <section class="view" id="v-needs" data-view="needs" aria-labelledby="hero-t">
+      <div class="sec" id="systems"></div>
       <div class="hero" id="hero"></div>
       <div class="sec" id="asks"></div>
       <div class="sec" id="gates"></div>
@@ -413,6 +418,7 @@ function windowLabel(w) {
 const byCreated = (x, y) => (x.created_at || "").localeCompare(y.created_at || "");
 const replyFor = (key) => Object.values(S.replies).find((r) => r.decision === key);
 // An ask you already answered stops counting as "waiting" while the answer travels to the next pass.
+const openSystems = (ap) => Object.values(S.decisions).filter((d) => d.status === "open" && d.kind === "system" && (!ap || d.ap === ap));
 const openAsks = (ap) => Object.values(S.decisions).filter((d) => d.status === "open" && d.kind === "ask" && (!ap || d.ap === ap) && !replyFor(d.ap + ":" + d.id));
 
 /* ---------- header ---------- */
@@ -513,6 +519,20 @@ function askCard(d) {
   }
   return el("article", { class: "card dec " + (gate ? "gate" : "ask") }, kids);
 }
+// A login or connection every pass needs stopped working. It closes by itself when a later check passes.
+function systemCard(d) {
+  const a = d.access || {};
+  return el("article", { class: "card dec system" },
+    el("div", { class: "card-head" },
+      el("span", { class: "tag system" }, "⚠ " + L("sys_tag")),
+      el("span", { class: "meta mono" }, decMeta(d)),
+      el("span", { class: "meta age" }, L("sys_since", { when: rel(a.since) }))),
+    el("h3", {}, T(d.title)),
+    el("div", { class: "body" }, T(d.body)),
+    el("div", { class: "sys-line" }, el("b", {}, L("sys_blocks") + ": "), T(a.blocks)),
+    el("div", { class: "sys-line" }, el("b", {}, L("sys_fix") + ": "), el("code", { class: "mono" }, a.fix || "–")),
+    el("div", { class: "note" }, L("sys_checked", { when: rel(a.last_checked) })));
+}
 function selfRow(d) {
   const key = d.ap + ":" + d.id, rep = replyFor(key), undone = d.status === "undone";
   return el("div", { class: "row" },
@@ -528,16 +548,21 @@ function answeredRow(d) {
   const opt = (d.options || []).find((o) => o.id === d.answer);
   return el("div", { class: "row" },
     el("div", {}, el("div", { class: "row-title" }, T(d.title)),
-      el("div", { class: "row-sub" }, d.status === "undone" ? L("undone") : L("answer_was", { answer: opt ? T(opt.label) : (d.answer || "") }))),
+      el("div", { class: "row-sub" }, d.status === "undone" ? L("undone") : d.status === "resolved" ? L("sys_restored", { when: rel(d.answered_at) })
+        : L("answer_was", { answer: opt ? T(opt.label) : (d.answer || "") }))),
     el("div", { class: "row-side" }, el("span", { class: "meta" }, (filterAp ? "" : d.ap + " · ") + rel(d.answered_at))));
 }
 let showArchive = false;
 function renderNeeds() {
   const ds = values("decisions");
   const open = (k) => ds.filter((d) => d.status === "open" && d.kind === k).sort(byCreated);
-  const asks = open("ask"), gates = open("gate");
+  const asks = open("ask"), gates = open("gate"), systems = open("system");
   const pendingN = asks.filter((d) => replyFor(d.ap + ":" + d.id)).length, n = asks.length - pendingN;
-  const subs = [gates.length ? L("hero_gates", { n: gates.length }) : null, pendingN ? L("hero_pending", { n: pendingN }) : null].filter(Boolean);
+  const subs = [systems.length ? L("hero_systems", { n: systems.length }) : null,
+    gates.length ? L("hero_gates", { n: gates.length }) : null, pendingN ? L("hero_pending", { n: pendingN }) : null].filter(Boolean);
+  fill($("systems"), ...(systems.length ? [
+    el("div", { class: "sec-h" }, el("h2", {}, L("sys_title")), el("span", { class: "hint" }, L("sys_hint"))),
+    ...systems.map(systemCard)] : []));
   fill($("hero"),
     el("div", { class: "hero-n" + (n ? "" : " zero"), "aria-hidden": n ? null : "true" }, n ? String(n) : "✓"),
     el("div", {},
@@ -773,7 +798,7 @@ function renderStatus() {
 
 /* ---------- tabs and render ---------- */
 function renderTabbar() {
-  const n = openAsks(filterAp).length;
+  const n = openAsks(filterAp).length + openSystems(filterAp).length;
   const st = runState((S.meta.budget || {}).allowance || {}, filterAp ? S.autopilots[filterAp] : null);
   const defs = [["needs", "inbox", "tab_needs"], ["tasks", "list", "tab_tickets"], ["status", "pulse", "tab_status"]];
   fill($("tabbar"), ...defs.map(([v, ic, lk]) => el("button", { type: "button", role: "tab", "aria-selected": String(tab === v),
