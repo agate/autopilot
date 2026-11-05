@@ -14,6 +14,9 @@ DENY_TOOL_PATTERNS = [re.compile(p, re.I) for p in (
     r"create[_-]?(jira[_-]?)?issue", r"add[_-]?(issue[_-]?)?comment|addcomment|create[_-]?comment|post[_-]?comment",
     r"(^|[_-])reply", r"send[_-]?(message|email|mail)|post[_-]?message", r"schedule[_-]?message", r"canvas",
     r"create[_-]?(confluence[_-]?)?pages?\b|createconfluencepage|(^|[_-])create-pages|update[_-]?(confluence[_-]?)?page",
+    r"(^|[_-])(add|edit|create|post)[a-z_-]*comment", r"(create|update)[_-]?confluence[_-]?content",
+    # Generic tools that send any API request: the write and delete ones can post, edit or remove anything.
+    r"^execute[_-]?(write|destructive)$",
 )]
 PROTECTED = ("RULES.md", "config.json", "settings*.json", "oneoff-*.json", "state.json", "page.json", "gate.json",
              "tick.json", "lock", "state.lock", "access.json")
