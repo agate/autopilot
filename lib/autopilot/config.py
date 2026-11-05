@@ -66,6 +66,8 @@ DEFAULT_AP: dict = {
     "report_times": None,
     "watches": [],
     "extra_hosts": [],
+    "mcp_servers": [],
+    "health_checks": [],
     "merge_method": "squash",
     "stopped": False,
 }

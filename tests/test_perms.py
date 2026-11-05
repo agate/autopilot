@@ -86,13 +86,32 @@ class PermsTest(unittest.TestCase):
         with TempData() as data:
             write_ap(data, "alpha")
             write_ap(data, "beta", authority={"source_status": False})
-            with mock.patch.object(perms, "discover_tools", return_value=["mcp__X__transitionJiraIssue"]):
+            with mock.patch.object(perms, "discover", return_value=(["mcp__X__transitionJiraIssue"], ["X"])):
                 perms.write_for("alpha")
             disp = json.loads((data / "settings-dispatcher.json").read_text())["permissions"]
             self.assertNotIn("mcp__X__transitionJiraIssue", disp["allow"])
             self.assertIn("Bash(gh pr ready:*)", disp["allow"])
             worker = json.loads((data / "alpha" / "settings.json").read_text())["permissions"]
             self.assertNotIn("allow", worker)
+
+
+    def test_write_for_records_the_servers_the_passes_use(self):
+        from autopilot import access
+        with TempData() as data:
+            write_ap(data, "alpha")
+            tools = ["mcp__claude_ai_Tracker__transitionJiraIssue", "mcp__chat__slack_send_message", "Read"]
+            with mock.patch.object(perms, "discover", return_value=(tools, ["claude.ai Tracker", "chat"])):
+                perms.write_for("alpha")
+            self.assertEqual(access.servers("alpha"), ["claude.ai Tracker"])
+
+    def test_servers_from_the_init_event(self):
+        line = json.dumps({"type": "system", "subtype": "init", "tools": ["Read"],
+                           "mcp_servers": [{"name": "X", "status": "connected"}, {"name": "Y", "status": "needs-auth"}]})
+        self.assertEqual(perms.servers_from_stream(line), ["X", "Y"])
+
+    def test_floor_protects_the_access_record(self):
+        deny = perms.generate([])["permissions"]["deny"]
+        self.assertTrue(any(d.endswith("/**/access.json)") for d in deny))
 
 
 if __name__ == "__main__":

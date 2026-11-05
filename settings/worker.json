@@ -21,6 +21,8 @@
       "Edit(~/.claude/autopilot-data/lock)",
       "Edit(~/.claude/autopilot-data/**/state.lock)",
       "Edit(~/.claude/autopilot-data/state.lock)",
+      "Edit(~/.claude/autopilot-data/**/access.json)",
+      "Edit(~/.claude/autopilot-data/access.json)",
       "Edit(~/.claude/skills/autopilot/**)",
       "Bash(gh pr comment:*)",
       "Bash(gh pr review:*)",

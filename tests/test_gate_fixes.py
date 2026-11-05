@@ -101,6 +101,7 @@ class DispatchGuardTest(Base):
         super().setUp()
         g = config.load_global()
         g["tools"]["claude"] = FAKE
+        g["tools"]["gh"] = str(ROOT / "tests" / "bin" / "fake-gh")  # the pass's access check
         config.save_global(g)
         self.log = self.tmp / "log"
         self.agents = self.tmp / "agents.json"

@@ -141,5 +141,16 @@ class DocsTest(unittest.TestCase):
             self.assertIn(word, rd)
 
 
+    def test_access_problems_go_on_system_cards(self):
+        rb = (ROOT / "RUNBOOK.md").read_text()
+        self.assertIn("ap access fail <ap> <check>", rb)
+        self.assertIn("ap access ok <ap> <check>", rb)
+        self.assertIn("never an `ask` card", rb)
+        cfg = (ROOT / "references" / "access.md").read_text()
+        for word in ("health_checks", "mcp_servers", "ap access check <ap>", "exits 0"):
+            self.assertIn(word, cfg)
+        self.assertIn("System access", (ROOT / "README.md").read_text())
+
+
 if __name__ == "__main__":
     unittest.main()

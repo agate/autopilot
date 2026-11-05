@@ -11,7 +11,7 @@ _MODULES = [
     "autopilot.budget", "autopilot.nextwork", "autopilot.workers", "autopilot.ops",
     "autopilot.gate", "autopilot.dispatch", "autopilot.mergecheck", "autopilot.snapshot",
     "autopilot.guard", "autopilot.perms", "autopilot.publish", "autopilot.checkpkg",
-    "autopilot.doctor", "autopilot.status", "autopilot.install",
+    "autopilot.doctor", "autopilot.status", "autopilot.install", "autopilot.access",
 ]
 
 

@@ -4,6 +4,8 @@ printf '%s\n' "$*" >> "${FAKE_CLAUDE_LOG:-/dev/null}"
 case "$1" in
   agents) cat "${FAKE_AGENTS_JSON:-/dev/null}" 2>/dev/null || echo '[]' ;;
   stop|rm) exit 0 ;;
+  auth) echo '{"loggedIn": true, "authMethod": "claude.ai"}' ;;
+  mcp) printf '%s:\n  Status: \xe2\x9c\x94 Connected\n' "$3" ;;
   --bg)
     name=""
     prev=""

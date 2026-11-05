@@ -124,5 +124,20 @@ console.log(JSON.stringify(got));
         self.assertNotIn(") : null,\n    (ev.logs", body)
 
 
+    def test_system_access_cards_sit_above_everything_else(self):
+        p = Ids()
+        p.feed(PAGE)
+        self.assertIn("systems", p.ids)
+        self.assertLess(PAGE.index('id="systems"'), PAGE.index('id="hero"'))
+        body = PAGE[PAGE.index("function systemCard"):PAGE.index("function selfRow")]
+        for key in ("sys_tag", "sys_since", "sys_blocks", "sys_fix", "sys_checked"):
+            self.assertIn(f'L("{key}"', body)
+            self.assertIn(key, LABELS)
+        self.assertIn('open("system")', PAGE)
+        for key in ("sys_title", "sys_hint", "hero_systems", "access_broken", "access_body", "sys_restored",
+                    "blocks_gh", "blocks_page", "blocks_mcp", "blocks_check"):
+            self.assertIn(key, LABELS)
+
+
 if __name__ == "__main__":
     unittest.main()
