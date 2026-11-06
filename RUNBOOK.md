@@ -127,22 +127,28 @@ in `body`, so the user sees what will run).
        fixable; a human's thread you may not answer becomes an `ask` card with a drafted reply.
 
 6. **Replies.** Read the page's `replies` collection with `ArtifactData` (`ap publish url` prints the
-   page). Each reply has `decision` (`<ap>:<D-id>`), `option` or `text`, and `by`. Record the answer
-   first, then act on it:
-   - `option: "undo"` on a `self` card: `ap decision resolve <ap> <D-id> --answer undo --status undone`.
-   - Otherwise: `ap decision resolve <ap> <D-id> --answer "<option id or text>"`.
-   - It prints `resolved`: if the card has an `action`, run `ap oneoff <ap> <D-id>` (it runs only when
-     the answer is the action's `option`, and only until it succeeds once). Exit 1 prints the error:
-     record it as an `access_failure` and run `ap oneoff` again on the next pass. Then act on the
-     answer (for undo: reverse what the card did), or leave it for the next pass and say so.
+   page). Each reply has `decision` (`<ap>:<D-id>`), `option` or `text`, and `by`. First record every
+   answer, then tell the page, then act on them:
+   - `option: "undo"` on a `self` card: `ap decision resolve <ap> <D-id> --answer undo --status undone --handling`.
+   - Otherwise: `ap decision resolve <ap> <D-id> --answer "<option id or text>" --handling`.
+   - It prints `resolved`: the answer is recorded and the page will show it as received, being handled.
    - It prints `unchanged`: the same answer was recorded before (a pass stopped before deleting this
      reply). Do only what the answer asks that is not done yet; never repeat a step that already happened.
    - Exit 3: the card already has a different answer (two devices, or the page and a talk session).
      Change nothing. Add an `ask` card with title `{"key": "two_answers", "args": {"id": "<D-id>"}}`,
      both answers as options and the original card's links. When that card is answered, run
-     `ap decision resolve <ap> <D-id> --answer "<the chosen one>" --replace` and act on it.
-   - Delete each handled reply document, by its id (never the whole collection: a reply that arrived
-     during this pass waits for the next one).
+     `ap decision resolve <ap> <D-id> --answer "<the chosen one>" --replace --handling` and act on it.
+   - **Tell the page now**, before acting on anything: run `ap publish diff --only decisions`, send its
+     `set` and `delete` rows in one `ArtifactData` batch (read each document's `version` first and pin
+     it with `if_version`, as in step 10; no assets, no reports), then `ap publish mark --only decisions`.
+   - Now act on each answer. If the card has an `action`, run `ap oneoff <ap> <D-id>` (it runs only
+     when the answer is the action's `option`, and only until it succeeds once). Exit 1 prints the
+     error: record it as an `access_failure` and run `ap oneoff` again on the next pass. Then act on the
+     answer (for undo: reverse what the card did), or leave it for the next pass and say so.
+   - When you have acted on an answer (or left it for the next pass), run
+     `ap decision handled <ap> <D-id>`. The step 10 publish sends that change. Then delete that reply
+     document, by its id (never the whole collection: a reply that arrived during this pass waits for
+     the next one).
 
 7. **Sync the source.** Follow `presets/<preset>.md` for each autopilot. It ends in `ap tasks sync`.
 
@@ -168,7 +174,13 @@ in `body`, so the user sees what will run).
      denials) with the error and the fix command; mark one that used to work.
    Send one `PushNotification` that leads with how many things wait on the user.
 
-10. **Tidy and publish.** Run `ap archive <ap>` for each autopilot, then:
+10. **Tidy and publish.** First read the page's `replies` again. Each new answer (it arrived during
+    this pass) gets only this: `ap decision resolve ... --handling` as in step 6, then
+    `ap publish diff --only decisions`, its rows in one `ArtifactData` batch, and
+    `ap publish mark --only decisions`. Do not act on it, do not run `ap decision handled`, and leave
+    the reply where it is: the next pass reads it again (`unchanged`) and acts. Then run
+    `ap tick <ap>`, so that pass starts right after this one ends.
+    Then run `ap archive <ap>` for each autopilot, and:
     - Run `ap publish diff`. For each entry in `assets`, copy `local_path` into your scratchpad as
       `upload_name` and upload that copy with the Artifact tool (`url` = the page, `asset: true`;
       `file_paths` takes up to 25 images in one call). Then run

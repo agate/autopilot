@@ -305,6 +305,7 @@ details.fold > summary + * { margin-top: 8px }
       <div class="sec" id="asks"></div>
       <div class="sec" id="gates"></div>
       <div class="sec" id="selfs"></div>
+      <div class="sec" id="handling"></div>
       <div class="sec" id="answered"></div>
     </section>
     <section class="view" id="v-tasks" data-view="tasks"></section>
@@ -552,6 +553,13 @@ function answeredRow(d) {
         : L("answer_was", { answer: opt ? T(opt.label) : (d.answer || "") }))),
     el("div", { class: "row-side" }, el("span", { class: "meta" }, (filterAp ? "" : d.ap + " · ") + rel(d.answered_at))));
 }
+function handlingRow(d) {
+  const opt = (d.options || []).find((o) => o.id === d.answer);
+  return el("div", { class: "row" },
+    el("div", {}, el("div", { class: "row-title" }, T(d.title)),
+      el("div", { class: "row-sub" }, L("answer_was", { answer: opt ? T(opt.label) : (d.answer || "") }))),
+    el("div", { class: "row-side" }, el("span", { class: "note ok" }, "✓ " + L("handling"))));
+}
 let showArchive = false;
 function renderNeeds() {
   const ds = values("decisions");
@@ -576,7 +584,13 @@ function renderNeeds() {
     el("div", { class: "sec-h" }, el("h2", {}, L("dec_self")), el("span", { class: "hint" }, L("self_hint"))),
     el("div", { class: "list" }, selfs.map(selfRow))] : []));
 
-  const answered = ds.filter((d) => d.status !== "open" && d.kind !== "self");
+  // An answer the dispatcher read but has not finished acting on: not a question any more, not yet done.
+  const handling = ds.filter((d) => d.status !== "open" && d.handling).sort((x, y) => byCreated(y, x));
+  fill($("handling"), ...(handling.length ? [
+    el("div", { class: "sec-h" }, el("h2", {}, L("handling")), el("span", { class: "hint" }, L("handling_hint"))),
+    el("div", { class: "list" }, handling.map(handlingRow))] : []));
+
+  const answered = ds.filter((d) => d.status !== "open" && d.kind !== "self" && !d.handling);
   const arch = values("archive");
   const archBox = el("div", { class: "list" }, arch.map(answeredRow));
   archBox.hidden = !showArchive;

@@ -92,9 +92,11 @@ class AnswerConflict(Exception):
     """The decision already has a different answer; only an explicit replace changes it."""
 
 
-def decision_resolve(ap: str, did: str, answer: str, status: str = "answered", replace: bool = False) -> str:
+def decision_resolve(ap: str, did: str, answer: str, status: str = "answered", replace: bool = False,
+                     handling: bool = False) -> str:
     """Record an answer once. "unchanged" when the same answer is already recorded (a reply seen twice),
-    AnswerConflict when a different one is, unless `replace` (the user asked to change it)."""
+    AnswerConflict when a different one is, unless `replace` (the user asked to change it).
+    With `handling` the page shows the answer as received and being handled until `decision_handled`."""
     with state.mutate(ap) as st:
         d = next((d for d in st["decisions"] if d["id"] == did), None)
         if d is None:
@@ -104,8 +106,24 @@ def decision_resolve(ap: str, did: str, answer: str, status: str = "answered", r
                 return "unchanged"
             raise AnswerConflict(f"{ap}: {did} already has the answer {d.get('answer')!r} ({d['status']})")
         d.update(status=status, answer=answer, answered_at=events.now_iso())
+        if handling:
+            d["handling"] = True
+        else:
+            d.pop("handling", None)
     events.append(ap, "decision_resolved", {"id": did, "status": status, "answer": answer})
     return "resolved"
+
+
+def decision_handled(ap: str, did: str) -> str:
+    """The pass finished acting on an answer: the page stops showing it as being handled."""
+    with state.mutate(ap) as st:
+        d = next((d for d in st["decisions"] if d["id"] == did), None)
+        if d is None or d["status"] == "open":
+            raise state.StateError(f"{ap}: no answered decision {did}")
+        if not d.pop("handling", False):
+            return "unchanged"
+    events.append(ap, "decision_handled", {"id": did})
+    return "handled"
 
 
 def _archive_lines(ap: str) -> list:
@@ -214,12 +232,14 @@ def _decision(args):
     elif len(args) >= 3 and args[0] == "resolve":
         try:
             print(decision_resolve(args[1], args[2], _flag(args, "--answer", ""), _flag(args, "--status", "answered"),
-                                   replace="--replace" in args))
+                                   replace="--replace" in args, handling="--handling" in args))
         except AnswerConflict as e:
             print(f"conflict: {e}", file=sys.stderr)
             return 3
+    elif len(args) == 3 and args[0] == "handled":
+        print(decision_handled(args[1], args[2]))
     else:
-        print("usage: ap decision add <ap> <file> | resolve <ap> <id> --answer X [--status answered|undone] [--replace]",
+        print("usage: ap decision add <ap> <file> | resolve <ap> <id> --answer X [--status answered|undone] [--replace] [--handling] | handled <ap> <id>",
               file=sys.stderr)
         return 2
     return 0

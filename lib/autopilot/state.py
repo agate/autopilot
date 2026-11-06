@@ -16,7 +16,7 @@ WORKER_REQ = {"task", "role", "session_name", "session_id", "short_id", "ports",
 WORKER_OPT = {"cwd"}
 ROLES = {"implement", "review", "pr"}
 DEC_REQ = {"id", "kind", "title", "body", "options", "links", "status", "created_at"}
-DEC_OPT = {"task", "answer", "action", "answered_at", "access"}
+DEC_OPT = {"task", "answer", "action", "answered_at", "access", "handling"}
 DEC_KINDS = {"ask", "gate", "self", "system"}
 DEC_STATUS = {"open", "answered", "undone", "resolved"}
 

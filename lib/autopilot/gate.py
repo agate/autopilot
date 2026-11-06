@@ -288,6 +288,7 @@ def run(now: datetime = None, dispatch_fn=None) -> int:
         if dispatch_fn is None:
             from autopilot import dispatch
             dispatch_fn = dispatch.run
+        began_at = events.now_iso()
         results = dispatch_fn(gcfg, todo)
         begun = [e for e in (_epoch(r.get("begun_at")) for r in results) if e]
         if _assess(results, todo, gcfg, now):
@@ -298,10 +299,12 @@ def run(now: datetime = None, dispatch_fn=None) -> int:
         for n in todo:
             last[n] = now.isoformat()
         fps, broken = _load_all(gcfg, now, hide_after=min(begun) if begun else None)
-        try:
-            tick_file.unlink()
-        except FileNotFoundError:
-            pass
+        # A note queued while the pass ran (a late answer) is for the next pass, so it stays.
+        if (_read_json(tick_file).get("at") or "") <= began_at:
+            try:
+                tick_file.unlink()
+            except FileNotFoundError:
+                pass
     gs.update(fps=fps, broken=broken, last_pass_at=last, last_run_at=now.isoformat())
     _write_gate(gs)
     return 0

@@ -48,6 +48,15 @@ class PageTest(unittest.TestCase):
                 self.assertIn(prefix + n, LABELS)
         self.assertEqual(LABELS["lang_short"], "EN")
 
+    def test_an_answer_being_handled_sits_outside_the_lists_that_need_you(self):
+        p = Ids()
+        p.feed(PAGE)
+        self.assertIn("handling", p.ids)
+        self.assertIn("handling", LABELS)
+        # Open asks, gates and systems only count open decisions; a handled one never shows in them or in "answered".
+        self.assertIn('d.status !== "open" && d.kind !== "self" && !d.handling', PAGE)
+        self.assertIn("d.handling", PAGE)
+
     def test_english_by_default_and_the_choice_is_remembered(self):
         self.assertIn('let lang = "en"', PAGE)
         self.assertIn('localStorage.getItem("autopilot-lang")', PAGE)

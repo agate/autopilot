@@ -48,6 +48,63 @@ class PublishTest(unittest.TestCase):
         self.assertIn(("tasks", "checkout:PROJ-123"), sets)
         self.assertNotIn(("tasks", "checkout:PROJ-124"), sets)
 
+    def test_only_limits_the_diff_to_the_named_collections(self):
+        self._mark()
+        ops.task_set("checkout", "PROJ-123", {"status": "in_progress"})
+        ops.decision_add("checkout", {"kind": "ask", "title": {"en": "t"}, "body": {"en": "b"}, "options": [],
+                                      "links": []})
+        cur = publish.collect(["checkout"])
+        d = publish.diff(publish.published(), cur, only=["decisions"])
+        self.assertEqual([(s["collection"], s["doc_id"]) for s in d["set"]], [("decisions", "checkout:D1")])
+        self.assertEqual((d["delete"], d["assets"]), ([], []))
+
+    def test_only_never_lists_assets(self):
+        run = self.data / "checkout" / "runs" / "PROJ-123"
+        (run / "media").mkdir(parents=True)
+        (run / "media" / "after.png").write_bytes(b"png")
+        (run / "evidence.json").write_text(json.dumps({"verdict": {"en": "ok"}, "screenshots": [
+            {"path": "media/after.png", "caption": {"en": "after"}}]}))
+        cur = publish.collect(["checkout"])
+        self.assertEqual(publish.diff({}, cur, only=["decisions"])["assets"], [])
+        self.assertEqual(len(publish.diff({}, cur)["assets"]), 1)
+
+    def test_partial_mark_keeps_the_rest_for_the_full_diff(self):
+        self._mark()
+        ops.task_set("checkout", "PROJ-123", {"status": "in_progress"})
+        ops.decision_add("checkout", {"kind": "ask", "title": {"en": "t"}, "body": {"en": "b"}, "options": [],
+                                      "links": []})
+        publish.mark(publish.collect(["checkout"]), {}, only=["decisions"])
+        d = publish.diff(publish.published(), publish.collect(["checkout"]))
+        left = [(s["collection"], s["doc_id"]) for s in d["set"]]
+        self.assertIn(("tasks", "checkout:PROJ-123"), left)
+        self.assertNotIn(("decisions", "checkout:D1"), left)
+        self.assertEqual(publish.diff(publish.published(), publish.collect(["checkout"]), only=["decisions"])["set"], [])
+
+    def test_partial_mark_records_a_removed_decision(self):
+        ops.decision_add("checkout", {"kind": "ask", "title": {"en": "t"}, "body": {"en": "b"}, "options": [],
+                                      "links": []})
+        self._mark()
+        st = json.loads((self.data / "checkout" / "state.json").read_text())
+        st["decisions"] = []
+        (self.data / "checkout" / "state.json").write_text(json.dumps(st))
+        cur = publish.collect(["checkout"])
+        self.assertEqual(publish.diff(publish.published(), cur, only=["decisions"])["delete"],
+                         [{"collection": "decisions", "doc_id": "checkout:D1"}])
+        publish.mark(cur, {}, only=["decisions"])
+        self.assertNotIn("checkout:D1", publish.published()["decisions"])
+
+    def test_cli_only_flag(self):
+        self._mark()
+        ops.task_set("checkout", "PROJ-123", {"status": "in_progress"})
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.assertEqual(cli.main(["publish", "diff", "--only", "decisions"]), 0)
+            self.assertEqual(json.loads(buf.getvalue())["set"], [])
+            self.assertEqual(cli.main(["publish", "diff", "--only", "bogus"]), 2)
+            self.assertEqual(cli.main(["publish", "mark", "--only", "decisions"]), 0)
+        rest = publish.diff(publish.published(), publish.collect(["checkout"]))["set"]
+        self.assertIn(("tasks", "checkout:PROJ-123"), [(s["collection"], s["doc_id"]) for s in rest])
+
     def test_removed_doc_deleted(self):
         self._mark()
         st = json.loads((self.data / "checkout" / "state.json").read_text())

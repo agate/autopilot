@@ -71,6 +71,41 @@ class OpsTest(unittest.TestCase):
         d = state.load("checkout")["decisions"][0]
         self.assertEqual((d["status"], d["answer"]), ("answered", "a"))
 
+    def test_resolve_can_leave_the_decision_being_handled_until_marked_handled(self):
+        ops.decision_add("checkout", dec())
+        ops.decision_resolve("checkout", "D1", "a", handling=True)
+        d = state.load("checkout")["decisions"][0]
+        self.assertEqual((d["status"], d["answer"], d["handling"]), ("answered", "a", True))
+        self.assertEqual(ops.decision_handled("checkout", "D1"), "handled")
+        d = state.load("checkout")["decisions"][0]
+        self.assertNotIn("handling", d)
+        self.assertEqual((d["status"], d["answer"]), ("answered", "a"))
+        self.assertEqual(ops.decision_handled("checkout", "D1"), "unchanged")
+
+    def test_handling_survives_a_repeated_resolve_and_a_plain_resolve_has_none(self):
+        ops.decision_add("checkout", dec())
+        ops.decision_add("checkout", dec())
+        ops.decision_resolve("checkout", "D1", "a", handling=True)
+        self.assertEqual(ops.decision_resolve("checkout", "D1", "a", handling=True), "unchanged")
+        self.assertTrue(state.load("checkout")["decisions"][0]["handling"])
+        ops.decision_resolve("checkout", "D2", "a")
+        self.assertNotIn("handling", state.load("checkout")["decisions"][1])
+
+    def test_handled_refuses_an_open_or_unknown_decision(self):
+        ops.decision_add("checkout", dec())
+        with self.assertRaises(state.StateError):
+            ops.decision_handled("checkout", "D1")
+        with self.assertRaises(state.StateError):
+            ops.decision_handled("checkout", "D9")
+
+    def test_handling_flag_and_handled_command(self):
+        ops.decision_add("checkout", dec())
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(["decision", "resolve", "checkout", "D1", "--answer", "a", "--handling"]), 0)
+            self.assertTrue(state.load("checkout")["decisions"][0]["handling"])
+            self.assertEqual(cli.main(["decision", "handled", "checkout", "D1"]), 0)
+        self.assertNotIn("handling", state.load("checkout")["decisions"][0])
+
     def test_same_answer_twice_is_unchanged(self):
         # A pass that stopped after resolving but before deleting the reply sees it again.
         ops.decision_add("checkout", dec())
