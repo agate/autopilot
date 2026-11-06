@@ -66,6 +66,13 @@ def deny_rules(data_root: str, package_root: str) -> list:
     return out + BASH_DENY
 
 
+def park_hook() -> dict:
+    """Workers park themselves at the usage line. A hook, not a request: it runs before every tool call, in the
+    worker and in its subagents, and denies all but the one `ap worker park` command while usage is high."""
+    return {"PreToolUse": [{"matcher": "*", "hooks": [
+        {"type": "command", "command": f"\"{paths.package_root() / 'bin' / 'ap'}\" hook-park", "timeout": 5}]}]}
+
+
 def generate(tools: list, exclude: set = frozenset(), role: str = "worker", authority: dict = None) -> dict:
     deny = [t for t in denied_tools(tools) if t not in exclude]
     deny += deny_rules("/" + str(paths.data_root()), "/" + str(paths.package_root()))
@@ -73,8 +80,11 @@ def generate(tools: list, exclude: set = frozenset(), role: str = "worker", auth
     allow = [a for a in allow_rules(tools, authority or {}, role) if a not in deny]
     if allow:
         perms["allow"] = allow
-    return {"permissions": perms,
-            "env": {"AUTOPILOT_ROLE": role, "AUTOPILOT_DATA": str(paths.data_root())}}
+    out = {"permissions": perms,
+           "env": {"AUTOPILOT_ROLE": role, "AUTOPILOT_DATA": str(paths.data_root())}}
+    if role == "worker":
+        out["hooks"] = park_hook()
+    return out
 
 
 def shared_authority() -> dict:

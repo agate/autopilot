@@ -9,7 +9,7 @@ from autopilot import paths
 
 DEFAULT_GLOBAL: dict = {
     "max_workers": 5,
-    "budget": {"window_pct": 85, "stale_min": 60, "credit_pct": 90, "resume_after_min": 5},
+    "budget": {"window_pct": 85, "stale_min": 60, "credit_pct": 90, "park_pct": 90, "resume_after_min": 5},
     "forced_pass_min": 30,
     # The gate wakes every minute: its own checks use no tokens, and the reply check (Haiku, ~$0.0008 a run at
     # list price) answers within a minute outside the quiet hours. At night the forced pass picks answers up.
@@ -34,6 +34,7 @@ DESCRIBE: dict = {
     "budget.window_pct": "Start no new work once a usage window reaches this percent.",
     "budget.stale_min": "Usage numbers older than this many minutes count as unknown: one new worker at a time.",
     "budget.credit_pct": "Start no new work once extra credits reach this percent of the monthly limit.",
+    "budget.park_pct": "Running workers stop and wait once any usage window reaches this percent, and continue after it resets. Unknown or stale numbers never park.",
     "budget.resume_after_min": "Minutes to wait after a usage window resets before work starts again.",
     "forced_pass_min": "Run a dispatcher pass at least this often, in minutes, even when nothing changed.",
     "gate_interval_s": "How often the background gate wakes, in seconds. Takes effect after `ap install`.",

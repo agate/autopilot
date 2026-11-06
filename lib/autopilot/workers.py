@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timezone
 
-from autopilot import cli, config, events, paths, sessions, state
+from autopilot import budget, cli, config, events, paths, sessions, state
 
 AGENTS = {"implement": "autopilot:implementer", "review": "autopilot:reviewer"}
 _BG = re.compile(r"backgrounded · (\w+)")  # a resumed copy prints no name after the id
@@ -81,10 +83,15 @@ def start(ap: str, task: str, role: str, cwd: str, prompt: str, needs: list = No
     """Start a worker. With resume, continue the task's saved session for this role (a fix round)."""
     gcfg, apcfg = config.load_global(), config.load_ap(ap)
     port_range = ports(gcfg["port_base"], next_slot(all_workers(), gcfg["port_base"]))
-    prompt = (f"{prompt}\n\nYour port range: {port_range[0]}-{port_range[1]}. "
+    old = next((w for w in state.load(ap)["workers"] if w["task"] == task and w["role"] == role), None)
+    parked = old if resume and old and old.get("parked") else None
+    if parked and parked.get("ports"):
+        port_range = parked["ports"]  # a parked worker keeps its slot: its ports and servers stay its own
+    prompt = (f"{prompt}\n\nYour autopilot: {ap}. Your task: {task}. Your role: {role}. "
+              f"Your port range: {port_range[0]}-{port_range[1]}. "
               f"The autopilot CLI: {paths.package_root() / 'bin' / 'ap'}.")
     argv, env = build_start(gcfg, apcfg, ap, task, role, prompt)
-    sid = _saved_session(ap, task, role) if resume else ""
+    sid = (_saved_session(ap, task, role) or (parked or {}).get("session_id") or "") if resume else ""
     if resume and not sid:
         raise RuntimeError(f"{ap} {task}: no saved {role} session to resume")
     if sid:
@@ -92,6 +99,9 @@ def start(ap: str, task: str, role: str, cwd: str, prompt: str, needs: list = No
         argv = ([argv[0], "--bg", "--resume", sid, "-n", sessions.name_for(ap, task, role)]
                 + argv[argv.index("--permission-mode"):argv.index("--settings") + 2])
         argv.append(prompt if role in AGENTS else "/autopilot:pr-loop " + prompt)
+    if parked:
+        # The parked session sits idle; the copy that continues takes its place.
+        subprocess.run([claude_bin(gcfg), "stop", parked["short_id"]], capture_output=True, timeout=60)
     short = _launch(argv, cwd, env)
     name = sessions.name_for(ap, task, role)
     listed = sessions.list_all(claude_bin(gcfg))
@@ -102,6 +112,12 @@ def start(ap: str, task: str, role: str, cwd: str, prompt: str, needs: list = No
            "needs": list(needs or []), "started_at": events.now_iso(), "resumes": 0, "cwd": str(cwd)}
     with state.mutate(ap) as st:
         st["workers"] = [w for w in st["workers"] if not (w["task"] == task and w["role"] == role)] + [rec]
+    if parked:
+        try:
+            (paths.ap_dir(ap) / "runs" / task / "parked.json").unlink()
+        except FileNotFoundError:
+            pass
+        events.append(ap, "worker_resumed", {"task": task, "role": role, "short_id": short, "from": "parked"})
     events.append(ap, "worker_started", {"task": task, "role": role, "short_id": short})
     return rec
 
@@ -121,6 +137,28 @@ def resume(ap: str, worker: dict) -> dict:
                 worker = w
     events.append(ap, "worker_resumed", {"task": worker["task"], "role": worker["role"], "short_id": short})
     return worker
+
+
+def park(ap: str, task: str, role: str, note: str, now: datetime = None, b: dict = None) -> dict:
+    """A worker stops itself because a usage window is at the park line: record why and when it may continue.
+    Raises ValueError when usage is under the line (nothing to wait for) or the worker is not on record."""
+    gcfg = config.load_global()
+    now = now or datetime.now(timezone.utc)
+    p = budget.parking(b if b is not None else budget.read(stale_min=gcfg["budget"]["stale_min"]), gcfg)
+    if p is None:
+        raise ValueError("usage is under the park line (or unknown): keep working, do not park")
+    rec = dict(p, reason="quota", note=note, parked_at=now.isoformat(), role=role)
+    with state.mutate(ap) as st:
+        w = next((w for w in st["workers"] if w["task"] == task and w["role"] == role), None)
+        if w is None:
+            raise ValueError(f"{ap}: no {role} worker on {task}")
+        w["parked"] = rec
+    run = paths.ap_dir(ap) / "runs" / task
+    run.mkdir(parents=True, exist_ok=True)
+    (run / "parked.json").write_text(json.dumps(rec, indent=1, ensure_ascii=False) + "\n")
+    events.append(ap, "worker_parked", {"task": task, "role": role, "window": p["kind"], "percent": p["percent"],
+                                        "resume_at": p["resume_at"]})
+    return rec
 
 
 def end(ap: str, task: str, role: str) -> None:
@@ -179,11 +217,12 @@ def _cmd(args: list) -> int:
             print(json.dumps(rows, indent=1, ensure_ascii=False))
         else:
             for w in rows:
-                print(f"{w['session_name']}: {w['state']} (resumes {w['resumes']})")
+                tail = f", resumes {w['parked']['resume_at']}" if w["state"] == "parked" else ""
+                print(f"{w['session_name']}: {w['state']} (resumes {w['resumes']}{tail})")
         return 0
     if len(args) < 4:
         print("usage: ap worker start|resume|end <ap> <task> <role> [--cwd P --prompt-file F --needs a,b --resume]"
-              " | ap worker list <ap> [--json]", file=sys.stderr)
+              " | ap worker park <ap> <task> <role> --note TEXT | ap worker list <ap> [--json]", file=sys.stderr)
         return 2
     sub, ap, task, role = args[:4]
     if sub == "start":
@@ -196,6 +235,13 @@ def _cmd(args: list) -> int:
         print(resume(ap, w)["short_id"])
     elif sub == "end":
         end(ap, task, role)
+    elif sub == "park":
+        try:
+            rec = park(ap, task, role, _opt(args, "--note", "") or "")
+        except ValueError as e:
+            print(f"ap worker park: {e}", file=sys.stderr)
+            return 1
+        print(f"parked until {rec['resume_at'] or 'usage drops'}; end your turn now with no further tool call")
     else:
         return 2
     return 0

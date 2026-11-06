@@ -61,6 +61,8 @@ def classify(worker: dict, all_sessions, run_dir: Path) -> str:
     f = Path(run_dir) / result_file(worker["role"])
     if f.exists() and f.stat().st_mtime >= _epoch(worker.get("started_at", "")):
         return "done"
+    if worker.get("parked"):
+        return "parked"  # it stopped itself on purpose: not died, not done, never resumed early
     if all_sessions is None:
         return "unknown"
     s = find_by_id(worker.get("short_id"), all_sessions) or find(worker["session_name"], all_sessions)

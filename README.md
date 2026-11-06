@@ -174,6 +174,7 @@ reaches you unless you changed that setting. The full list is in
 | `max_workers` | `5` | Most workers running at once, across all autopilots |
 | `budget.window_pct` | `85` | Start no new work once a usage window reaches this percent |
 | `budget.credit_pct` | `90` | Start no new work once extra credits reach this percent of the monthly limit |
+| `budget.park_pct` | `90` | Running workers stop and wait once any usage window reaches this percent, and continue after it resets |
 | `forced_pass_min` | `30` | Run a pass at least this often, in minutes, even when nothing changed |
 | `gate_interval_s` | `60` | How often the check wakes, in seconds; takes effect after `ap install` |
 | `reply_check.quiet` | `["22:00", "06:00"]` | No answer reads between these times; the forced pass picks answers up then |

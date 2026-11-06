@@ -179,6 +179,15 @@ Then write `prloop.json` in the run directory (it tells the dispatcher you are d
 
 Then run `<ap> kick` and end with one line naming both files.
 
+## Usage limit
+
+A tool call, yours or a reviewer's or the fixer's, may be denied with a reason that says usage is at the
+limit. Obey it. A subagent stops and replies "parked for quota" to you. You then run the `ap worker park
+<autopilot> <task> pr --note "<the round, the head SHA and the next step>"` command the reason names
+(your brief names your autopilot, task and role), with a one-line note, and end your turn with no
+other tool call. Spawn no new reviewer after a denial. The dispatcher resumes you after the usage window
+resets; start from your note and re-check the PR head first. Never work around a denial.
+
 ## Never
 
 - Merge, enable auto-merge, or mark the PR ready (the dispatcher decides that).
