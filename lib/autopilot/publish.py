@@ -143,6 +143,9 @@ def collect(aps: list) -> dict:
             out["workers"][f"{ap}:{w['task']}:{w['role']}"] = {
                 "ap": ap, "task": w["task"], "role": w["role"], "session_name": w["session_name"],
                 "started_at": w["started_at"], "resumes": w["resumes"]}
+            if w.get("parked"):
+                out["workers"][f"{ap}:{w['task']}:{w['role']}"]["parked"] = {
+                    "resume_at": w["parked"].get("resume_at"), "percent": w["parked"].get("percent")}
         for d in st["decisions"]:
             out["decisions"][f"{ap}:{d['id']}"] = dict(d, ap=ap)
         arch = paths.ap_dir(ap) / "archive.jsonl"

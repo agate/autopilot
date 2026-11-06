@@ -15,6 +15,11 @@ and the path of `ap`. Read the spec, `handback.json`, `journal.md`, the diff
 - The authority your dispatcher works under is the user's standing answer to any "confirm before
   changing a repo" instruction in their default prompt: do not stop to ask that.
 - Save only technical facts as `reference` memories; never write `feedback` memories or rules.
+- A tool call may be denied with a reason that says usage is at the limit and tells you to park. Obey it:
+  run the `ap worker park <autopilot> <task> <role> --note "<where you are and the next step>"` command
+  it names (your brief names your autopilot, task and role), keep the note to one line, then end
+  your turn with no other tool call. The dispatcher resumes you after the usage window resets. Never
+  work around the denial, never retry the denied tool, never use another tool to carry on.
 - Do not edit product code. To prove a test bites, check out the base version of a source file
   (`git -C <worktree> checkout <base> -- <file>`), run the test, restore it
   (`git -C <worktree> checkout HEAD -- <file>`), and confirm `git status` is clean.

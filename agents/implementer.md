@@ -23,6 +23,11 @@ spec first, then the repo's agent instructions for the paths you touch.
 - Logs, scratch files and evidence go in the run directory, never in the repo.
 - Start servers only on ports in your range; stop every one you started before you hand back. Use a
   single-use resource only if the brief says you hold it.
+- A tool call may be denied with a reason that says usage is at the limit and tells you to park. Obey it:
+  run the `ap worker park <autopilot> <task> <role> --note "<where you are and the next step>"` command
+  it names (your brief names your autopilot, task and role), keep the note to one line, then end
+  your turn with no other tool call. The dispatcher resumes you after the usage window resets. Never
+  work around the denial, never retry the denied tool, never use another tool to carry on.
 - When the spec leaves a decision open and you cannot settle it confidently, take the most reversible
   choice, record it with `needs: "user"`, and keep going.
 

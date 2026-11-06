@@ -12,6 +12,7 @@ that setting.
 | `budget.window_pct` | `85` | Start no new work once a usage window reaches this percent. |
 | `budget.stale_min` | `60` | Usage numbers older than this many minutes count as unknown: one new worker at a time. |
 | `budget.credit_pct` | `90` | Start no new work once extra credits reach this percent of the monthly limit. |
+| `budget.park_pct` | `90` | Running workers stop and wait once any usage window reaches this percent, and continue after it resets. Unknown or stale numbers never park. |
 | `budget.resume_after_min` | `5` | Minutes to wait after a usage window resets before work starts again. |
 | `forced_pass_min` | `30` | Run a dispatcher pass at least this often, in minutes, even when nothing changed. |
 | `gate_interval_s` | `60` | How often the background gate wakes, in seconds. Takes effect after `ap install`. |

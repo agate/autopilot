@@ -122,6 +122,8 @@
   "at_limit": "almost at the limit",
   "worker_on": "{role} · started {when}",
   "resumed_n": "restarted {n}×",
+  "parked_chip": "Waiting for quota · resumes {when}",
+  "parked_chip_unknown": "Waiting for quota · resumes when usage drops",
   "count_status": "{n} {status}",
   "waiting_count": "{n} waiting on you",
   "just_now": "just now",

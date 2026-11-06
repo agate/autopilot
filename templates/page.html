@@ -403,6 +403,11 @@ function linkPill(label, url, cls) {
   return u ? el("a", { class: "pill" + (cls ? " " + cls : ""), href: u, target: "_blank", rel: "noopener" }, label, icon("ext")) : null;
 }
 const STATUS = { todo: ["muted", "○"], in_progress: ["", "●"], in_review: ["", "◐"], done: ["ok", "✓"], blocked: ["crit", "!"], skipped: ["muted", "–"] };
+// A worker that stopped itself at the usage line shows this instead of its role.
+function workerChip(w) {
+  if (w.parked) return el("span", { class: "chip warn" }, "⏸ " + (w.parked.resume_at ? L("parked_chip", { when: rel(w.parked.resume_at) }) : L("parked_chip_unknown")));
+  return el("span", { class: "chip" }, "● " + L("role_" + w.role));
+}
 function statusChip(s) { const [cls, g] = STATUS[s] || ["muted", "•"]; return el("span", { class: "chip " + cls }, g + " " + L("status_" + s)); }
 function runState(a, ap) {
   if (ap && ap.status === "paused") return { cls: "warn", glyph: "❚❚", text: L("state_paused") };
@@ -614,7 +619,8 @@ function taskRow(t) {
   const ev = S.evidence[t.ap + ":" + t.id];
   const meta = [];
   if (!filterAp) meta.push(t.ap);
-  if (w) meta.push(L("worker_on", { role: L("role_" + w.role), when: rel(w.started_at) }));
+  if (w && w.parked) meta.push(w.parked.resume_at ? L("parked_chip", { when: rel(w.parked.resume_at) }) : L("parked_chip_unknown"));
+  else if (w) meta.push(L("worker_on", { role: L("role_" + w.role), when: rel(w.started_at) }));
   if (t.depends_on && t.depends_on.length && t.status === "todo") meta.push(L("after", { list: t.depends_on.join(", ") }));
   if (t.needs && t.needs.length) meta.push(L("needs", { list: t.needs.join(", ") }));
   if (t.origin === "found") meta.push(L("found"));
@@ -780,7 +786,7 @@ function renderStatus() {
   const workerSec = el("div", { class: "ps" }, el("div", { class: "ps-h" }, el("span", {}, L("running_now")), el("span", { class: "n" }, String(ws.length))),
     ws.length ? el("div", { class: "wlist" }, ws.map((w) => el("details", {},
       el("summary", { title: w.session_name },
-        el("span", { class: "chip" }, "● " + L("role_" + w.role)),
+        workerChip(w),
         el("span", { class: "wt" }, el("span", { class: "mono" }, w.task), filterAp ? null : el("span", { class: "ap mono" }, w.ap)),
         el("span", { class: "wtime" }, rel(w.started_at) + (w.resumes ? " · ↻" + w.resumes : ""))),
       el("div", { class: "attach mono" }, 'claude attach "' + w.session_name + '"'

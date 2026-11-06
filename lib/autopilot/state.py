@@ -13,7 +13,7 @@ TASK_OPT = {"pr", "branch", "worktree", "spec", "assignee", "evidence", "session
 TASK_STATUS = {"todo", "in_progress", "in_review", "done", "blocked", "skipped"}
 ORIGINS = {"source", "found"}
 WORKER_REQ = {"task", "role", "session_name", "session_id", "short_id", "ports", "needs", "started_at", "resumes"}
-WORKER_OPT = {"cwd"}
+WORKER_OPT = {"cwd", "parked"}
 ROLES = {"implement", "review", "pr"}
 DEC_REQ = {"id", "kind", "title", "body", "options", "links", "status", "created_at"}
 DEC_OPT = {"task", "answer", "action", "answered_at", "access", "handling"}
@@ -72,6 +72,8 @@ def validate(st: dict, langs: set) -> list:
         errs += _keys(wk, WORKER_REQ, WORKER_OPT, w)
         if wk.get("role") not in ROLES:
             errs.append(f"{w}: bad role {wk.get('role')!r}")
+        if "parked" in wk and not isinstance(wk["parked"], dict):
+            errs.append(f"{w}: parked must be an object")
     for i, d in enumerate(st.get("decisions") or []):
         w = f"decisions[{i}]"
         errs += _keys(d, DEC_REQ, DEC_OPT, w)

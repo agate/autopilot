@@ -11,7 +11,7 @@ _MODULES = [
     "autopilot.budget", "autopilot.nextwork", "autopilot.workers", "autopilot.ops",
     "autopilot.gate", "autopilot.dispatch", "autopilot.mergecheck", "autopilot.snapshot",
     "autopilot.guard", "autopilot.perms", "autopilot.publish", "autopilot.checkpkg",
-    "autopilot.doctor", "autopilot.status", "autopilot.install", "autopilot.access",
+    "autopilot.doctor", "autopilot.status", "autopilot.install", "autopilot.access", "autopilot.park",
 ]
 
 
@@ -36,7 +36,8 @@ def usage() -> str:
 
 
 # Hooks run on every message or tool call, so they load only their own module.
-FAST = {"hook-prompt": "autopilot.snapshot", "hook-guard": "autopilot.guard"}
+FAST = {"hook-prompt": "autopilot.snapshot", "hook-guard": "autopilot.guard",
+        "hook-park": "autopilot.park"}
 
 
 def main(argv: list) -> int:

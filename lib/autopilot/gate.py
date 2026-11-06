@@ -8,7 +8,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 
-from autopilot import budget, cli, config, events, lock, nextwork, ops, paths, replies, sessions, state, workers
+from autopilot import budget, cli, config, events, lock, nextwork, ops, paths, park, replies, sessions, state, workers
 
 
 def report_due(times: list, last_slot, now: datetime):
@@ -84,8 +84,13 @@ def fingerprint(ap: str, apcfg: dict, st: dict, all_sessions, now: datetime, gh_
                 if hide_after is None or mt < hide_after:
                     files.append(f"{f.parent.name}/{f.name}:{int(mt)}")
     wk = []
+    b = budget.read() if any(w.get("parked") for w in st["workers"]) else None
     for w in st["workers"]:
         cls = sessions.classify(w, all_sessions, runs / w["task"])
+        if cls == "parked":
+            # Looks like a running worker while it waits, so parking wakes no pass; the entry changes the
+            # moment it can continue, which does.
+            cls = "parked_due" if park.resume_due(w, now, gcfg, b) else "running"
         if cls == "done" and hide_after is not None:
             rf = runs / w["task"] / sessions.result_file(w["role"])
             if rf.exists() and rf.stat().st_mtime >= hide_after:

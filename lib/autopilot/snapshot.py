@@ -47,9 +47,17 @@ def _txt(obj) -> str:
     if not isinstance(obj, dict):
         return str(obj)
     if "key" in obj:
-        return text.labels().get(obj["key"], obj["key"])
+        s = text.labels().get(obj["key"], obj["key"])
+        for k, v in (obj.get("args") or {}).items():
+            s = s.replace("{" + k + "}", str(v))
+        return s
     lang = config.load_global().get("reader_lang") or "en"
     return obj.get(lang) or obj.get("en") or ""
+
+
+def _parked(w: dict) -> str:
+    pk = w.get("parked")
+    return f" [parked for quota, resumes {pk.get('resume_at') or 'when usage drops'}]" if pk else ""
 
 
 def _budget_line() -> str:
@@ -79,7 +87,7 @@ def build(name: str, offset, rules_mtimes: dict, now: datetime) -> tuple:
     gates = [d for d in st["decisions"] if d["status"] == "open" and d["kind"] == "gate"]
     body = [
         "Tasks: " + (", ".join(f"{k} {v}" for k, v in sorted(counts.items())) or "none"),
-        "Workers: " + (", ".join(f"{w['session_name']} (ports {w['ports'][0]}-{w['ports'][1]})"
+        "Workers: " + (", ".join(f"{w['session_name']} (ports {w['ports'][0]}-{w['ports'][1]})" + _parked(w)
                                   for w in st["workers"]) or "none"),
         f"Waiting on you ({len(asks)}): " + ("; ".join(f"{d['id']} {_txt(d['title'])}" for d in asks) or "-"),
         f"Human gates ({len(gates)}): " + ("; ".join(f"{d['id']} {_txt(d['title'])}" for d in gates) or "-"),
