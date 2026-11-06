@@ -61,6 +61,10 @@ done), and `action` (`{tool, option, prompt}`) when one answer should carry out 
 `option` is the id of the approving option, `prompt` the exact instruction that does it (also quote it
 in `body`, so the user sees what will run).
 
+A title or body written as `{"key": ..., "args": {...}}` must fill every `{placeholder}` of that label
+in `templates/labels.en.json` with `args`, or the page shows the raw `{session}`. `ap decision add`
+rejects one that does not.
+
 ## The pass
 
 1. **Begin.** Run `ap budget`. Note `allowance.allow`: `0` means start no new workers, `1` means at
@@ -83,7 +87,8 @@ in `body`, so the user sees what will run).
      `{"key": "worker_blocked", "args": {"session": "<name>"}}`) unless one is open; tell the user they
      can `claude attach "<name>"` to answer it.
    - `dead`: if `resumes` is 0, `ap worker resume <ap> <task> <role>`. Otherwise `ap worker end`, then
-     `ap task set <ap> <task> status=blocked`, then an `ask` card (`worker_died_twice`).
+     `ap task set <ap> <task> status=blocked`, then an `ask` card with title
+     `{"key": "worker_died_twice", "args": {"session": "<name>"}}`.
    - `done`: handle by role, below.
 
 3. **Implementer done** (`runs/<task>/handback.json`):

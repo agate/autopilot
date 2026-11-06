@@ -47,7 +47,10 @@ def _txt(obj) -> str:
     if not isinstance(obj, dict):
         return str(obj)
     if "key" in obj:
-        return text.labels().get(obj["key"], obj["key"])
+        s = text.labels().get(obj["key"], obj["key"])
+        for k, v in (obj.get("args") or {}).items():
+            s = s.replace("{" + k + "}", str(v))
+        return s
     lang = config.load_global().get("reader_lang") or "en"
     return obj.get(lang) or obj.get("en") or ""
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from functools import lru_cache
 
 from autopilot import paths
@@ -14,6 +15,16 @@ def required_langs(cfg: dict) -> set:
 @lru_cache(maxsize=1)
 def labels() -> dict:
     return json.loads((paths.package_root() / "templates" / "labels.en.json").read_text())
+
+
+def unfilled(obj) -> list:
+    """Placeholders of a {key, args} label that `args` does not fill. Not part of `check`: a card saved
+    before this rule must still load."""
+    if not isinstance(obj, dict) or obj.get("key") not in labels():
+        return []
+    args = obj.get("args")
+    given = set(args) if isinstance(args, dict) else set()
+    return sorted(set(re.findall(r"\{(\w+)\}", labels()[obj["key"]])) - given)
 
 
 def check(obj, langs: set, where: str) -> list:

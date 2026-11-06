@@ -74,6 +74,11 @@ def task_add(ap: str, task: dict) -> None:
 
 
 def decision_add(ap: str, d: dict) -> str:
+    for f in ("title", "body"):
+        miss = text.unfilled(d.get(f))
+        if miss:
+            raise ValueError(f"{f}: label {d[f]['key']!r} needs args {', '.join(miss)} "
+                             f"(for example {{\"key\": \"{d[f]['key']}\", \"args\": {{\"{miss[0]}\": \"...\"}}}})")
     with state.mutate(ap) as st:
         nums = [int(x["id"][1:]) for x in st["decisions"] if x["id"][1:].isdigit()]
         for line in _archive_lines(ap):
@@ -228,7 +233,11 @@ def _task(args):
 @cli.command("decision")
 def _decision(args):
     if len(args) == 3 and args[0] == "add":
-        print(decision_add(args[1], _load_arg(args[2])))
+        try:
+            print(decision_add(args[1], _load_arg(args[2])))
+        except ValueError as e:
+            print(f"ap decision add: {e}", file=sys.stderr)
+            return 1
     elif len(args) >= 3 and args[0] == "resolve":
         try:
             print(decision_resolve(args[1], args[2], _flag(args, "--answer", ""), _flag(args, "--status", "answered"),
