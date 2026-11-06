@@ -162,9 +162,11 @@ def _same(a, b) -> bool:
     return json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
 
 
-def diff(prev: dict, cur: dict) -> dict:
+def diff(prev: dict, cur: dict, only: list = None) -> dict:
+    """What to send to the page. With `only`, just those collections (and no asset uploads)."""
+    cols = [c for c in COLLECTIONS if not only or c in only]
     sets, dels = [], []
-    for c in COLLECTIONS:
+    for c in cols:
         p, n = prev.get(c) or {}, cur.get(c) or {}
         for k, v in n.items():
             if k not in p or not _same(p[k], v):
@@ -173,7 +175,7 @@ def diff(prev: dict, cur: dict) -> dict:
             if k not in n:
                 dels.append({"collection": c, "doc_id": k})
     assets = []
-    for ev in (cur.get("evidence") or {}).values():
+    for ev in (cur.get("evidence") or {}).values() if "evidence" in cols else []:
         for s in (ev.get("screenshots") or []) + (ev.get("logs") or []):
             if not s.get("asset_id"):
                 name = Path(s["path"]).name
@@ -190,10 +192,12 @@ def record_assets(new_assets: dict) -> None:
     _save_page(p)
 
 
-def mark(cur: dict, new_assets: dict) -> None:
+def mark(cur: dict, new_assets: dict, only: list = None) -> None:
+    """Record `cur` as published. With `only`, just those collections: the rest stay as they were, so the
+    next full diff still lists what changed in them."""
     record_assets(new_assets)
     p = _page()
-    p["published"] = cur
+    p["published"] = cur if not only else dict(p.get("published") or {}, **{c: cur.get(c) or {} for c in only})
     p["published_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     _save_page(p)
 
@@ -201,15 +205,23 @@ def mark(cur: dict, new_assets: dict) -> None:
 @cli.command("publish")
 def _cmd(args: list) -> int:
     aps = config.list_aps()
+    only = None
+    if "--only" in args:
+        i = args.index("--only")
+        only = (args[i + 1] if i + 1 < len(args) else "").split(",")
+        args = args[:i] + args[i + 2:]
+        if args[:1] not in (["diff"], ["mark"]) or not all(c in COLLECTIONS for c in only):
+            print(f"--only takes {', '.join(COLLECTIONS)} (comma-separated) after diff or mark", file=sys.stderr)
+            return 2
     if args[:1] == ["diff"]:
-        d = diff(published(), collect(aps))
+        d = diff(published(), collect(aps), only)
         d["url"] = _page().get("url")
         print(json.dumps(d, indent=1, ensure_ascii=False))
     elif args[:1] == ["assets"]:
         record_assets(dict(a.split("=", 1) for a in args[1:] if "=" in a))
     elif args[:1] == ["mark"]:
         new = dict(a.split("=", 1) for a in args[1:] if a != "--assets" and "=" in a)
-        mark(collect(aps), new)
+        mark(collect(aps), new, only)
     elif args[:1] == ["url"]:
         if len(args) == 2:
             p = _page()
@@ -217,7 +229,7 @@ def _cmd(args: list) -> int:
             _save_page(p)
         print(_page().get("url") or "")
     else:
-        print("usage: ap publish diff | assets key=<asset id> ... | mark [--assets key=<asset id> ...] | url [url]",
+        print("usage: ap publish diff [--only <collections>] | assets key=<asset id> ... | mark [--only <collections>] [--assets key=<asset id> ...] | url [url]",
               file=sys.stderr)
         return 2
     return 0

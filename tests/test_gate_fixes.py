@@ -95,6 +95,23 @@ class TickTest(Base):
         self.assertEqual(len(fn.calls), 2)
         self.assertFalse((self.data / "tick.json").exists())
 
+    def test_a_tick_queued_during_a_pass_survives_it(self):
+        # A pass queues the next pass for an answer that arrived late; the gate must not wipe that note.
+        self.ap("alpha")
+        gate.run(dispatch_fn=fake_pass())
+
+        def queue_next():
+            (self.data / "tick.json").write_text(json.dumps({"aps": ["alpha"], "at": "2999-01-01T00:00:00Z"}))
+        fn = fake_pass(during=queue_next)
+        (self.data / "tick.json").write_text(json.dumps({"aps": ["alpha"], "at": "2000-01-01T00:00:00Z"}))
+        gate.run(dispatch_fn=fn)
+        self.assertTrue((self.data / "tick.json").exists())
+        (self.data / "tick.json").write_text(json.dumps({"aps": ["alpha"], "at": "2000-01-01T00:00:00Z"}))
+        nxt = fake_pass()
+        gate.run(dispatch_fn=nxt)
+        self.assertEqual(nxt.calls, [["alpha"]])
+        self.assertFalse((self.data / "tick.json").exists())
+
 
 class DispatchGuardTest(Base):
     def setUp(self):

@@ -67,6 +67,8 @@
   "undo": "Undo",
   "sent": "Sent.",
   "pending": "Your answer is on its way.",
+  "handling_hint": "Your answer reached the dispatcher. It is acting on it now.",
+  "handling": "Received, being handled",
   "send_failed": "Could not send: {error}",
   "read_only": "You can read this page but cannot answer here.",
   "empty_decisions": "Nothing is waiting on you.",
