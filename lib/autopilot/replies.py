@@ -145,14 +145,16 @@ def check(gcfg: dict, url: str, poll_s: float = 2) -> dict:
         _cleanup(claude, short)
 
 
-def step(gcfg: dict, gs: dict, now: datetime, allow: dict) -> set:
-    """Run the check when it is due and return the autopilots to queue a pass for. Keeps its own
+def step(gcfg: dict, gs: dict, now: datetime) -> set:
+    """Run the check when it is due and return the autopilots to queue a pass for. It runs whatever the budget
+    allows: a paused budget still reads answers (the gate lets a ticked autopilot's pass go, and the pass starts
+    no workers). Keeps its own
     bookkeeping in gs["replies"]: last_at, ok_at, ids (the reply ids seen last time), errors, error."""
     from autopilot import publish
     rc = gcfg.get("reply_check") or {}
     every = rc.get("every_s") or 0
     rs = gs.setdefault("replies", {})
-    if not every or quiet(now, rc.get("quiet")) or allow.get("allow") == 0:
+    if not every or quiet(now, rc.get("quiet")):
         return set()
     last = rs.get("last_at")
     if last and now - datetime.fromisoformat(last) < timedelta(seconds=every - 5):

@@ -192,8 +192,9 @@ rejects one that does not.
     this pass) gets only this: `ap decision resolve ... --handling` as in step 6, then
     `ap publish diff --only decisions`, its rows in one `ArtifactData` batch, and
     `ap publish mark --only decisions`. Do not act on it, do not run `ap decision handled`, and leave
-    the reply where it is: the next pass reads it again (`unchanged`) and acts. Then run
-    `ap tick <ap>`, so that pass starts right after this one ends.
+    the reply where it is: the next pass reads it again (`unchanged`) and acts. Run `ap tick <ap>`
+    ONLY when this re-read found at least one new answer; otherwise never queue a pass from a pass (an
+    unneeded tick makes passes run back to back and spend the budget for nothing).
     Then run `ap archive <ap>` for each autopilot, and:
     - Run `ap publish diff`. For each entry in `assets`, copy `local_path` into your scratchpad as
       `upload_name` and upload that copy with the Artifact tool (`url` = the page, `asset: true`;

@@ -123,71 +123,71 @@ class StepTest(Env):
         ops.decision_add("checkout", dec())
         gs = {}
         self.result = {"ok": True, "replies": [{"id": "r1", "ap": "checkout"}]}
-        self.assertEqual(replies.step(config.load_global(), gs, self.NOON, self.OK), {"checkout"})
+        self.assertEqual(replies.step(config.load_global(), gs, self.NOON), {"checkout"})
         # The same reply still there a minute later (the pass has not deleted it yet): no second tick.
-        self.assertEqual(replies.step(config.load_global(), gs, self.NOON + timedelta(minutes=1), self.OK), set())
+        self.assertEqual(replies.step(config.load_global(), gs, self.NOON + timedelta(minutes=1)), set())
         self.assertEqual(len(self.calls), 2)
 
     def test_checks_at_most_every_interval(self):
         ops.decision_add("checkout", dec())
         gs = {}
-        replies.step(config.load_global(), gs, self.NOON, self.OK)
-        replies.step(config.load_global(), gs, self.NOON + timedelta(seconds=20), self.OK)
+        replies.step(config.load_global(), gs, self.NOON)
+        replies.step(config.load_global(), gs, self.NOON + timedelta(seconds=20))
         self.assertEqual(len(self.calls), 1)
 
     def test_undo_on_a_self_decision_counts(self):
         ops.decision_add("checkout", dec(kind="self"))
-        replies.step(config.load_global(), {}, self.NOON, self.OK)
+        replies.step(config.load_global(), {}, self.NOON)
         self.assertEqual(len(self.calls), 1)
 
     def test_nothing_can_be_answered_no_check(self):
         did = ops.decision_add("checkout", dec(kind="self"))
         ops.decision_resolve("checkout", did, "undo", "undone")
         ops.decision_add("checkout", dec(kind="gate"))
-        self.assertEqual(replies.step(config.load_global(), {}, self.NOON, self.OK), set())
+        self.assertEqual(replies.step(config.load_global(), {}, self.NOON), set())
         self.assertEqual(self.calls, [])
 
     def test_quiet_hours_no_check(self):
         ops.decision_add("checkout", dec())
         night = datetime(2026, 1, 2, 23, 0).astimezone()
-        self.assertEqual(replies.step(config.load_global(), {}, night, self.OK), set())
+        self.assertEqual(replies.step(config.load_global(), {}, night), set())
         self.assertEqual(self.calls, [])
 
-    def test_paused_for_budget_no_check(self):
+    def test_paused_budget_still_reads_answers(self):
         ops.decision_add("checkout", dec())
-        paused = {"allow": 0, "paused_until": None, "reason": "window"}
-        self.assertEqual(replies.step(config.load_global(), {}, self.NOON, paused), set())
-        self.assertEqual(self.calls, [])
+        self.result = {"ok": True, "replies": [{"id": "r1", "ap": "checkout"}]}
+        self.assertEqual(replies.step(config.load_global(), {}, self.NOON), {"checkout"})
+        self.assertEqual(len(self.calls), 1)
 
     def test_no_page_yet_no_check(self):
         ops.decision_add("checkout", dec())
         publish._save_page({})
-        self.assertEqual(replies.step(config.load_global(), {}, self.NOON, self.OK), set())
+        self.assertEqual(replies.step(config.load_global(), {}, self.NOON), set())
         self.assertEqual(self.calls, [])
 
     def test_turned_off(self):
         ops.decision_add("checkout", dec())
         config.save_global(dict(config.load_global(), reply_check={"every_s": 0}))
-        self.assertEqual(replies.step(config.load_global(), {}, self.NOON, self.OK), set())
+        self.assertEqual(replies.step(config.load_global(), {}, self.NOON), set())
         self.assertEqual(self.calls, [])
 
     def test_failed_check_is_counted_and_queues_nothing(self):
         ops.decision_add("checkout", dec())
         gs = {}
         self.result = {"ok": False, "error": "no ArtifactData call in the transcript"}
-        self.assertEqual(replies.step(config.load_global(), gs, self.NOON, self.OK), set())
-        replies.step(config.load_global(), gs, self.NOON + timedelta(minutes=1), self.OK)
+        self.assertEqual(replies.step(config.load_global(), gs, self.NOON), set())
+        replies.step(config.load_global(), gs, self.NOON + timedelta(minutes=1))
         self.assertEqual(gs["replies"]["errors"], 2)
         self.assertIn("ArtifactData", gs["replies"]["error"])
         self.result = {"ok": True, "replies": []}
-        replies.step(config.load_global(), gs, self.NOON + timedelta(minutes=2), self.OK)
+        replies.step(config.load_global(), gs, self.NOON + timedelta(minutes=2))
         self.assertEqual(gs["replies"]["errors"], 0)
 
     def test_a_broken_autopilot_does_not_stop_the_check(self):
         ops.decision_add("checkout", dec())
         (self.data / "perf" / "config.json").write_text("{nope")
         self.result = {"ok": True, "replies": [{"id": "r1", "ap": "checkout"}]}
-        self.assertEqual(replies.step(config.load_global(), {}, self.NOON, self.OK), {"checkout"})
+        self.assertEqual(replies.step(config.load_global(), {}, self.NOON), {"checkout"})
 
     def test_gate_survives_a_crashing_check(self):
         ops.decision_add("checkout", dec())
@@ -202,7 +202,7 @@ class StepTest(Env):
     def test_reply_for_an_unknown_autopilot_queues_the_ones_that_wait(self):
         ops.decision_add("checkout", dec())
         self.result = {"ok": True, "replies": [{"id": "r9", "ap": None}]}
-        self.assertEqual(replies.step(config.load_global(), {}, self.NOON, self.OK), {"checkout"})
+        self.assertEqual(replies.step(config.load_global(), {}, self.NOON), {"checkout"})
 
 
 class GateTest(Env):
@@ -214,6 +214,23 @@ class GateTest(Env):
         fn = lambda g, aps: calls.append(list(aps)) or [{"started": 0, "free": 0, "ready": 0, "allow": None, "ended_at": "x"}]
         with mock.patch.object(gate, "_sessions", lambda g: []), mock.patch.object(gate, "notify", lambda m: None), \
                 mock.patch.object(gate, "_allowance", lambda g, now: self.OK):
+            gate.run(now=self.NOON + timedelta(minutes=1), dispatch_fn=fn)
+        self.assertEqual(calls, [["checkout"]])
+
+
+class PausedGateTest(Env):
+    def test_a_new_answer_queues_a_pass_while_credits_are_out(self):
+        ops.decision_add("checkout", dec())
+        for n in ("checkout", "perf"):
+            write_ap(self.data, n, report_times=[])
+        calls = []
+        fn = lambda g, aps: calls.append(list(aps)) or [{"started": 0, "free": 0, "ready": 0, "allow": 0, "ended_at": "x"}]
+        paused = {"allow": 0, "paused_until": None, "reason": "credits"}
+        with mock.patch.object(gate, "_sessions", lambda g: []), mock.patch.object(gate, "notify", lambda m: None), \
+                mock.patch.object(gate, "_allowance", lambda g, now: paused):
+            gate.run(now=self.NOON, dispatch_fn=fn)
+            self.assertEqual(calls, [])
+            self.result = {"ok": True, "replies": [{"id": "r1", "ap": "checkout"}]}
             gate.run(now=self.NOON + timedelta(minutes=1), dispatch_fn=fn)
         self.assertEqual(calls, [["checkout"]])
 
