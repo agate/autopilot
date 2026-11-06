@@ -91,7 +91,8 @@ def start(ap: str, task: str, role: str, cwd: str, prompt: str, needs: list = No
               f"Your port range: {port_range[0]}-{port_range[1]}. "
               f"The autopilot CLI: {paths.package_root() / 'bin' / 'ap'}.")
     argv, env = build_start(gcfg, apcfg, ap, task, role, prompt)
-    sid = (_saved_session(ap, task, role) or (parked or {}).get("session_id") or "") if resume else ""
+    # A parked worker resumes its own conversation; the saved session of the role is an earlier run's.
+    sid = ((parked or {}).get("session_id") or _saved_session(ap, task, role)) if resume else ""
     if resume and not sid:
         raise RuntimeError(f"{ap} {task}: no saved {role} session to resume")
     if sid:

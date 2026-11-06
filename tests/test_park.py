@@ -336,6 +336,18 @@ class ResumeTest(Base):
         evs, _ = events.since("checkout", 0)
         self.assertIn("worker_resumed", [e["type"] for e in evs])
 
+    def test_a_parked_resume_uses_its_own_session_not_an_older_saved_one(self):
+        os.environ["FAKE_AGENTS_JSON"] = str(self.data / "none.json")
+        self.add_worker(parked={"reason": "quota", "resume_at": RESET, "note": "n", "role": "implement"},
+                        session_id="parked-sid")
+        ops.task_add("checkout", {"id": "PROJ-1", "title": {"en": "t"}, "depends_on": [], "status": "in_progress",
+                                  "link": "", "needs": [], "critical": False, "phase": 1})
+        ops.task_set("checkout", "PROJ-1", {"sessions": {"implement": "older-sid"}})
+        workers.start("checkout", "PROJ-1", "implement", str(self.data), "go", resume=True)
+        log = self.log.read_text()
+        self.assertIn("--resume parked-sid", log)
+        self.assertNotIn("older-sid", log)
+
     def test_runbook_resumes_parked_workers_first(self):
         rb = (ROOT / "RUNBOOK.md").read_text()
         step = rb[rb.index("2. **Check workers.**"):rb.index("3. **Implementer done**")]
@@ -358,6 +370,12 @@ class FloorAndPageTest(Base):
         self.assertEqual(w["hooks"]["PreToolUse"][0]["matcher"], "*")
         for role in ("dispatcher", "oneoff"):
             self.assertNotIn("hooks", perms.generate([], role=role))
+
+    def test_only_the_worker_floor_allows_the_park_command(self):
+        rule = f"Bash({paths.package_root() / 'bin' / 'ap'} worker park:*)"
+        self.assertEqual(perms.generate([], role="worker")["permissions"]["allow"], [rule])
+        self.assertNotIn(rule, perms.generate([], role="dispatcher")["permissions"].get("allow", []))
+        self.assertNotIn("allow", perms.generate([], role="oneoff")["permissions"])
 
     def test_one_off_file_has_no_hook(self):
         (self.data / "checkout" / "settings.json").write_text(json.dumps(perms.generate([], role="worker")))

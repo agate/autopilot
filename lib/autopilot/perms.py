@@ -41,6 +41,9 @@ def allow_rules(tools: list, authority: dict, role: str) -> list:
     them: a pass is a fresh session and its prompt names no ticket, PR or worker, so the classifier blocks
     a close, a ready-for-review, a merge or a stop as unrequested. Workers get none: they never take these
     steps. `source_status` and `open_prs` are on unless set to false; the merge rule needs `merge: true`."""
+    if role == "worker":
+        # The park command is the one step a parking worker takes; the auto-mode classifier must not judge it.
+        return [f"Bash({paths.package_root() / 'bin' / 'ap'} worker park:*)"]
     if role != "dispatcher":
         return []
     out = status_tools(tools) if authority.get("source_status", True) else []

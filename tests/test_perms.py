@@ -108,8 +108,8 @@ class PermsTest(unittest.TestCase):
                            authority={"source_status": False, "open_prs": False})["permissions"]
         self.assertEqual(p["allow"], [f"Bash({paths.package_root() / 'bin' / 'ap'} worker end:*)"])
 
-    def test_worker_floor_allows_nothing(self):
-        self.assertNotIn("allow", perms.generate(["mcp__X__transitionJiraIssue"], role="worker")["permissions"])
+    def test_worker_floor_allows_only_the_park_command(self):
+        self.assertEqual(perms.generate(["mcp__X__transitionJiraIssue"], role="worker")["permissions"]["allow"], [f"Bash({paths.package_root() / 'bin' / 'ap'} worker park:*)"])
 
     def test_allow_and_deny_never_overlap(self):
         tools = ["mcp__X__transitionJiraIssue", "mcp__X__createJiraIssue", "mcp__chat__slack_send_message"]
@@ -126,7 +126,7 @@ class PermsTest(unittest.TestCase):
             self.assertNotIn("mcp__X__transitionJiraIssue", disp["allow"])
             self.assertIn("Bash(gh pr ready:*)", disp["allow"])
             worker = json.loads((data / "alpha" / "settings.json").read_text())["permissions"]
-            self.assertNotIn("allow", worker)
+            self.assertEqual(worker["allow"], [f"Bash({paths.package_root() / 'bin' / 'ap'} worker park:*)"])
 
 
     def test_write_for_records_the_servers_the_passes_use(self):
@@ -163,7 +163,7 @@ class PermsTest(unittest.TestCase):
         for auth in ({}, {"merge": False}, {"merge": "yes"}, None):
             allow = perms.generate([], role="dispatcher", authority=auth)["permissions"]["allow"]
             self.assertNotIn(MERGE, allow, auth)
-        self.assertNotIn("allow", perms.generate([], role="worker", authority={"merge": True})["permissions"])
+        self.assertEqual(perms.generate([], role="worker", authority={"merge": True})["permissions"]["allow"], [f"Bash({paths.package_root() / 'bin' / 'ap'} worker park:*)"])
 
     def test_shared_floor_merges_only_when_every_autopilot_may(self):
         def disp_allow(data):
