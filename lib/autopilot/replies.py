@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import subprocess
-import time
 from datetime import datetime, timedelta
 
 from autopilot import config, paths, sessions, state, usage, workers
@@ -128,15 +127,9 @@ def check(gcfg: dict, url: str, poll_s: float = 2) -> dict:
     except (RuntimeError, OSError, subprocess.SubprocessError) as e:
         return {"ok": False, "error": f"could not start the check: {e}"}
     try:
-        deadline = time.monotonic() + float(rc.get("timeout_s") or 120)
-        s = None
-        while time.monotonic() < deadline:
-            s = sessions.find_by_id(short, sessions.list_all(claude) or [])
-            if s and s.get("state") == "done":
-                break
-            time.sleep(poll_s)
-        else:
-            return {"ok": False, "error": "the check did not finish in time"}
+        s, why = sessions.wait_turn(claude, short, float(rc.get("timeout_s") or 120), poll_s)
+        if why:
+            return {"ok": False, "error": f"the check {why}"}
         found = parse(usage.find_transcript(s.get("sessionId")), url)
         if found is None:
             return {"ok": False, "error": "no ArtifactData read of the replies in the check's transcript"}

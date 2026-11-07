@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
 import os
+import re
+import time
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
 from tests.helpers import ROOT, TempData, write_ap
-from autopilot import config, gate, lock, ops, publish, refresh, state
+from autopilot import config, gate, lock, ops, publish, refresh, replies, state
 
 URL = "https://claude.ai/artifact/PAGE"
 NOW = datetime(2026, 1, 2, 12, 0).astimezone()
@@ -20,12 +23,28 @@ def dec():
             "options": [{"id": "a", "label": {"en": "A"}}], "links": []}
 
 
-def transcript(path: Path, plan: dict, url=URL, result="Applied 2 writes atomically.", is_error=False, drop=None):
+def committed(writes, skip=()):
+    """The tool's own record of a batch it wrote, as a live transcript holds it in toolUseResult.db_write."""
+    return {"op": "batch", "committed": True, "results": [
+        {"op": w["op"], "collection": w["collection"], "doc_id": w["doc_id"], "version": 7}
+        for w in writes if w["doc_id"] not in skip]}
+
+
+def transcript(path: Path, plan: dict, url=URL, result=None, is_error=False, drop=None, db_write=None):
+    """A batch call and its result shaped like a live transcript: the result text, and in toolUseResult the
+    tool's record of what it wrote (a success) or its error string (a refusal)."""
     writes = [w for w in plan["writes"] if w is not drop]
+    if result is None:
+        result = (f"Database batch committed atomically — {len(writes)} writes; who can read them follows the "
+                  "page's access rules (by default, everyone who can open the artifact):\n"
+                  + "\n".join(f'- {w["op"]} "{w["collection"]}"/"{w["doc_id"]}" (version 7)' for w in writes))
+    if db_write is None and not is_error:
+        db_write = committed(writes)
+    tur = {"written": {"url": url}, "owned": True, "db_write": db_write} if db_write else f"Error: {result}"
     lines = [{"type": "assistant", "message": {"content": [
         {"type": "tool_use", "id": "b1", "name": "ArtifactData", "input": {"action": "batch", "url": url, "writes": writes}}]}},
         {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "b1", "content": result,
-                                                  "is_error": is_error}]}}]
+                                                  "is_error": is_error}]}, "toolUseResult": tur}]
     path.write_text("\n".join(json.dumps(l) for l in lines) + "\n")
     return path
 
@@ -131,6 +150,22 @@ class PrepareTest(Env):
         self.assertEqual(json.loads((folder / "manifest.json").read_text()), plan)
         self.assertNotIn("evidence", plan["collections"])
 
+    def test_file_paths_are_resolved_through_symbolic_links(self):
+        # A file_path spelled through a link makes the tool stop at a permission prompt nobody answers, and the
+        # session's read rule names the resolved folder.
+        self.publish_now()
+        prev = publish._page()["published"]
+        ops.decision_add("checkout", dec())
+        real = self.data / "real"
+        real.mkdir()
+        (self.data / "link").symlink_to(real)
+        plan = refresh.prepare(prev, publish.collect(["checkout"]), self.data / "link" / "page-refresh")
+        sets = [w for w in plan["writes"] if w["op"] == "set"]
+        self.assertTrue(sets)
+        for w in sets:
+            self.assertEqual(w["file_path"], os.path.realpath(w["file_path"]))
+            self.assertTrue(w["file_path"].startswith(str(real.resolve() / "page-refresh") + os.sep))
+
     def test_deletes_have_no_file_and_batches_are_capped(self):
         writes = [{"op": "delete", "collection": "tasks", "doc_id": f"t{i}"} for i in range(120)]
         self.assertEqual([len(b) for b in refresh.batches(writes)], [50, 50, 20])
@@ -160,10 +195,29 @@ class VerifyTest(Env):
         plan = self.plan()
         t = self.data / "t.jsonl"
         self.assertIn("failed", refresh.verify(transcript(t, plan, is_error=True), URL, plan))
-        self.assertIn("failed", refresh.verify(transcript(t, plan, result="Refused: document changed (version 4)"), URL, plan))
+        self.assertIn("failed", refresh.verify(transcript(t, plan, result="Refused: document changed (version 4)",
+                                                          db_write=False), URL, plan))
         self.assertIn("no ArtifactData batch", refresh.verify(transcript(t, plan, url="other"), URL, plan))
         self.assertIn("never sent", refresh.verify(transcript(t, plan, drop=plan["writes"][0]), URL, plan))
         self.assertIn("no transcript", refresh.verify(self.data / "nope", URL, plan))
+
+    def test_a_fail_word_in_a_document_id_does_not_fail_a_success(self):
+        # The result text lists every document it wrote, so a task named "fix-login-error" is in it.
+        w = [{"op": "set", "collection": "tasks", "doc_id": "fix-login-error", "file_path": "/x/0000.json"},
+             {"op": "set", "collection": "reports", "doc_id": "denied-refunds", "file_path": "/x/0001.json"}]
+        plan = {"writes": w, "collections": {"tasks": ["fix-login-error"], "reports": ["denied-refunds"]}}
+        self.assertEqual(refresh.verify(transcript(self.data / "t.jsonl", plan), URL, plan), "")
+
+    def test_only_the_tools_record_of_a_write_is_proof(self):
+        plan = self.plan()
+        t = self.data / "t.jsonl"
+        sets = [w for w in plan["writes"] if w["op"] == "set"]
+        self.assertIn("failed", refresh.verify(transcript(t, plan, result="Applied 2 writes atomically.",
+                                                          db_write=False), URL, plan))
+        self.assertIn("failed", refresh.verify(transcript(t, plan, result="Database write not committed.",
+                                                          db_write={"op": "batch", "committed": False}), URL, plan))
+        skipped = committed(plan["writes"], skip={sets[0]["doc_id"]})
+        self.assertIn(sets[0]["doc_id"], refresh.verify(transcript(t, plan, db_write=skipped), URL, plan))
 
     def test_an_unplanned_write_is_not_proof(self):
         plan = self.plan()
@@ -291,22 +345,76 @@ class RunbookTest(unittest.TestCase):
 
 
 class SessionTest(Env):
-    def test_argv_is_a_small_haiku_session(self):
-        log = self.data / "claude.log"
+    """The real run_session against the fake claude, with the listing entries the live CLI showed."""
+
+    @contextlib.contextmanager
+    def cli(self, state="done", status="idle", transcript=Path("/x/t.jsonl")):
+        self.log = self.data / "claude.log"
         agents = self.data / "agents.json"
-        agents.write_text(json.dumps([{"id": "abcd1234", "name": refresh.NAME, "status": "idle", "state": "done",
-                                       "sessionId": "sess-1", "kind": "background", "startedAt": 1}]))
-        gcfg = dict(self.gcfg, tools={"claude": str(ROOT / "tests" / "bin" / "fake-claude")})
-        with mock.patch.dict(os.environ, {"FAKE_CLAUDE_LOG": str(log), "FAKE_AGENTS_JSON": str(agents)}), \
-                mock.patch("autopilot.usage.find_transcript", lambda sid: Path("/x/t.jsonl")):
-            res = refresh.run_session(gcfg, URL, "PROMPT", self.data, poll_s=0)
+        agents.write_text(json.dumps([{"id": "abcd1234", "name": refresh.NAME, "status": status, "state": state,
+                                       "sessionId": "sess-1", "kind": "background", "startedAt": 1, "pid": 1}]))
+        self.gcfg = dict(self.gcfg, tools={"claude": str(ROOT / "tests" / "bin" / "fake-claude")})
+        find = transcript if callable(transcript) else (lambda sid: transcript)
+        with mock.patch.dict(os.environ, {"FAKE_CLAUDE_LOG": str(self.log), "FAKE_AGENTS_JSON": str(agents)}), \
+                mock.patch("autopilot.usage.find_transcript", find), mock.patch.object(refresh, "TIMEOUT_S", 2):
+            t = time.monotonic()
+            yield
+            self.took = time.monotonic() - t
+
+    def run_session(self, cwd=None, **kw):
+        with self.cli(**kw):
+            return refresh.run_session(self.gcfg, URL, "PROMPT", cwd or self.data, poll_s=0.05)
+
+    def start_line(self):
+        return next(l for l in self.log.read_text().splitlines() if l.startswith("--bg"))
+
+    def test_argv_is_a_small_haiku_session(self):
+        res = self.run_session()
         self.assertEqual(res, {"ok": True, "transcript": Path("/x/t.jsonl")})
-        text = log.read_text()
-        start = next(l for l in text.splitlines() if l.startswith("--bg"))
+        start = self.start_line()
         for part in ("--model haiku", "--strict-mcp-config", "--setting-sources project", "--allowedTools=ArtifactData",
                      "--disallowedTools=", "--system-prompt", "PROMPT"):
             self.assertIn(part, start)
-        self.assertIn("rm abcd1234", text)
+        self.assertIn("rm abcd1234", self.log.read_text())
+
+    def test_the_session_may_read_its_own_folder_only(self):
+        # The tool reads each document's file itself, and a Read deny refuses that whatever the folder.
+        real = self.data / "real"
+        real.mkdir()
+        (self.data / "link").symlink_to(real)
+        self.run_session(cwd=self.data / "link")
+        start = self.start_line()
+        denied = re.search(r"--disallowedTools=(\S+)", start).group(1).split(",")
+        self.assertNotIn("Read", denied)
+        self.assertIn("Bash", denied)
+        self.assertIn(f"--allowedTools=ArtifactData,Read(/{real.resolve()}/**) ", start)
+        self.assertIn("Read", replies.DISALLOWED.split(","))   # the answer read still reads no file
+
+    def test_a_turn_that_ended_in_failure_ends_the_wait(self):
+        # Seen live: a turn that replied FAILED lists as blocked (or failed, or done) and idle.
+        for state in ("blocked", "failed", "done"):
+            self.assertEqual(self.run_session(state=state), {"ok": True, "transcript": Path("/x/t.jsonl")}, state)
+            self.assertLess(self.took, 1.5)
+
+    def test_a_permission_prompt_fails_fast_with_its_reason(self):
+        res = self.run_session(state="blocked", status="waiting")
+        self.assertEqual(res, {"ok": False, "error": "the refresh stopped at a permission prompt"})
+        self.assertLess(self.took, 1.5)
+        self.assertIn("rm abcd1234", self.log.read_text())
+
+    def test_a_failed_turn_records_the_tools_own_error(self):
+        self.publish_now()
+        ops.decision_add("checkout", dec())
+        refused = ("Error: Writing a database document from a file reads file contents, and the Read deny rule from "
+                   "CLI argument forbids reading files")
+        manifest = self.data / "page-refresh" / "manifest.json"
+        lazy = lambda sid: transcript(self.data / "t.jsonl", json.loads(manifest.read_text()), result=refused,
+                                      is_error=True)
+        gs = {}
+        with self.cli(state="blocked", transcript=lazy):
+            self.assertTrue(refresh.step(self.gcfg, gs, NOW))
+        self.assertIn("Read deny rule", gs["refresh"]["error"])
+        self.assertLess(self.took, 1.5)
 
 
 if __name__ == "__main__":

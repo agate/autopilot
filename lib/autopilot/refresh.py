@@ -16,7 +16,6 @@ import json
 import re
 import shutil
 import subprocess
-import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -33,7 +32,9 @@ MAX_BYTES = 600_000     # of document data per batch (the tool's limit is 1 MiB 
 GET_LIMIT = 10          # up to this many touched documents in a collection are read one by one; more, one list
 SYSTEM = ("You copy prepared writes to one page database with the ArtifactData tool. Do exactly the steps you are "
           "given, nothing else. Never guess: if you cannot call the tool, reply FAILED.")
-FAIL_WORDS = re.compile(r"refus|conflict|mismatch|nothing (was )?written|fail|error|invalid|denied|not allowed", re.I)
+# The tool reads each document's file itself and refuses while Read is denied, so this session may use Read
+# (allowed for its own folder only, see run_session); the answer read keeps it denied.
+DISALLOWED = ",".join(t for t in replies.DISALLOWED.split(",") if t != "Read")
 
 
 def _volatile_free(cur: dict) -> dict:
@@ -90,9 +91,10 @@ def prepare(prev: dict, cur: dict, folder) -> dict:
     d = publish.diff(prev, cur, list(LIGHT))
     shutil.rmtree(folder, ignore_errors=True)
     folder.mkdir(parents=True, exist_ok=True)
+    real = Path(folder).resolve()   # a file_path spelled through a symbolic link stops the tool at a permission prompt
     writes, touched = [], {}
     for i, row in enumerate(d["set"]):
-        f = folder / f"{i:04d}.json"
+        f = real / f"{i:04d}.json"
         f.write_text(json.dumps(row["data"], ensure_ascii=False))
         writes.append({"op": "set", "collection": row["collection"], "doc_id": row["doc_id"], "file_path": str(f)})
         touched.setdefault(row["collection"], []).append(row["doc_id"])
@@ -138,7 +140,8 @@ def build_prompt(url: str, plan: dict) -> str:
 
 def verify(path, url: str, plan: dict):
     """Check the transcript: every planned `set` and nothing unplanned was sent in ArtifactData batch calls
-    that all succeeded. Returns "" when proven, else the reason."""
+    that all succeeded. Returns "" when proven, else the reason. Success is the tool's own record of each write
+    (toolUseResult.db_write), never the result's words: they list every document id, and an id may say "error"."""
     try:
         lines = [json.loads(l) for l in Path(path).read_text(errors="replace").splitlines() if l.strip()]
     except (OSError, TypeError, ValueError):
@@ -156,20 +159,24 @@ def verify(path, url: str, plan: dict):
     for e in lines:
         for c in ((e.get("message") or {}).get("content") or []) if e.get("type") == "user" else []:
             if isinstance(c, dict) and c.get("type") == "tool_result" and c.get("tool_use_id") in calls:
-                results[c["tool_use_id"]] = c
+                tur = e.get("toolUseResult")
+                results[c["tool_use_id"]] = (c, tur.get("db_write") if isinstance(tur, dict) else None)
     sent, want = set(), {(w["op"], w["collection"], w["doc_id"]): w.get("file_path") for w in plan["writes"]}
     for cid, inp in calls.items():
-        r = results.get(cid)
-        if r is None:
+        if cid not in results:
             return "a batch call has no result"
+        r, record = results[cid]
         body = r.get("content")
         body = " ".join(b.get("text", "") for b in body if isinstance(b, dict)) if isinstance(body, list) else str(body or "")
-        if r.get("is_error") or FAIL_WORDS.search(body):
+        if r.get("is_error") or not isinstance(record, dict) or record.get("committed") is not True:
             return "a batch call failed: " + re.sub(r"\s+", " ", body).strip()[:200]
+        written = {(x.get("collection"), x.get("doc_id")) for x in record.get("results") or [] if isinstance(x, dict)}
         for w in inp.get("writes") or []:
             key = (w.get("op"), w.get("collection"), w.get("doc_id"))
             if key not in want or (key[0] == "set" and w.get("file_path") != want[key]):
                 return f"an unplanned write was sent: {key}"
+            if key[1:] not in written:
+                return f"the tool did not report writing {key}"
             sent.add(key)
     missing = [k for k in want if k[0] == "set" and k not in sent]
     return f"{len(missing)} planned writes were never sent" if missing else ""
@@ -179,22 +186,19 @@ def run_session(gcfg: dict, url: str, prompt: str, cwd, poll_s: float = 2) -> di
     """Run the prompt in a throwaway Haiku session. {"ok": True, "transcript": path} or {"ok": False, "error"}."""
     rc = gcfg.get("reply_check") or {}
     claude = workers.claude_bin(gcfg)
+    folder = Path(cwd).resolve()   # the plan's file paths are resolved the same way (prepare)
     argv = [claude, "--bg", "-n", NAME, "--model", rc.get("model") or "haiku", "--strict-mcp-config",
-            "--setting-sources", "project", f"--disallowedTools={replies.DISALLOWED}", "--system-prompt", SYSTEM,
-            "--allowedTools=ArtifactData", "--", prompt]
+            "--setting-sources", "project", f"--disallowedTools={DISALLOWED}", "--system-prompt", SYSTEM,
+            f"--allowedTools=ArtifactData,Read(/{folder}/**)", "--", prompt]
     try:
-        short = workers._launch(argv, str(cwd), workers._env("refresh"))
+        short = workers._launch(argv, str(folder), workers._env("refresh"))
     except (RuntimeError, OSError, subprocess.SubprocessError) as e:
         return {"ok": False, "error": f"could not start the refresh: {e}"}
     try:
-        deadline = time.monotonic() + TIMEOUT_S
-        s = None
-        while time.monotonic() < deadline:
-            s = sessions.find_by_id(short, sessions.list_all(claude) or [])
-            if s and s.get("state") == "done":
-                return {"ok": True, "transcript": usage.find_transcript(s.get("sessionId"))}
-            time.sleep(poll_s)
-        return {"ok": False, "error": "the refresh did not finish in time"}
+        s, why = sessions.wait_turn(claude, short, TIMEOUT_S, poll_s)
+        if why:
+            return {"ok": False, "error": f"the refresh {why}"}
+        return {"ok": True, "transcript": usage.find_transcript(s.get("sessionId"))}
     finally:
         replies._cleanup(claude, short)
 
