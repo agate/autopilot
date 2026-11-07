@@ -15,6 +15,9 @@ DEFAULT_GLOBAL: dict = {
     # list price) answers within a minute outside the quiet hours. At night the forced pass picks answers up.
     "gate_interval_s": 60,
     "reply_check": {"every_s": 60, "quiet": ["22:00", "06:00"], "model": "haiku", "timeout_s": 120},
+    # Between passes the gate refreshes the page's light collections on its own (a Haiku session, a fraction of a
+    # cent): soon after a real change, and at least this often so usage numbers and times stay current.
+    "page_refresh_min": 30,
     "report_times": ["09:00", "17:00", "21:00"],
     "port_base": 7100,
     "archive_after_days": 7,
@@ -42,6 +45,7 @@ DESCRIBE: dict = {
     "reply_check.quiet": "No answer reads between these two times (this computer's clock); the forced pass picks answers up then.",
     "reply_check.model": "Model for the answer read.",
     "reply_check.timeout_s": "Give up on one answer read after this many seconds.",
+    "page_refresh_min": "Refresh the page at least this often, in minutes, even when nothing changed, so usage numbers and times stay current. A real change refreshes it within a few minutes. 0 turns the periodic refresh off.",
     "report_times": "When reports are written, local time. An autopilot can set its own.",
     "port_base": "First port handed to workers; each worker gets a block of 10.",
     "archive_after_days": "Answered decisions older than this many days move to the archive.",

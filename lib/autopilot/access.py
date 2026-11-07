@@ -17,7 +17,8 @@ import sys
 from autopilot import cli, config, events, ops, paths, state, workers
 
 TIMEOUT_S = 20
-NAMES = {"gh": "GitHub (gh)", "page": "claude.ai login", "artifact": "Artifact tools"}
+NAMES = {"gh": "GitHub (gh)", "page": "claude.ai login", "artifact": "Artifact tools",
+         "page_refresh": "Page refresh"}
 
 
 def _file(ap: str):

@@ -20,6 +20,7 @@ that setting.
 | `reply_check.quiet` | `["22:00", "06:00"]` | No answer reads between these two times (this computer's clock); the forced pass picks answers up then. |
 | `reply_check.model` | `"haiku"` | Model for the answer read. |
 | `reply_check.timeout_s` | `120` | Give up on one answer read after this many seconds. |
+| `page_refresh_min` | `30` | Refresh the page at least this often, in minutes, even when nothing changed, so usage numbers and times stay current. A real change refreshes it within a few minutes. 0 turns the periodic refresh off. |
 | `report_times` | `["09:00", "17:00", "21:00"]` | When reports are written, local time. An autopilot can set its own. |
 | `port_base` | `7100` | First port handed to workers; each worker gets a block of 10. |
 | `archive_after_days` | `7` | Answered decisions older than this many days move to the archive. |
