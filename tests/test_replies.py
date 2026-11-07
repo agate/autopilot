@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -264,6 +265,30 @@ class CheckTest(unittest.TestCase):
                      "--disallowedTools=", "--system-prompt", URL):
             self.assertIn(part, start)
         self.assertIn("rm abcd1234", log)
+
+    def listed(self, state, status):
+        self.agents.write_text(json.dumps([{"id": "abcd1234", "name": replies.NAME, "status": status, "state": state,
+                                            "sessionId": "sess-1", "kind": "background", "startedAt": 1, "pid": 1}]))
+        self.gcfg["reply_check"] = dict(self.gcfg["reply_check"], timeout_s=2)
+
+    def test_a_turn_listed_as_blocked_or_failed_is_read_at_once(self):
+        # The state is the CLI's label for how the turn ended, not whether it is over: "idle" says it is.
+        t = write_transcript(self.data / "sess-1.jsonl", [{"id": "r1", "decision": "checkout:D-7"}])
+        for state in ("blocked", "failed"):
+            self.listed(state, "idle")
+            began = time.monotonic()
+            with mock.patch("autopilot.usage.find_transcript", lambda sid: t):
+                res = replies.check(self.gcfg, URL, poll_s=0.05)
+            self.assertEqual(res, {"ok": True, "replies": [{"id": "r1", "ap": "checkout"}]}, state)
+            self.assertLess(time.monotonic() - began, 1.5)
+
+    def test_a_permission_prompt_fails_fast(self):
+        self.listed("blocked", "waiting")
+        began = time.monotonic()
+        res = replies.check(self.gcfg, URL, poll_s=0.05)
+        self.assertEqual(res, {"ok": False, "error": "the check stopped at a permission prompt"})
+        self.assertLess(time.monotonic() - began, 1.5)
+        self.assertIn("rm abcd1234", self.log.read_text())
 
     def test_unverified_answer_is_an_error(self):
         t = write_transcript(self.data / "sess-1.jsonl", [], call=False, answer="5")

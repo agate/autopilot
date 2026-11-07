@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -25,6 +26,24 @@ def list_all(claude_bin: str):
 
 def find_by_id(short: str, all_sessions):
     return next((s for s in all_sessions or [] if s.get("id") == short), None)
+
+
+def wait_turn(claude_bin: str, short: str, timeout_s: float, poll_s: float = 2):
+    """Wait for a throwaway background session to end its turn: (session, "") when it did, else (the last listing
+    of it or None, why). The listed state is the CLI's own label for how the turn ended (a reply of FAILED has been
+    listed as done, blocked and failed), so any state but "working" ends the wait once the session is idle or its
+    process is gone; whether the work succeeded is for the transcript to say. A permission prompt ends the wait at
+    once, since nobody answers a background session."""
+    deadline = time.monotonic() + timeout_s
+    s = None
+    while time.monotonic() < deadline:
+        s = find_by_id(short, list_all(claude_bin) or [])
+        if s and s.get("status") == "waiting":
+            return s, "stopped at a permission prompt"
+        if s and s.get("state") not in (None, "working") and s.get("status") in (None, "idle"):
+            return s, ""
+        time.sleep(poll_s)
+    return s, "did not finish in time"
 
 
 def find(name: str, all_sessions):
