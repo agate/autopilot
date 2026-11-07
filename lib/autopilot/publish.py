@@ -16,6 +16,8 @@ IMAGE_EXT = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")
 # The page shows each log as text. The asset store refuses .log and .tap, so those go up under a .txt name.
 LOG_EXT = (".txt", ".log", ".tap", ".json", ".md")
 UPLOAD_EXT = IMAGE_EXT + (".txt", ".json", ".md")
+# The page is a claude.ai Artifact; `ap publish url <url>` stores only such a link.
+PAGE_HOST = "https://claude.ai/"
 
 
 def _page_file():
@@ -227,6 +229,12 @@ def _cmd(args: list) -> int:
         mark(collect(aps), new, only)
     elif args[:1] == ["url"]:
         if len(args) == 2:
+            # Most ap commands take the autopilot name first, so `ap publish url <name>` is an easy slip;
+            # saving it would silently point every later publish at no page.
+            if not args[1].startswith(PAGE_HOST):
+                print(f"ap publish url: {args[1]!r} is not a page URL (it must start with {PAGE_HOST}); "
+                      "to print the URL, run `ap publish url` with no argument", file=sys.stderr)
+                return 2
             p = _page()
             p["url"] = args[1]
             _save_page(p)

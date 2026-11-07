@@ -105,6 +105,27 @@ class PublishTest(unittest.TestCase):
         rest = publish.diff(publish.published(), publish.collect(["checkout"]))["set"]
         self.assertIn(("tasks", "checkout:PROJ-123"), [(s["collection"], s["doc_id"]) for s in rest])
 
+    def test_cli_url_sets_and_prints(self):
+        page = "https://claude.ai/artifact/PAGE"
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.assertEqual(cli.main(["publish", "url", page]), 0)
+            self.assertEqual(cli.main(["publish", "url"]), 0)
+        self.assertEqual(buf.getvalue().splitlines(), [page, page])
+
+    def test_cli_url_refuses_a_non_page_argument(self):
+        page = "https://claude.ai/artifact/PAGE"
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(["publish", "url", page]), 0)
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            self.assertEqual(cli.main(["publish", "url", "checkout"]), 2)
+        self.assertIn("run `ap publish url` with no argument", err.getvalue())
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(cli.main(["publish", "url"]), 0)
+        self.assertEqual(out.getvalue().strip(), page)
+
     def test_removed_doc_deleted(self):
         self._mark()
         st = json.loads((self.data / "checkout" / "state.json").read_text())
