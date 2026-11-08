@@ -26,6 +26,9 @@ LIGHT = ("meta", "autopilots", "tasks", "workers", "decisions", "reports")
 DEBOUNCE_MIN = 3        # a change refreshes the page at most this often
 BACKOFF_MIN = (5, 10, 20, 40, 60)
 SIGNAL_AFTER = 3        # failures in a row before an access card opens
+START_ERROR = "could not start the refresh"   # run_session's error when no background session starts
+FIX = ("nothing to run: the refresh retries on its own (at once when background sessions start again, otherwise "
+       "within the hour), and passes keep publishing the page meanwhile")
 TIMEOUT_S = 180
 MAX_WRITES = 50         # one ArtifactData batch
 MAX_BYTES = 600_000     # of document data per batch (the tool's limit is 1 MiB for the whole body)
@@ -193,7 +196,7 @@ def run_session(gcfg: dict, url: str, prompt: str, cwd, poll_s: float = 2) -> di
     try:
         short = workers._launch(argv, str(folder), workers._env("refresh"))
     except (RuntimeError, OSError, subprocess.SubprocessError) as e:
-        return {"ok": False, "error": f"could not start the refresh: {e}"}
+        return {"ok": False, "error": f"{START_ERROR}: {e}"}
     try:
         s, why = sessions.wait_turn(claude, short, TIMEOUT_S, poll_s)
         if why:
@@ -211,8 +214,7 @@ def _fail(gcfg: dict, rs: dict, now: datetime, error: str) -> None:
         rs["signaled"] = True
         for ap in config.active_aps():
             try:
-                access.record(ap, "page_refresh", False, error,
-                              "run /autopilot doctor; the next pass publishes the page",
+                access.record(ap, "page_refresh", False, error, FIX,
                               {"key": "blocks_check", "args": {"name": access.NAMES["page_refresh"]}})
             except Exception:   # noqa: BLE001 - the gate must keep running
                 pass
@@ -230,6 +232,15 @@ def _ok(rs: dict, now: datetime) -> None:
     rs.update(errors=0, ok_at=now.isoformat())
 
 
+def _sessions_start_again(gs: dict, rs: dict) -> bool:
+    """True when the last refresh could not start its session and the reply check, the same kind of throwaway
+    session, has worked since. Only that error: the reply check works every minute, so retrying any other
+    error on it would undo the backoff."""
+    replied = (gs.get("replies") or {}).get("ok_at")
+    return (str(rs.get("error") or "").startswith(START_ERROR) and bool(replied and rs.get("last_at"))
+            and datetime.fromisoformat(replied) > datetime.fromisoformat(rs["last_at"]))
+
+
 def step(gcfg: dict, gs: dict, now: datetime) -> bool:
     """Refresh the page when due. True when a session ran. Keeps its bookkeeping in gs["refresh"]:
     last_at, ok_at, errors, error, next_at."""
@@ -237,6 +248,8 @@ def step(gcfg: dict, gs: dict, now: datetime) -> bool:
     if not page.get("url") or not page.get("published_at") or not config.list_aps():
         return False   # nothing is published yet: the first publish is a pass's job
     rs = gs.setdefault("refresh", {})
+    if rs.get("next_at") and _sessions_start_again(gs, rs):
+        rs.pop("next_at")   # the cause is gone: retry now instead of waiting out the backoff
     cur = publish.collect(config.list_aps())
     reason = due(gcfg, rs, now, page.get("published") or {}, cur)
     if not reason:
