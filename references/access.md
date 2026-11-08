@@ -34,3 +34,9 @@ Keep profile names and account details in your data folder's `config.json`, neve
 `ap access list <ap>` lists the checks; `ap access check <ap>` runs the one that is due, and
 `ap access check <ap> <check>` runs that one now (exit 0 when it works). Both print the result and
 open or close the card.
+
+The gate's own page refresh (the Haiku session that keeps the page fresh between passes) opens a
+`Page refresh` card the same way after 3 failed refreshes in a row. There is nothing to run: it
+retries on its own after 5, 10, 20, 40, then every 60 minutes, and at once when it could not start
+its session and the reply check has started one since. Passes keep publishing the page meanwhile,
+and the next refresh that works closes the card.

@@ -238,6 +238,8 @@ class StepTest(Env):
         plan = json.loads((Path(cwd) / "manifest.json").read_text())
         if self.result == "ok":
             return {"ok": True, "transcript": transcript(self.data / "t.jsonl", plan)}
+        if self.result == "start":   # the error run_session returns when no background session can start
+            return {"ok": False, "error": "could not start the refresh: could not start session: Workspace not trusted"}
         return {"ok": False, "error": "the refresh did not finish in time"}
 
     def step(self, gs, now=NOW):
@@ -299,6 +301,61 @@ class StepTest(Env):
         self.assertTrue(self.step(gs, t + timedelta(hours=1)))
         self.assertEqual(gs["refresh"]["errors"], 0)
         self.assertEqual([d for d in state.load("checkout")["decisions"] if d["kind"] == "system" and d["status"] == "open"], [])
+
+    def fail_three_times(self, kind):
+        """Three failed refreshes in a row (the access card is open); returns gs and the last attempt's time."""
+        self.result, gs, t = kind, {}, NOW
+        for _ in range(3):
+            self.assertTrue(self.step(gs, t))
+            last, t = t, datetime.fromisoformat(gs["refresh"]["next_at"]) + timedelta(seconds=1)
+        self.result = "ok"
+        return gs, last
+
+    def open_cards(self):
+        return [d for d in state.load("checkout")["decisions"] if d["kind"] == "system" and d["status"] == "open"]
+
+    def test_a_start_error_retries_once_the_reply_check_starts_a_session(self):
+        # Seen live: no background session could start for hours. Once they could again, the reply check (the
+        # same kind of session) worked every minute, but the refresh waited out its backoff and the card stayed.
+        gs, last = self.fail_three_times("start")
+        self.assertEqual(len(self.open_cards()), 1)
+        gs["replies"] = {"ok_at": (last + timedelta(minutes=1)).isoformat()}
+        self.assertTrue(self.step(gs, last + timedelta(minutes=4)))   # the backoff runs to last + 20 minutes
+        self.assertEqual(len(self.sessions), 4)
+        self.assertEqual(gs["refresh"]["errors"], 0)
+        self.assertNotIn("next_at", gs["refresh"])
+        self.assertEqual(self.open_cards(), [])
+
+    def test_a_start_error_keeps_its_backoff_without_a_newer_reply_check(self):
+        gs, last = self.fail_three_times("start")
+        for replies_state in ({}, {"ok_at": (last - timedelta(minutes=1)).isoformat()}):
+            gs["replies"] = replies_state
+            self.assertFalse(self.step(gs, last + timedelta(minutes=4)), replies_state)
+        self.assertEqual(len(self.sessions), 3)
+        self.assertEqual(len(self.open_cards()), 1)
+
+    def test_another_error_keeps_its_backoff_whatever_the_reply_check_does(self):
+        # The reply check works every minute, so retrying any error on it would undo the backoff.
+        gs, last = self.fail_three_times("timeout")
+        gs["replies"] = {"ok_at": (last + timedelta(minutes=1)).isoformat()}
+        self.assertFalse(self.step(gs, last + timedelta(minutes=4)))
+        self.assertEqual(len(self.sessions), 3)
+        self.assertEqual(len(self.open_cards()), 1)
+
+    def test_the_card_says_the_refresh_retries_by_itself(self):
+        self.fail_three_times("start")
+        fix = self.open_cards()[0]["access"]["fix"]
+        self.assertNotIn("doctor", fix)   # doctor neither fixes nor retries the refresh
+        self.assertIn("retries on its own", fix)
+        self.assertIn("background sessions start again", fix)
+        self.assertIn("passes keep publishing the page", fix)
+
+    def test_a_success_closes_the_card(self):
+        self.fail_three_times("start")
+        rs = {"errors": 3, "error": "x", "next_at": NOW.isoformat(), "signaled": True}
+        refresh._ok(rs, NOW)
+        self.assertEqual(rs, {"errors": 0, "ok_at": NOW.isoformat()})
+        self.assertEqual(self.open_cards(), [])
 
     def test_no_page_yet_no_refresh(self):
         publish._save_page({})
