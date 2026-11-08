@@ -73,7 +73,7 @@ def _age_min(iso, now: datetime):
 
 
 def due(gcfg: dict, rs: dict, now: datetime, prev: dict, cur: dict):
-    """Why a refresh should run now: "change", "periodic", or None."""
+    """Why a refresh should run now: "change", "retry", "periodic", or None."""
     if rs.get("next_at") and now < datetime.fromisoformat(rs["next_at"]):
         return None
     last = rs.get("last_at")
@@ -81,6 +81,8 @@ def due(gcfg: dict, rs: dict, now: datetime, prev: dict, cur: dict):
         return None
     if meaningful_change(prev, cur):
         return "change"
+    if rs.get("errors"):   # passes keep the page fresh, so without this a failed refresh never runs again
+        return "retry"
     every = gcfg.get("page_refresh_min") or 0
     age = _age_min(publish._page().get("published_at"), now)
     if every and (age is None or age >= every):
