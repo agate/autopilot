@@ -7,7 +7,7 @@ import os
 import re
 import time
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -128,6 +128,20 @@ class DueTest(Env):
         rs = {"next_at": (NOW + timedelta(minutes=5)).isoformat()}
         self.assertIsNone(refresh.due(self.gcfg, rs, NOW, prev, cur))
         self.assertEqual(refresh.due(self.gcfg, rs, NOW + timedelta(minutes=6), prev, cur), "change")
+
+    def test_a_failed_refresh_is_retried_while_passes_keep_the_page_fresh(self):
+        # Seen live: passes published the whole page every 30 minutes, so nothing changed and the page was never
+        # stale; a refresh that had failed was never tried again and its card stayed open.
+        self.publish_now(at=(NOW - timedelta(minutes=1)).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        prev = publish._page()["published"]
+        cur = copy.deepcopy(prev)
+        last = (NOW - timedelta(hours=1)).isoformat()
+        self.assertEqual(refresh.due(self.gcfg, {"errors": 6, "last_at": last}, NOW, prev, cur), "retry")
+        waiting = {"errors": 6, "last_at": last, "next_at": (NOW + timedelta(minutes=5)).isoformat()}
+        self.assertIsNone(refresh.due(self.gcfg, waiting, NOW, prev, cur))   # still inside its backoff
+        just_tried = {"errors": 6, "last_at": (NOW - timedelta(minutes=1)).isoformat()}
+        self.assertIsNone(refresh.due(self.gcfg, just_tried, NOW, prev, cur))   # the debounce still holds
+        self.assertIsNone(refresh.due(self.gcfg, {"errors": 0, "last_at": last}, NOW, prev, cur))   # healthy
 
     def test_config_key(self):
         self.assertEqual(config.DEFAULT_GLOBAL["page_refresh_min"], 30)
