@@ -165,6 +165,24 @@ class DocsTest(unittest.TestCase):
         self.assertIn("`gh pr merge --match-head-commit`", rd)
         self.assertIn("`authority.merge`", rd)
 
+    def test_self_decisions_are_flagged_read_and_reminded(self):
+        rb = (ROOT / "RUNBOOK.md").read_text()
+        auth = rb[rb.index("## Authority"):rb.index("## System access")]
+        self.assertIn("`attention`", auth)                       # every self card says whether it wants a look
+        begin = rb[rb.index("1. **Begin.**"):rb.index("2. **Check workers.**")]
+        self.assertIn("ap decision attention <ap> <D-id> true|false", begin)   # older cards get the flag once
+        step = rb[rb.index("**Replies.**"):rb.index("7. **Sync the source.**")]
+        self.assertIn('`option: "keep"`', step)
+        self.assertIn("ap decision keep <ap> <D-id>", step)
+        self.assertIn("`decisions`", step)                        # the page's "mark all read" reply
+        report = rb[rb.index("9. **Report.**"):rb.index("10. **Tidy and publish.**")]
+        self.assertIn("ap decision unread <ap>", report)
+        self.assertIn("`remind`", report)
+        late = rb[rb.index("10. **Tidy and publish.**"):rb.index("11. **End.**")]
+        self.assertIn("ap decision keep", late)                   # a keep that arrives late is no "being handled"
+        talk = (ROOT / "references" / "talk.md").read_text()
+        self.assertIn("ap decision keep <name>", talk)
+
 
 if __name__ == "__main__":
     unittest.main()

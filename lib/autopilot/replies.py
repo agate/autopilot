@@ -96,7 +96,10 @@ def parse(path, url: str):
         data = {d.get("id"): d.get("data") or {} for d in _db_lines(results[0].get("content"))}
         out = []
         for d in read["docs"]:
-            dec = str((data.get(d.get("id")) or {}).get("decision") or "")
+            doc = data.get(d.get("id")) or {}
+            # "Mark all read" sends one reply per autopilot that lists its cards under `decisions`.
+            many = doc.get("decisions") if isinstance(doc.get("decisions"), list) else []
+            dec = str(doc.get("decision") or (many[0] if many else ""))
             out.append({"id": d.get("id"), "ap": dec.split(":", 1)[0] if ":" in dec else None})
         return out
     return None

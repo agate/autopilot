@@ -16,7 +16,7 @@ WORKER_REQ = {"task", "role", "session_name", "session_id", "short_id", "ports",
 WORKER_OPT = {"cwd", "parked"}
 ROLES = {"implement", "review", "pr"}
 DEC_REQ = {"id", "kind", "title", "body", "options", "links", "status", "created_at"}
-DEC_OPT = {"task", "answer", "action", "answered_at", "access", "handling"}
+DEC_OPT = {"task", "answer", "action", "answered_at", "access", "handling", "attention"}
 DEC_KINDS = {"ask", "gate", "self", "system"}
 DEC_STATUS = {"open", "answered", "undone", "resolved"}
 
@@ -81,6 +81,8 @@ def validate(st: dict, langs: set) -> list:
             errs.append(f"{w}: bad kind {d.get('kind')!r}")
         if d.get("status") not in DEC_STATUS:
             errs.append(f"{w}: bad status {d.get('status')!r}")
+        if "attention" in d and not isinstance(d["attention"], bool):
+            errs.append(f"{w}: attention must be true or false")
         for f in ("title", "body"):
             if f in d:
                 errs += text.check(d[f], langs, f"{w}.{f}")

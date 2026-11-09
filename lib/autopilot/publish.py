@@ -115,6 +115,7 @@ def collect(aps: list) -> dict:
     out["meta"]["labels"] = _labels(gcfg)
     gate = _read_json(paths.data_root() / "gate.json") or {}
     out["meta"]["health"] = {"broken": gate.get("broken") or {}, "last_gate_at": gate.get("last_run_at")}
+    out["meta"]["self_review"] = gcfg["self_review"]
     rc = gcfg.get("reply_check") or {}
     offset = datetime.now().astimezone().utcoffset()
     # The page tells the reader when an answer is picked up: within a minute, or at the next forced pass

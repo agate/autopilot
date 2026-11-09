@@ -29,6 +29,10 @@ a field missing a language.
 - A reversible decision is yours: take the recommended option, then `ap decision add` with
   `kind: self`, the reason in `body`, and how it is undone. Look for a reversible route before calling
   something irreversible.
+- Every `self` card sets `attention`. `true` when the user should look at it: it goes against the
+  spec or the ticket's words, widens or narrows the scope, is hard to undo once merged, or changes
+  what people see or use. Otherwise `false`: the page folds routine calls into one line, and the user
+  reads them when they like. Start the body with one sentence that says what you chose.
 - Something only a person can pass (a required approval, a teammate's review) is a `kind: gate` card,
   added once. Keep other work moving.
 - Never wait for a reply. Add the card and continue.
@@ -69,7 +73,8 @@ rejects one that does not.
 
 1. **Begin.** Run `ap budget`. Note `allowance.allow`: `0` means start no new workers, `1` means at
    most one. Read `$AUTOPILOT_DATA/RULES.md`, and for each autopilot its `config.json`, `RULES.md` and
-   `state.json`.
+   `state.json`. An open `self` card with no `attention` field was added before every card had one:
+   judge it by the rule under Authority and run `ap decision attention <ap> <D-id> true|false`.
 
 2. **Check workers.** For each autopilot run `ap worker list <ap> --json` and handle each worker by
    its `state`:
@@ -144,6 +149,11 @@ rejects one that does not.
    page). Each reply has `decision` (`<ap>:<D-id>`), `option` or `text`, and `by`. First record every
    answer, then tell the page, then act on them:
    - `option: "undo"` on a `self` card: `ap decision resolve <ap> <D-id> --answer undo --status undone --handling`.
+     It works on a card the user already marked read, too, even once the archive took it.
+   - `option: "keep"` on a `self` card (OK: read, it stands), or a reply with a `decisions` list (the
+     page's "mark all read", `<ap>:<D-id>` each): `ap decision keep <ap> <D-id> ...` with every id. It
+     prints `kept`, `unchanged` and `skipped`. Nothing is left to act on: no `--handling`, no
+     `ap decision handled`; delete the reply once the page has been told.
    - Otherwise: `ap decision resolve <ap> <D-id> --answer "<option id or text>" --handling`.
    - It prints `resolved`: the answer is recorded and the page will show it as received, being handled.
    - It prints `unchanged`: the same answer was recorded before (a pass stopped before deleting this
@@ -183,13 +193,16 @@ rejects one that does not.
 9. **Report.** For each autopilot, if `ap report due <ap>` prints a slot, write the report JSON
    `{slot, done, waiting, next, budget, access}` and run `ap report write <ap> <file>`.
    - `done`: what merged, shipped or moved since the last report, with task ids and PR numbers.
-   - `waiting`: at most 5 things for the user, each answerable in a word.
+   - `waiting`: at most 5 things for the user, each answerable in a word. Run
+     `ap decision unread <ap>`: when `remind` is true, one of the 5 says how many decisions it made by
+     itself are unread (`count`), since when (`oldest_at`), and that they are folded on the page.
    - `access`: every tool or login failure since the last report (MCP, GitHub, hosts, permission
      denials) with the error and the fix command; mark one that used to work.
    Send one `PushNotification` that leads with how many things wait on the user.
 
 10. **Tidy and publish.** First read the page's `replies` again. Each new answer (it arrived during
-    this pass) gets only this: `ap decision resolve ... --handling` as in step 6, then
+    this pass) gets only this: `ap decision resolve ... --handling` as in step 6 (a keep reply gets
+    `ap decision keep <ap> <D-id> ...` instead, never `--handling`), then
     `ap publish diff --only decisions`, its rows in one `ArtifactData` batch, and
     `ap publish mark --only decisions`. Do not act on it, do not run `ap decision handled`, and leave
     the reply where it is: the next pass reads it again (`unchanged`) and acts. Run `ap tick <ap>`

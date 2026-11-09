@@ -105,7 +105,7 @@
   "hero_sub_none": "The autopilot keeps going on its own.",
   "ask_tag": "Your call",
   "asked_at": "asked {when}",
-  "self_hint": "It went ahead. Undo if you disagree.",
+  "self_hint": "Routine calls it made and went ahead with. Nothing waits on them: OK marks one read, Undo reverses it.",
   "you_chose": "You chose: {answer}",
   "you_wrote": "You wrote: {answer}",
   "pickup_minute": "It is picked up within a minute.",
@@ -153,5 +153,16 @@
   "blocks_gh": "Pushing branches, opening and merging PRs, and the merge check.",
   "blocks_page": "Publishing this page and reading your answers on it.",
   "blocks_mcp": "Every step that uses the {name} tools, such as syncing and moving tickets.",
-  "blocks_check": "Every step that needs {name}."
+  "blocks_check": "Every step that needs {name}.",
+  "ok": "OK",
+  "kept": "Read",
+  "look_tag": "Worth a look",
+  "self_look": "Decided by itself, worth a look ({n})",
+  "self_look_hint": "It went ahead, but this one changes the scope or the spec, is hard to undo once merged, or changes what people see. OK if it stands, Undo if not.",
+  "self_routine": "Decided by itself: {n} unread",
+  "keep_all": "Mark all {n} read",
+  "self_remind": "{n} decisions it made by itself are unread, the oldest from {when}.",
+  "self_remind_go": "Look through them",
+  "self_task": "Decided by itself in this task ({n})",
+  "hero_look": "{n} of its own decisions are worth a look"
 }

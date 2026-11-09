@@ -103,6 +103,18 @@ h1 { font-size: 16px; font-weight: 700; letter-spacing: -.01em }
 .tag.ask { background: var(--accent-soft); color: var(--accent) }
 .tag.gate { background: var(--gate-soft); color: var(--gate) }
 .tag.system { background: var(--crit-soft); color: var(--crit) }
+.tag.look { background: var(--warn-soft); color: var(--warn) }
+.dec.look { border-left: 5px solid var(--warn) }
+.self-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center }
+.self-actions .btn.ghost, .ok-btn { min-height: 36px }
+.self-tools { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; color: var(--muted); font-size: 12.5px }
+.self-body > summary { list-style: none; cursor: pointer }
+.self-body > summary::-webkit-details-marker { display: none }
+.self-body > summary::before { content: "▸ "; color: var(--muted) }
+.self-body[open] > summary::before { content: "▾ " }
+.self-body > summary + * { margin-top: 6px }
+.self-body .links { margin-top: 8px }
+.remind { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 8px 12px; border-radius: var(--r-sm); background: var(--warn-soft); color: var(--warn); font-size: 13px; font-weight: 600 }
 .meta { color: var(--muted); font-size: 12px; overflow-wrap: anywhere }
 .age { margin-left: auto }
 .body { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink-2) }
@@ -302,8 +314,10 @@ details.fold > summary + * { margin-top: 8px }
     <section class="view" id="v-needs" data-view="needs" aria-labelledby="hero-t">
       <div class="sec" id="systems"></div>
       <div class="hero" id="hero"></div>
+      <div id="self-remind"></div>
       <div class="sec" id="asks"></div>
       <div class="sec" id="gates"></div>
+      <div class="sec" id="self-look"></div>
       <div class="sec" id="selfs"></div>
       <div class="sec" id="handling"></div>
       <div class="sec" id="answered"></div>
@@ -422,7 +436,8 @@ function windowLabel(w) {
   return L("tile_weekly");
 }
 const byCreated = (x, y) => (x.created_at || "").localeCompare(y.created_at || "");
-const replyFor = (key) => Object.values(S.replies).find((r) => r.decision === key);
+// "Mark all read" sends one reply that lists its cards under `decisions`.
+const replyFor = (key) => Object.values(S.replies).find((r) => r.decision === key || (r.decisions || []).includes(key));
 // An ask you already answered stops counting as "waiting" while the answer travels to the next pass.
 const openSystems = (ap) => Object.values(S.decisions).filter((d) => d.status === "open" && d.kind === "system" && (!ap || d.ap === ap));
 const openAsks = (ap) => Object.values(S.decisions).filter((d) => d.status === "open" && d.kind === "ask" && (!ap || d.ap === ap) && !replyFor(d.ap + ":" + d.id));
@@ -539,16 +554,117 @@ function systemCard(d) {
     el("div", { class: "sys-line" }, el("b", {}, L("sys_fix") + ": "), el("code", { class: "mono" }, a.fix || "–")),
     el("div", { class: "note" }, L("sys_checked", { when: rel(a.last_checked) })));
 }
+/* Decisions it made by itself. The pass flags the few worth a look (`attention`): they sit on top as cards.
+   The routine rest folds into one line. OK marks one read; read ones move to the history and to their task's
+   evidence page, where Undo stays. A card saved before the flag existed counts as routine. */
+function selfGroups(ds) {
+  const selfs = ds.filter((d) => d.kind === "self");
+  const older = (x, y) => (x.created_at || "").localeCompare(y.created_at || "");
+  return {
+    look: selfs.filter((d) => d.status === "open" && d.attention === true).sort(older),
+    routine: selfs.filter((d) => d.status === "open" && d.attention !== true).sort((x, y) => older(y, x)),
+    read: selfs.filter((d) => d.status !== "open").sort((x, y) => older(y, x)),
+  };
+}
+// One line, never a card: once `remind_at` routine cards are unread, or the oldest is `remind_days` old (0 = off).
+function selfRemind(routine, cfg, now) {
+  if (!routine.length) return false;
+  const at = Number((cfg || {}).remind_at) || 0, days = Number((cfg || {}).remind_days) || 0;
+  if (at > 0 && routine.length >= at) return true;
+  const ts = routine.map((d) => Date.parse(d.created_at)).filter((t) => !isNaN(t));
+  return days > 0 && ts.length > 0 && now - Math.min(...ts) > days * 86400000;
+}
+function selfButtons(d) {
+  const key = d.ap + ":" + d.id, rep = replyFor(key), off = canWrite === false || !db;
+  if (d.status === "undone") return [el("span", { class: "chip muted" }, "↺ " + L("undone"))];
+  // A read card does not keep the minute-by-minute answer check running, so its undo waits for the forced pass.
+  if (rep) return [el("span", { class: "note ok" }, "✓ " + L("pending") + (d.status === "open" ? "" : " " + L("pickup_later", { min: (S.meta.reply_check || {}).forced_pass_min || 30 })))];
+  const undo = el("button", { type: "button", class: "btn ghost", disabled: off, onclick: () => sendReply(key, { option: "undo" }) }, "↺ " + L("undo"));
+  if (d.status !== "open") return [el("span", { class: "chip ok" }, "✓ " + L("kept")), undo];
+  return [el("button", { type: "button", class: "btn ghost ok-btn", disabled: off, onclick: () => sendReply(key, { option: "keep" }) }, "✓ " + L("ok")), undo];
+}
+// From the Needs view, a card's task opens its evidence page, which lists all of that task's own decisions.
+function taskButton(d) {
+  const k = d.ap + ":" + d.task;
+  return d.task && S.tasks[k] && detailKey !== k ? el("button", { type: "button", class: "btn small", onclick: () => openDetail(k) }, L("evidence_link")) : null;
+}
+// Bodies opened by a click stay open across a re-render (every new snapshot redraws the lists).
+const openBodies = new Set();
 function selfRow(d) {
-  const key = d.ap + ":" + d.id, rep = replyFor(key), undone = d.status === "undone";
+  const key = d.ap + ":" + d.id;
+  const links = (d.links || []).map((l) => linkPill(T(l.label), l.url)).filter(Boolean);
+  const more = el("details", { class: "self-body", open: openBodies.has(key),
+    ontoggle: (e) => { if (e.target.open) openBodies.add(key); else openBodies.delete(key); } },
+    el("summary", {}, el("span", { class: "row-title" }, T(d.title))),
+    T(d.body) ? el("div", { class: "row-sub body" }, T(d.body)) : null,
+    links.length ? el("div", { class: "links" }, links) : null);
   return el("div", { class: "row" },
-    el("div", {}, el("div", { class: "row-title" }, T(d.title)), el("div", { class: "row-sub" }, T(d.body)),
-      el("div", { class: "meta mono" }, decMeta(d) + " · " + rel(d.created_at))),
-    el("div", { class: "row-side" },
-      undone ? el("span", { class: "chip muted" }, "↺ " + L("undone"))
-        : rep ? el("span", { class: "note ok" }, "✓ " + L("pending"))
-        : el("button", { type: "button", class: "btn ghost", disabled: canWrite === false || !db, onclick: () => sendReply(key, { option: "undo" }) }, "↺ " + L("undo"))),
+    el("div", {}, more, el("div", { class: "meta mono" }, d.attention === true ? el("span", { class: "tag look" }, "! " + L("look_tag")) : null,
+      " " + decMeta(d) + " · " + rel(d.created_at))),
+    el("div", { class: "row-side" }, taskButton(d), selfButtons(d)),
     errNote(key));
+}
+function selfCard(d) {
+  const key = d.ap + ":" + d.id;
+  const links = (d.links || []).map((l) => linkPill(T(l.label), l.url)).filter(Boolean);
+  return el("article", { class: "card dec look" },
+    el("div", { class: "card-head" },
+      el("span", { class: "tag look" }, "! " + L("look_tag")),
+      el("span", { class: "meta mono" }, decMeta(d)),
+      el("span", { class: "meta age" }, rel(d.created_at))),
+    el("h3", {}, T(d.title)),
+    T(d.body) ? el("div", { class: "body" }, T(d.body)) : null,
+    links.length ? el("div", { class: "links" }, links) : null,
+    el("div", { class: "self-actions" }, selfButtons(d), taskButton(d)),
+    errNote(key));
+}
+async function keepAll(list) {
+  if (!db) return;
+  delete sendErrors["keep-all"];
+  const byAp = {};
+  for (const d of list) {
+    const k = d.ap + ":" + d.id;
+    if (!replyFor(k)) (byAp[d.ap] = byAp[d.ap] || []).push(k);
+  }
+  try {
+    for (const keys of Object.values(byAp)) {
+      await db.collection("replies").add({ decisions: keys, option: "keep", at: new Date().toISOString(), by: myId });
+    }
+  } catch (e) {
+    sendErrors["keep-all"] = L("send_failed", { error: (e && (e.message || e.code)) || e });
+  }
+  render();
+}
+let selfOpen = false;
+function renderSelfs(ds) {
+  const g = selfGroups(ds), n = g.routine.length, off = canWrite === false || !db;
+  fill($("self-look"), ...(g.look.length ? [
+    el("div", { class: "sec-h" }, el("h2", {}, L("self_look", { n: g.look.length })), el("span", { class: "hint" }, L("self_look_hint"))),
+    ...g.look.map(selfCard)] : []));
+  // Like asks, a card whose OK is on its way stops counting as unread.
+  const waiting = g.routine.filter((d) => !replyFor(d.ap + ":" + d.id));
+  g.lookWaiting = g.look.filter((d) => !replyFor(d.ap + ":" + d.id));
+  fill($("selfs"), ...(n ? [el("details", { class: "fold self-fold", id: "self-fold", open: selfOpen,
+    ontoggle: (e) => { selfOpen = e.target.open; } },
+    el("summary", {}, L("self_routine", { n: waiting.length })),
+    el("div", { class: "self-tools" }, el("span", { class: "hint" }, L("self_hint")),
+      waiting.length ? el("button", { type: "button", class: "btn small", disabled: off, onclick: () => keepAll(waiting) }, "✓ " + L("keep_all", { n: waiting.length })) : null),
+    errNote("keep-all"),
+    el("div", { class: "list" }, g.routine.map(selfRow)))] : []));
+  const remind = selfRemind(waiting, S.meta.self_review || { remind_at: 10, remind_days: 3 }, Date.now());
+  fill($("self-remind"), ...(remind ? [el("div", { class: "remind", role: "status" },
+    el("span", {}, "▲ " + L("self_remind", { n: waiting.length, when: rel(waiting[waiting.length - 1].created_at) })),
+    el("button", { type: "button", class: "btn small", onclick: () => { selfOpen = true; render(); const f = $("self-fold"); if (f && f.scrollIntoView) f.scrollIntoView({ block: "start" }); } }, L("self_remind_go")))] : []));
+  return g;
+}
+// A task's own decisions, open and read, for its evidence page. The archive keeps the ones read long ago.
+function taskSelfs(ap, id) {
+  const seen = new Set(), out = [];
+  for (const d of [...values("decisions"), ...values("archive")]) {
+    const k = d.ap + ":" + d.id;
+    if (d.kind === "self" && d.ap === ap && d.task === id && !seen.has(k)) { seen.add(k); out.push(d); }
+  }
+  return out.sort((x, y) => (y.created_at || "").localeCompare(x.created_at || ""));
 }
 function answeredRow(d) {
   const opt = (d.options || []).find((o) => o.id === d.answer);
@@ -565,14 +681,16 @@ function handlingRow(d) {
       el("div", { class: "row-sub" }, L("answer_was", { answer: opt ? T(opt.label) : (d.answer || "") }))),
     el("div", { class: "row-side" }, el("span", { class: "note ok" }, "✓ " + L("handling"))));
 }
-let showArchive = false;
+let showArchive = false, answeredOpen = false;
 function renderNeeds() {
   const ds = values("decisions");
   const open = (k) => ds.filter((d) => d.status === "open" && d.kind === k).sort(byCreated);
   const asks = open("ask"), gates = open("gate"), systems = open("system");
   const pendingN = asks.filter((d) => replyFor(d.ap + ":" + d.id)).length, n = asks.length - pendingN;
+  const g = renderSelfs(ds);
   const subs = [systems.length ? L("hero_systems", { n: systems.length }) : null,
-    gates.length ? L("hero_gates", { n: gates.length }) : null, pendingN ? L("hero_pending", { n: pendingN }) : null].filter(Boolean);
+    gates.length ? L("hero_gates", { n: gates.length }) : null, pendingN ? L("hero_pending", { n: pendingN }) : null,
+    g.lookWaiting.length ? L("hero_look", { n: g.lookWaiting.length }) : null].filter(Boolean);
   fill($("systems"), ...(systems.length ? [
     el("div", { class: "sec-h" }, el("h2", {}, L("sys_title")), el("span", { class: "hint" }, L("sys_hint"))),
     ...systems.map(systemCard)] : []));
@@ -584,26 +702,24 @@ function renderNeeds() {
   fill($("asks"), ...asks.map(askCard));
   fill($("gates"), ...gates.map(askCard));
 
-  const selfs = ds.filter((d) => d.kind === "self").sort((x, y) => byCreated(y, x));
-  fill($("selfs"), ...(selfs.length ? [
-    el("div", { class: "sec-h" }, el("h2", {}, L("dec_self")), el("span", { class: "hint" }, L("self_hint"))),
-    el("div", { class: "list" }, selfs.map(selfRow))] : []));
-
   // An answer the dispatcher read but has not finished acting on: not a question any more, not yet done.
   const handling = ds.filter((d) => d.status !== "open" && d.handling).sort((x, y) => byCreated(y, x));
   fill($("handling"), ...(handling.length ? [
     el("div", { class: "sec-h" }, el("h2", {}, L("handling")), el("span", { class: "hint" }, L("handling_hint"))),
     el("div", { class: "list" }, handling.map(handlingRow))] : []));
 
-  const answered = ds.filter((d) => d.status !== "open" && d.kind !== "self" && !d.handling);
+  // The history: answered cards, and its own decisions once read or undone (a read one keeps its Undo here).
+  const answered = ds.filter((d) => d.status !== "open" && !d.handling).sort((x, y) => (y.answered_at || "").localeCompare(x.answered_at || ""));
+  const histRow = (d) => d.kind === "self" ? selfRow(d) : answeredRow(d);
   const arch = values("archive");
-  const archBox = el("div", { class: "list" }, arch.map(answeredRow));
+  const archBox = el("div", { class: "list" }, arch.map(histRow));
   archBox.hidden = !showArchive;
   const cb = el("input", { type: "checkbox", onchange: (e) => { showArchive = e.target.checked; archBox.hidden = !showArchive; } });
   cb.checked = showArchive;
   fill($("answered"),
-    el("details", { class: "fold" }, el("summary", {}, L("dec_answered", { n: answered.length })),
-      answered.length ? el("div", { class: "list" }, answered.map(answeredRow)) : el("div", { class: "empty" }, "–")),
+    el("details", { class: "fold", open: answeredOpen, ontoggle: (e) => { answeredOpen = e.target.open; } },
+      el("summary", {}, L("dec_answered", { n: answered.length })),
+      answered.length ? el("div", { class: "list" }, answered.map(histRow)) : el("div", { class: "empty" }, "–")),
     el("label", { class: "check" }, cb, L("show_archive")), archBox);
 }
 
@@ -633,7 +749,7 @@ function taskRow(t) {
       statusChip(t.status),
       t.pr ? linkPill(L("pr") + " #" + prN, t.pr, "mono") : null,
       linkPill(L("ticket"), t.link),
-      ev ? el("button", { type: "button", class: "btn small", onclick: () => openDetail(t.ap + ":" + t.id) }, L("evidence_link")) : null));
+      ev || taskSelfs(t.ap, t.id).length ? el("button", { type: "button", class: "btn small", onclick: () => openDetail(t.ap + ":" + t.id) }, L("evidence_link")) : null));
 }
 function renderTasks() {
   const box = $("v-tasks");
@@ -690,7 +806,13 @@ function emptyCard(title, why) {
 function renderDetail() {
   const ev = S.evidence[detailKey], t = S.tasks[detailKey] || {};
   const back = el("button", { type: "button", class: "btn ghost back", onclick: () => { detailKey = null; render(); } }, L("back"));
-  if (!ev) return [back, el("div", { class: "empty" }, L("no_evidence"))];
+  // Every decision it made by itself while doing this task, read or not, each with its OK and Undo.
+  const mine = taskSelfs(t.ap, t.id);
+  const selfs = mine.length ? el("article", { class: "card" }, el("h3", {}, L("self_task", { n: mine.length })),
+    el("div", { class: "list" }, mine.map(selfRow))) : null;
+  if (!ev) return [back, selfs ? el("article", { class: "card" }, el("div", { class: "card-head" }, statusChip(t.status),
+    el("span", { class: "meta mono" }, (filterAp ? "" : t.ap + " · ") + t.id)), el("h2", {}, T(t.title))) : null,
+    selfs, el("div", { class: "empty" }, L("no_evidence"))];
   const crit = ev.criteria || [];
   const pass = (c) => c.ok === true || c.status === "pass";
   const okN = crit.filter(pass).length;
@@ -704,6 +826,7 @@ function renderDetail() {
       el("h2", {}, T(t.title)),
       ev.verdict ? el("div", { class: "verdict" }, T(ev.verdict)) : null,
       ev.what_changed ? el("div", { class: "sec" }, el("h3", {}, L("what_changed")), el("div", { class: "body" }, T(ev.what_changed))) : null),
+    selfs,
     crit.length ? el("article", { class: "card" }, el("h3", {}, L("criteria", { ok: okN, n: crit.length })),
       el("ul", { class: "crit-list" }, crit.map((c) => el("li", {},
         el("span", { class: "mark " + (pass(c) ? "ok" : "crit"), "aria-label": pass(c) ? "pass" : "fail" }, pass(c) ? "✓" : "✗"),

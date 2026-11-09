@@ -35,6 +35,10 @@ class PublishTest(unittest.TestCase):
         self.assertEqual(cur["tasks"]["checkout:PROJ-123"]["ap"], "checkout")
         self.assertIn("checkout", cur["autopilots"])
 
+    def test_page_learns_when_to_remind_about_unread_self_decisions(self):
+        meta = publish.collect(["checkout"])["meta"]
+        self.assertEqual(meta["self_review"], {"remind_at": 10, "remind_days": 3})
+
     def test_unchanged_empty_diff(self):
         self._mark()
         d = publish.diff(publish.published(), publish.collect(["checkout"]))

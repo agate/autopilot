@@ -53,6 +53,19 @@ class SnapshotTest(unittest.TestCase):
         self.assertIn("Pick the first thing", out)
         self.assertIn("Pick the second thing", out)
 
+    def test_self_decisions_show_as_one_line_of_counts(self):
+        # A talk session sees how many of its own calls wait to be read, and which want a look, never their bodies.
+        def mine(title, attention):
+            return dict(dec(title), kind="self", options=[], attention=attention)
+        ops.decision_add("checkout", mine("Picked the wider retry", True))
+        ops.decision_add("checkout", mine("Renamed a helper", False))
+        ops.decision_add("checkout", mine("Kept the old flag", False))
+        ops.decision_keep("checkout", ["D3"])
+        snapshot.handle(P("/autopilot checkout"))
+        out = snapshot.handle(P("hello"))
+        self.assertIn("Decided by itself, unread (2): want a look: D1 Picked the wider retry; routine: 1", out)
+        self.assertNotIn("Renamed a helper", out)
+
     def test_events_not_repeated(self):
         snapshot.handle(P("/autopilot checkout"))
         events.append("checkout", "worker_started", {"task": "PROJ-123"})

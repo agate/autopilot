@@ -88,7 +88,12 @@ with no extra flags. Start a new session after cloning.
    check starts it within seconds. Otherwise the first pass comes on its own.
 
 From then on, watch the page, answer what only you can, and undo what the
-autopilot decided by itself if you disagree.
+autopilot decided by itself if you disagree. The few calls of its own that are
+worth a look (they change the scope or the spec, are hard to undo once merged,
+or change what people see) sit on top with OK and Undo; the routine rest fold
+into one line, and each task's evidence page lists the ones made for it. Once
+10 routine ones are unread, or the oldest is 3 days old, the reports and the
+page remind you in one line (`self_review` in `ap config`).
 
 ## Commands
 
