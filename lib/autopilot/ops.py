@@ -347,6 +347,19 @@ def _decision(args):
     return 0
 
 
+@cli.command("dir")
+def _dir(args):
+    """The folder an autopilot's files live in right now: sessions take every path from here, never by hand."""
+    if len(args) != 1:
+        print("usage: ap dir <ap>", file=sys.stderr)
+        return 2
+    if args[0] not in config.list_aps():
+        print(f"ap dir: no autopilot named {args[0]!r}", file=sys.stderr)
+        return 1
+    print(paths.ap_dir(args[0]))
+    return 0
+
+
 @cli.command("archive")
 def _archive(args):
     print(archive(args[0]))

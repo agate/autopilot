@@ -5,7 +5,7 @@
 ## Plan (first pass, or when `plan.md` is missing)
 
 1. Read the ticket, its links and the code it points to.
-2. Write `$AUTOPILOT_DATA/projects/<ap>/plan.md`: 2-10 slices, each one PR: an id `<key>-s<n>`, a title, what it
+2. Write `<ap dir>/plan.md` (the folder `ap dir <ap>` prints): 2-10 slices, each one PR: an id `<key>-s<n>`, a title, what it
    changes, the slices it depends on, and how it is proven.
 3. Add an `ask` card "Approve the plan" with options `approve` (recommended) and `change`, and a link
    to the ticket. Add no tasks yet.

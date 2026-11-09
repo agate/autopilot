@@ -22,10 +22,11 @@ def projects_root() -> Path:
 
 def ap_dir(name: str) -> Path:
     """One autopilot's folder. An autopilot made before projects/ existed stays at the top of the data
-    root until `config.migrate_legacy` moves it."""
+    root until `config.migrate_legacy` moves it. The new place counts only once it holds config.json, so a
+    file written there early cannot hide the autopilot."""
     new = projects_root() / name
     old = data_root() / name
-    if not new.exists() and (old / "config.json").exists():
+    if not (new / "config.json").exists() and (old / "config.json").exists():
         return old
     return new
 

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import unittest
 from unittest import mock
 
 from tests.helpers import TempData, write_ap
-from autopilot import config, gate, paths, state
+from autopilot import cli, config, gate, paths, state
 
 
 def legacy(data, name, **st):
@@ -73,6 +75,35 @@ class LayoutTest(unittest.TestCase):
             self.assertTrue((old / "config.json").exists())
             self.assertEqual(paths.ap_dir("alpha"), new)
             self.assertEqual(config.list_aps(), ["alpha"])
+
+    def test_a_stray_new_folder_does_not_hide_the_legacy_autopilot(self):
+        # A pass or talk session that writes into projects/<name>/ before the move must not make the
+        # autopilot vanish: the new place counts only once it holds config.json.
+        with TempData() as d:
+            old = legacy(d, "alpha")
+            stray = d / "projects" / "alpha" / "runs" / "T-1"
+            stray.mkdir(parents=True)
+            (stray / "brief-review.md").write_text("brief")
+            self.assertEqual(paths.ap_dir("alpha"), old)
+            self.assertEqual(config.load_ap("alpha")["name"], "alpha")
+            self.assertEqual(config.list_aps(), ["alpha"])
+            self.assertEqual(config.migrate_legacy(), [])          # nothing is merged or lost
+            self.assertTrue((old / "config.json").exists())
+            self.assertTrue((stray / "brief-review.md").exists())
+
+    def test_dir_command_prints_the_folder_in_use(self):
+        def run(*argv):
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = cli.main(list(argv))
+            return rc, out.getvalue().strip()
+        with TempData() as d:
+            legacy(d, "alpha")
+            self.assertEqual(run("dir", "alpha"), (0, str(d / "alpha")))
+            config.migrate_legacy()
+            self.assertEqual(run("dir", "alpha"), (0, str(d / "projects" / "alpha")))
+            self.assertEqual(run("dir", "nope")[0], 1)
+            self.assertEqual(run("dir")[0], 2)
 
     def test_legacy_autopilot_named_projects_moves_first(self):
         with TempData() as d:

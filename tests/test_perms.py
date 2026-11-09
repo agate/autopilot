@@ -177,7 +177,7 @@ class PermsTest(unittest.TestCase):
             write_ap(data, "beta", authority={})
             self.assertNotIn(MERGE, disp_allow(data))
             write_ap(data, "beta", authority={"merge": True})
-            (data / "beta" / "config.json").write_text("{ broken")
+            (paths.ap_dir("beta") / "config.json").write_text("{ broken")
             self.assertNotIn(MERGE, disp_allow(data))
 
 

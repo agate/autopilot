@@ -63,7 +63,7 @@ class PublishTest(unittest.TestCase):
         self.assertEqual((d["delete"], d["assets"]), ([], []))
 
     def test_only_never_lists_assets(self):
-        run = self.data / "checkout" / "runs" / "PROJ-123"
+        run = paths.ap_dir("checkout") / "runs" / "PROJ-123"
         (run / "media").mkdir(parents=True)
         (run / "media" / "after.png").write_bytes(b"png")
         (run / "evidence.json").write_text(json.dumps({"verdict": {"en": "ok"}, "screenshots": [
@@ -88,9 +88,9 @@ class PublishTest(unittest.TestCase):
         ops.decision_add("checkout", {"kind": "ask", "title": {"en": "t"}, "body": {"en": "b"}, "options": [],
                                       "links": []})
         self._mark()
-        st = json.loads((self.data / "checkout" / "state.json").read_text())
+        st = json.loads((paths.ap_dir("checkout") / "state.json").read_text())
         st["decisions"] = []
-        (self.data / "checkout" / "state.json").write_text(json.dumps(st))
+        (paths.ap_dir("checkout") / "state.json").write_text(json.dumps(st))
         cur = publish.collect(["checkout"])
         self.assertEqual(publish.diff(publish.published(), cur, only=["decisions"])["delete"],
                          [{"collection": "decisions", "doc_id": "checkout:D1"}])

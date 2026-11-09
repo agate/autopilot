@@ -5,7 +5,7 @@
 ## Plan (first pass, or when `plan.md` is missing)
 
 1. Read the idea and the repo it targets.
-2. Write `$AUTOPILOT_DATA/projects/<ap>/plan.md`: 2-10 slices, each one PR: an id `IDEA-<n>`-style id unique in
+2. Write `<ap dir>/plan.md` (the folder `ap dir <ap>` prints): 2-10 slices, each one PR: an id `IDEA-<n>`-style id unique in
    this autopilot (letters, digits, dashes), a title, what it changes, its dependencies, and how it is
    proven.
 3. Add an `ask` card "Approve the plan" with options `approve` (recommended) and `change`.

@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 
 from tests.helpers import ROOT, TempData, write_ap
-from autopilot import cli, ops, snapshot, state, text
+from autopilot import cli, ops, snapshot, state, text, paths
 
 
 class Base(unittest.TestCase):
@@ -57,7 +57,7 @@ class LabelArgsTest(Base):
     def test_a_card_saved_before_the_rule_still_loads(self):
         st = state.empty()
         st["decisions"] = [dict(self.card({"key": "worker_blocked"}), id="D1", status="open", created_at="x")]
-        (self.data / "checkout" / "state.json").write_text(json.dumps(st))
+        (paths.ap_dir("checkout") / "state.json").write_text(json.dumps(st))
         self.assertEqual(len(state.load("checkout")["decisions"]), 1)
 
     def test_the_snapshot_fills_the_placeholders(self):
