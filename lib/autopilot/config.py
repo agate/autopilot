@@ -238,7 +238,8 @@ def _rebase(value, old: str, new: str):
 
 
 # Written into an autopilot's folder just before it moves and removed once every stored path points at the new
-# place; it holds the old path. A run that finds it in projects/<name>/ finishes the rewrite.
+# place. It holds JSON: the old path (`from`) and, if one was set aside, the stray folder (`stray`). A run that
+# finds it in projects/<name>/ finishes the rewrite.
 PENDING = ".rewrite-pending"
 
 
@@ -255,14 +256,22 @@ def _rewrite(old: str, new: Path) -> None:
             _write(f, fixed)
 
 
-def _finish(name: str, new: Path, stray: Path = None) -> None:
-    marker = new / PENDING
-    old = marker.read_text().strip()
+def _marker(folder: Path) -> dict:
+    try:
+        info = json.loads((folder / PENDING).read_text())
+    except (OSError, ValueError):
+        return {}
+    return info if isinstance(info, dict) else {}
+
+
+def _finish(name: str, new: Path) -> None:
+    info = _marker(new)
+    old = info.get("from") or str(paths.data_root() / name)
     _rewrite(old, new)
-    marker.unlink()
+    (new / PENDING).unlink()
     data = {"from": old, "to": str(new)}
-    if stray is not None:
-        data["stray"] = str(stray)
+    if info.get("stray"):
+        data["stray"] = info["stray"]
     events.append(name, "moved", data)
 
 
@@ -276,15 +285,17 @@ def _move(name: str) -> bool:
         fcntl.flock(fd, fcntl.LOCK_EX)
         if _workers(old) != []:
             return False
-        (old / PENDING).write_text(str(old))
+        info = dict(_marker(old), **{"from": str(old)})   # keeps a stray named by an earlier try
+        (old / PENDING).write_text(json.dumps(info))
         dest.mkdir(exist_ok=True)
-        stray = None
         if new.exists():
             # Something wrote into projects/<name>/ before the move. Keep it, out of the way, and say where.
             stray = dest / f".{name}.stray-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
             os.rename(new, stray)
+            info["stray"] = str(stray)
+            (old / PENDING).write_text(json.dumps(info))
         os.rename(old, new)
-        _finish(name, new, stray)   # the lock file moved with the folder, so the lock still holds
+        _finish(name, new)   # the lock file moved with the folder, so the lock still holds
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
@@ -306,9 +317,15 @@ def _resume_rewrites() -> None:
             os.close(fd)
 
 
+def _movable(name: str) -> bool:
+    return not (paths.projects_root() / name / "config.json").exists() and _workers(paths.data_root() / name) == []
+
+
 def legacy_waiting() -> bool:
-    """An autopilot still at the old place, or a move whose rewrite has not finished."""
-    return bool(_names_in(paths.data_root())) or any(paths.projects_root().glob(f"*/{PENDING}"))
+    """An autopilot at the old place that could move now, or a move whose rewrite has not finished. The gate
+    lists sessions only then, so an autopilot that cannot move yet costs nothing."""
+    return (any(_movable(n) for n in _names_in(paths.data_root()))
+            or any(paths.projects_root().glob(f"*/{PENDING}")))
 
 
 def migrate_legacy() -> list:

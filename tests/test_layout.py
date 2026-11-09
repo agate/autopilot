@@ -137,6 +137,72 @@ class LayoutTest(unittest.TestCase):
             self.assertEqual(len([e for e in events.since("alpha", 0)[0] if e["type"] == "moved"]), 1)
             self.assertIs(config._write, real)
 
+    def test_only_a_movable_autopilot_keeps_the_gate_checking(self):
+        # Each check costs one session listing a minute: skip autopilots that cannot move yet.
+        with TempData() as d:
+            self.assertFalse(config.legacy_waiting())
+            legacy(d, "alpha", workers=[{"task": "T-1"}])        # a worker runs
+            self.assertFalse(config.legacy_waiting())
+            broken = legacy(d, "beta")
+            (broken / "state.json").write_text("{broken")
+            self.assertFalse(config.legacy_waiting())
+            legacy(d, "gamma")
+            write_ap(d, "gamma")                                # its new place is taken
+            self.assertFalse(config.legacy_waiting())
+            legacy(d, "delta")
+            self.assertTrue(config.legacy_waiting())
+
+    def test_a_pending_rewrite_keeps_the_gate_checking(self):
+        with TempData() as d:
+            new = write_ap(d, "alpha")
+            (new / config.PENDING).write_text(json.dumps({"from": str(d / "alpha")}))
+            self.assertTrue(config.legacy_waiting())
+
+    def test_the_stray_folder_is_named_even_when_the_move_finishes_later(self):
+        # The stray was set aside, then the rename failed; the next run finishes and still says where it went.
+        with TempData() as d:
+            legacy(d, "alpha")
+            (d / "projects" / "alpha" / "runs").mkdir(parents=True)
+            real, calls = os.rename, []
+
+            def flaky(a, b):
+                calls.append(a)
+                if len(calls) == 2:
+                    raise OSError("busy")
+                return real(a, b)
+            with mock.patch.object(os, "rename", flaky):
+                self.assertEqual(config.migrate_legacy(), [])
+            self.assertTrue((d / "alpha" / "config.json").exists())
+            self.assertEqual(config.migrate_legacy(), ["alpha"])
+            moved = [e for e in events.since("alpha", 0)[0] if e["type"] == "moved"]
+            self.assertEqual(len(moved), 1)
+            self.assertTrue(moved[0]["data"]["stray"].startswith(str(d / "projects" / ".alpha.stray-")))
+
+    def test_an_event_follows_a_folder_that_moved_meanwhile(self):
+        with TempData() as d:
+            old = legacy(d, "alpha")
+            new = write_ap(d, "alpha")
+            calls = []
+
+            def where(name):
+                calls.append(name)
+                return old if len(calls) == 1 else new
+            with mock.patch.object(paths, "ap_dir", side_effect=where):
+                events.append("alpha", "x", {})
+            self.assertTrue((new / "events.jsonl").exists())
+            self.assertFalse((old / "events.jsonl").exists())
+
+    def test_doctor_flags_an_older_autopilot_named_projects(self):
+        from autopilot import doctor
+        with TempData() as d:
+            with mock.patch.object(doctor, "_run", lambda argv: (1, "")):
+                names = {c["name"]: c for c in doctor.checks(config.load_global())}
+                self.assertNotIn("autopilot named projects", names)
+                legacy(d, "projects")
+                c = {c["name"]: c for c in doctor.checks(config.load_global())}["autopilot named projects"]
+            self.assertFalse(c["ok"])
+            self.assertIn("rename", c["fix"])
+
     def test_the_name_projects_is_reserved(self):
         # It is the folder every autopilot lives in (finding 3).
         self.assertFalse(paths.valid_name("projects"))

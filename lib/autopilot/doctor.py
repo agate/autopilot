@@ -98,6 +98,11 @@ def checks(gcfg: dict) -> list:
         except ValueError:
             fresh = False
     out.append(_c("gate ran recently", fresh, last or "never", "" if fresh else "check gate.log in the data folder"))
+    if (paths.projects_root() / "config.json").exists():
+        # `projects` is reserved: an autopilot of that name from an earlier version is no longer listed or run.
+        out.append(_c("autopilot named projects", False, str(paths.projects_root()),
+                      "stop its workers, then rename its folder and the `name` in its config.json; "
+                      "the gate then moves it into projects/"))
     out.append(_reply_check(gate, gcfg))
     for name, err in (gate.get("broken") or {}).items():
         out.append(_c(f"state {name}", False, err, f"fix or restore {paths.ap_dir(name) / 'state.json'}"))
