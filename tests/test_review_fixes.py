@@ -34,7 +34,7 @@ class Env(unittest.TestCase):
         self.agents = self.tmp / "agents.json"
         self.agents.write_text("[]")
         os.environ.update(FAKE_CLAUDE_LOG=str(self.log), FAKE_AGENTS_JSON=str(self.agents))
-        (self.data / "checkout" / "settings.json").write_text("{}")
+        (self.data / "projects" / "checkout" / "settings.json").write_text("{}")
 
     def tearDown(self):
         for k in ("FAKE_CLAUDE_LOG", "FAKE_AGENTS_JSON"):
@@ -58,7 +58,7 @@ class PermissionFloorTest(Env):
         self.assertEqual(s["env"]["AUTOPILOT_DATA"], str(paths.data_root()))
 
     def test_worker_refused_without_settings(self):
-        (self.data / "checkout" / "settings.json").unlink()
+        (self.data / "projects" / "checkout" / "settings.json").unlink()
         with self.assertRaises(RuntimeError):
             workers.build_start(config.load_global(), config.load_ap("checkout"), "checkout", "PROJ-1", "implement", "x")
 
@@ -187,7 +187,7 @@ class OneOffTest(Env):
             with self.assertRaises(RuntimeError):
                 perms.run_one_off("checkout", did)
         self.assertNotIn("done_at", self._action(did))
-        ev = [json.loads(l) for l in (self.data / "checkout" / "events.jsonl").read_text().splitlines()]
+        ev = [json.loads(l) for l in (self.data / "projects" / "checkout" / "events.jsonl").read_text().splitlines()]
         done = [e for e in ev if e["type"] == "oneoff_done"][-1]["data"]
         self.assertEqual(done["exit"], 1)
         self.assertIn("Input must be provided", done["error"])

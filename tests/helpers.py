@@ -56,7 +56,7 @@ def write_ap(data: Path, name: str, **cfg) -> Path:
     """Create a minimal autopilot config under the temp data root."""
     import json
 
-    d = data / name
+    d = data / "projects" / name
     d.mkdir(parents=True, exist_ok=True)
     base = {"name": name, "source": {"preset": "jira-epic", "key": "PROJ-100"}, "repo": str(data)}
     base.update(cfg)

@@ -130,11 +130,21 @@ def save(name: str, st: dict) -> None:
 def mutate(name: str):
     """Load, let the caller change, validate and save one autopilot's state, holding its file lock.
     Every writer (dispatcher, talk session, gate, worker commands) goes through here."""
-    lk = paths.ap_dir(name) / "state.lock"
-    lk.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(lk), os.O_CREAT | os.O_RDWR, 0o644)
-    try:
+    while True:
+        lk = paths.ap_dir(name) / "state.lock"
+        lk.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(lk), os.O_CREAT | os.O_RDWR, 0o644)
         fcntl.flock(fd, fcntl.LOCK_EX)
+        # The gate may have moved the folder while this waited: then the lock that counts is at the new place.
+        try:
+            same = os.fstat(fd).st_ino == os.stat(paths.ap_dir(name) / "state.lock").st_ino
+        except FileNotFoundError:
+            same = False
+        if same:
+            break
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+    try:
         st = load(name)
         yield st
         save(name, st)

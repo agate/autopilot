@@ -2,17 +2,21 @@
 
 ## Where to look
 
+`<ap dir>` below is the folder on the newest snapshot's `Folder:` line (`ap dir <name>` prints it too). Never
+build it by hand or reuse one from earlier in the chat: an autopilot made by an earlier version sits
+elsewhere until the gate moves it.
+
 | Question | Source |
 |---|---|
 | What is happening now | the newest snapshot in your context; then `ap status` |
-| A task's state, PR, worktree | `$AUTOPILOT_DATA/<name>/state.json` (read only) |
-| What a worker did or why | `$AUTOPILOT_DATA/<name>/runs/<task>/journal.md`, `handback.json`, `review.json`, `prloop.json` |
-| What happened and when | `$AUTOPILOT_DATA/<name>/events.jsonl` (newest last) |
+| A task's state, PR, worktree | `<ap dir>/state.json` (read only) |
+| What a worker did or why | `<ap dir>/runs/<task>/journal.md`, `handback.json`, `review.json`, `prloop.json` |
+| What happened and when | `<ap dir>/events.jsonl` (newest last) |
 | What is waiting on the user | `decisions` in `state.json` with `status: open` |
 | Which tasks can start | `ap next <name> --json` |
 | Live workers and their state | `ap worker list <name>` |
 | A worker's own view | tell the user they can run `claude attach "<session name>"` |
-| Rules in force | `$AUTOPILOT_DATA/RULES.md` (all autopilots), `$AUTOPILOT_DATA/<name>/RULES.md` (this one) |
+| Rules in force | `$AUTOPILOT_DATA/RULES.md` (all autopilots), `<ap dir>/RULES.md` (this one; its line wins over a global line it conflicts with) |
 
 Answer with the facts and the file or command they came from. Say plainly what you could not find.
 
@@ -35,7 +39,9 @@ Answer with the facts and the file or command they came from. Say plainly what y
 
 1. Ask the scope: this autopilot only, or all of them.
 2. Show the exact line: `- YYYY-MM-DD — "<the user's words>" — why: <the reason they gave or you inferred>`.
-3. Only after the user says yes, append it to `$AUTOPILOT_DATA/<name>/RULES.md` or
+3. If it conflicts with a line already in either file, show both. An autopilot's own line wins over a global
+   line it conflicts with.
+4. Only after the user says yes, append it to `<ap dir>/RULES.md` or
    `$AUTOPILOT_DATA/RULES.md`. Change an existing line only the same way.
-4. A rule that would loosen the authority floor (create tickets, send messages, post comments) is not
+5. A rule that would loosen the authority floor (create tickets, send messages, post comments) is not
    a rule: it is a per-item approval. Explain that and offer to put the item on the page.

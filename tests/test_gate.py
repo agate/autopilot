@@ -79,7 +79,7 @@ class RunTest(unittest.TestCase):
     def test_broken_state_isolated(self):
         write_ap(self.data, "alpha")
         write_ap(self.data, "beta")
-        (self.data / "beta" / "state.json").write_text("{broken")
+        (self.data / "projects" / "beta" / "state.json").write_text("{broken")
         calls = []
 
         def fake(g, aps):
@@ -88,7 +88,7 @@ class RunTest(unittest.TestCase):
 
         self.assertEqual(gate.run(dispatch_fn=fake), 0)
         self.assertEqual(calls, [["alpha"]])
-        self.assertIn("state_broken", (self.data / "beta" / "events.jsonl").read_text())
+        self.assertIn("state_broken", (self.data / "projects" / "beta" / "events.jsonl").read_text())
         self.assertIn("beta", json.loads((self.data / "gate.json").read_text())["broken"])
 
     def test_lock_held_skips(self):

@@ -183,6 +183,22 @@ class DocsTest(unittest.TestCase):
         talk = (ROOT / "references" / "talk.md").read_text()
         self.assertIn("ap decision keep <name>", talk)
 
+    def test_sessions_get_the_autopilot_folder_from_ap_dir(self):
+        # Until the gate moves an older autopilot, its folder is not projects/<name>/: a pass or talk session
+        # that wrote there by hand would split it in two. Every path comes from `ap dir`. (init.md makes a new
+        # autopilot, which always goes in projects/<name>/.)
+        docs = ["RUNBOOK.md", "references/talk.md", "presets/idea.md", "presets/jira-ticket.md",
+                "presets/jira-epic.md", "presets/custom.md"]
+        for name in docs:
+            text = (ROOT / name).read_text()
+            for bad in ("$AUTOPILOT_DATA/projects/<", "$AUTOPILOT_DATA/<ap>/", "$AUTOPILOT_DATA/<name>/"):
+                self.assertNotIn(bad, text, name)
+        rb = (ROOT / "RUNBOOK.md").read_text()
+        self.assertIn("`ap dir <ap>`", rb[:rb.index("## Authority")])
+        briefs = rb[rb.index("## Briefs"):]
+        self.assertIn("older run directory", briefs)
+        self.assertIn("`ap dir <name>`", (ROOT / "references" / "talk.md").read_text())
+
 
 if __name__ == "__main__":
     unittest.main()

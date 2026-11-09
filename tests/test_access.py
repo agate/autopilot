@@ -45,7 +45,7 @@ class Base(unittest.TestCase):
                 if d["kind"] == "system" and (status is None or d["status"] == status)]
 
     def events(self, ap="alpha"):
-        f = self.data / ap / "events.jsonl"
+        f = self.data / "projects" / ap / "events.jsonl"
         return [json.loads(l) for l in f.read_text().splitlines()] if f.exists() else []
 
 

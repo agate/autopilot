@@ -17,6 +17,8 @@ def _path(name: str):
 def append(name: str, type: str, data: dict) -> int:
     p = _path(name)
     p.parent.mkdir(parents=True, exist_ok=True)
+    p = _path(name)   # looked up again: the gate may have moved the folder while the first one was made
+    p.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps({"at": now_iso(), "type": type, "data": data}, ensure_ascii=False) + "\n"
     with open(p, "ab") as f:
         f.write(line.encode("utf-8"))

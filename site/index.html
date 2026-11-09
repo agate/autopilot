@@ -217,7 +217,7 @@
               </tr>
               <tr>
                 <td><code>RULES.md</code></td>
-                <td><span lang="en">Your standing rules, for every autopilot or for one</span><span lang="zh">你的长期规则，管所有 autopilot 或者其中一个</span></td>
+                <td><span lang="en">Your standing rules, for every autopilot or for one. One autopilot's own rule wins over a global one it conflicts with.</span><span lang="zh">你的长期规则，管所有 autopilot 或者其中一个。某个 autopilot 自己的规则和全局规则冲突时，以它自己的为准。</span></td>
                 <td><span lang="en">Only you, in a session you open, after you say yes to the exact line. Passes and workers are denied.</span><span lang="zh">只有你，在你自己开的会话里，对那一行字点头之后才写。每一轮和干活的会话都被禁止修改。</span></td>
               </tr>
               <tr>
@@ -243,8 +243,8 @@
             </tbody>
           </table>
           <p class="note mono">
-            <span lang="en">Your data lives in <code>~/.claude/autopilot-data/</code>, apart from the plugin's code. Every pass and worker also loads the repo's own instructions, skills and your memory for that repo, as any Claude Code session there does.</span>
-            <span lang="zh">你的数据放在 <code>~/.claude/autopilot-data/</code>，和插件的代码分开。每一轮和每个干活的会话，也会像那个仓库里的任何 Claude Code 会话一样，加载仓库自带的说明、技能，以及你在这个仓库的记忆。</span>
+            <span lang="en">Your data lives in <code>~/.claude/autopilot-data/</code>, apart from the plugin's code: the global rules and settings at the top, each autopilot's own files in <code>projects/&lt;name&gt;/</code>. Every pass and worker also loads the repo's own instructions, skills and your memory for that repo, as any Claude Code session there does.</span>
+            <span lang="zh">你的数据放在 <code>~/.claude/autopilot-data/</code>，和插件的代码分开：最上层是全局的规则和设置，每个 autopilot 自己的文件在 <code>projects/&lt;name&gt;/</code>。每一轮和每个干活的会话，也会像那个仓库里的任何 Claude Code 会话一样，加载仓库自带的说明、技能，以及你在这个仓库的记忆。</span>
           </p>
         </div>
       </section>

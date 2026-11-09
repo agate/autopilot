@@ -213,7 +213,7 @@ class ParkCommandTest(Base):
         for k, v in (("kind", "session"), ("percent", 95), ("resets_at", RESET), ("resume_at", "2026-01-01T14:05:00+00:00"),
                      ("note", "tests green, next: evidence"), ("parked_at", NOW.isoformat()), ("role", "implement")):
             self.assertEqual(rec[k], v, k)
-        f = json.loads((self.data / "checkout" / "runs" / "PROJ-1" / "parked.json").read_text())
+        f = json.loads((paths.ap_dir("checkout") / "runs" / "PROJ-1" / "parked.json").read_text())
         self.assertEqual(f, rec)
         evs, _ = events.since("checkout", 0)
         self.assertEqual([e["type"] for e in evs if e["type"] == "worker_parked"], ["worker_parked"])
@@ -244,7 +244,7 @@ class ParkCommandTest(Base):
     def test_state_schema_wants_an_object(self):
         st = state.empty()
         st["workers"] = [worker(parked="soon")]
-        (self.data / "checkout" / "state.json").write_text(json.dumps(st))
+        (paths.ap_dir("checkout") / "state.json").write_text(json.dumps(st))
         with self.assertRaises(state.StateError):
             state.load("checkout")
 
@@ -320,7 +320,7 @@ class ResumeTest(Base):
         os.environ["FAKE_AGENTS_JSON"] = str(agents)
         self.add_worker(parked={"reason": "quota", "resume_at": RESET, "note": "n", "role": "implement"},
                         short_id="old11111")
-        run = self.data / "checkout" / "runs" / "PROJ-1"
+        run = paths.ap_dir("checkout") / "runs" / "PROJ-1"
         run.mkdir(parents=True)
         (run / "parked.json").write_text("{}")
         prompt = "You were parked for quota. Your note: n. Continue from there."
@@ -378,7 +378,7 @@ class FloorAndPageTest(Base):
         self.assertNotIn("allow", perms.generate([], role="oneoff")["permissions"])
 
     def test_one_off_file_has_no_hook(self):
-        (self.data / "checkout" / "settings.json").write_text(json.dumps(perms.generate([], role="worker")))
+        (paths.ap_dir("checkout") / "settings.json").write_text(json.dumps(perms.generate([], role="worker")))
         path = perms.one_off_settings("checkout", "mcp__x__send_message")
         self.assertNotIn("hooks", json.loads(path.read_text()))
 

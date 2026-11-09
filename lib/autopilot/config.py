@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import copy
+import fcntl
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 
-from autopilot import paths
+from autopilot import events, paths
 
 DEFAULT_GLOBAL: dict = {
     "max_workers": 5,
@@ -205,11 +207,150 @@ def save_ap(name: str, cfg: dict) -> None:
     _write(paths.ap_dir(name) / "config.json", cfg)
 
 
-def list_aps() -> list:
-    root = paths.data_root()
+def _names_in(root: Path) -> list:
     if not root.exists():
         return []
-    return sorted(p.name for p in root.iterdir() if (p / "config.json").exists() and paths.valid_name(p.name))
+    return [p.name for p in root.iterdir() if (p / "config.json").exists() and paths.valid_name(p.name)]
+
+
+def list_aps() -> list:
+    return sorted(set(_names_in(paths.projects_root())) | set(_names_in(paths.data_root())))
+
+
+def _workers(folder: Path):
+    """The workers recorded in a folder's state.json, or None when it cannot be read."""
+    try:
+        return json.loads((folder / "state.json").read_text()).get("workers") or []
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def _rebase(value, old: str, new: str):
+    if isinstance(value, str):
+        return new + value[len(old):] if value.startswith(old + "/") else value
+    if isinstance(value, list):
+        return [_rebase(v, old, new) for v in value]
+    if isinstance(value, dict):
+        return {k: _rebase(v, old, new) for k, v in value.items()}
+    return value
+
+
+# Written into an autopilot's folder just before it moves and removed once every stored path points at the new
+# place. It holds JSON: the old path (`from`) and, if one was set aside, the stray folder (`stray`). A run that
+# finds it in projects/<name>/ finishes the rewrite.
+PENDING = ".rewrite-pending"
+
+
+def _rewrite(old: str, new: Path) -> None:
+    """Point the absolute paths stored in state.json and in each run's JSON files at the new folder. Safe to
+    repeat; a file that is not JSON is left as it is."""
+    for f in [new / "state.json"] + sorted(new.glob("runs/*/*.json")):
+        try:
+            data = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        fixed = _rebase(data, old, str(new))
+        if fixed != data:
+            _write(f, fixed)
+
+
+def _marker(folder: Path) -> dict:
+    try:
+        info = json.loads((folder / PENDING).read_text())
+    except (OSError, ValueError):
+        return {}
+    return info if isinstance(info, dict) else {}
+
+
+def _finish(name: str, new: Path) -> None:
+    info = _marker(new)
+    old = info.get("from") or str(paths.data_root() / name)
+    _rewrite(old, new)
+    (new / PENDING).unlink()
+    data = {"from": old, "to": str(new)}
+    if info.get("stray"):
+        data["stray"] = info["stray"]
+    events.append(name, "moved", data)
+
+
+def _move(name: str) -> bool:
+    root, dest = paths.data_root(), paths.projects_root()
+    old, new = root / name, dest / name
+    if (new / "config.json").exists():
+        return False   # an autopilot of that name already lives in projects/: leave this one alone
+    fd = os.open(str(old / "state.lock"), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        if _workers(old) != []:
+            return False
+        info = dict(_marker(old), **{"from": str(old)})   # keeps a stray named by an earlier try
+        (old / PENDING).write_text(json.dumps(info))
+        dest.mkdir(exist_ok=True)
+        if new.exists():
+            # Something wrote into projects/<name>/ before the move. Keep it, out of the way, and say where.
+            stray = dest / f".{name}.stray-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            os.rename(new, stray)
+            info["stray"] = str(stray)
+            (old / PENDING).write_text(json.dumps(info))
+        os.rename(old, new)
+        _finish(name, new)   # the lock file moved with the folder, so the lock still holds
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+    return True
+
+
+def _resume_rewrites() -> None:
+    for marker in sorted(paths.projects_root().glob(f"*/{PENDING}")):
+        folder = marker.parent
+        fd = os.open(str(folder / "state.lock"), os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            if marker.exists():
+                _finish(folder.name, folder)
+        except OSError:
+            continue
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+
+def _movable(name: str) -> bool:
+    return not (paths.projects_root() / name / "config.json").exists() and _workers(paths.data_root() / name) == []
+
+
+def _blocked_by_reserved_name() -> bool:
+    """An autopilot named `projects` from an earlier version owns the folder the others move into: moving any
+    in would mix them with its files. `ap doctor` says how to rename it."""
+    return (paths.projects_root() / "config.json").exists()
+
+
+def legacy_waiting() -> bool:
+    """An autopilot at the old place that could move now, or a move whose rewrite has not finished. The gate
+    lists sessions only then, so an autopilot that cannot move yet costs nothing."""
+    if _blocked_by_reserved_name():
+        return False
+    return (any(_movable(n) for n in _names_in(paths.data_root()))
+            or any(paths.projects_root().glob(f"*/{PENDING}")))
+
+
+def migrate_legacy() -> list:
+    """Move each autopilot made before projects/ existed into projects/<name>/, once none of its workers
+    runs (a running worker holds paths into the old folder), and finish any rewrite a failed move left.
+    Returns the names moved. The gate calls it only while nothing else can be using those folders."""
+    if _blocked_by_reserved_name():
+        return []
+    _resume_rewrites()
+    moved = []
+    for name in sorted(_names_in(paths.data_root())):
+        try:
+            if _move(name):
+                moved.append(name)
+        except OSError:
+            continue  # left where it is, or moved with its rewrite pending; the next run goes on
+    return moved
 
 
 def status_of(name: str) -> str:

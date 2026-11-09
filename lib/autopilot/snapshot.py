@@ -96,6 +96,7 @@ def build(name: str, offset, rules_mtimes: dict, now: datetime) -> tuple:
     asks = [d for d in st["decisions"] if d["status"] == "open" and d["kind"] == "ask"]
     gates = [d for d in st["decisions"] if d["status"] == "open" and d["kind"] == "gate"]
     body = [
+        f"Folder: {paths.ap_dir(name)}",
         "Tasks: " + (", ".join(f"{k} {v}" for k, v in sorted(counts.items())) or "none"),
         "Workers: " + (", ".join(f"{w['session_name']} (ports {w['ports'][0]}-{w['ports'][1]})" + _parked(w)
                                   for w in st["workers"]) or "none"),

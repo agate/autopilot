@@ -63,7 +63,7 @@ class PublishTest(unittest.TestCase):
         self.assertEqual((d["delete"], d["assets"]), ([], []))
 
     def test_only_never_lists_assets(self):
-        run = self.data / "checkout" / "runs" / "PROJ-123"
+        run = paths.ap_dir("checkout") / "runs" / "PROJ-123"
         (run / "media").mkdir(parents=True)
         (run / "media" / "after.png").write_bytes(b"png")
         (run / "evidence.json").write_text(json.dumps({"verdict": {"en": "ok"}, "screenshots": [
@@ -88,9 +88,9 @@ class PublishTest(unittest.TestCase):
         ops.decision_add("checkout", {"kind": "ask", "title": {"en": "t"}, "body": {"en": "b"}, "options": [],
                                       "links": []})
         self._mark()
-        st = json.loads((self.data / "checkout" / "state.json").read_text())
+        st = json.loads((paths.ap_dir("checkout") / "state.json").read_text())
         st["decisions"] = []
-        (self.data / "checkout" / "state.json").write_text(json.dumps(st))
+        (paths.ap_dir("checkout") / "state.json").write_text(json.dumps(st))
         cur = publish.collect(["checkout"])
         self.assertEqual(publish.diff(publish.published(), cur, only=["decisions"])["delete"],
                          [{"collection": "decisions", "doc_id": "checkout:D1"}])
@@ -132,14 +132,14 @@ class PublishTest(unittest.TestCase):
 
     def test_removed_doc_deleted(self):
         self._mark()
-        st = json.loads((self.data / "checkout" / "state.json").read_text())
+        st = json.loads((self.data / "projects" / "checkout" / "state.json").read_text())
         st["tasks"] = st["tasks"][:1]
-        (self.data / "checkout" / "state.json").write_text(json.dumps(st))
+        (self.data / "projects" / "checkout" / "state.json").write_text(json.dumps(st))
         d = publish.diff(publish.published(), publish.collect(["checkout"]))
         self.assertIn({"collection": "tasks", "doc_id": "checkout:PROJ-124"}, d["delete"])
 
     def test_new_screenshot_listed_once(self):
-        run = self.data / "checkout" / "runs" / "PROJ-123"
+        run = self.data / "projects" / "checkout" / "runs" / "PROJ-123"
         (run / "media").mkdir(parents=True)
         (run / "media" / "after.png").write_bytes(b"png")
         (run / "evidence.json").write_text(json.dumps({"verdict": {"en": "ok"}, "screenshots": [
@@ -153,7 +153,7 @@ class PublishTest(unittest.TestCase):
         self.assertEqual(ev["screenshots"][0]["asset_id"], "0123456789abcdef0123456789abcdef")
 
     def _evidence(self, shots, files, logs=()):
-        run = self.data / "checkout" / "runs" / "PROJ-123"
+        run = self.data / "projects" / "checkout" / "runs" / "PROJ-123"
         (run / "media").mkdir(parents=True, exist_ok=True)
         for f in files:
             (run / "media" / f).write_bytes(b"x")
@@ -193,7 +193,7 @@ class PublishTest(unittest.TestCase):
 
     def test_handback_criteria_show_as_criteria(self):
         # Before evidence.json exists the page shows the hand-back's criteria, with the reviewer's status.
-        run = self.data / "checkout" / "runs" / "PROJ-123"
+        run = self.data / "projects" / "checkout" / "runs" / "PROJ-123"
         run.mkdir(parents=True)
         (run / "handback.json").write_text(json.dumps({"criteria": [
             {"id": "c1", "status": "met", "evidence": "test_a"}, {"id": "c2", "status": "met", "evidence": "test_b"}]}))
@@ -249,7 +249,7 @@ class PublishTest(unittest.TestCase):
             with contextlib.redirect_stdout(buf):
                 self.assertEqual(cli.main(["evidence", "add", "checkout", "PROJ-123", str(shot)]), 0)
         self.assertEqual(buf.getvalue().split(), ["media/after.png"])
-        self.assertEqual((self.data / "checkout" / "runs" / "PROJ-123" / "media" / "after.png").read_bytes(), b"\x89PNG")
+        self.assertEqual((self.data / "projects" / "checkout" / "runs" / "PROJ-123" / "media" / "after.png").read_bytes(), b"\x89PNG")
 
     def test_evidence_add_refuses_an_unknown_task_or_a_missing_file(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -258,8 +258,8 @@ class PublishTest(unittest.TestCase):
             with contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(cli.main(["evidence", "add", "checkout", "../PROJ-123", str(shot)]), 1)
                 self.assertEqual(cli.main(["evidence", "add", "checkout", "PROJ-123", str(shot), tmp + "/none.png"]), 1)
-        self.assertFalse((self.data / "checkout" / "PROJ-123").exists())
-        self.assertFalse((self.data / "checkout" / "runs" / "PROJ-123" / "media" / "after.png").exists())
+        self.assertFalse((self.data / "projects" / "checkout" / "PROJ-123").exists())
+        self.assertFalse((self.data / "projects" / "checkout" / "runs" / "PROJ-123" / "media" / "after.png").exists())
 
     def test_labels_merged_with_reader_lang(self):
         g = config.load_global()
