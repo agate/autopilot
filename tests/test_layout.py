@@ -201,7 +201,9 @@ class LayoutTest(unittest.TestCase):
                 legacy(d, "projects")
                 c = {c["name"]: c for c in doctor.checks(config.load_global())}["autopilot named projects"]
             self.assertFalse(c["ok"])
-            self.assertIn("rename", c["fix"])
+            # Renaming the whole folder would carry along every autopilot inside it: move only its own files.
+            self.assertIn("only its own files", c["fix"])
+            self.assertIn("never another autopilot's folder", c["fix"])
 
     def test_the_name_projects_is_reserved(self):
         # It is the folder every autopilot lives in (finding 3).
@@ -260,12 +262,15 @@ class LayoutTest(unittest.TestCase):
             self.assertEqual(run("dir")[0], 2)
 
     def test_a_legacy_folder_named_projects_is_never_treated_as_an_autopilot(self):
+        # Its folder is the one the others move into: nothing moves in until it is renamed, or they would mix.
         with TempData() as d:
             legacy(d, "alpha")
             legacy(d, "projects")
             self.assertEqual(config.list_aps(), ["alpha"])
-            self.assertEqual(config.migrate_legacy(), ["alpha"])
-            self.assertTrue((d / "projects" / "alpha" / "config.json").exists())
+            self.assertFalse(config.legacy_waiting())
+            self.assertEqual(config.migrate_legacy(), [])
+            self.assertTrue((d / "alpha" / "config.json").exists())
+            self.assertFalse((d / "projects" / "alpha").exists())
 
 
 class GateMovesTest(unittest.TestCase):

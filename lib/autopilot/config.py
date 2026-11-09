@@ -321,9 +321,17 @@ def _movable(name: str) -> bool:
     return not (paths.projects_root() / name / "config.json").exists() and _workers(paths.data_root() / name) == []
 
 
+def _blocked_by_reserved_name() -> bool:
+    """An autopilot named `projects` from an earlier version owns the folder the others move into: moving any
+    in would mix them with its files. `ap doctor` says how to rename it."""
+    return (paths.projects_root() / "config.json").exists()
+
+
 def legacy_waiting() -> bool:
     """An autopilot at the old place that could move now, or a move whose rewrite has not finished. The gate
     lists sessions only then, so an autopilot that cannot move yet costs nothing."""
+    if _blocked_by_reserved_name():
+        return False
     return (any(_movable(n) for n in _names_in(paths.data_root()))
             or any(paths.projects_root().glob(f"*/{PENDING}")))
 
@@ -332,6 +340,8 @@ def migrate_legacy() -> list:
     """Move each autopilot made before projects/ existed into projects/<name>/, once none of its workers
     runs (a running worker holds paths into the old folder), and finish any rewrite a failed move left.
     Returns the names moved. The gate calls it only while nothing else can be using those folders."""
+    if _blocked_by_reserved_name():
+        return []
     _resume_rewrites()
     moved = []
     for name in sorted(_names_in(paths.data_root())):
