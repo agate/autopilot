@@ -2,8 +2,9 @@
 
 ## Where to look
 
-`<ap dir>` below is the folder `ap dir <name>` prints. Never build it by hand: an autopilot made by an
-earlier version sits elsewhere until the gate moves it.
+`<ap dir>` below is the folder on the newest snapshot's `Folder:` line (`ap dir <name>` prints it too). Never
+build it by hand or reuse one from earlier in the chat: an autopilot made by an earlier version sits
+elsewhere until the gate moves it.
 
 | Question | Source |
 |---|---|

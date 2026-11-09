@@ -8,7 +8,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 
-from autopilot import budget, cli, config, events, lock, nextwork, ops, paths, park, refresh, replies, sessions, state, workers
+from autopilot import budget, cli, config, dispatch, events, lock, nextwork, ops, paths, park, refresh, replies, sessions, state, workers
 
 
 def report_due(times: list, last_slot, now: datetime):
@@ -139,6 +139,27 @@ def _sessions(gcfg: dict):
     return sessions.list_all(workers.claude_bin(gcfg))
 
 
+def _move_legacy(gcfg: dict) -> None:
+    """Move older autopilots into projects/ only when nothing else can be using their folders: under the data-root
+    lock a pass holds, and with no dispatcher session still working. That lock dies with its gate, but the
+    dispatcher session it started may not; an unreadable session list counts as one that still works."""
+    if not config.legacy_waiting():
+        return
+    lk = paths.data_root() / "lock"
+    if not lock.acquire(lk, "move older autopilots"):
+        return
+    try:
+        rows = _sessions(gcfg)
+        if rows is None:
+            return
+        s = sessions.find(dispatch.NAME, rows)
+        if s and s.get("status") in ("busy", "waiting") and sessions.pid_alive(s.get("pid")):
+            return
+        config.migrate_legacy()
+    finally:
+        lock.release(lk)
+
+
 def _allowance(gcfg: dict, now: datetime) -> dict:
     return budget.allowance(budget.read(), gcfg, now.astimezone(timezone.utc))
 
@@ -258,7 +279,7 @@ def run(now: datetime = None, dispatch_fn=None) -> int:
     gcfg = config.load_global()
     if lock.held(paths.data_root() / "lock"):
         return 0
-    config.migrate_legacy()
+    _move_legacy(gcfg)
     now = now or _local_now()
     gs = _read_json(_gate_file())
     fps, broken = _load_all(gcfg, now)

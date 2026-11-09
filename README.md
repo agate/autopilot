@@ -191,13 +191,14 @@ reaches you unless you changed that setting. The full list is in
 Each autopilot's own setup (source, repo, branch pattern, resources,
 authority, report times, watches) is written by `init` to
 `~/.claude/autopilot-data/projects/<name>/config.json`. Your standing rules go in
-`~/.claude/autopilot-data/RULES.md` (all autopilots) or
-`~/.claude/autopilot-data/projects/<name>/RULES.md` (one): say a new rule in a talk
+`~/.claude/autopilot-data/RULES.md` (all autopilots) or the `RULES.md` in the
+autopilot's own folder (one; `ap dir <name>` prints it): say a new rule in a talk
 session, and it is written only after you say yes to the exact line. When the
 two conflict, the autopilot's own rule wins. All data lives in
 `~/.claude/autopilot-data/`; set `AUTOPILOT_DATA` to use another folder. An
 autopilot made by an earlier version sits at `~/.claude/autopilot-data/<name>/`;
-the gate moves it into `projects/<name>/` once none of its workers runs.
+the gate moves it into `projects/<name>/` once none of its workers runs. The
+name `projects` is reserved.
 
 ## Uninstall
 

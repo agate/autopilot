@@ -16,7 +16,7 @@ default. Write nothing until the user confirms the playback.
 ## The questions
 
 0. **Name.** Propose a short word from the work's title (epic "Checkout redesign" -> `checkout`):
-   lowercase letters, digits and dashes, starting with a letter, not already used.
+   lowercase letters, digits and dashes, starting with a letter, not already used, and not `projects`.
 1. **Source.** Jira epic (default) / one Jira ticket / an idea / something else.
    - Jira epic or ticket: ask for the key. Read it right away.
    - Idea: ask for the text or a document path.

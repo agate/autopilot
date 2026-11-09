@@ -3,11 +3,12 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import unittest
 from unittest import mock
 
 from tests.helpers import TempData, write_ap
-from autopilot import cli, config, gate, paths, state
+from autopilot import cli, config, dispatch, events, gate, lock, paths, snapshot, state
 
 
 def legacy(data, name, **st):
@@ -87,9 +88,96 @@ class LayoutTest(unittest.TestCase):
             self.assertEqual(paths.ap_dir("alpha"), old)
             self.assertEqual(config.load_ap("alpha")["name"], "alpha")
             self.assertEqual(config.list_aps(), ["alpha"])
-            self.assertEqual(config.migrate_legacy(), [])          # nothing is merged or lost
-            self.assertTrue((old / "config.json").exists())
-            self.assertTrue((stray / "brief-review.md").exists())
+
+    def test_a_stray_new_folder_is_set_aside_and_the_move_runs(self):
+        # Left in place, it would block the move for good. Nothing in it is lost, and the event says where it went.
+        with TempData() as d:
+            legacy(d, "alpha")
+            (d / "projects" / "alpha" / "runs" / "T-1").mkdir(parents=True)
+            (d / "projects" / "alpha" / "runs" / "T-1" / "brief-review.md").write_text("brief")
+            self.assertEqual(config.migrate_legacy(), ["alpha"])
+            self.assertTrue((d / "projects" / "alpha" / "config.json").exists())
+            aside = [x for x in (d / "projects").iterdir() if x.name.startswith(".alpha.stray-")]
+            self.assertEqual(len(aside), 1)
+            self.assertEqual((aside[0] / "runs" / "T-1" / "brief-review.md").read_text(), "brief")
+            self.assertEqual(config.list_aps(), ["alpha"])
+            moved = [e for e in events.since("alpha", 0)[0] if e["type"] == "moved"]
+            self.assertEqual(moved[0]["data"]["stray"], str(aside[0]))
+
+    def test_run_files_with_absolute_paths_are_rewritten_too(self):
+        # `ap evidence check` accepts an absolute path inside the run directory (finding 4).
+        with TempData() as d:
+            old = legacy(d, "alpha")
+            run = old / "runs" / "T-1"
+            (run / "media").mkdir(parents=True)
+            (run / "media" / "a.png").write_bytes(b"png")
+            (run / "evidence.json").write_text(json.dumps({"screenshots": [{"path": str(run / "media" / "a.png")}]}))
+            (run / "notes.json").write_text("{not json")
+            config.migrate_legacy()
+            new = d / "projects" / "alpha" / "runs" / "T-1"
+            ev = json.loads((new / "evidence.json").read_text())
+            self.assertEqual(ev["screenshots"][0]["path"], str(new / "media" / "a.png"))
+            self.assertEqual((new / "notes.json").read_text(), "{not json")   # left as it was
+
+    def test_an_interrupted_rewrite_is_finished_by_the_next_run(self):
+        # The folder is already moved when the rewrite runs; a failure there must not leave old paths for good.
+        with TempData() as d:
+            old = legacy(d, "alpha", tasks=[{"id": "T-1", "status": "todo", "spec": str(d / "alpha" / "specs" / "T-1.md")}])
+            real = config._write
+            with mock.patch.object(config, "_write", side_effect=OSError("disk full")):
+                config.migrate_legacy()
+            new = d / "projects" / "alpha"
+            self.assertTrue((new / "config.json").exists())
+            self.assertTrue((new / ".rewrite-pending").exists())
+            self.assertFalse([e for e in events.since("alpha", 0)[0] if e["type"] == "moved"])
+            self.assertEqual(config.migrate_legacy(), [])
+            st = json.loads((new / "state.json").read_text())
+            self.assertEqual(st["tasks"][0]["spec"], str(new / "specs" / "T-1.md"))
+            self.assertFalse((new / ".rewrite-pending").exists())
+            self.assertEqual(len([e for e in events.since("alpha", 0)[0] if e["type"] == "moved"]), 1)
+            self.assertIs(config._write, real)
+
+    def test_the_name_projects_is_reserved(self):
+        # It is the folder every autopilot lives in (finding 3).
+        self.assertFalse(paths.valid_name("projects"))
+        self.assertTrue(paths.valid_name("project-x"))
+
+    def test_state_lock_follows_a_folder_that_moved_while_waiting(self):
+        # A command that opened the old lock file just before the move must not slip past it (finding 7).
+        with TempData() as d:
+            old = legacy(d, "alpha")
+            new = d / "projects" / "alpha"
+            new.mkdir(parents=True)
+            for f in ("config.json", "state.json"):
+                (new / f).write_text((old / f).read_text())
+            (new / "state.lock").write_text("")
+            (old / "state.lock").write_text("")
+            calls = []
+
+            def where(name):
+                calls.append(name)
+                return old if len(calls) == 1 else new
+            opened, real_open = [], os.open
+
+            def spy(path, *a, **k):
+                if str(path).endswith("state.lock"):
+                    opened.append(str(path))
+                return real_open(path, *a, **k)
+            with mock.patch.object(paths, "ap_dir", side_effect=where), mock.patch.object(os, "open", spy):
+                with state.mutate("alpha") as st:
+                    st["tasks"] = []
+            # It found the folder had moved after taking the old lock, and took the new one instead.
+            self.assertEqual(opened, [str(old / "state.lock"), str(new / "state.lock")])
+
+    def test_snapshot_names_the_folder_in_use(self):
+        # A long talk session reads the folder from every message, never from a path it saw hours ago (finding 5).
+        with TempData() as d:
+            legacy(d, "alpha")
+            out, _, _ = snapshot.build("alpha", 0, {}, __import__("datetime").datetime.now())
+            self.assertIn(f"Folder: {d / 'alpha'}", out)
+            config.migrate_legacy()
+            out, _, _ = snapshot.build("alpha", 0, {}, __import__("datetime").datetime.now())
+            self.assertIn(f"Folder: {d / 'projects' / 'alpha'}", out)
 
     def test_dir_command_prints_the_folder_in_use(self):
         def run(*argv):
@@ -105,15 +193,13 @@ class LayoutTest(unittest.TestCase):
             self.assertEqual(run("dir", "nope")[0], 1)
             self.assertEqual(run("dir")[0], 2)
 
-    def test_legacy_autopilot_named_projects_moves_first(self):
+    def test_a_legacy_folder_named_projects_is_never_treated_as_an_autopilot(self):
         with TempData() as d:
             legacy(d, "alpha")
             legacy(d, "projects")
-            self.assertEqual(config.migrate_legacy(), ["projects", "alpha"])
-            self.assertFalse((d / "projects" / "config.json").exists())
-            self.assertTrue((d / "projects" / "projects" / "config.json").exists())
+            self.assertEqual(config.list_aps(), ["alpha"])
+            self.assertEqual(config.migrate_legacy(), ["alpha"])
             self.assertTrue((d / "projects" / "alpha" / "config.json").exists())
-            self.assertEqual(config.list_aps(), ["alpha", "projects"])
 
 
 class GateMovesTest(unittest.TestCase):
@@ -133,6 +219,41 @@ class GateMovesTest(unittest.TestCase):
             self.assertEqual(gate.run(dispatch_fn=fake), 0)
             self.assertEqual(seen, [str(d / "projects" / "alpha")])
             self.assertFalse((d / "alpha").exists())
+
+    def _gate(self, d, rows):
+        seen = []
+
+        def fake(g, aps):
+            seen.append(str(paths.ap_dir("alpha")))
+            return [{"started": 0, "free": 0, "ready": 0, "allow": None, "ended_at": "x"}]
+        with mock.patch.object(gate, "_sessions", lambda g: rows), \
+                mock.patch.object(gate, "notify", lambda msg: None), \
+                mock.patch.object(gate, "_allowance", lambda g, now: {"allow": None, "paused_until": None, "reason": "ok"}):
+            gate.run(dispatch_fn=fake)
+        return seen
+
+    def test_gate_waits_while_an_earlier_dispatcher_still_works(self):
+        # The data-root lock dies with its gate, but the dispatcher session it started may keep running.
+        with TempData() as d:
+            legacy(d, "alpha")
+            live = [{"kind": "background", "name": dispatch.NAME, "status": "busy", "pid": os.getpid(), "startedAt": 1}]
+            self._gate(d, live)
+            self.assertTrue((d / "alpha" / "config.json").exists())
+            self._gate(d, None)                      # the session list could not be read: wait too
+            self.assertTrue((d / "alpha" / "config.json").exists())
+            idle = [dict(live[0], status="idle")]
+            self._gate(d, idle)
+            self.assertTrue((d / "projects" / "alpha" / "config.json").exists())
+
+    def test_gate_moves_under_the_data_root_lock(self):
+        with TempData() as d:
+            legacy(d, "alpha")
+            held = []
+            real = config.migrate_legacy
+            with mock.patch.object(config, "migrate_legacy", lambda: held.append(lock.held(d / "lock")) or real()):
+                self._gate(d, [])
+            self.assertTrue(held and held[0])
+            self.assertFalse(lock.held(d / "lock"))
 
 
 if __name__ == "__main__":

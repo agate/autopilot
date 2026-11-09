@@ -31,5 +31,9 @@ def ap_dir(name: str) -> Path:
     return new
 
 
+# `projects` is the folder every autopilot lives in, so no autopilot may take that name.
+RESERVED = {"projects"}
+
+
 def valid_name(name: str) -> bool:
-    return bool(_NAME.match(name or ""))
+    return bool(_NAME.match(name or "")) and name not in RESERVED

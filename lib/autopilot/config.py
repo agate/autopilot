@@ -4,6 +4,7 @@ import copy
 import fcntl
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 
 from autopilot import events, paths
@@ -236,45 +237,92 @@ def _rebase(value, old: str, new: str):
     return value
 
 
+# Written into an autopilot's folder just before it moves and removed once every stored path points at the new
+# place; it holds the old path. A run that finds it in projects/<name>/ finishes the rewrite.
+PENDING = ".rewrite-pending"
+
+
+def _rewrite(old: str, new: Path) -> None:
+    """Point the absolute paths stored in state.json and in each run's JSON files at the new folder. Safe to
+    repeat; a file that is not JSON is left as it is."""
+    for f in [new / "state.json"] + sorted(new.glob("runs/*/*.json")):
+        try:
+            data = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        fixed = _rebase(data, old, str(new))
+        if fixed != data:
+            _write(f, fixed)
+
+
+def _finish(name: str, new: Path, stray: Path = None) -> None:
+    marker = new / PENDING
+    old = marker.read_text().strip()
+    _rewrite(old, new)
+    marker.unlink()
+    data = {"from": old, "to": str(new)}
+    if stray is not None:
+        data["stray"] = str(stray)
+    events.append(name, "moved", data)
+
+
 def _move(name: str) -> bool:
     root, dest = paths.data_root(), paths.projects_root()
     old, new = root / name, dest / name
-    if name != "projects" and new.exists():
-        return False
+    if (new / "config.json").exists():
+        return False   # an autopilot of that name already lives in projects/: leave this one alone
     fd = os.open(str(old / "state.lock"), os.O_CREAT | os.O_RDWR, 0o644)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         if _workers(old) != []:
             return False
-        if name == "projects":
-            # Its folder is the one the others move into: step aside, then move in.
-            tmp = root / ".projects-moving"
-            os.rename(old, tmp)
-            dest.mkdir()
-            os.rename(tmp, new)
-        else:
-            dest.mkdir(exist_ok=True)
-            os.rename(old, new)
-        state_file = new / "state.json"
-        if state_file.exists():
-            _write(state_file, _rebase(json.loads(state_file.read_text()), str(old), str(new)))
+        (old / PENDING).write_text(str(old))
+        dest.mkdir(exist_ok=True)
+        stray = None
+        if new.exists():
+            # Something wrote into projects/<name>/ before the move. Keep it, out of the way, and say where.
+            stray = dest / f".{name}.stray-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            os.rename(new, stray)
+        os.rename(old, new)
+        _finish(name, new, stray)   # the lock file moved with the folder, so the lock still holds
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
-    events.append(name, "moved", {"from": str(old), "to": str(new)})
     return True
+
+
+def _resume_rewrites() -> None:
+    for marker in sorted(paths.projects_root().glob(f"*/{PENDING}")):
+        folder = marker.parent
+        fd = os.open(str(folder / "state.lock"), os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            if marker.exists():
+                _finish(folder.name, folder)
+        except OSError:
+            continue
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+
+def legacy_waiting() -> bool:
+    """An autopilot still at the old place, or a move whose rewrite has not finished."""
+    return bool(_names_in(paths.data_root())) or any(paths.projects_root().glob(f"*/{PENDING}"))
 
 
 def migrate_legacy() -> list:
     """Move each autopilot made before projects/ existed into projects/<name>/, once none of its workers
-    runs (a running worker holds paths into the old folder). Returns the names moved."""
+    runs (a running worker holds paths into the old folder), and finish any rewrite a failed move left.
+    Returns the names moved. The gate calls it only while nothing else can be using those folders."""
+    _resume_rewrites()
     moved = []
-    for name in sorted(_names_in(paths.data_root()), key=lambda n: (n != "projects", n)):
+    for name in sorted(_names_in(paths.data_root())):
         try:
             if _move(name):
                 moved.append(name)
         except OSError:
-            continue  # left where it is; ap_dir still finds it there
+            continue  # left where it is, or moved with its rewrite pending; the next run goes on
     return moved
 
 
