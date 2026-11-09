@@ -231,6 +231,18 @@ console.log(JSON.stringify([
         # A task with decisions but no evidence still opens its page.
         self.assertIn("taskSelfs(t.ap, t.id).length", js_fn("taskRow"))
 
+    def test_counts_leave_out_cards_whose_answer_is_on_its_way(self):
+        # Like asks: once OK (or "mark all read") is sent, the card stops counting while the answer travels.
+        body = js_fn("renderSelfs")
+        self.assertIn("selfRemind(waiting,", body)
+        self.assertIn('L("self_routine", { n: waiting.length })', body)
+        self.assertIn("lookWaiting", PAGE[PAGE.index("function renderNeeds"):])
+        self.assertIn('L("hero_look", { n: g.lookWaiting.length })', PAGE)
+
+    def test_an_archived_read_card_keeps_its_undo(self):
+        # The pass brings an archived read card back when its undo arrives (ops.decision_resolve).
+        self.assertNotIn("archived", js_fn("selfButtons"))
+
     def test_reminder_is_one_line_never_a_card(self):
         body = PAGE[PAGE.index("function renderSelfs"):PAGE.index("function renderNeeds")]
         self.assertIn('L("self_remind"', body)

@@ -110,6 +110,10 @@ def decision_resolve(ap: str, did: str, answer: str, status: str = "answered", r
     With `handling` the page shows the answer as received and being handled until `decision_handled`."""
     with state.mutate(ap) as st:
         d = next((d for d in st["decisions"] if d["id"] == did), None)
+        if d is None and status == "undone":
+            d = _unarchive_read(ap, did)
+            if d is not None:
+                st["decisions"].append(d)
         if d is None:
             raise state.StateError(f"{ap}: no decision {did}")
         # OK on a self card means "read", not "final": an undo may follow it.
@@ -137,8 +141,11 @@ def decision_keep(ap: str, ids: list) -> dict:
             d = by_id.get(did)
             if d is None or d["kind"] != "self" or d["status"] == "undone":
                 out["skipped"].append(did)
+            elif d["status"] != "open" and d.get("answer") == KEEP:
+                d.pop("handling", None)   # an early resolve may have set it; nothing is left to act on
+                out["unchanged"].append(did)
             elif d["status"] != "open":
-                out["unchanged" if d.get("answer") == KEEP else "skipped"].append(did)
+                out["skipped"].append(did)
             else:
                 d.update(status="answered", answer=KEEP, answered_at=events.now_iso())
                 d.pop("handling", None)
@@ -187,6 +194,21 @@ def decision_handled(ap: str, did: str) -> str:
             return "unchanged"
     events.append(ap, "decision_handled", {"id": did})
     return "handled"
+
+
+def _unarchive_read(ap: str, did: str):
+    """A read self card the archive took (a week after OK) whose Undo arrived: take it out of the archive so the
+    undo can be recorded. Called under the state lock, which `archive` also holds while it writes the file."""
+    p = paths.ap_dir(ap) / "archive.jsonl"
+    lines = _archive_lines(ap)
+    hit = next((d for d in lines if d.get("id") == did and d.get("kind") == "self" and d.get("answer") == KEEP), None)
+    if hit is None:
+        return None
+    tmp = p.with_suffix(".jsonl.tmp")
+    tmp.write_text("".join(json.dumps(d, ensure_ascii=False) + "\n" for d in lines if d is not hit))
+    os.replace(tmp, p)
+    events.append(ap, "decision_unarchived", {"id": did})
+    return hit
 
 
 def _archive_lines(ap: str) -> list:

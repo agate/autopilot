@@ -178,6 +178,8 @@ class DocsTest(unittest.TestCase):
         report = rb[rb.index("9. **Report.**"):rb.index("10. **Tidy and publish.**")]
         self.assertIn("ap decision unread <ap>", report)
         self.assertIn("`remind`", report)
+        late = rb[rb.index("10. **Tidy and publish.**"):rb.index("11. **End.**")]
+        self.assertIn("ap decision keep", late)                   # a keep that arrives late is no "being handled"
         talk = (ROOT / "references" / "talk.md").read_text()
         self.assertIn("ap decision keep <name>", talk)
 

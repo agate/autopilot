@@ -149,7 +149,7 @@ rejects one that does not.
    page). Each reply has `decision` (`<ap>:<D-id>`), `option` or `text`, and `by`. First record every
    answer, then tell the page, then act on them:
    - `option: "undo"` on a `self` card: `ap decision resolve <ap> <D-id> --answer undo --status undone --handling`.
-     It works on a card the user already marked read, too.
+     It works on a card the user already marked read, too, even once the archive took it.
    - `option: "keep"` on a `self` card (OK: read, it stands), or a reply with a `decisions` list (the
      page's "mark all read", `<ap>:<D-id>` each): `ap decision keep <ap> <D-id> ...` with every id. It
      prints `kept`, `unchanged` and `skipped`. Nothing is left to act on: no `--handling`, no
@@ -201,7 +201,8 @@ rejects one that does not.
    Send one `PushNotification` that leads with how many things wait on the user.
 
 10. **Tidy and publish.** First read the page's `replies` again. Each new answer (it arrived during
-    this pass) gets only this: `ap decision resolve ... --handling` as in step 6, then
+    this pass) gets only this: `ap decision resolve ... --handling` as in step 6 (a keep reply gets
+    `ap decision keep <ap> <D-id> ...` instead, never `--handling`), then
     `ap publish diff --only decisions`, its rows in one `ArtifactData` batch, and
     `ap publish mark --only decisions`. Do not act on it, do not run `ap decision handled`, and leave
     the reply where it is: the next pass reads it again (`unchanged`) and acts. Run `ap tick <ap>`

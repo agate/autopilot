@@ -211,6 +211,35 @@ class OpsTest(unittest.TestCase):
         with self.assertRaises(ops.AnswerConflict):
             ops.decision_resolve("checkout", "D1", "keep")
 
+    def test_undo_of_an_archived_read_card_brings_it_back(self):
+        # A read card moves to the archive after a week; its Undo stays on the evidence page, and a pass may
+        # also archive it between reading the reply and acting on it.
+        ops.decision_add("checkout", dec(kind="self", options=[], attention=False))
+        ops.decision_add("checkout", dec(kind="self", options=[], attention=False))
+        ops.decision_keep("checkout", ["D1", "D2"])
+        st = state.load("checkout")
+        for d in st["decisions"]:
+            d["answered_at"] = "2020-01-01T00:00:00Z"
+        state.save("checkout", st)
+        self.assertEqual(ops.archive("checkout"), 2)
+        self.assertEqual(ops.decision_resolve("checkout", "D1", "undo", "undone", handling=True), "resolved")
+        d = state.load("checkout")["decisions"][0]
+        self.assertEqual((d["id"], d["status"], d["answer"], d["handling"]), ("D1", "undone", "undo", True))
+        lines = (paths.ap_dir("checkout") / "archive.jsonl").read_text().splitlines()
+        self.assertEqual([json.loads(l)["id"] for l in lines], ["D2"])
+        # Only an undo of a read self card comes back; anything else stays unknown.
+        with self.assertRaises(state.StateError):
+            ops.decision_resolve("checkout", "D2", "keep")
+        with self.assertRaises(state.StateError):
+            ops.decision_resolve("checkout", "D9", "undo", "undone")
+
+    def test_keep_clears_a_handling_flag_left_by_an_early_resolve(self):
+        # Step 10 may have recorded the keep with --handling; nothing is left to act on, so it must not stick.
+        ops.decision_add("checkout", dec(kind="self", options=[], attention=False))
+        ops.decision_resolve("checkout", "D1", "keep", handling=True)
+        self.assertEqual(ops.decision_keep("checkout", ["D1"])["unchanged"], ["D1"])
+        self.assertNotIn("handling", state.load("checkout")["decisions"][0])
+
     def test_undo_after_an_answer_to_an_ask_is_still_a_conflict(self):
         ops.decision_add("checkout", dec())
         ops.decision_resolve("checkout", "D1", "a")

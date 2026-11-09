@@ -641,17 +641,19 @@ function renderSelfs(ds) {
   fill($("self-look"), ...(g.look.length ? [
     el("div", { class: "sec-h" }, el("h2", {}, L("self_look", { n: g.look.length })), el("span", { class: "hint" }, L("self_look_hint"))),
     ...g.look.map(selfCard)] : []));
+  // Like asks, a card whose OK is on its way stops counting as unread.
   const waiting = g.routine.filter((d) => !replyFor(d.ap + ":" + d.id));
+  g.lookWaiting = g.look.filter((d) => !replyFor(d.ap + ":" + d.id));
   fill($("selfs"), ...(n ? [el("details", { class: "fold self-fold", id: "self-fold", open: selfOpen,
     ontoggle: (e) => { selfOpen = e.target.open; } },
-    el("summary", {}, L("self_routine", { n })),
+    el("summary", {}, L("self_routine", { n: waiting.length })),
     el("div", { class: "self-tools" }, el("span", { class: "hint" }, L("self_hint")),
       waiting.length ? el("button", { type: "button", class: "btn small", disabled: off, onclick: () => keepAll(waiting) }, "✓ " + L("keep_all", { n: waiting.length })) : null),
     errNote("keep-all"),
     el("div", { class: "list" }, g.routine.map(selfRow)))] : []));
-  const remind = selfRemind(g.routine, S.meta.self_review || { remind_at: 10, remind_days: 3 }, Date.now());
+  const remind = selfRemind(waiting, S.meta.self_review || { remind_at: 10, remind_days: 3 }, Date.now());
   fill($("self-remind"), ...(remind ? [el("div", { class: "remind", role: "status" },
-    el("span", {}, "▲ " + L("self_remind", { n, when: rel(g.routine[n - 1].created_at) })),
+    el("span", {}, "▲ " + L("self_remind", { n: waiting.length, when: rel(waiting[waiting.length - 1].created_at) })),
     el("button", { type: "button", class: "btn small", onclick: () => { selfOpen = true; render(); const f = $("self-fold"); if (f && f.scrollIntoView) f.scrollIntoView({ block: "start" }); } }, L("self_remind_go")))] : []));
   return g;
 }
@@ -688,7 +690,7 @@ function renderNeeds() {
   const g = renderSelfs(ds);
   const subs = [systems.length ? L("hero_systems", { n: systems.length }) : null,
     gates.length ? L("hero_gates", { n: gates.length }) : null, pendingN ? L("hero_pending", { n: pendingN }) : null,
-    g.look.length ? L("hero_look", { n: g.look.length }) : null].filter(Boolean);
+    g.lookWaiting.length ? L("hero_look", { n: g.lookWaiting.length }) : null].filter(Boolean);
   fill($("systems"), ...(systems.length ? [
     el("div", { class: "sec-h" }, el("h2", {}, L("sys_title")), el("span", { class: "hint" }, L("sys_hint"))),
     ...systems.map(systemCard)] : []));
