@@ -105,7 +105,8 @@ def checks(gcfg: dict) -> list:
                       "stop its workers; make a new folder `$AUTOPILOT_DATA/<new name>/` and move into it only its own "
                       "files from projects/ (config.json, state.json, RULES.md, runs/, specs/, reports/, events.jsonl "
                       "and the like), never another autopilot's folder; set `name` in its config.json to the new "
-                      "name. No autopilot moves into projects/ until then."))
+                      "name, and point its tasks' `spec` paths at the new folder (`ap task set <new name> <task> spec=<path>`). "
+                      "No autopilot moves into projects/ until then."))
     out.append(_reply_check(gate, gcfg))
     for name, err in (gate.get("broken") or {}).items():
         out.append(_c(f"state {name}", False, err, f"fix or restore {paths.ap_dir(name) / 'state.json'}"))
