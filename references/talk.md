@@ -21,7 +21,9 @@ Answer with the facts and the file or command they came from. Say plainly what y
 | The user says | Run |
 |---|---|
 | answers a waiting decision | `ap decision resolve <name> <D-id> --answer "<their words or option id>"`, then do what the answer asks, or leave it for the next pass and say so. Exit 3 means it already has a different answer: show both and ask which one counts; only on their word run it again with `--replace` |
-| undo a decision the autopilot made | `ap decision resolve <name> <D-id> --answer undo --status undone`, then reverse it or leave it for the next pass |
+| undo a decision the autopilot made (also one already marked read) | `ap decision resolve <name> <D-id> --answer undo --status undone`, then reverse it or leave it for the next pass |
+| OK to a decision the autopilot made, or "mark them all read" | `ap decision keep <name> <D-id> ...` (for all: every open `self` id) |
+| a decision the autopilot made does, or does not, need their look | `ap decision attention <name> <D-id> true` (or `false`) |
 | skip / block / reopen a task | `ap task set <name> <task> status=skipped` (or `blocked`, `todo`) |
 | add work inside the scope | write the task as JSON, then `ap task add <name> <file>` |
 | start now | `ap tick <name>` (queues a pass; it starts within seconds) |

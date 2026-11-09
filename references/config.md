@@ -24,6 +24,8 @@ that setting.
 | `report_times` | `["09:00", "17:00", "21:00"]` | When reports are written, local time. An autopilot can set its own. |
 | `port_base` | `7100` | First port handed to workers; each worker gets a block of 10. |
 | `archive_after_days` | `7` | Answered decisions older than this many days move to the archive. |
+| `self_review.remind_at` | `10` | Remind once this many routine decisions the autopilot made by itself are unread: one line in the reports and on the page. 0 turns it off. |
+| `self_review.remind_days` | `3` | Also remind once the oldest unread routine decision is this many days old. 0 turns it off. |
 | `permission_mode` | `"auto"` | Claude Code permission mode for the dispatcher and workers. |
 | `page_host` | `"claude.ai"` | Where the page is published. |
 | `models.dispatcher` | `null` | Model for dispatcher passes; null uses Claude Code's default. |

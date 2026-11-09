@@ -21,6 +21,9 @@ DEFAULT_GLOBAL: dict = {
     "report_times": ["09:00", "17:00", "21:00"],
     "port_base": 7100,
     "archive_after_days": 7,
+    # Decisions the autopilot made by itself and nobody has read yet: one line in the reports and on the page
+    # once this many pile up, or once the oldest is this many days old. 0 turns that half off.
+    "self_review": {"remind_at": 10, "remind_days": 3},
     "permission_mode": "auto",
     "page_host": "claude.ai",
     "models": {"dispatcher": None, "worker": None},
@@ -49,6 +52,8 @@ DESCRIBE: dict = {
     "report_times": "When reports are written, local time. An autopilot can set its own.",
     "port_base": "First port handed to workers; each worker gets a block of 10.",
     "archive_after_days": "Answered decisions older than this many days move to the archive.",
+    "self_review.remind_at": "Remind once this many routine decisions the autopilot made by itself are unread: one line in the reports and on the page. 0 turns it off.",
+    "self_review.remind_days": "Also remind once the oldest unread routine decision is this many days old. 0 turns it off.",
     "permission_mode": "Claude Code permission mode for the dispatcher and workers.",
     "page_host": "Where the page is published.",
     "models.dispatcher": "Model for dispatcher passes; null uses Claude Code's default.",

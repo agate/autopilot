@@ -74,6 +74,9 @@ def task_add(ap: str, task: dict) -> None:
 
 
 def decision_add(ap: str, d: dict) -> str:
+    if d.get("kind") == "self" and not isinstance(d.get("attention"), bool):
+        raise ValueError("a self card needs \"attention\": true when the user should look at it (see the runbook), "
+                         "false for a routine call")
     for f in ("title", "body"):
         miss = text.unfilled(d.get(f))
         if miss:
@@ -93,6 +96,9 @@ def decision_add(ap: str, d: dict) -> str:
     return new["id"]
 
 
+KEEP = "keep"
+
+
 class AnswerConflict(Exception):
     """The decision already has a different answer; only an explicit replace changes it."""
 
@@ -106,7 +112,9 @@ def decision_resolve(ap: str, did: str, answer: str, status: str = "answered", r
         d = next((d for d in st["decisions"] if d["id"] == did), None)
         if d is None:
             raise state.StateError(f"{ap}: no decision {did}")
-        if d["status"] != "open" and not replace:
+        # OK on a self card means "read", not "final": an undo may follow it.
+        undo_after_ok = d["kind"] == "self" and d.get("answer") == KEEP and status == "undone"
+        if d["status"] != "open" and not replace and not undo_after_ok:
             if d["status"] == status and d.get("answer") == answer:
                 return "unchanged"
             raise AnswerConflict(f"{ap}: {did} already has the answer {d.get('answer')!r} ({d['status']})")
@@ -117,6 +125,56 @@ def decision_resolve(ap: str, did: str, answer: str, status: str = "answered", r
             d.pop("handling", None)
     events.append(ap, "decision_resolved", {"id": did, "status": status, "answer": answer})
     return "resolved"
+
+
+def decision_keep(ap: str, ids: list) -> dict:
+    """The user read these self cards and lets them stand (OK, or "mark all read"). Nothing is left to act on,
+    so none is shown as being handled. Cards that are not open self cards are skipped, never changed."""
+    out = {"kept": [], "unchanged": [], "skipped": []}
+    with state.mutate(ap) as st:
+        by_id = {d["id"]: d for d in st["decisions"]}
+        for did in ids:
+            d = by_id.get(did)
+            if d is None or d["kind"] != "self" or d["status"] == "undone":
+                out["skipped"].append(did)
+            elif d["status"] != "open":
+                out["unchanged" if d.get("answer") == KEEP else "skipped"].append(did)
+            else:
+                d.update(status="answered", answer=KEEP, answered_at=events.now_iso())
+                d.pop("handling", None)
+                out["kept"].append(did)
+    if out["kept"]:
+        events.append(ap, "decisions_kept", {"ids": out["kept"]})
+    return out
+
+
+def decision_attention(ap: str, did: str, flag: bool) -> str:
+    """Say whether a self card wants the user's look; for cards added before every self card had to say so."""
+    with state.mutate(ap) as st:
+        d = next((d for d in st["decisions"] if d["id"] == did), None)
+        if d is None or d["kind"] != "self":
+            raise state.StateError(f"{ap}: no self decision {did}")
+        if d.get("attention") is flag:
+            return "unchanged"
+        d["attention"] = flag
+    events.append(ap, "decision_attention", {"id": did, "attention": flag})
+    return "set"
+
+
+def _when(iso: str):
+    return datetime.fromisoformat(iso.replace("Z", "+00:00"))
+
+
+def self_unread(st: dict, cfg: dict, now: datetime) -> dict:
+    """Open self cards: how many routine ones wait to be read, the oldest of them, how many want a look, and
+    whether the reminder is due. A card saved before the flag existed counts as routine."""
+    opened = [d for d in st["decisions"] if d.get("kind") == "self" and d.get("status") == "open"]
+    routine = [d for d in opened if d.get("attention") is not True]
+    oldest = min((d["created_at"] for d in routine if d.get("created_at")), default=None, key=_when)
+    at, days = int(cfg.get("remind_at") or 0), float(cfg.get("remind_days") or 0)
+    remind = bool(routine) and ((at > 0 and len(routine) >= at) or
+                                (days > 0 and oldest is not None and now - _when(oldest) > timedelta(days=days)))
+    return {"count": len(routine), "attention": len(opened) - len(routine), "oldest_at": oldest, "remind": remind}
 
 
 def decision_handled(ap: str, did: str) -> str:
@@ -247,8 +305,15 @@ def _decision(args):
             return 3
     elif len(args) == 3 and args[0] == "handled":
         print(decision_handled(args[1], args[2]))
+    elif len(args) >= 3 and args[0] == "keep":
+        print(json.dumps(decision_keep(args[1], args[2:])))
+    elif len(args) == 4 and args[0] == "attention" and args[3] in ("true", "false"):
+        print(decision_attention(args[1], args[2], args[3] == "true"))
+    elif len(args) == 2 and args[0] == "unread":
+        print(json.dumps(self_unread(state.load(args[1]), config.load_global()["self_review"], datetime.now(timezone.utc))))
     else:
-        print("usage: ap decision add <ap> <file> | resolve <ap> <id> --answer X [--status answered|undone] [--replace] [--handling] | handled <ap> <id>",
+        print("usage: ap decision add <ap> <file> | resolve <ap> <id> --answer X [--status answered|undone] [--replace] [--handling]"
+              " | handled <ap> <id> | keep <ap> <id> ... | attention <ap> <id> true|false | unread <ap>",
               file=sys.stderr)
         return 2
     return 0

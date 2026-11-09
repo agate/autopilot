@@ -60,6 +60,16 @@ def _parked(w: dict) -> str:
     return f" [parked for quota, resumes {pk.get('resume_at') or 'when usage drops'}]" if pk else ""
 
 
+def _self_line(st: dict) -> str:
+    """Its own unread calls: the ones that want a look by title, the routine rest as a count."""
+    opened = [d for d in st["decisions"] if d["kind"] == "self" and d["status"] == "open"]
+    look = [d for d in opened if d.get("attention") is True]
+    named = "; ".join(f"{d['id']} {_txt(d['title'])[:120]}" for d in look[:5]) or "-"
+    if len(look) > 5:
+        named += f"; {len(look) - 5} more"
+    return f"Decided by itself, unread ({len(opened)}): want a look: {named}; routine: {len(opened) - len(look)}"
+
+
 def _budget_line() -> str:
     b = budget.read()
     if not b.get("ok"):
@@ -91,6 +101,7 @@ def build(name: str, offset, rules_mtimes: dict, now: datetime) -> tuple:
                                   for w in st["workers"]) or "none"),
         f"Waiting on you ({len(asks)}): " + ("; ".join(f"{d['id']} {_txt(d['title'])}" for d in asks) or "-"),
         f"Human gates ({len(gates)}): " + ("; ".join(f"{d['id']} {_txt(d['title'])}" for d in gates) or "-"),
+        _self_line(st),
         _budget_line(),
     ]
     evs, new_off = events.since(name, offset or 0)

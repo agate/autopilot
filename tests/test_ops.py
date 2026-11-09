@@ -131,9 +131,123 @@ class OpsTest(unittest.TestCase):
         self.assertEqual(state.load("checkout")["decisions"][0]["answer"], "b")
 
     def test_undo_twice_is_unchanged(self):
-        ops.decision_add("checkout", dec(kind="self", options=[]))
+        ops.decision_add("checkout", dec(kind="self", options=[], attention=False))
         self.assertEqual(ops.decision_resolve("checkout", "D1", "undo", "undone"), "resolved")
         self.assertEqual(ops.decision_resolve("checkout", "D1", "undo", "undone"), "unchanged")
+
+    def test_a_self_card_says_whether_it_needs_a_look(self):
+        # The page puts the ones worth a look on top and folds the rest; the pass has to choose.
+        with self.assertRaises(ValueError):
+            ops.decision_add("checkout", dec(kind="self", options=[]))
+        with self.assertRaises(ValueError):
+            ops.decision_add("checkout", dec(kind="self", options=[], attention="yes"))
+        ops.decision_add("checkout", dec(kind="self", options=[], attention=True))
+        self.assertIs(state.load("checkout")["decisions"][0]["attention"], True)
+        # Other kinds never need it.
+        ops.decision_add("checkout", dec())
+        self.assertNotIn("attention", state.load("checkout")["decisions"][1])
+
+    def test_attention_is_a_bool_in_the_state_file(self):
+        ops.decision_add("checkout", dec(kind="self", options=[], attention=False))
+        st = state.load("checkout")
+        st["decisions"][0]["attention"] = "no"
+        with self.assertRaises(state.StateError):
+            state.save("checkout", st)
+
+    def test_a_self_card_saved_before_attention_existed_still_loads(self):
+        ops.decision_add("checkout", dec(kind="self", options=[], attention=False))
+        st = state.load("checkout")
+        del st["decisions"][0]["attention"]
+        state.save("checkout", st)
+        self.assertNotIn("attention", state.load("checkout")["decisions"][0])
+
+    def test_attention_can_be_set_on_an_old_self_card(self):
+        ops.decision_add("checkout", dec(kind="self", options=[], attention=False))
+        ops.decision_add("checkout", dec())
+        self.assertEqual(ops.decision_attention("checkout", "D1", True), "set")
+        self.assertIs(state.load("checkout")["decisions"][0]["attention"], True)
+        self.assertEqual(ops.decision_attention("checkout", "D1", True), "unchanged")
+        with self.assertRaises(state.StateError):
+            ops.decision_attention("checkout", "D2", True)   # not a self card
+        with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.main(["decision", "attention", "checkout", "D1", "false"]), 0)
+            self.assertEqual(cli.main(["decision", "attention", "checkout", "D1", "maybe"]), 2)
+        self.assertEqual(out.getvalue().split(), ["set"])
+        self.assertIs(state.load("checkout")["decisions"][0]["attention"], False)
+
+    def test_keep_marks_self_cards_read(self):
+        for _ in range(3):
+            ops.decision_add("checkout", dec(kind="self", options=[], attention=False))
+        ops.decision_add("checkout", dec())
+        ops.decision_resolve("checkout", "D3", "undo", "undone")
+        got = ops.decision_keep("checkout", ["D1", "D2", "D3", "D4", "D9"])
+        self.assertEqual(got, {"kept": ["D1", "D2"], "unchanged": [], "skipped": ["D3", "D4", "D9"]})
+        ds = state.load("checkout")["decisions"]
+        self.assertEqual([(d["status"], d.get("answer")) for d in ds[:3]],
+                         [("answered", "keep"), ("answered", "keep"), ("undone", "undo")])
+        self.assertNotIn("handling", ds[0])   # nothing to act on: never shown as being handled
+        self.assertEqual(ops.decision_keep("checkout", ["D1"]), {"kept": [], "unchanged": ["D1"], "skipped": []})
+        kept = [e for e in events.since("checkout", 0)[0] if e.get("type") == "decisions_kept"]
+        self.assertEqual([e["data"]["ids"] for e in kept], [["D1", "D2"]])
+
+    def test_keep_cli(self):
+        ops.decision_add("checkout", dec(kind="self", options=[], attention=False))
+        ops.decision_add("checkout", dec())
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.main(["decision", "keep", "checkout", "D1", "D2"]), 0)
+            self.assertEqual(cli.main(["decision", "keep", "checkout"]), 2)
+        self.assertEqual(json.loads(out.getvalue()), {"kept": ["D1"], "unchanged": [], "skipped": ["D2"]})
+
+    def test_a_kept_self_card_can_still_be_undone(self):
+        # OK means "read", not "final": the task's evidence page keeps an Undo button.
+        ops.decision_add("checkout", dec(kind="self", options=[], attention=False))
+        ops.decision_keep("checkout", ["D1"])
+        self.assertEqual(ops.decision_resolve("checkout", "D1", "undo", "undone", handling=True), "resolved")
+        d = state.load("checkout")["decisions"][0]
+        self.assertEqual((d["status"], d["answer"], d["handling"]), ("undone", "undo", True))
+        # An undone card is final: OK after it is skipped, and "keep" is no answer that replaces it.
+        self.assertEqual(ops.decision_keep("checkout", ["D1"])["skipped"], ["D1"])
+        with self.assertRaises(ops.AnswerConflict):
+            ops.decision_resolve("checkout", "D1", "keep")
+
+    def test_undo_after_an_answer_to_an_ask_is_still_a_conflict(self):
+        ops.decision_add("checkout", dec())
+        ops.decision_resolve("checkout", "D1", "a")
+        with self.assertRaises(ops.AnswerConflict):
+            ops.decision_resolve("checkout", "D1", "undo", "undone")
+
+    def test_unread_counts_open_routine_self_cards(self):
+        now = datetime(2026, 1, 10, 12, 0, tzinfo=timezone.utc)
+        cfg = {"remind_at": 3, "remind_days": 2}
+        st = {"decisions": []}
+        self.assertEqual(ops.self_unread(st, cfg, now), {"count": 0, "attention": 0, "oldest_at": None, "remind": False})
+
+        def add(at, attention=False, status="open", kind="self"):
+            st["decisions"].append({"kind": kind, "status": status, "created_at": at, "attention": attention})
+        add("2026-01-09T12:00:00Z")
+        add("2026-01-10T11:00:00Z")
+        add("2026-01-01T00:00:00Z", attention=True)    # shown on top: not part of the routine count
+        add("2026-01-01T00:00:00Z", status="answered")  # read
+        add("2026-01-01T00:00:00Z", kind="ask")
+        st["decisions"].append({"kind": "self", "status": "open", "created_at": "2026-01-09T18:00:00Z"})  # no field yet
+        got = ops.self_unread(st, cfg, now)
+        self.assertEqual(got, {"count": 3, "attention": 1, "oldest_at": "2026-01-09T12:00:00Z", "remind": True})
+        st["decisions"].pop()
+        got = ops.self_unread(st, cfg, now)
+        self.assertEqual((got["count"], got["remind"]), (2, False))   # 2 < 3 and the oldest is 1 day old
+        got = ops.self_unread(st, cfg, now + timedelta(days=1, minutes=1))
+        self.assertTrue(got["remind"])                                # now the oldest is past 2 days
+
+    def test_unread_cli_uses_the_configured_thresholds(self):
+        for _ in range(2):
+            ops.decision_add("checkout", dec(kind="self", options=[], attention=False))
+        (paths.data_root() / "config.json").write_text(json.dumps({"self_review": {"remind_at": 2}}))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(cli.main(["decision", "unread", "checkout"]), 0)
+        got = json.loads(out.getvalue())
+        self.assertEqual((got["count"], got["remind"]), (2, True))
 
     def test_resolve_cli_exit_codes(self):
         ops.decision_add("checkout", dec())
