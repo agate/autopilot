@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 from tests.helpers import TempData
 from autopilot import budget, config
@@ -61,6 +62,27 @@ class BudgetTest(unittest.TestCase):
         b = budget.read(Path("/nonexistent/claude.json"), now_ms=NOW_MS)
         self.assertFalse(b["ok"])
         self.assertEqual(budget.allowance(b, self.cfg, NOW)["allow"], 1)
+
+
+class IsolationTest(unittest.TestCase):
+    """Tests never read this machine's real usage: a nearly spent account used to pause the dispatcher in them."""
+
+    def test_temp_data_brings_its_own_quiet_usage_file(self):
+        real = budget.DEFAULT_PATH
+        with TempData():
+            self.assertNotEqual(budget.DEFAULT_PATH, real)
+            b = budget.read()
+            self.assertTrue(b["ok"], b)
+            self.assertEqual([w["percent"] for w in b["windows"]], [0])
+            self.assertFalse(b["stale"])
+            self.assertIsNone(budget.allowance(b, config.load_global(), datetime.now(timezone.utc))["allow"])
+            self.assertTrue(budget.read_fast()["ok"])
+        self.assertEqual(budget.DEFAULT_PATH, real)
+
+    def test_the_default_file_is_looked_up_when_called(self):
+        with TempData(), mock.patch.object(budget, "DEFAULT_PATH", _write(percent=97)):
+            self.assertEqual(budget.read()["windows"][0]["percent"], 97)
+            self.assertEqual(budget.read_fast()["windows"][0]["percent"], 97)
 
 
 if __name__ == "__main__":

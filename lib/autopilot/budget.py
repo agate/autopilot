@@ -11,8 +11,9 @@ from autopilot import cli, config, paths
 DEFAULT_PATH = Path.home() / ".claude.json"
 
 
-def read(path: Path = DEFAULT_PATH, now_ms: int = None, stale_min: int = 60) -> dict:
+def read(path: Path = None, now_ms: int = None, stale_min: int = 60) -> dict:
     """Usage windows and extra-usage credits from Claude Code's cached utilization."""
+    path = path or DEFAULT_PATH   # looked up per call, so tests can point it at their own file
     now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
     try:
         cache = json.loads(Path(path).read_text()).get("cachedUsageUtilization") or {}
@@ -72,9 +73,10 @@ def allowance(b: dict, cfg: dict, now: datetime) -> dict:
     return {"allow": None, "paused_until": None, "reason": "ok"}
 
 
-def read_fast(path: Path = DEFAULT_PATH, now_ms: int = None, stale_min: int = 60) -> dict:
+def read_fast(path: Path = None, now_ms: int = None, stale_min: int = 60) -> dict:
     """Same numbers as `read`, for a hook that runs on every tool call. `~/.claude.json` can be large, so the
     small utilization block is kept in the data folder and re-read only when that file's size or mtime moves."""
+    path = path or DEFAULT_PATH
     now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
     side = paths.data_root() / "usage-cache.json"
     try:
