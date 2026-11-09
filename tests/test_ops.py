@@ -233,6 +233,22 @@ class OpsTest(unittest.TestCase):
         with self.assertRaises(state.StateError):
             ops.decision_resolve("checkout", "D9", "undo", "undone")
 
+    def test_a_failed_save_leaves_the_archived_card_where_it_was(self):
+        # The archive line goes only once the state file holds the card: a save that fails loses nothing.
+        ops.decision_add("checkout", dec(kind="self", options=[], attention=False))
+        ops.decision_keep("checkout", ["D1"])
+        st = state.load("checkout")
+        st["decisions"][0]["answered_at"] = "2020-01-01T00:00:00Z"
+        state.save("checkout", st)
+        ops.archive("checkout")
+        (paths.data_root() / "config.json").write_text(json.dumps({"reader_lang": "zh"}))  # its text is en only
+        with self.assertRaises(state.StateError):
+            ops.decision_resolve("checkout", "D1", "undo", "undone")
+        lines = (paths.ap_dir("checkout") / "archive.jsonl").read_text().splitlines()
+        self.assertEqual([json.loads(l)["id"] for l in lines], ["D1"])
+        self.assertEqual(state.load("checkout")["decisions"], [])
+        self.assertFalse([e for e in events.since("checkout", 0)[0] if e.get("type") == "decision_unarchived"])
+
     def test_keep_clears_a_handling_flag_left_by_an_early_resolve(self):
         # Step 10 may have recorded the keep with --handling; nothing is left to act on, so it must not stick.
         ops.decision_add("checkout", dec(kind="self", options=[], attention=False))
