@@ -457,8 +457,8 @@ class ConfigErrorLineOutputTest(unittest.TestCase):
 
 class ConfigErrorLineInProcessTest(unittest.TestCase):
     # In-process, so they run where /dev/full does not exist (macOS), and an exception out of main fails the test
-    # instead of being lost in a closed pipe. The fake stream's fileno() is a file this test owns, so pointing it at
-    # devnull cannot touch the test runner's real streams.
+    # instead of being lost in a closed pipe. The fake stream's fileno() is a fresh file each subtest owns, so pointing
+    # it at devnull cannot touch the test runner's real streams, and one subtest's devnull cannot pass another's check.
     FullStream = OutputWriteErrorTest.FullStdout
 
     class GoneStream(FullStream):
@@ -474,15 +474,19 @@ class ConfigErrorLineInProcessTest(unittest.TestCase):
         home = TempHome()
         self.home = home.__enter__()
         self.addCleanup(home.__exit__)
-        tmp = Path(tempfile.mkdtemp(prefix="ap2-cli-")).resolve()
+        self.tmp = tmp = Path(tempfile.mkdtemp(prefix="ap2-cli-")).resolve()
         self.addCleanup(shutil.rmtree, tmp, True)
         bad = tmp / "bad"
         bad.mkdir()
         (bad / "config.yaml").write_text("mode: loud\n")
         self.cases = (("invalid config", ["config", "--data", str(bad)]),
                       ("refused data folder", ["config", "--data", str(self.home / ".claude" / "x")]))
-        self.fd = os.open(tmp / "err", os.O_WRONLY | os.O_CREAT)
-        self.addCleanup(os.close, self.fd)
+
+    def fresh_stderr_file(self):
+        fd, _ = tempfile.mkstemp(dir=self.tmp)
+        self.addCleanup(os.close, fd)  # registered after rmtree, so it closes first
+        self.assertNotEqual(os.fstat(fd).st_rdev, os.stat(os.devnull).st_rdev)
+        return fd
 
     def run_main(self, argv, stderr):
         with mock.patch.object(sys, "stdout", io.StringIO()) as out, mock.patch.object(sys, "stderr", stderr):
@@ -492,14 +496,16 @@ class ConfigErrorLineInProcessTest(unittest.TestCase):
     def test_error_line_with_stderr_reader_gone_returns_1_without_raising(self):
         for name, argv in self.cases:
             with self.subTest(name):
-                self.assertEqual(self.run_main(argv, self.GoneStream(self.fd)), (1, ""))
-                self.assertEqual(os.fstat(self.fd).st_rdev, os.stat(os.devnull).st_rdev)
+                fd = self.fresh_stderr_file()
+                self.assertEqual(self.run_main(argv, self.GoneStream(fd)), (1, ""))
+                self.assertEqual(os.fstat(fd).st_rdev, os.stat(os.devnull).st_rdev)
 
     def test_error_line_on_a_full_stderr_returns_1_without_raising_and_points_it_at_devnull(self):
         for name, argv in self.cases:
             with self.subTest(name):
-                self.assertEqual(self.run_main(argv, self.FullStream(self.fd)), (1, ""))
-                self.assertEqual(os.fstat(self.fd).st_rdev, os.stat(os.devnull).st_rdev)
+                fd = self.fresh_stderr_file()
+                self.assertEqual(self.run_main(argv, self.FullStream(fd)), (1, ""))
+                self.assertEqual(os.fstat(fd).st_rdev, os.stat(os.devnull).st_rdev)
 
     def test_error_line_on_a_full_stderr_without_a_file_descriptor_returns_1(self):
         err = self.FullStream(None)
