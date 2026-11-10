@@ -585,6 +585,16 @@ class ToDevnullTest(unittest.TestCase):
         self.assertEqual(len(self.opened), 1)
         self.assert_closed(self.opened[0])
 
+    def test_returns_quietly_when_closing_the_devnull_fd_fails(self):
+        with mock.patch.object(os, "open", side_effect=self.spy_open), \
+                mock.patch.object(os, "close", side_effect=OSError(errno.EIO, "Input/output error")) as close:
+            result = cli._to_devnull(self.FullStream(self.fd))
+        for fd in self.opened:
+            os.close(fd)  # the patched close did not close it; do not leak it in the test
+        self.assertIsNone(result)
+        self.assertEqual(len(self.opened), 1)
+        close.assert_called_once_with(self.opened[0])
+
     def test_write_still_raises_the_write_error_when_devnull_cannot_be_opened(self):
         with mock.patch.object(os, "open", side_effect=self.emfile_on_devnull):
             with self.assertRaises(BrokenPipeError):
