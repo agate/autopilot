@@ -10,7 +10,7 @@ In the subset (enough for config.yaml, source files and routines):
   never inside quotes).
 
 Everything else raises `YamlError`, whose message starts with `line N:` and says why: tabs in indentation,
-anchors, aliases, tags, `|`/`>` multi-line scalars, `---`/`...` document markers, bad indentation, unclosed
+a tab after a `-` or `?` indicator, anchors, aliases, tags, `|`/`>` multi-line scalars, `---`/`...` document markers, bad indentation, unclosed
 quotes or brackets, duplicate keys, complex `?` keys, a `- ` list item inside a flow collection, a plain value
 holding `: `, and a plain value starting with `@`, `` ` ``, `%`, `]`, `}`, `,` or `? ` (quote it).
 """
@@ -146,8 +146,15 @@ def _is_item(text: str) -> bool:
     return text == "-" or text.startswith("- ")
 
 
+def _check_indicator_tab(text: str, no: int) -> None:
+    """YAML reads `-` or `?` followed by a tab as an indicator; refuse it rather than read it as plain text."""
+    if text.startswith(("-\t", "?\t")):
+        raise YamlError(no, "a tab after '-' or '?' is not supported; use a space")
+
+
 def _split_key(text: str, no: int):
     """`key: rest` -> (key, rest); None when the text is not a map entry. Keys are always strings."""
+    _check_indicator_tab(text, no)
     if text == "?" or text.startswith("? "):
         raise YamlError(no, "complex keys ('?') are not supported")
     if text[0] in "\"'":
@@ -262,6 +269,7 @@ class _Parser:
             return _quoted(text, no)
         if _is_item(text):
             raise YamlError(no, "a list cannot start after 'key:' on the same line; put '- ' items on the next lines")
+        _check_indicator_tab(text, no)
         if text == "?" or text.startswith("? "):
             raise YamlError(no, "complex keys ('?') are not supported")
         _check_plain(text, no)
@@ -340,12 +348,13 @@ class _Flow:
         start = self.i
         while self.i < len(self.s):
             ch = self.s[self.i]
-            if ch in ",[]{}" or (ch == ":" and (self.i + 1 == len(self.s) or self.s[self.i + 1] in " ,]}")):
+            if ch in ",[]{}" or (ch == ":" and (self.i + 1 == len(self.s) or self.s[self.i + 1] in " \t,]}")):
                 break
             self.i += 1
         tok = self.s[start:self.i].strip()
         if not tok:
             raise YamlError(self.no, "empty entry in a flow collection")
+        _check_indicator_tab(tok, self.no)
         if tok == "?" or tok.startswith("? "):
             raise YamlError(self.no, "complex keys ('?') are not supported")
         if tok == "-" or tok.startswith("- "):

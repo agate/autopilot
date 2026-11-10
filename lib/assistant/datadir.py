@@ -27,8 +27,10 @@ def resolve(flag: Optional[str] = None) -> Path:
     raw = flag if flag is not None else (os.environ.get(ENV) or str(default()))
     path = Path(raw).expanduser().resolve()
     claude = (Path.home() / ".claude").resolve()
-    # The name check, then a same-folder check: on a case-insensitive file system ~/.CLAUDE is ~/.claude.
-    if path == claude or claude in path.parents or (
+    # The name check ignores letter case (on a case-insensitive file system ~/.CLAUDE is ~/.claude, even before
+    # ~/.claude exists); the same-folder check then catches symlinks into ~/.claude.
+    parts, claude_parts = [p.casefold() for p in path.parts], [p.casefold() for p in claude.parts]
+    if parts[:len(claude_parts)] == claude_parts or (
             claude.exists() and any(p.exists() and os.path.samefile(p, claude) for p in (path, *path.parents))):
         raise ConfigError(f"data folder {path} is inside {claude}; pick a folder outside ~/.claude "
                           "(for example ~/Documents/Assistant)")

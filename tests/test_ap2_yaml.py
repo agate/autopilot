@@ -98,6 +98,7 @@ class ScalarTest(unittest.TestCase):
         self.assertEqual(self.one("b-'c # d'"), "b-'c")
         self.assertEqual(self.one("rock 'n roll"), "rock 'n roll")
         self.assertEqual(self.one("it's, 'ok' # c"), "it's, 'ok'")
+        self.assertEqual(self.one("?x"), "?x")                 # '?' with no space or tab after it is plain text
 
     def test_a_quote_mid_value_stays_plain_text(self):
         # Outside brackets a quote opens a string only at a value's start, not after ', ', ' - ' or '? ' later on.
@@ -172,6 +173,11 @@ class StructureTest(unittest.TestCase):
         self.assertEqual(load("a: {k: 'v # w', n: [1, 'p, q']}  # c\n"), {"a": {"k": "v # w", "n": [1, "p, q"]}})
         self.assertEqual(load("a: ['x # y', [1], 'p # q']\n"), {"a": ["x # y", [1], "p # q"]})
         self.assertEqual(load('k: {"a" :"b # c"}\n'), {"k": {"a": "b # c"}})  # spaces before the ':' after a quote
+        self.assertEqual(load('k: {"a"\t:"b # c"}\n'), {"k": {"a": "b # c"}})  # a tab before the ':' after a quote
+        self.assertEqual(load("k: [x:'y, z]  # it's here\n"), {"k": ["x:'y", "z"]})  # a quote after 'x:' is plain
+
+    def test_tab_after_a_colon_in_a_flow_map(self):
+        self.assertEqual(load("a: {k:\tv}\n"), {"a": {"k": "v"}})
 
     def test_quotes_after_block_list_indicators(self):
         self.assertEqual(load("a:\n  - 'x # y'\n  - - 'z # w'\n"), {"a": ["x # y", ["z # w"]]})
@@ -241,6 +247,16 @@ ERRORS = [
     ("plain value starting with ','", "a: ,x\n", 1, "',' cannot start a plain value"),
     ("plain value starting with '? '", "a: ? x\n", 1, "complex keys"),
     ("plain value that is only '?'", "a: ?\n", 1, "complex keys"),
+    ("tab after ':' in a flow list", "a: [b:\tc]\n", 1, "expected ',' or ']'"),
+    ("tab after ':' before a quote in a flow list", "a: [b:\t'x # y']\n", 1, "expected ',' or ']'"),
+    ("tab after '?' in a value", "k: ?\tx\n", 1, "a tab after '-' or '?'"),
+    ("tab after '?' in a key", "a: 1\n?\tx: 1\n", 2, "a tab after '-' or '?'"),
+    ("tab after '-' in a value", "k: -\tx\n", 1, "a tab after '-' or '?'"),
+    ("tab after '?' in a flow list", "k: [?\tx]\n", 1, "a tab after '-' or '?'"),
+    ("tab after '-' in a flow list", "k: [-\tx]\n", 1, "a tab after '-' or '?'"),
+    ("tab after '?' in a flow map key", "k: {?\tx: 1}\n", 1, "a tab after '-' or '?'"),
+    ("tab after a nested '-' in a block list", "k:\n  - -\tx\n", 2, "a tab after '-' or '?'"),
+    ("tab after '-' starting a block list item", "k:\n  -\tx\n", 2, "a tab after '-' or '?'"),
     ("form feed is not a line break", "a: x\x0cy\nc: [\n", 2, "unclosed"),
     ("line separator is not a line break", "a: x\u2028y\nc: [\n", 2, "unclosed"),
 ]

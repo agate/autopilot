@@ -98,6 +98,7 @@ REFUSALS = [
     ("primary_language empty quotes", "primary_language: ''\n", "primary_language"),
     ("secondary_language not a code", "secondary_language: Chinese\n", "secondary_language"),
     ("secondary_language a number", "secondary_language: 12\n", "secondary_language"),
+    ("secondary_language false", "secondary_language: false\n", "secondary_language"),
     ("secondary equals primary", "primary_language: zh\nsecondary_language: zh\n", "same as primary_language"),
     ("secondary equals default primary", "secondary_language: en\n", "same as primary_language"),
 ]
@@ -211,9 +212,20 @@ class LookupTest(unittest.TestCase):
             with self.assertRaises(ConfigError):
                 datadir.resolve("~/.CLAUDE/assistant")
 
+    def test_other_case_of_dot_claude_is_refused_before_it_exists(self):
+        # The name check ignores letter case, so this holds on every OS and leaves nothing behind.
+        with TempHome() as home:
+            with self.assertRaises(ConfigError):
+                datadir.resolve("~/.CLAUDE/assistant")
+            with self.assertRaises(ConfigError):
+                datadir.resolve("~/.Claude")
+            self.assertEqual(list(home.iterdir()), [])
+
     def test_similar_name_is_allowed(self):
         with TempHome() as home:
             self.assertEqual(datadir.resolve("~/.claude-notes"), home / ".claude-notes")
+            self.assertEqual(datadir.resolve("~/.claudex"), home / ".claudex")
+            self.assertEqual(datadir.resolve("~/.CLAUDEX/x"), home / ".CLAUDEX" / "x")
 
 
 class LayoutTest(unittest.TestCase):
