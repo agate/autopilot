@@ -1,0 +1,19 @@
+# Built-in template: someone asked the user a question (a Slack mention, a chat message).
+kind: question
+title: Question
+description: Someone asked you something. Claude investigates and drafts a reply; you send it.
+source: any
+view: [source_block, draft, findings, questions, activity]
+buttons:
+  - id: sent
+    label: I sent it
+    lane: done
+  - id: later
+    label: Later
+    lane: planned
+  - id: undo
+    label: Undo
+    restore: last
+roles:
+  - role: investigate
+    brief: "Find the answer to the question on card {id}. Read the thread, then the code, docs, tickets and history it points to. Draft a short reply in the asker's language, with the files or messages you used. Never send it."

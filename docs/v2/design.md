@@ -680,7 +680,7 @@ Calls the author made without asking (check them):
   calls first and which refuses in shadow mode), `datadir.py` (lookup and layout), `cli.py` (the `ap2` command,
   run by `bin/ap2`), and the card store: `cards.py` (card shape, ids and checks), `store.py` (the `Store` API:
   add, get, update, list, restore, propose_opposite, prune, search), `restore.py` (restore points and proposed
-  opposite actions) and `index.py` (`index.sqlite`); the gate: `routines.py` (routine files and slots) and `gate.py` (one gate run, `ap2 gate`). `ap2 config [--data PATH]` prints the effective config and `data_dir` as JSON. With stdout
+  opposite actions) and `index.py` (`index.sqlite`); the gate: `routines.py` (routine files and slots) and `gate.py` (one gate run, `ap2 gate`); templates and roles: `templates.py` (loading, the user's override, validation, briefs) and `roles.py` (the shipped roles and their tools). `ap2 config [--data PATH]` prints the effective config and `data_dir` as JSON. With stdout
   closed, `ap2 config` sets up the folder, prints nothing and exits 0; when its reader goes away
   (`ap2 config | true`) it exits 1 with nothing on stderr; when a write fails (a full disk) it prints one line,
   `ap2: cannot write the output: ...`, and exits 1. `ap2` with no arguments prints the usage, listing the
@@ -810,6 +810,64 @@ Calls the author made without asking (check them):
     year before 1971 (or a time too far out to turn into UTC) is an argument error too. A bad routine or watch is
     in `errors` and still exits 0 (launchd runs it again in a minute); a bad `config.yaml` or data folder is one
     `ap2: ...` line and exit 1. Nothing is installed: no launchd job is written in this slice.
+- **[decided by the builder]** Templates and roles (design 4.2, 6).
+  - Built-in templates live in `lib/assistant/builtin/templates/<kind>.yaml` (the plugin's folder, found from
+    `templates.py`'s own path; not the repo's `templates/`, which holds v1's page labels). v2 ships `question`,
+    `errand`, `alert`, `code` (Code task), `project`, `research`, `routine`, `login`, `step` and `pr-review`. The
+    user's own are `<data>/templates/<kind>.yaml`; one with a built-in kind replaces it, a new kind is added. Only
+    `*.yaml` files count; hidden files and folders are skipped. A bad user file fails the load with one error
+    naming it (it is never skipped, so a template cannot silently fall back to the built-in one).
+  - Keys: `kind` (required; lowercase letters, digits and `-`, and the file name without `.yaml`), `title` and
+    `description` (optional text), `source` (`any` or `none`, default `none`), `view` (required, a non-empty
+    list of block names, each once), `buttons` (required list) and `roles` (required list). An unknown key is
+    refused with its line. A template with `source: any` must show `source_block` first; `source_block` is
+    refused without it, because the block is drawn from the source's record (5.4).
+  - Blocks: `source_block`, `plan`, `draft`, `findings`, `verdict`, `analysis`, `report`, `pr`, `merge_checks`,
+    `children`, `links`, `schedule`, `runs`, `fix_steps`, `questions`, `activity`. The plain-words block (3.7) is
+    not a view block: every card shows it first, above its view.
+  - A button is `{id, label, <one action>}`: `lane: <needs|running|planned|done>` (a lane change),
+    `restore: last` (put the card back as it was before its last change, from its restore point) or
+    `child: <kind>` (a child card; the kind must be a built-in or user template). `id` is unique in the file.
+    `label` is English text for now; page translations come with the pages' `labels.<lang>.json`.
+  - A role entry is `{role, when?, brief}`. `when` is prose. `brief` is prose with `{field}` placeholders, filled
+    from the card (`{a.b}` reads a field inside a field; `{{` and `}}` are literal braces). A placeholder the
+    card lacks, or holds as null or blank text, is an error (`BriefError`) naming every such field; a value must
+    be text or a number. A filled value is not read again. Built-in briefs use only `{id}`, a field every
+    stored card has, because `title` is optional.
+  - No added tools or permissions: a key that would widen a role is refused anywhere in the file (top level,
+    a `roles` entry, a button), before any other check, with one error class `TemplateWidenError` naming the
+    file, line and key. The keys, compared without letter case, `-`, `_` or spaces: `tools`, `tool`,
+    `allowed_tools`, `disallowed_tools`, `permissions`, `permission`, `permission_mode`, `settings`,
+    `setting_sources`, `mcp`, `mcp_servers`, `mcp_config`, `hooks`, `env`, `add_dir`, `add_dirs`,
+    `dangerously_skip_permissions`, `floor`, `cwd`, `folder`, `sandbox`, `agents`, `additional_directories`,
+    `default_mode`. Every template error is a `TemplateError`, a `ConfigError`, so `ap2` prints it as one
+    `ap2: <file>: line N: ...` line.
+  - Roles are a fixed table in code (`roles.ROLES`, read-only), not a file, so nothing in the data folder can
+    change one. Each role has its tools (the only Claude Code tools its session gets) and a permission floor:
+    `worker` is v1's worker floor (`lib/autopilot/perms.py`, `generate(role="worker")`: outward MCP tools, the
+    protected data files, the plugin and `gh` comment and review commands denied, the park hook), plus the
+    user's templates and sources (`<data>/templates/`, `<data>/sources/`) cannot be edited, because changing a
+    template or a source asks first (3.6); `read-only` is that floor with no Edit or NotebookEdit: the role
+    reads and runs commands that change nothing, and its one write is its result file (Write only there, which
+    the worker sessions add as a deny rule for every other path); a role without Write (`reviewer-angle`)
+    returns its findings to the loop that started it. The worker sessions (slice 6) turn a floor into settings,
+    with Edit and Write deny rules for those two folders.
+    - `implement` (`agents/implementer.md`), worker: Agent, Bash, Edit, Glob, Grep, NotebookEdit, Read, Skill,
+      WebFetch, WebSearch, Write.
+    - `review` (`agents/reviewer.md`), worker: Agent, Bash, Glob, Grep, Read, Skill, Write.
+    - `pr-loop` (`commands/pr-loop.md`), worker: Agent, Bash, Edit, Glob, Grep, Read, Skill, Write.
+    - `investigate` and `analyze` (secretary's investigator and analyst), read-only: Bash, Glob, Grep, Read,
+      WebFetch, WebSearch, Write (the result file only).
+    - `reviewer-angle` (secretary's reviewer; one review angle, 6.1), read-only: Bash, Glob, Grep, Read.
+    - `general`, worker: Bash, Edit, Glob, Grep, Read, WebFetch, WebSearch, Write.
+    - Adding a role is one more entry in the table; the PR review cards slice adds `pr-review` (6.2) and moves the
+      `pr-review` template to it (it uses `reviewer-angle` until then).
+  - Commands, each with `--data PATH` and JSON on stdout: `ap2 template list` (every template's kind, title,
+    origin, file, and whether it replaces a built-in one), `ap2 template show <kind>` (the template in use, as
+    written, and each role with its tools and floor) and `ap2 template check <file>` (validates the file and says
+    what it would replace, `builtin`, `user` or null; it copies nothing). They only read: none creates the data
+    folder. Errors follow the other commands (one `ap2: ...` line, exit 1).
+  - Later work: template versions (6: "the old version stays") and Claude's suggested changes are not built yet.
 - How the local server pushes updates to an open page (polling is fine).
 - Exact limits: idle timeout, grace for missed slots, page sizes.
 

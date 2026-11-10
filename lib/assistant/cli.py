@@ -7,7 +7,7 @@ import os
 import sys
 from pathlib import Path
 
-from assistant import config, datadir
+from assistant import config, datadir, templates
 from assistant.cards import LANES, CardError
 from assistant.config import ConfigError
 from assistant.store import Store
@@ -75,6 +75,7 @@ def _parser() -> argparse.ArgumentParser:
     r.add_argument("--by", default="ap2", help=BY_HELP)
     r.add_argument("--data", metavar="PATH", help=DATA_HELP)
     _gate_parser(sub)
+    _template_parser(sub)
     return p
 
 
@@ -238,6 +239,49 @@ def cmd_gate(args) -> int:
 
 
 COMMANDS["gate"] = cmd_gate
+
+
+# --- ap2 template (design 6) ---------------------------------------------------------------------------------
+# Read-only: none of these creates the data folder or writes a file. A bad template is a TemplateError (a
+# ConfigError), printed as one `ap2: <file>: line N: ...` line with exit 1.
+
+def _template_parser(sub) -> None:
+    t = sub.add_parser("template", help="list, show or check card templates",
+                       description="List, show or check card templates: the built-in ones and the user's own in "
+                                   "<data>/templates/, which win on the same kind.")
+    t_sub = t.add_subparsers(dest="template_command", metavar="<template command>", title="template commands")
+    t_sub.required = True
+    li = t_sub.add_parser("list", help="print every template's kind and origin as a JSON list",
+                          description="Print every template (built in, and the user's own) as a JSON list, by kind.")
+    li.add_argument("--data", metavar="PATH", help=DATA_HELP)
+    sh = t_sub.add_parser("show", help="print one template, with each role's tools",
+                          description="Print the template in use for KIND as JSON: its file, what it shows, and "
+                                      "each role with the tools and permission floor it keeps.")
+    sh.add_argument("kind", metavar="KIND")
+    sh.add_argument("--data", metavar="PATH", help=DATA_HELP)
+    ch = t_sub.add_parser("check", help="validate a template file without installing it",
+                          description="Validate the template in FILE (named <kind>.yaml) and say which template it "
+                                      "would replace. Nothing is copied or installed.")
+    ch.add_argument("file", metavar="FILE")
+    ch.add_argument("--data", metavar="PATH", help=DATA_HELP)
+
+
+def cmd_template(args) -> int:
+    data = datadir.resolve(args.data)  # refused folders are refused here too; nothing is created
+    if args.template_command == "list":
+        out = [templates.summary(t) for t in templates.catalog(data).values()]
+    elif args.template_command == "show":
+        cat = templates.catalog(data)
+        if args.kind not in cat:
+            raise templates.TemplateError(f"no template for kind {args.kind!r} (kinds: {', '.join(cat)})")
+        out = templates.describe(cat[args.kind])
+    else:
+        out = templates.check(args.file, data)
+    _print_json(out)
+    return 0
+
+
+COMMANDS["template"] = cmd_template
 
 
 def main(argv: list) -> int:
