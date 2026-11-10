@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 from tests.helpers import ROOT, TempData, write_ap
-from autopilot import config, gate, install, ops, publish, replies, state
+from autopilot import config, gate, install, ops, publish, replies, state, workers
 
 URL = "https://claude.ai/artifact/PAGE"
 
@@ -109,6 +109,9 @@ class Env(unittest.TestCase):
         self.data = self.td.__enter__()
         write_ap(self.data, "checkout")
         write_ap(self.data, "perf")
+        g = config.load_global()
+        g["tools"]["claude"] = str(ROOT / "tests" / "bin" / "fake-claude")   # never the machine's real claude
+        config.save_global(g)
         publish._save_page({"url": URL})
         self.calls = []
         self.result = {"ok": True, "replies": []}
@@ -220,15 +223,22 @@ class StepTest(Env):
         self.assertEqual(replies.step(config.load_global(), {}, self.NOON), {"checkout"})
 
 
+class FakeClaudeTest(Env):
+    def test_these_tests_never_reach_the_real_claude(self):
+        # A gate run a test forgot to mock lists sessions with whatever `claude` it finds: the fake one here.
+        self.assertEqual(workers.claude_bin(config.load_global()), str(ROOT / "tests" / "bin" / "fake-claude"))
+
+
 class GateTest(Env):
     def test_gate_runs_a_pass_for_a_new_reply(self):
         ops.decision_add("checkout", dec())
-        gate.run(now=self.NOON, dispatch_fn=lambda g, aps: [{"started": 0, "free": 0, "ready": 0, "allow": None, "ended_at": "x"}])
-        self.result = {"ok": True, "replies": [{"id": "r1", "ap": "checkout"}]}
         calls = []
         fn = lambda g, aps: calls.append(list(aps)) or [{"started": 0, "free": 0, "ready": 0, "allow": None, "ended_at": "x"}]
+        # Both runs are mocked: the first one used to list sessions with the real claude and could notify.
         with mock.patch.object(gate, "_sessions", lambda g: []), mock.patch.object(gate, "notify", lambda m: None), \
                 mock.patch.object(gate, "_allowance", lambda g, now: self.OK):
+            gate.run(now=self.NOON, dispatch_fn=lambda g, aps: [{"started": 0, "free": 0, "ready": 0, "allow": None, "ended_at": "x"}])
+            self.result = {"ok": True, "replies": [{"id": "r1", "ap": "checkout"}]}
             gate.run(now=self.NOON + timedelta(minutes=1), dispatch_fn=fn)
         self.assertEqual(calls, [["checkout"]])
 
