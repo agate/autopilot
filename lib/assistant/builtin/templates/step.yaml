@@ -1,0 +1,15 @@
+# Built-in template: one step of a bigger card, often one Claude found while working.
+kind: step
+title: Step
+description: One small step of a bigger card.
+view: [plan, findings, activity]
+buttons:
+  - id: done
+    label: Done
+    lane: done
+  - id: undo
+    label: Undo
+    restore: last
+roles:
+  - role: general
+    brief: "Do the step on card {id}, and only that. Say what you changed and how to undo it."

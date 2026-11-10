@@ -1,0 +1,21 @@
+# Built-in template: a question the user asked Claude to look into.
+kind: research
+title: Research
+description: Something to look into. Claude reads and reports what it found, with its sources.
+view: [plan, report, findings, links, questions, activity]
+buttons:
+  - id: start
+    label: Start
+    lane: running
+  - id: follow_up
+    label: Follow up
+    child: research
+  - id: done
+    label: Done
+    lane: done
+  - id: undo
+    label: Undo
+    restore: last
+roles:
+  - role: investigate
+    brief: "Look into the topic on card {id}. Report what you found in plain words, with every file, page or message you used."

@@ -1,0 +1,15 @@
+# The design's user template (section 6): a new kind, not one the plugin ships.
+kind: parcel
+title: Parcel
+view: [plan, activity]
+buttons:
+  - id: arrived
+    label: It arrived
+    lane: done
+  - id: undo
+    label: Undo
+    restore: last
+roles:
+  - role: general            # a built-in role
+    when: "delivery day 08:00"
+    brief: "Check the carrier page for {tracking}. If it says out for delivery, nudge me."
