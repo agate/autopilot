@@ -17,4 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run tests
+        # The package check treats $USER as a private name; the CI machine's user is "runner", a word the docs use.
+        env:
+          USER: ""
         run: python3 -m unittest discover -s tests -v
