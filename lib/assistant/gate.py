@@ -172,7 +172,9 @@ def _parse_time(text) -> Optional[datetime]:
 def due_watches(data: Path, watches, now: datetime):
     """The watches due at `now` (`now - last_check_at >= every`), as `(names, errors)`; records `last_check_at`
     for each due one in `<data>/watches.json`. Each watch is `{name, every, last_check_at?}`; the time saved in
-    watches.json wins when it is later. The gate does not read the sources itself; the caller does."""
+    watches.json wins when it is later. A time later than `now` (past the grace) means the clock went back: it is
+    reported, and the watch is due now and its time written again, so it recovers on its own (a watch looked at
+    once early is harmless). The gate does not read the sources itself; the caller does."""
     if not watches:
         return [], []
     state, damaged = _read_watch_state(data)
@@ -194,6 +196,10 @@ def due_watches(data: Path, watches, now: datetime):
         except ValueError as e:
             errors.append({"watch": name if isinstance(name, str) else None, "error": str(e)})
             continue
+        if last is not None and last > now + routines.GRACE:
+            errors.append({"watch": name, "error": f"last_check_at {cards.stamp(last)} is later than now "
+                                                   f"({cards.stamp(now)}); the clock may have gone back"})
+            last = None
         if last is None or now - last >= every:
             found.append(name)
             state[name] = {"last_check_at": cards.stamp(now)}
@@ -212,17 +218,31 @@ def _safe(value):
 def run(data, now: datetime, watches=(), store: Optional[Store] = None) -> dict:
     """One gate run at `now` (an aware datetime). Returns what it found, also written to `<data>/gate.json`; a run
     that finds the lock held returns `{"locked": true, ...}` and does nothing. Raises ConfigError when the data
-    folder or config.yaml is not usable."""
+    folder or config.yaml is not usable; that error is also the last line of `<data>/gate.log`, `fatal: ...`."""
     data = Path(data)
     if now.tzinfo is None:
         raise ValueError("now must be an aware datetime")
-    with _lock(data) as held:
-        if not held:
-            return {"locked": True, "lock": str(data / LOCK)}
-        try:
-            return _run(data, now, watches, store)
-        except OSError as e:
-            raise ConfigError(f"the gate cannot use the data folder {data}: {e}") from e
+    try:
+        with _lock(data) as held:
+            if not held:
+                return {"locked": True, "lock": str(data / LOCK)}
+            try:
+                return _run(data, now, watches, store)
+            except OSError as e:
+                raise ConfigError(f"the gate cannot use the data folder {data}: {e}") from e
+    except ConfigError as e:
+        _log_fatal(data, now, e)
+        raise
+
+
+def _log_fatal(data: Path, now: datetime, error: ConfigError) -> None:
+    """One `fatal: <error>` line in gate.log, best effort: a run started by launchd has no terminal, so this is
+    where the user finds why it stopped. Nothing is written when the data folder does not exist."""
+    try:
+        if data.is_dir():
+            Log(data, now)(f"fatal: {error}")
+    except OSError:
+        pass  # e.g. gate.log is a folder or the disk is full: the error itself still comes out
 
 
 def _run(data: Path, now: datetime, watches, store: Optional[Store]) -> dict:
@@ -238,6 +258,12 @@ def _run(data: Path, now: datetime, watches, store: Optional[Store]) -> dict:
     by_key = None  # the routine cards, read once, only when a slot is due
     for r in loaded:
         try:
+            if r.last_slot is not None and routines.slot_at(r) > now + routines.GRACE:
+                # The clock went back (or the file was edited ahead). Not repaired: moving last_slot back by
+                # itself could run a slot twice. The routine waits, as it would anyway, and the user is told.
+                raise routines.RoutineError(
+                    f"{r.path}: last_slot {r.last_slot} is later than now ({cards.stamp(now)}); the clock may have "
+                    f"gone back. Set last_slot to null or an earlier slot to run it again.")
             d = routines.due(r, now)
             if d is None:
                 continue
@@ -271,6 +297,8 @@ def _run(data: Path, now: datetime, watches, store: Optional[Store]) -> dict:
     for e in watch_errors:
         if "watches" in e:
             log(f"watches: error: {e['error']}")
+        elif e["watch"] in due_names:  # a time later than now: reported, and the watch still ran
+            log(f"watch {e['watch']}: error: {e['error']}")
         else:
             log(f"watch {e['watch']}: refused: {e['error']}")
     if due_names:

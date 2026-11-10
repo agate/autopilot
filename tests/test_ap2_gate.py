@@ -697,5 +697,210 @@ class NoOutsideEffectsTest(GateCase):
             self.gate(datetime(2026, 11, 10, 9))
 
 
+# -- follow-ups: a clock that went back, a changed routine tz, fatal errors in gate.log ----------------------------
+
+class ClockWentBackTest(GateCase):
+    NOW = utc(2026, 11, 10, 9, 1)
+
+    def test_a_routine_last_slot_later_than_now_is_reported_and_the_file_kept(self):
+        p = self.put(last_slot="2026-11-11T09:01")  # one day after now (the routine's tz is UTC)
+        before = p.read_bytes()
+        out = self.gate(self.NOW)
+        self.assertEqual(out["routines"], [])
+        msg = (f"{p}: last_slot 2026-11-11T09:01 is later than now (2026-11-10T09:01:00Z); the clock may have gone "
+               f"back. Set last_slot to null or an earlier slot to run it again.")
+        self.assertEqual(out["errors"], [{"routine": "digest", "file": str(p), "error": msg}])
+        self.assertEqual(json.loads((self.data / "gate.json").read_text(encoding="utf-8")), out)
+        log = (self.data / "gate.log").read_text(encoding="utf-8").splitlines()
+        self.assertEqual([line for line in log if "digest" in line],
+                         [f"2026-11-10T09:01:00Z routine digest: error: {msg}"])
+        self.assertEqual(p.read_bytes(), before)
+        self.assertEqual(self.routine_cards(), [])
+
+    def test_the_slot_is_read_in_the_routines_tz(self):
+        # 2026-11-10T06:00 in Los Angeles is 14:00 UTC, five hours after now.
+        p = self.put(tz=LA, last_slot="2026-11-10T06:00", last_slot_tz=LA)
+        out = self.gate(self.NOW)
+        self.assertEqual(len(out["errors"]), 1)
+        self.assertIn(f"{p}: last_slot 2026-11-10T06:00 is later than now", out["errors"][0]["error"])
+
+    def test_a_last_slot_at_now_or_inside_the_grace_is_no_error(self):
+        for slot in ("2026-11-10T09:01", "2026-11-10T09:06"):
+            with self.subTest(last_slot=slot):
+                p = self.put(last_slot=slot)
+                before = p.read_bytes()
+                out = self.gate(self.NOW)
+                self.assertEqual((out["routines"], out["errors"]), ([], []))
+                self.assertEqual(p.read_bytes(), before)
+        self.put(last_slot="2026-11-10T09:07")  # past the 5-minute grace
+        self.assertEqual(len(self.gate(self.NOW)["errors"]), 1)
+
+    def test_a_slot_at_the_ends_of_the_calendar_never_stops_the_run(self):
+        # Year 9999 in Los Angeles and year 1 in Tokyo have no UTC time (Python cannot hold it).
+        far = self.put("far", tz=LA, last_slot="9999-12-31T23:59")
+        self.put("old", tz="Asia/Tokyo", last_slot="0001-01-01T00:00")
+        self.put("ok", last_slot="2026-11-09T09:00")
+        out = self.gate(self.NOW)
+        self.assertEqual([e["routine"] for e in out["errors"]], ["far"])
+        self.assertIn(f"{far}: last_slot 9999-12-31T23:59 is later than now", out["errors"][0]["error"])
+        self.assertEqual(sorted(f["routine"] for f in out["routines"]), ["ok", "old"])
+
+    def test_a_watch_time_later_than_now_is_reported_and_repaired(self):
+        T = utc(2026, 11, 10, 14, 0)
+        write_json(self.data / "watches.json", {"slack": {"last_check_at": "2026-11-11T14:00:00Z"}})
+        out = self.gate(T, watches=[{"name": "slack", "every": "5m"}])
+        self.assertEqual(out["watches_due"], ["slack"])
+        self.assertEqual(out["errors"], [{"watch": "slack", "error": "last_check_at 2026-11-11T14:00:00Z is later "
+                                          "than now (2026-11-10T14:00:00Z); the clock may have gone back"}])
+        self.assertEqual(json.loads((self.data / "watches.json").read_text()),
+                         {"slack": {"last_check_at": "2026-11-10T14:00:00Z"}})
+        self.assertIn("watch slack: error: last_check_at 2026-11-11T14:00:00Z is later than now",
+                      (self.data / "gate.log").read_text())
+        again = self.gate(T + timedelta(minutes=1), watches=[{"name": "slack", "every": "5m"}])
+        self.assertEqual((again["watches_due"], again["errors"]), ([], []))  # recovered on its own
+
+    def test_a_given_watch_time_later_than_now_is_reported_too(self):
+        T = utc(2026, 11, 10, 14, 0)
+        out = self.gate(T, watches=[{"name": "slack", "every": "5m", "last_check_at": "2026-11-10T15:00:00Z"}])
+        self.assertEqual(out["watches_due"], ["slack"])
+        self.assertEqual([e["watch"] for e in out["errors"]], ["slack"])
+        self.assertIn("the clock may have gone back", out["errors"][0]["error"])
+
+    def test_a_watch_time_inside_the_grace_is_no_error(self):
+        T = utc(2026, 11, 10, 14, 0)
+        out = self.gate(T, watches=[{"name": "slack", "every": "5m", "last_check_at": "2026-11-10T14:05:00Z"}])
+        self.assertEqual((out["watches_due"], out["errors"]), ([], []))
+
+
+class ZoneNextToLastSlotTest(GateCase):
+    def test_a_run_writes_last_slot_and_its_zone(self):
+        for name, tz, now in (("utc", "UTC", utc(2026, 11, 10, 9, 1)), ("pacific", LA, utc(2026, 11, 10, 17, 1))):
+            with self.subTest(tz=tz):
+                self.put(name, tz=tz, last_slot="2026-11-09T09:00")
+                out = self.gate(now)
+                self.assertEqual([(f["routine"], f["action"]) for f in out["routines"]], [(name, "run")])
+                obj = self.file(name)
+                slot = "2026-11-10T09:00"
+                self.assertEqual((obj["last_slot"], obj["last_slot_tz"]), (slot, tz))
+
+    def test_a_new_routine_start_writes_the_zone_too(self):
+        self.put(tz=LA, last_slot=None)
+        out = self.gate(utc(2026, 11, 10, 20, 0))  # 12:00 in Los Angeles: the 09:00 slot is older than the routine
+        self.assertEqual([f["action"] for f in out["routines"]], ["start"])
+        self.assertEqual((self.file()["last_slot"], self.file()["last_slot_tz"]), ("2026-11-10T09:00", LA))
+
+    def test_an_old_file_without_the_zone_loads_and_behaves_as_before(self):
+        p = self.put(tz=LA, last_slot="2026-11-09T09:00")
+        self.assertNotIn("last_slot_tz", self.file())
+        r = routines.load(p)
+        self.assertEqual(r.last_slot, "2026-11-09T09:00")
+        self.assertIsNone(routines.due(r, utc(2026, 11, 10, 16, 59)))
+        self.assertEqual(routines.due(r, utc(2026, 11, 10, 17, 1)).action, "run")
+        out = self.gate(utc(2026, 11, 10, 17, 1))
+        self.assertEqual([(f["slot"], f["action"]) for f in out["routines"]], [("2026-11-10T09:00", "run")])
+        self.assertEqual(out["errors"], [])
+
+    def test_the_zone_is_text_or_null(self):
+        p = self.put(last_slot_tz=None)
+        self.assertIsNone(routines.load(p).last_slot)
+        for bad in (7, ["UTC"], True):
+            with self.subTest(last_slot_tz=bad):
+                p = self.put(last_slot="2026-11-09T09:00", last_slot_tz=bad)
+                with self.assertRaises(routines.RoutineError) as cm:
+                    routines.load(p)
+                self.assertIn(f"{p}: last_slot_tz:", str(cm.exception))
+
+
+class ChangedZoneTest(GateCase):
+    def test_a_changed_tz_converts_last_slot_so_no_slot_is_skipped(self):
+        # Eastern 09:00 is Pacific 06:00, so the Pacific 09:00 slot has not run yet.
+        p = self.put(tz=LA, last_slot="2026-11-10T09:00", last_slot_tz="America/New_York")
+        self.assertEqual(routines.load(p).last_slot, "2026-11-10T06:00")
+        before = p.read_bytes()
+        routines.load(p)
+        self.assertEqual(p.read_bytes(), before)  # only write_last_slot rewrites the file
+        now = datetime(2026, 11, 10, 9, 1, tzinfo=routines.ZoneInfo(LA))
+        out = self.gate(now)
+        self.assertEqual([(f["slot"], f["action"]) for f in out["routines"]], [("2026-11-10T09:00", "run")])
+        self.assertEqual([c["key"] for c in self.routine_cards()], ["digest@2026-11-10T09:00"])
+        obj = self.file()
+        self.assertEqual((obj["last_slot"], obj["last_slot_tz"]), ("2026-11-10T09:00", LA))
+        self.assertEqual(self.gate(now + timedelta(minutes=1))["routines"], [])
+
+    def test_the_same_zone_changes_nothing(self):
+        p = self.put(tz=LA, last_slot="2026-11-10T09:00", last_slot_tz=LA)
+        self.assertEqual(routines.load(p).last_slot, "2026-11-10T09:00")
+        out = self.gate(datetime(2026, 11, 10, 9, 1, tzinfo=routines.ZoneInfo(LA)))
+        self.assertEqual((out["routines"], out["errors"]), ([], []))
+
+    def test_a_slot_that_cannot_be_moved_to_the_new_zone_is_one_error(self):
+        # The old zone's time is past the calendar's end, the new zone's time is, and the old one is before its start.
+        for last, old, tz in (("9999-12-31T23:59", LA, "Asia/Tokyo"), ("9999-12-31T20:00", "UTC", "Asia/Tokyo"),
+                              ("0001-01-01T00:00", "Asia/Tokyo", LA)):
+            with self.subTest(last_slot=last, last_slot_tz=old, tz=tz):
+                p = self.put(tz=tz, last_slot=last, last_slot_tz=old)
+                with self.assertRaises(routines.RoutineError) as cm:
+                    routines.load(p)
+                self.assertIn(f"{p}: last_slot:", str(cm.exception))
+        self.put("ok", last_slot="2026-11-09T09:00")
+        out = self.gate(utc(2026, 11, 10, 9, 1))
+        self.assertEqual([f["routine"] for f in out["routines"]], ["ok"])
+        self.assertEqual([e["routine"] for e in out["errors"]], ["digest"])
+
+    def test_an_unknown_old_zone_is_refused_on_last_slot_tz(self):
+        for bad in ("Mars/Olympus_Mons", "", "../../etc/passwd"):
+            with self.subTest(last_slot_tz=bad):
+                p = self.put(tz=LA, last_slot="2026-11-10T09:00", last_slot_tz=bad)
+                with self.assertRaises(routines.RoutineError) as cm:
+                    routines.load(p)
+                self.assertIn(f"{p}: last_slot_tz:", str(cm.exception))
+                self.assertEqual(len(str(cm.exception).splitlines()), 1)
+
+
+class FatalLineTest(GateCase):
+    def test_a_config_that_does_not_parse_writes_a_fatal_line_and_raises(self):
+        (self.data / "config.yaml").write_text("mode: [\n", encoding="utf-8")
+        with self.assertRaises(ConfigError) as cm:
+            self.gate(utc(2026, 11, 10, 9, 1))
+        lines = (self.data / "gate.log").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(lines[-1], f"2026-11-10T09:01:00Z fatal: {cm.exception}")
+        self.assertIn("config.yaml", str(cm.exception))
+
+    def test_an_unwritable_log_gives_the_same_error_and_nothing_else(self):
+        (self.data / "config.yaml").write_text("mode: [\n", encoding="utf-8")
+        with self.assertRaises(ConfigError) as first:
+            self.gate(utc(2026, 11, 10, 9, 1))
+        (self.data / "gate.log").unlink()
+        (self.data / "gate.log").mkdir()  # a folder where the log should be
+        with self.assertRaises(ConfigError) as cm:
+            self.gate(utc(2026, 11, 10, 9, 1))
+        self.assertIs(type(cm.exception), ConfigError)
+        self.assertEqual(str(cm.exception), str(first.exception))
+        self.assertNotIsInstance(cm.exception.__context__, OSError)
+        self.assertEqual(list((self.data / "gate.log").iterdir()), [])
+
+    def test_a_lock_that_cannot_be_taken_writes_a_fatal_line(self):
+        no_locks = OSError(errno.ENOLCK, "No locks available")
+        with mock.patch.object(gate.fcntl, "flock", side_effect=no_locks):
+            with self.assertRaises(ConfigError) as cm:
+                self.gate(utc(2026, 11, 10, 9, 1))
+        self.assertEqual((self.data / "gate.log").read_text(encoding="utf-8"),
+                         f"2026-11-10T09:01:00Z fatal: {cm.exception}\n")
+
+    def test_no_data_folder_writes_nothing(self):
+        missing = self.data / "nowhere"
+        with self.assertRaises(ConfigError):
+            gate.run(missing, utc(2026, 11, 10, 9, 1))
+        self.assertFalse(missing.exists())
+
+    def test_a_held_lock_is_not_fatal(self):
+        import fcntl
+        fd = os.open(str(self.data / ".gate.lock"), os.O_CREAT | os.O_RDWR, 0o644)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        self.assertTrue(self.gate(utc(2026, 11, 10, 9, 1))["locked"])
+        self.assertFalse((self.data / "gate.log").exists())
+
+
 if __name__ == "__main__":
     unittest.main()
