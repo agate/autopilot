@@ -265,6 +265,12 @@ Every item fills the same fields:
     One small-model **scan session** per gate run makes every due call of this kind, saves the raw output, and
     ends. `fill: paths` then still means code fills the record from that saved output.
   - `skill`: the scan session runs the named skill.
+- **Token cost, honestly:** only `command` reads are free, because the gate runs a plain program and calls no
+  model (v1's gate already runs `gh pr view` this way in `gate.pr_fingerprint`). Every `mcp`, `connector` and
+  `skill` read costs tokens. The tool's whole reply passes through the scan session, so a big reply costs more.
+  `fill: paths` saves judgment, not tokens. The cost per read has not been measured yet. The only number so far is
+  v1's own estimate for its Haiku answer read (about $0.0008 a run at list price, `config.py`). Measure the scan
+  session before choosing default intervals, and keep each read small (a `since` filter, few fields).
 - **`fill: ai`**: the tool returns text (the Slack connector). A small model fills the record from that text, and
   code then checks that every `id`, `thread_id` and `at` appears **word for word** in the raw tool output. A record
   that fails is dropped and logged. This is what keeps an AI from inventing ids.
