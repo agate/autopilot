@@ -244,6 +244,25 @@ class UserTemplatesTest(TempFolder):
         self.assertIn(str(bad), str(e.exception))
         self.assertIn("colour", str(e.exception))
 
+    def test_a_broken_link_is_reported_not_skipped(self):
+        link = self.data / "templates" / "question.yaml"
+        link.symlink_to(self.tmp / "missing.yaml")
+        with self.assertRaises(TemplateError) as e:
+            templates.catalog(self.data)
+        self.assertIn(str(link), str(e.exception))
+        self.assertIn("cannot read", str(e.exception))
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root ignores folder modes")
+    def test_a_folder_that_cannot_be_searched_is_a_template_error(self):
+        folder = self.data / "templates"
+        shutil.copy(templates.BUILTIN_DIR / "question.yaml", folder / "question.yaml")
+        folder.chmod(0o444)
+        self.addCleanup(folder.chmod, 0o755)  # runs before the temp folder is removed
+        with self.assertRaises(TemplateError) as e:
+            templates.catalog(self.data)
+        self.assertIn(str(folder), str(e.exception))
+        self.assertIn("cannot read", str(e.exception))
+
     def test_a_user_child_button_may_name_a_user_kind(self):
         self.write("parcel.yaml", GOOD + "", self.data / "templates")
         self.write("errand.yaml", (templates.BUILTIN_DIR / "errand.yaml").read_text().replace(
@@ -375,8 +394,12 @@ BAD_CASES = [
      "does not match the file name"),
     ("no kind", GOOD.replace("kind: parcel\n", ""), "parcel.yaml: ", "missing key 'kind'"),
     ("no view", GOOD.replace("view: [plan, activity]\n", ""), "parcel.yaml: ", "missing key 'view'"),
+    ("no buttons", GOOD.replace("buttons:\n  - id: arrived\n    label: It arrived\n    lane: done\n", ""),
+     "parcel.yaml: ", "missing key 'buttons'"),
     ("no roles", GOOD.split("roles:")[0], "parcel.yaml: ", "missing key 'roles'"),
     ("a role with no brief", GOOD.replace("    brief: \"Check {tracking}.\"\n", ""), "line 8", "brief"),
+    ("a role with no role", GOOD.replace("  - role: general\n    brief", "  - brief"), "line 8",
+     "roles[0] has no role"),
     ("a role entry with an unknown key", GOOD + "    after: implement\n", "line 10", "unknown key 'after'"),
     ("an empty brief", GOOD.replace("\"Check {tracking}.\"", "\"  \""), "line 9", "brief"),
     ("a brief with a lone brace", GOOD.replace("{tracking}.", "{tracking."), "line 9", "brace"),

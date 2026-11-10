@@ -335,14 +335,16 @@ def load_file(path, origin: str = "user", kinds=None) -> Template:
 
 
 def _files(folder: Path) -> list:
-    """The `*.yaml` files in `folder`, by name; hidden files and folders are skipped. A missing folder has none."""
+    """The `*.yaml` files in `folder`, by name; hidden files and folders are skipped. A missing folder has none.
+    A broken link is kept, so loading it fails naming it rather than falling back to the built-in template."""
     try:
         entries = sorted(folder.iterdir())
+        return [p for p in entries if p.name.endswith(SUFFIX) and not p.name.startswith(".")
+                and (p.is_file() or (p.is_symlink() and not p.exists()))]
     except FileNotFoundError:
         return []
     except OSError as e:
         raise TemplateError(f"{folder}: cannot read: {e}") from e
-    return [p for p in entries if p.name.endswith(SUFFIX) and not p.name.startswith(".") and p.is_file()]
 
 
 def _user_dir(data_dir) -> Optional[Path]:
