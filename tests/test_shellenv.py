@@ -147,13 +147,13 @@ class LaunchUsesProjectEnvTest(unittest.TestCase):
 
     def test_shell_never_sets_who_the_session_is_or_who_pays(self):
         env = self._launch(({"PATH": "/proj/bin", "ANTHROPIC_API_KEY": "sk-shell", "CLAUDE_CODE_USE_BEDROCK": "1",
-                             "ANTHROPIC_BASE_URL": "https://shell"}, None),
+                             "ANTHROPIC_BASE_URL": "https://shell.example.com"}, None),
                            gate_env={"PATH": "/launchd/bin", "AUTOPILOT_ROLE": "worker",
-                                     "ANTHROPIC_BASE_URL": "https://gate"})
+                                     "ANTHROPIC_BASE_URL": "https://gate.example.com"})
         self.assertEqual(env["PATH"], "/proj/bin")
         self.assertNotIn("ANTHROPIC_API_KEY", env)
         self.assertNotIn("CLAUDE_CODE_USE_BEDROCK", env)
-        self.assertEqual(env["ANTHROPIC_BASE_URL"], "https://gate")
+        self.assertEqual(env["ANTHROPIC_BASE_URL"], "https://gate.example.com")
 
     def test_switched_off_launch_is_quiet_and_unchanged(self):
         done = subprocess.CompletedProcess([], 0, stdout="backgrounded · abcd1234 · x\n", stderr="")
