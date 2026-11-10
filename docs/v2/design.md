@@ -96,7 +96,8 @@ Revisit only for one hot part (for example, search slower than 100 ms) or for us
 ### 3.4 Data folder **[decided]**
 
 All data lives in one folder the user picks, outside `~/.claude` (example: `~/Documents/Assistant`). The data is
-plain JSON files plus one search index, so Time Machine, a copy or a sync folder backs it up.
+plain JSON files plus one search index, so Time Machine, a copy or a sync folder backs it up. How the folder is
+found and first set up is in section 12.
 
 ```
 <data>/
@@ -556,6 +557,35 @@ Calls the author made without asking (check them):
 
 - The engine's internal module layout and the YAML loader (standard library only, so a small YAML subset or JSON
   with comments; pick one and document it).
+  - **[decided by the builder]** A small YAML subset, read by `lib/assistant/yamlish.py`. Not JSON with comments:
+    every example file in this design is YAML, and users write these files by hand.
+    - In: block maps, block lists (`- item`, lists of maps, and a list written at its key's indent), flow lists
+      `[a, b]` and flow maps `{a: 1, b: x}` on one line, plain / single-quoted / double-quoted strings, ints,
+      floats, `true`/`false`, `null`/`~`/empty, and `#` comments (full-line and trailing; a `#` starts a comment
+      only at the start of a line or after a space, never inside quotes). Keys are always strings. `true`,
+      `false` and `null` are read in lower, Title and UPPER case (`true`, `True`, `TRUE`); `yes`/`no` stay
+      strings (YAML 1.2). A quote starts a quoted string only at the start of a value or key (after `- `, `: `,
+      `? `, `[`, `{` or `,`), so `don't` and `well-'known` are plain text.
+    - Refused, with one error class (`YamlError`) whose message starts with `line N:` and says why: tabs in
+      indentation, anchors `&`, aliases `*`, tags `!`, multi-line scalars `|`/`>` and multi-line plain values,
+      document markers `---`/`...`, bad indentation, unclosed quotes or brackets (a flow collection must close on
+      its line), duplicate keys, complex `?` keys, and a plain value holding `: ` (quote it). The top level must
+      be a map. Refusing is safer than guessing: a file either reads exactly as written or names its bad line.
+- **[decided by the builder]** The data folder and its lookup. The folder is `--data <path>` if given, else the
+  environment variable `AP2_DATA`, else `~/Documents/Assistant`. A folder inside `~/.claude` is refused (3.4),
+  symlinks followed and in any letter case (a same-folder check catches `~/.CLAUDE` on a case-insensitive disk).
+  `config.yaml` lives in the folder, so it has no `data_dir` key. On first use `ap2` creates the layout from 3.4
+  and writes `config.yaml` with the defaults and a comment per key; it never overwrites an existing
+  `config.yaml`. The search index is left to the card store. Config keys and defaults:
+  `primary_language: en`, `secondary_language:` (empty = none; it may not equal the primary),
+  `mode: shadow` (`shadow | live`), `keep_transcripts: always` (`always | never | <N>d`, N at least 1). A
+  language is a short code: 2-3 lowercase letters, then an optional script (`zh-Hans`) and/or an uppercase
+  region (`pt-BR`, `es-419`). An unknown key is refused with its name and line.
+- **[decided by the builder]** Module layout so far, in `lib/assistant/`: `yamlish.py` (the subset reader),
+  `config.py` (defaults, validation, and `require_live(cfg, what)`, which every write outside the data folder
+  calls first and which refuses in shadow mode), `datadir.py` (lookup and layout), `cli.py` (the `ap2` command,
+  run by `bin/ap2`). `ap2 config [--data PATH]` prints the effective config and `data_dir` as JSON. `ap2` with
+  no arguments prints the usage, listing the commands, to stderr and exits 2, like v1's `bin/ap`.
 - The search index schema.
 - How the local server pushes updates to an open page (polling is fine).
 - Exact limits: idle timeout, grace for missed slots, page sizes.
