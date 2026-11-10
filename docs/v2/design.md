@@ -594,7 +594,9 @@ Calls the author made without asking (check them):
 - **[decided by the builder]** Module layout so far, in `lib/assistant/`: `yamlish.py` (the subset reader),
   `config.py` (defaults, validation, and `require_live(cfg, what)`, which every write outside the data folder
   calls first and which refuses in shadow mode), `datadir.py` (lookup and layout), `cli.py` (the `ap2` command,
-  run by `bin/ap2`). `ap2 config [--data PATH]` prints the effective config and `data_dir` as JSON. With stdout
+  run by `bin/ap2`), and the card store: `cards.py` (card shape, ids and checks), `store.py` (the `Store` API:
+  add, get, update, list, restore, propose_opposite, prune, search), `restore.py` (restore points and proposed
+  opposite actions) and `index.py` (`index.sqlite`). `ap2 config [--data PATH]` prints the effective config and `data_dir` as JSON. With stdout
   closed, `ap2 config` sets up the folder, prints nothing and exits 0; when its reader goes away
   (`ap2 config | true`) it exits 1 with nothing on stderr; when a write fails (a full disk) it prints one line,
   `ap2: cannot write the output: ...`, and exits 1. `ap2` with no arguments prints the usage, listing the
@@ -607,7 +609,63 @@ Calls the author made without asking (check them):
   and ap2 still exits 1). The `ap2: <message>` line for a refused config or data folder follows the same
   rules: when stderr's reader is gone or its write fails, the line is lost and ap2 still exits 1, with nothing
   more. None of these prints a traceback or an `Exception ignored` line.
-- The search index schema.
+- **[decided by the builder]** The card store (design 3.4, 3.6, 3.7, 4.1).
+  - Card id: `c-YYYYMMDD-HHMMSS-xxxxxx`, the UTC creation time to the second (ASCII digits only) and 6 random
+    lowercase hex digits (a new pair is drawn if the file exists). The file is `<data>/items/<yyyy-mm>/<id>.json`, the month taken from
+    the id, so a card is found without a scan and nothing but these characters reaches a path. Times are UTC text,
+    `2026-11-10T14:30:05Z`. Files are UTF-8 JSON, sorted keys, indent 2, written atomically (temp file in the same
+    folder, fsync, `os.replace`). Every store call holds `<data>/.store.lock` (`flock`), so two processes never lose
+    each other's change.
+  - The store sets `id`, `created_at`, `updated_at` and `audit`; a card that gives one is refused. Required:
+    `kind` and `feed` (non-empty text), `lane`, `pri`, `origin` (the enums of 4.1), `links` (a list of card ids),
+    `plain`. Optional: `parent` (a card id or null), `ask` (null or an object whose `type` is one of the four),
+    `title` (text, searched). Other keys are kept as they are, for later templates. Ids in `parent` and `links` are
+    checked for form only, not for existence (an import may add a child before its parent).
+  - Plain words: `plain.what|where|do.<lang>` must be non-empty text for `primary_language` and, when set,
+    `secondary_language`. One error class (`PlainWordsError`, a `CardError`) lists every gap, for example
+    `plain.where.zh missing; plain.do.en is empty`. Restore does not re-check them: the languages may have changed
+    since the point was saved.
+  - Audit entry `{at, by, did, restore}`: `did` is `add`, `update: <fields>`, `restore <point id>` or
+    `propose <action>`; `restore` is the point saved just before that change (null for an add). An update that
+    changes nothing writes nothing. A restore puts the old card back but keeps the full audit (the current one
+    plus the restore entry), so the history never shrinks.
+  - The store reads a card file only when its structure is usable (`audit` a list, `plain` an object, `ask` an
+    object or null, text valid Unicode); otherwise the call fails with one error naming the file, and nothing is
+    written. Restore puts back any point it saved without re-checking enums, so an undo can always be undone.
+    Text that is not valid Unicode (a lone surrogate, e.g. from command-line bytes that are not UTF-8) is refused
+    on add, update, `--by`, `did` and search before anything is written; so are NaN and Infinity (cards are
+    standard JSON) and values JSON cannot write with sorted keys (mixed key types, sets). `did`, when given, is checked like `by`: non-empty text.
+  - Restore points: one file `<data>/restore/<point id>.json` with
+    `{"id", "at", "kind": "card", "card_id", "card"}`, id `r-YYYYMMDD-HHMMSS-xxxxxx` (ASCII digits only). A point
+    is refused, naming its file, unless its `id` is its file name and its `card_id` is its card's `id`, and its
+    card passes the same structure check as a card file. `Store.prune()` removes points
+    older than 30 days (kept at exactly 30); nothing calls it yet, the heartbeat (slice 5) will. A point whose time
+    cannot be read is kept.
+  - Proposed opposite action: `Store.propose_opposite(id, action, run, by)` sets the card's `ask` to
+    `{"type": "approve", "action": <move_ticket_back|close_pr|force_push_saved_ref|revert_pr>, "run": [argv...],
+    "proposed": true, "text"?: <optional note>}` and runs nothing. It is refused when the card already has an open ask (that ask is never
+    overwritten).
+- **[decided by the builder]** The search index schema. `<data>/index.sqlite` holds
+  `meta(key TEXT PRIMARY KEY, value TEXT)` with `('version', '1')` and `cards(id TEXT PRIMARY KEY, text TEXT NOT
+  NULL)`, the text being the card's plain words in every language, `title`, `kind` and `feed`, casefolded. A search
+  keeps the cards whose text holds every white-space-separated word of the query as a substring (`LIKE`, with `%`,
+  `_` and `\` escaped). Not FTS5, although the bundled sqlite has it: its default tokenizer cannot split Chinese
+  words and its query syntax fails on input like `a-b`. Each add, update and restore rewrites the card's row; when
+  that write fails for any reason (sqlite, a damaged card file met by a rebuild, the disk) the file is removed and
+  the change still succeeds, because the card file is already written. Before each card file is written,
+  `<data>/.index.stale` is made; it is removed once the index holds the card, so a write stopped in between (a
+  crash, Ctrl-C) leaves the marker, and the next search or write rebuilds the index. A missing, unreadable,
+  other-version or stale-marked file is rebuilt from `items/` (written to a temp file, then `os.replace`; the temp
+  file is removed when the build fails). Results are read from the card files, never from the index, and a card is
+  kept only when its file holds every word of the query, so a row that is behind its file never shows a card. A search whose rebuild meets a damaged card file
+  fails with one error naming that file. Hand edits to card files that remove words are caught by this re-check,
+  but added words are found only after the next rebuild (delete `index.sqlite` to force one). An index row that
+  is not a card id, or a repeated row, is skipped. A month folder in `items/` that cannot be read fails the call
+  with one error; it is never skipped, so a rebuild cannot silently drop its cards.
+- **[decided by the builder]** Card commands: `ap2 card add <file.json|-> [--by NAME]`, `ap2 card show <id>`,
+  `ap2 card list [--lane L] [--kind K] [--parent ID]`, `ap2 search <text...>`, `ap2 restore <point id> [--by NAME]`,
+  each with `--data PATH`. `--by` defaults to `ap2`. `card add -` reads stdin as UTF-8, like a file, whatever the locale. Output is JSON (a card, or a list oldest first; cards made in the same second are in id order); an error is
+  one line `ap2: ...` on stderr with exit 1.
 - How the local server pushes updates to an open page (polling is fine).
 - Exact limits: idle timeout, grace for missed slots, page sizes.
 
