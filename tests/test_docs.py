@@ -217,6 +217,8 @@ class DocsTest(unittest.TestCase):
         self.assertIn("`path:line`", walk)
         self.assertIn("attention: true", walk)
         self.assertIn("`replies`", walk)                          # a card answered on the page is not asked again
+        self.assertIn('"A decision card"', talk[talk.index("## Changing things"):])   # a card a talk session adds
+        self.assertIn("if it does, every section above", card)    # a gate's walk-through is all or nothing
         for preset in ("jira-ticket.md", "idea.md"):
             self.assertIn('"A decision card"', (ROOT / "presets" / preset).read_text(), preset)
         self.assertIn("walk through them one at a time", (ROOT / "SKILL.md").read_text())

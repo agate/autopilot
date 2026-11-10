@@ -68,6 +68,9 @@ the walk-through: say how many cards are left.
 
 `ap` commands wait their turn for the autopilot's state lock, so they work while a pass runs.
 
+A card you add (`ap decision add`) is a full card, written as `RUNBOOK.md` "A decision card" says: the
+command refuses one without its walk-through.
+
 ## New rules
 
 1. Ask the scope: this autopilot only, or all of them.
@@ -77,4 +80,5 @@ the walk-through: say how many cards are left.
 4. Only after the user says yes, append it to `<ap dir>/RULES.md` or
    `$AUTOPILOT_DATA/RULES.md`. Change an existing line only the same way.
 5. A rule that would loosen the authority floor (create tickets, send messages, post comments) is not
-   a rule: it is a per-item approval. Explain that and offer to put the item on the page.
+   a rule: it is a per-item approval. Explain that and offer to put the item on the page, as a full
+   card.
