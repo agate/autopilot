@@ -409,6 +409,22 @@ to-do.
 Built from secretary's `commands/review.md`, `agents/reviewer.md` and its report checks (`review roles`, `review
 verdict`, `report validate`), copied, not called (3.2).
 
+### 6.3 How the PR loop ends **[decided by the user, 2026-11-10]**
+
+v1's PR loop may merge on its own only when it ends clean (a round with nothing to fix) or converged (two rounds in
+a row with no behavior finding). When it reaches its round limit, the last round's fixes have never been reviewed,
+so the loop asks the user, even when those fixes are a few small lines with tests and green CI. On 2026-11-10 this
+asked the user twice for the same reason (v1 PRs #21 and #25 on `v2`). v1 keeps its rule; v2 changes it:
+
+1. When a round's fixes would hit the round limit, the loop runs one **check of the fix**: a fresh reviewer per
+   angle that found something in that round, each reading only the fix commit (its diff, the findings it answers,
+   and the code it touches). It does not count toward the round limit, and it runs at most once per loop.
+2. It finds nothing: the loop ends clean and may merge on its own, as any clean loop does (`ap merge-check` still
+   decides).
+3. It finds something: no more fixing; the loop stops and asks the user, with the check's findings on the card.
+4. The card and the round report say the loop ended through a check of the fix, and link its findings.
+5. A loop that stops for any other reason (not converging, the same finding twice, a design call) asks as before.
+
 ## 7. Scheduling
 
 ### 7.1 The gate **[decided, from v1]**
@@ -611,6 +627,7 @@ Calls the author made without asking (check them):
 - v2 runs next to v1 under its own names (10).
 - One review-angle table for both the PR loop and PR review, in three layers with the repo's winning (6.1).
 - PR review cards as secretary makes them today, with the TL;DR as "where it stands" (6.2).
+- The check of the fix runs once, with one reviewer per angle that found something in the last round (6.3).
 
 ## 12. Left to the builder
 
