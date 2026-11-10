@@ -758,13 +758,15 @@ Calls the author made without asking (check them):
     list of `mon`..`sun`; `at`: a list of `HH:MM`), `tz` (an IANA name, read with `zoneinfo`), and optional
     `missed_run` (default `once_within: 3h`; see 7.3), `last_slot` (`YYYY-MM-DDTHH:MM` wall-clock time in `tz`, or
     null) and `paused` (default false). An unknown key, a repeated day or time, or a bad value is refused with one
-    error, `<file>: <field>: <why>`; a bad routine is listed in the run's `errors` and the others still run.
-    Hidden files in `routines/` are left out.
+    error, `<file>: <field>: <why>`; a bad routine is listed in the run's `errors` and the others still run. An
+    unknown key is quoted with its escapes (`'owner'`, `schedule.'every'`), so a key JSON can hold but UTF-8
+    cannot (a lone `\ud800`) never stops `gate.json` from being written. Hidden files in `routines/` are left out.
   - Due slot: the latest slot at or before now, looked for in the last 7 days, in the routine's `tz`, compared with
     `last_slot` as wall-clock text. So each wall-clock slot happens once on a day the clocks change: a time that
     happens twice (clocks going back) runs at its first time; a time that does not exist (clocks going forward)
-    runs with the offset before the change (02:30 runs at 03:30). The grace before a slot counts as missed is
-    5 minutes (on time at exactly 5). A paused routine is not looked at, and its `last_slot` is not moved. A
+    runs at the moment the clocks jump (02:30 runs at 03:00). So a slot never runs after a slot with a later
+    time, and two slots that land on the same moment run once, as the later one. The grace before a slot counts as
+    missed is 5 minutes (on time at exactly 5). A paused routine is not looked at, and its `last_slot` is not moved. A
     routine that never ran (`last_slot` null) runs a slot inside the grace; an older slot is not a missed run (it
     came before the routine), so the gate only writes it as `last_slot` (action `start`, no card) and the routine
     counts from its next slot.
@@ -774,25 +776,33 @@ Calls the author made without asking (check them):
     `last_slot` is written atomically (the file is read again first, so a change made meanwhile is kept). Before
     making a card the gate reads the routine cards once per run and looks for the key; a card found means it only
     writes `last_slot`. A damaged card file makes that read fail, so the routine waits (with an error) rather than
-    risk a second card. The plain words are built in for English and Chinese (`zh`, `zh-*`); any other configured
-    language gets the English lines, since the gate has no AI to write them.
+    risk a second card. A routine card whose `key` is not text is passed over in that look. The plain words are
+    built in for English and Chinese (`zh`, `zh-*`); any other configured language gets the English lines, since
+    the gate has no AI to write them.
   - Watches: until the source loader (slice 3) is on `v2`, the watch list is a plain argument of `gate.run`
     (`[{name, every, last_check_at?}]`, `every` is `<N>m` or `<N>h`); `ap2 gate` passes none. A watch is due when
     `now - last_check_at >= every` (or it was never checked); the gate lists it in `watches_due` and saves
     `last_check_at` in `<data>/watches.json`, whose time wins when it is later than the one given. The gate does not
-    read the source and makes no card for the look.
+    read the source and makes no card for the look. A watches.json that cannot be read, is not JSON or is not an
+    object is treated like a damaged saved time: the run logs it, adds `{"watches": <path>, "error": ...}` to
+    `errors`, starts from no saved times (so each watch is due) and writes the file again when a watch is due.
   - Heartbeat: every run writes `<data>/gate.json` atomically: `{"last_run_at": <UTC>, "routines": [{routine,
     slot, key, action (run, late, skip, exists or start), card, late_minutes}], "watches_due": [...], "pruned": [point
     ids], "errors": [...]}`. Every line of `<data>/gate.log` starts with the run's UTC time
     (`2026-11-10T14:30:05Z run: ...`), one line per routine action or error and one summary line; past 1 MB it is
     renamed `gate.log.1` (one old file is kept). Each run calls `Store.prune()`.
   - One run at a time: `<data>/.gate.lock` is taken with a non-blocking `flock`; a run that finds it held prints
-    `{"locked": true, "lock": <path>}`, writes nothing and exits 0. The gate starts no process, opens no socket and
-    writes only inside the data folder; the time is passed in (`gate.run(data, now)`), never read inside.
+    `{"locked": true, "lock": <path>}`, writes nothing and exits 0. A lock that cannot be taken for any other reason
+    (`ENOLCK` on a network share) is a config error: one `ap2: cannot lock the gate ...` line and exit 1. The gate
+    starts no process, opens no socket and writes only inside the data folder; the time is passed in
+    (`gate.run(data, now)`), never read inside.
   - `ap2 gate [--data PATH] [--now ISO]` runs once and prints the run as JSON. `--now` needs a zone (`Z` or an
-    offset); a time without one is an argument error (exit 2). A bad routine or watch is in `errors` and still
-    exits 0 (launchd runs it again in a minute); a bad `config.yaml` or data folder is one `ap2: ...` line and
-    exit 1. Nothing is installed: no launchd job is written in this slice.
+    offset); a time without one is an argument error (exit 2). `--now` may not be later than the real time plus
+    the 5-minute grace, also an argument error: a run writes `last_slot`, makes cards and prunes restore points,
+    so a run in the future would hold back every real slot until then and prune points that are only days old. A
+    year before 1971 (or a time too far out to turn into UTC) is an argument error too. A bad routine or watch is
+    in `errors` and still exits 0 (launchd runs it again in a minute); a bad `config.yaml` or data folder is one
+    `ap2: ...` line and exit 1. Nothing is installed: no launchd job is written in this slice.
 - How the local server pushes updates to an open page (polling is fine).
 - Exact limits: idle timeout, grace for missed slots, page sizes.
 

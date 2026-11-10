@@ -5,6 +5,7 @@ Every test injects the time; none sleeps or reads the machine's time zone (each 
 from __future__ import annotations
 
 import builtins
+import errno
 import json
 import os
 import shutil
@@ -75,7 +76,7 @@ class RoutineFileTest(GateCase):
         (routine(schedule="daily"), "schedule"),
         (routine(schedule={"at": ["09:00"]}), "schedule.days"),
         (routine(schedule={"days": "daily"}), "schedule.at"),
-        (routine(schedule={"days": "daily", "at": ["09:00"], "every": "1h"}), "schedule.every"),
+        (routine(schedule={"days": "daily", "at": ["09:00"], "every": "1h"}), "schedule.'every'"),
         (routine(schedule={"days": "weekend", "at": ["09:00"]}), "schedule.days"),
         (routine(schedule={"days": ["mon", "funday"], "at": ["09:00"]}), "schedule.days"),
         (routine(schedule={"days": [], "at": ["09:00"]}), "schedule.days"),
@@ -98,7 +99,7 @@ class RoutineFileTest(GateCase):
         (routine(last_slot="2026-13-01T09:00"), "last_slot"),
         (routine(last_slot="2026-11-07T09:00:00Z"), "last_slot"),
         (routine(paused="no"), "paused"),
-        (dict(routine(), owner="me"), "owner"),
+        (dict(routine(), owner="me"), "'owner'"),
         ([1, 2], "(file)"),
     ]
 
@@ -152,6 +153,22 @@ class RoutineFileTest(GateCase):
         self.assertIn("tz", next(e for e in out["errors"] if e["routine"] == "bad")["error"])
         self.assertEqual(self.file("good")["last_slot"], "2026-11-10T09:00")
         self.assertEqual(len(self.routine_cards()), 1)
+
+    def test_a_lone_surrogate_key_is_refused_and_the_heartbeat_is_still_written(self):
+        # JSON can hold "\ud800" (half of a surrogate pair); the error must not carry it raw, or gate.json cannot be
+        # written as UTF-8.
+        self.put("good", last_slot="2026-11-09T09:00")
+        top = json.dumps(routine()).replace('"paused"', '"\\ud800": 1, "paused"')
+        nested = json.dumps(routine()).replace('"at"', '"\\udfff": 1, "at"')
+        (self.data / "routines" / "top.json").write_text(top, encoding="utf-8")
+        (self.data / "routines" / "nested.json").write_text(nested, encoding="utf-8")
+        out = self.gate(utc(2026, 11, 10, 9, 1))
+        self.assertEqual([f["routine"] for f in out["routines"]], ["good"])
+        self.assertEqual(sorted(e["routine"] for e in out["errors"]), ["nested", "top"])
+        self.assertIn("'\\ud800': unknown key", next(e for e in out["errors"] if e["routine"] == "top")["error"])
+        self.assertIn("schedule.'\\udfff': unknown key",
+                      next(e for e in out["errors"] if e["routine"] == "nested")["error"])
+        self.assertEqual(json.loads((self.data / "gate.json").read_text(encoding="utf-8")), out)
 
 
 # -- criterion 2: due slots ---------------------------------------------------------------------------------------
@@ -209,13 +226,46 @@ class DueSlotTest(GateCase):
         self.assertEqual(self.routine_cards()[0]["slot_at"], "2026-11-01T08:30:00Z")  # the first 01:30
 
     def test_clocks_going_forward_give_each_slot_once(self):
-        # 2026-03-08 in Los Angeles: 02:00-03:00 does not happen. 02:30 runs once, at 03:30 PDT (10:30 UTC).
+        # 2026-03-08 in Los Angeles: 02:00-03:00 does not happen. 02:30 runs once, at the jump (03:00 PDT, 10:00 UTC).
         self.put(schedule={"days": "daily", "at": ["02:30"]}, tz=LA, last_slot="2026-03-07T02:30")
         made = []
-        for minute in range(0, 4 * 60, 7):
-            made += self.gate(utc(2026, 3, 8, 8) + timedelta(minutes=minute))["routines"]
+        for minute in range(0, 4 * 60, 7):  # a tick every 7 minutes from 08:02 UTC: one lands at 10:01
+            made += self.gate(utc(2026, 3, 8, 8, 2) + timedelta(minutes=minute))["routines"]
         self.assertEqual([(m["slot"], m["action"]) for m in made], [("2026-03-08T02:30", "run")])
-        self.assertEqual(self.routine_cards()[0]["slot_at"], "2026-03-08T10:30:00Z")
+        self.assertEqual(self.routine_cards()[0]["slot_at"], "2026-03-08T10:00:00Z")
+
+    def test_a_time_that_does_not_exist_is_the_moment_the_clocks_jump(self):
+        tz = routines.ZoneInfo(LA)
+        self.assertEqual(routines.slot_time(datetime(2026, 3, 8, 2, 30), tz), utc(2026, 3, 8, 10))
+        self.assertEqual(routines.slot_time(datetime(2026, 3, 8, 2, 0), tz), utc(2026, 3, 8, 10))
+        self.assertEqual(routines.slot_time(datetime(2026, 3, 8, 3, 0), tz), utc(2026, 3, 8, 10))
+        self.assertEqual(routines.slot_time(datetime(2026, 3, 8, 1, 59), tz), utc(2026, 3, 8, 9, 59))
+
+    def tick_every_minute(self, start, hours) -> list:
+        made = []
+        for minute in range(hours * 60):
+            made += self.gate(start + timedelta(minutes=minute))["routines"]
+        return made
+
+    def test_two_slots_in_the_gap_run_once_as_the_later_one(self):
+        # 02:30 does not exist on 2026-03-08 in LA and 03:00 is the moment the clocks jump: both are 10:00 UTC.
+        self.put(schedule={"days": "daily", "at": ["02:30", "03:00"]}, tz=LA, last_slot="2026-03-07T03:00")
+        made = self.tick_every_minute(utc(2026, 3, 8, 8), 4)
+        self.assertEqual([(m["slot"], m["action"]) for m in made], [("2026-03-08T03:00", "run")])
+        self.assertEqual([(c["key"], c["slot_at"]) for c in self.routine_cards()],
+                         [("digest@2026-03-08T03:00", "2026-03-08T10:00:00Z")])
+        self.assertEqual(self.file()["last_slot"], "2026-03-08T03:00")
+
+    def test_a_slot_in_the_gap_is_not_lost_behind_a_later_slot(self):
+        # Read with the offset before the change, 02:30 would be 10:30 UTC, after 03:15 (10:15 UTC); 03:15 would
+        # run first and 02:30 would then be dropped as older than last_slot.
+        self.put(schedule={"days": "daily", "at": ["02:30", "03:15"]}, tz=LA, last_slot="2026-03-07T03:15")
+        made = self.tick_every_minute(utc(2026, 3, 8, 8), 4)
+        self.assertEqual([(m["slot"], m["action"]) for m in made],
+                         [("2026-03-08T02:30", "run"), ("2026-03-08T03:15", "run")])
+        self.assertEqual([c["slot_at"] for c in self.routine_cards()],
+                         ["2026-03-08T10:00:00Z", "2026-03-08T10:15:00Z"])
+        self.assertEqual(self.file()["last_slot"], "2026-03-08T03:15")
 
     def test_a_new_routine_counts_from_its_next_slot(self):
         # last_slot null: a slot inside the grace runs; an older one is not a missed run (the routine did not exist).
@@ -354,6 +404,18 @@ class CardFirstTest(GateCase):
         self.assertIn("c-20261101-000000-abcdef", out["errors"][0]["error"])
         self.assertEqual(self.file()["last_slot"], "2026-11-09T09:00")
 
+    def test_a_routine_card_whose_key_is_not_text_is_passed_over(self):
+        r = routines.parse(self.data / "routines" / "other.json", routine())
+        d = routines.Due("2026-11-09T09:00", utc(2026, 11, 9, 9), "run", timedelta(0))
+        odd = dict(gate.run_card(r, d, ("en",)), key=["a", "b"])
+        self.store().add(odd, by="test")
+        self.put(last_slot="2026-11-09T09:00")
+        out = self.gate(utc(2026, 11, 10, 9, 1))
+        self.assertEqual([(f["routine"], f["action"]) for f in out["routines"]], [("digest", "run")])
+        self.assertEqual(out["errors"], [])
+        self.assertIn("digest@2026-11-10T09:00", [c["key"] for c in self.routine_cards()])
+        self.assertEqual(self.file()["last_slot"], "2026-11-10T09:00")
+
 
 class TwoLanguageCardTest(GateCase):
     cfg = Config(secondary_language="zh")
@@ -408,6 +470,22 @@ class WatchTest(GateCase):
         out = self.gate(self.T, watches=watches)
         self.assertEqual(out["watches_due"], ["ok"])
         self.assertEqual([e["watch"] for e in out["errors"]], ["bad", None, "x"])
+
+    def test_a_damaged_watches_file_is_reported_and_the_run_goes_on(self):
+        for text in ("{", "[1]", "\xff"):
+            with self.subTest(text=text):
+                path = self.data / "watches.json"
+                path.write_bytes(text.encode("latin-1"))
+                (self.data / "gate.json").unlink(missing_ok=True)
+                (self.data / "gate.log").unlink(missing_ok=True)
+                out = self.gate(self.T, watches=[{"name": "slack", "every": "5m"}])
+                self.assertEqual(out["watches_due"], ["slack"])
+                self.assertEqual(len(out["errors"]), 1)
+                self.assertEqual(out["errors"][0]["watches"], str(path))
+                self.assertIn(str(path), out["errors"][0]["error"])
+                self.assertEqual(json.loads((self.data / "gate.json").read_text()), out)
+                self.assertIn(f"watches: error: {path}", (self.data / "gate.log").read_text())
+                self.assertEqual(json.loads(path.read_text()), {"slack": {"last_check_at": "2026-11-10T14:00:00Z"}})
 
     def test_a_look_is_not_logged_as_a_card(self):
         self.gate(self.T, watches=[{"name": "slack", "every": "5m"}])
@@ -533,6 +611,18 @@ class NoOutsideEffectsTest(GateCase):
         self.assertEqual(self.file()["last_slot"], "2026-11-09T09:00")
         fcntl.flock(fd, fcntl.LOCK_UN)
         self.assertEqual(len(self.gate(utc(2026, 11, 10, 9, 1))["routines"]), 1)
+
+    def test_a_lock_that_cannot_be_taken_is_a_config_error_naming_the_lock(self):
+        self.put(last_slot="2026-11-09T09:00")
+        no_locks = OSError(errno.ENOLCK, "No locks available")
+        with mock.patch.object(gate.fcntl, "flock", side_effect=no_locks), \
+                mock.patch.object(gate.os, "close", wraps=os.close) as close:
+            with self.assertRaises(ConfigError) as cm:
+                self.gate(utc(2026, 11, 10, 9, 1))
+        self.assertIn(f"cannot lock the gate {self.data / '.gate.lock'}", str(cm.exception))
+        self.assertEqual(close.call_count, 1)  # the lock file is closed again
+        self.assertEqual(self.file()["last_slot"], "2026-11-09T09:00")
+        self.assertFalse((self.data / "gate.json").exists())
 
     def test_a_bad_config_is_a_config_error(self):
         (self.data / "config.yaml").write_text("mode: loud\n")

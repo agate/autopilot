@@ -181,14 +181,27 @@ COMMANDS = {"config": cmd_config, "card": cmd_card, "search": cmd_search, "resto
 # -- ap2 gate (slice 5) -------------------------------------------------------------------------------------------
 
 def _gate_now(text: str):
-    """--now: an ISO time with a zone (2026-11-10T09:00:00Z or ...-08:00), for trying a run at another time."""
-    from datetime import datetime
+    """--now: an ISO time with a zone (2026-11-10T09:00:00Z or ...-08:00), for trying a run at another time. It
+    may not be later than the real time (plus the slot grace): a run writes last_slot, makes cards and prunes
+    restore points, so a run in the future would hold back every real slot until then. A year before 1971 is
+    refused too (the slot and prune arithmetic would go below year 1)."""
+    from datetime import datetime, timezone
+    from assistant import cards, routines
     try:
         at = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text)
     except ValueError:
         raise argparse.ArgumentTypeError(f"not an ISO time: {text!r} (for example 2026-11-10T09:00:00Z)") from None
     if at.tzinfo is None:
         raise argparse.ArgumentTypeError(f"{text!r} has no time zone; add Z or an offset such as -08:00")
+    try:
+        in_utc = at.astimezone(timezone.utc)
+    except OverflowError:
+        in_utc = None
+    if in_utc is None or in_utc.year < 1971:
+        raise argparse.ArgumentTypeError(f"{text!r} is out of range (years 1971 to now)")
+    if in_utc > cards.now_utc() + routines.GRACE:
+        raise argparse.ArgumentTypeError(f"{text!r} cannot be later than the real time: a run writes last_slot, "
+                                         f"makes cards and prunes restore points")
     return at
 
 

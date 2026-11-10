@@ -142,7 +142,7 @@ def parse(path: Path, obj) -> Routine:
         _fail(path, "(file)", f"a routine is a JSON object, not {type(obj).__name__}")
     for key in obj:
         if key not in KEYS:
-            _fail(path, str(key), f"unknown key (known keys: {', '.join(KEYS)})")
+            _fail(path, repr(key), f"unknown key (known keys: {', '.join(KEYS)})")
     for key in REQUIRED:
         if key not in obj:
             _fail(path, key, "missing")
@@ -154,7 +154,7 @@ def parse(path: Path, obj) -> Routine:
         _fail(path, "schedule", f"schedule must be an object with days and at, not {schedule!r}")
     for key in schedule:
         if key not in SCHEDULE_KEYS:
-            _fail(path, f"schedule.{key}", f"unknown key (known keys: {', '.join(SCHEDULE_KEYS)})")
+            _fail(path, f"schedule.{key!r}", f"unknown key (known keys: {', '.join(SCHEDULE_KEYS)})")
     for key in SCHEDULE_KEYS:
         if key not in schedule:
             _fail(path, f"schedule.{key}", "missing")
@@ -215,11 +215,21 @@ def load_all(data: Path):
     return found, errors
 
 
+def _exists(wall: datetime, tz) -> bool:
+    """True when the wall-clock time happens in `tz` (it reads back the same after a round trip through UTC)."""
+    at = wall.replace(tzinfo=tz, fold=0)
+    return at.astimezone(timezone.utc).astimezone(tz).replace(tzinfo=None) == wall
+
+
 def slot_time(wall: datetime, tz) -> datetime:
     """The UTC time of a wall-clock slot in `tz`. A time that happens twice (the hour the clocks go back) is its
-    first time; a time that does not exist (the hour they go forward) is read with the offset before the change,
-    so 02:30 on that day runs at 03:30 (fold=0, Python's default)."""
-    return wall.replace(tzinfo=tz, fold=0).astimezone(timezone.utc)
+    first time. A time that does not exist (the hour they go forward) is the moment the clocks jump: 02:30 on that
+    day runs at 03:00. So a slot never comes later in UTC than a slot with a later wall-clock text; two slots that
+    land on the same moment run once, as the later one (see `latest_slot`)."""
+    step = wall
+    while not _exists(step, tz):  # step forward a minute at a time to the first wall time after the jump
+        step += timedelta(minutes=1)
+    return step.replace(tzinfo=tz, fold=0).astimezone(timezone.utc)
 
 
 def latest_slot(r: Routine, now: datetime):

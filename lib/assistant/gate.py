@@ -53,6 +53,8 @@ def _lock(data: Path):
         except BlockingIOError:
             yield False
             return
+        except OSError as e:  # e.g. ENOLCK on a network share: one ConfigError line, not a traceback
+            raise ConfigError(f"cannot lock the gate {data / LOCK}: {e}") from e
         yield True
     finally:
         os.close(fd)  # closing releases the lock
@@ -137,15 +139,21 @@ def parse_every(text) -> timedelta:
     return timedelta(minutes=n) if m.group(2) == "m" else timedelta(hours=n)
 
 
-def _read_watch_state(data: Path) -> dict:
+def _read_watch_state(data: Path):
+    """The saved watch times, as `(state, error)`. A damaged or unreadable watches.json is treated like a damaged
+    saved time: the run goes on from `{}` (every watch is due) and `error` says why; the file is written again,
+    atomically, when a watch is due."""
     path = data / WATCHES
     try:
         state = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return {}
-    except (OSError, ValueError) as e:
-        raise ConfigError(f"{path}: cannot read the watch times: {e}") from e
-    return state if isinstance(state, dict) else {}
+        return {}, None
+    except (OSError, ValueError) as e:  # UnicodeDecodeError is a ValueError
+        return {}, {"watches": str(path), "error": f"{path}: cannot read the watch times: {e}"}
+    if not isinstance(state, dict):
+        return {}, {"watches": str(path),
+                    "error": f"{path}: the watch times must be a JSON object, not {type(state).__name__}"}
+    return state, None
 
 
 def _parse_time(text) -> Optional[datetime]:
@@ -163,8 +171,8 @@ def due_watches(data: Path, watches, now: datetime):
     watches.json wins when it is later. The gate does not read the sources itself; the caller does."""
     if not watches:
         return [], []
-    state = _read_watch_state(data)
-    found, errors = [], []
+    state, damaged = _read_watch_state(data)
+    found, errors = [], [damaged] if damaged else []
     for w in watches:
         name = w.get("name") if isinstance(w, dict) else None
         try:
@@ -231,7 +239,7 @@ def _run(data: Path, now: datetime, watches, store: Optional[Store]) -> dict:
                 log(f"routine {r.name}: new; slots count from after {d.slot}")
                 continue
             if by_key is None:
-                by_key = {c.get("key"): c for c in store.list(kind="routine")}
+                by_key = {c["key"]: c for c in store.list(kind="routine") if isinstance(c.get("key"), str)}
             card = by_key.get(key)
             if card is None:
                 card = store.add(run_card(r, d, store.languages), by=BY)
@@ -251,7 +259,10 @@ def _run(data: Path, now: datetime, watches, store: Optional[Store]) -> dict:
     due_names, watch_errors = due_watches(data, list(watches), now)
     errors.extend(watch_errors)
     for e in watch_errors:
-        log(f"watch {e['watch']}: refused: {e['error']}")
+        if "watches" in e:
+            log(f"watches: error: {e['error']}")
+        else:
+            log(f"watch {e['watch']}: refused: {e['error']}")
     if due_names:
         log(f"watches due: {', '.join(due_names)}")
 
