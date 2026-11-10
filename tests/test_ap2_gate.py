@@ -771,6 +771,16 @@ class ClockWentBackTest(GateCase):
         out = self.gate(T, watches=[{"name": "slack", "every": "5m", "last_check_at": "2026-11-10T14:05:00Z"}])
         self.assertEqual((out["watches_due"], out["errors"]), ([], []))
 
+    def test_a_saved_watch_time_inside_the_grace_is_no_error(self):
+        T = utc(2026, 11, 10, 14, 0)
+        for saved in ("2026-11-10T14:03:00Z", "2026-11-10T14:05:00Z"):
+            with self.subTest(saved=saved):
+                write_json(self.data / "watches.json", {"slack": {"last_check_at": saved}})
+                out = self.gate(T, watches=[{"name": "slack", "every": "5m"}])
+                self.assertEqual((out["watches_due"], out["errors"]), ([], []))
+                self.assertEqual(json.loads((self.data / "watches.json").read_text()),
+                                 {"slack": {"last_check_at": saved}})
+
     def test_after_a_tz_change_the_error_quotes_the_files_slot_and_its_old_zone(self):
         # Tokyo 09:00 on Nov 11 is 00:00 UTC, which is 19:00 on Nov 10 in New York: later than now.
         p = self.put(tz="America/New_York", last_slot="2026-11-11T09:00", last_slot_tz="Asia/Tokyo")
