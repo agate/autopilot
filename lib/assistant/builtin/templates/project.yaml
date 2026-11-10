@@ -1,0 +1,25 @@
+# Built-in template: a big piece of work (an epic) that splits into code tasks.
+kind: project
+title: Project
+description: Big work split into PR-sized tasks. You confirm the split; each task then starts on its own.
+source: any
+view: [source_block, plan, children, links, activity]
+buttons:
+  - id: confirm
+    label: Confirm the split
+    lane: running
+  - id: add_task
+    label: Add a task
+    child: code
+  - id: cancel
+    label: Cancel
+    lane: done
+  - id: undo
+    label: Undo
+    restore: last
+roles:
+  - role: general
+    brief: "Split the project on card {id} into PR-sized tasks. Read the code first, then list each task with what it waits for."
+  - role: review
+    when: "after the split"
+    brief: "Check the split of the project on card {id} cold, like a code review: is each task PR-sized, and is what waits for what right?"
