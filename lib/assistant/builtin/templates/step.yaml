@@ -12,4 +12,4 @@ buttons:
     restore: last
 roles:
   - role: general
-    brief: "Do the step {title}, and only that. Say what you changed and how to undo it."
+    brief: "Do the step on card {id}, and only that. Say what you changed and how to undo it."

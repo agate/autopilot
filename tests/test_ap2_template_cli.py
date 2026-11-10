@@ -119,6 +119,16 @@ class TemplateCommandTest(unittest.TestCase):
         shutil.copy(FIXTURES / "question.yaml", path)
         self.assertEqual(self.ok("template", "check", str(path))["replaces"], "builtin")
 
+    def test_check_reads_the_data_folder_from_env_and_from_the_flag(self):
+        other = self.tmp / "other"
+        (other / "templates").mkdir(parents=True)
+        shutil.copy(FIXTURES / "question.yaml", other / "templates" / "question.yaml")
+        path = self.tmp / "question.yaml"
+        shutil.copy(FIXTURES / "question.yaml", path)
+        self.assertEqual(self.ok("template", "check", str(path), data=other)["replaces"], "user")  # AP2_DATA
+        self.assertEqual(self.ok("template", "check", str(path), "--data", str(other))["replaces"], "user")
+        self.assertEqual(self.ok("template", "check", str(path))["replaces"], "builtin")  # AP2_DATA has none
+
     def test_check_refuses_a_template_that_adds_tools(self):
         path = self.tmp / "parcel.yaml"
         path.write_text((FIXTURES / "parcel.yaml").read_text() + "    tools: [Bash, Write]\n", encoding="utf-8")

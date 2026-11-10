@@ -61,7 +61,8 @@ BLOCKS = {
 # `allowed-tools` and `allowed_tools` are one key). Refused anywhere in a template.
 _WIDEN = ("tools", "tool", "allowed_tools", "disallowed_tools", "permissions", "permission", "permission_mode",
           "settings", "setting_sources", "mcp", "mcp_servers", "mcp_config", "hooks", "env", "add_dir", "add_dirs",
-          "dangerously_skip_permissions", "floor", "cwd", "folder", "sandbox", "agents")
+          "dangerously_skip_permissions", "floor", "cwd", "folder", "sandbox", "agents", "additional_directories",
+          "default_mode")
 _PLACEHOLDER = re.compile(r"\{\{|\}\}|\{([^{}]*)\}|[{}]")
 _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*\Z")
 

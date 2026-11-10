@@ -16,4 +16,4 @@ buttons:
 roles:
   - role: general
     when: "after you say it is fixed"
-    brief: "Check that {title} works again with one read that changes nothing. Say what you ran and what it returned."
+    brief: "Check that the login on card {id} works again with one read that changes nothing. Say what you ran and what it returned."

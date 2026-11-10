@@ -16,4 +16,4 @@ buttons:
     restore: last
 roles:
   - role: analyze
-    brief: "Analyze the alert in {title}: is it still firing, how big is it, what changed just before it, and what does the playbook say. Name every dashboard, log or commit you used."
+    brief: "Analyze the alert on card {id}: is it still firing, how big is it, what changed just before it, and what does the playbook say. Name every dashboard, log or commit you used."

@@ -17,6 +17,17 @@ BUILTIN_KINDS = {"question", "errand", "alert", "code", "project", "research", "
 # Design 6: the roles v2 ships. The PR review slice adds more (pr-review), so the tests check these are there, not that no
 # other role is.
 SHIPPED_ROLES = {"implement", "review", "pr-loop", "investigate", "analyze", "reviewer-angle", "general"}
+# Design 12: each shipped role's tools and permission floor, copied from the design, not from roles.py.
+EXPECTED_ROLES = {
+    "implement": (("Agent", "Bash", "Edit", "Glob", "Grep", "NotebookEdit", "Read", "Skill", "WebFetch", "WebSearch",
+                   "Write"), "worker"),
+    "review": (("Agent", "Bash", "Glob", "Grep", "Read", "Skill", "Write"), "worker"),
+    "pr-loop": (("Agent", "Bash", "Edit", "Glob", "Grep", "Read", "Skill", "Write"), "worker"),
+    "investigate": (("Bash", "Glob", "Grep", "Read", "WebFetch", "WebSearch"), "read-only"),
+    "analyze": (("Bash", "Glob", "Grep", "Read", "WebFetch", "WebSearch"), "read-only"),
+    "reviewer-angle": (("Bash", "Glob", "Grep", "Read"), "read-only"),
+    "general": (("Bash", "Edit", "Glob", "Grep", "Read", "WebFetch", "WebSearch", "Write"), "worker"),
+}
 
 GOOD = """\
 kind: parcel
@@ -107,11 +118,21 @@ class RolesTest(unittest.TestCase):
                 self.assertIn(role.floor, roles.FLOORS)
                 self.assertTrue(role.does.strip())
 
+    def test_each_shipped_role_has_the_designs_tools_and_floor(self):
+        for name, (tools, floor) in EXPECTED_ROLES.items():
+            with self.subTest(name):
+                role = roles.ROLES[name]
+                self.assertEqual(tuple(sorted(role.tools)), tuple(sorted(tools)))
+                self.assertEqual(role.floor, floor)
+
     def test_read_only_roles_have_no_file_editing_tools(self):
         for name in ("reviewer-angle", "investigate", "analyze"):
             with self.subTest(name):
-                role = roles.ROLES[name]
-                self.assertEqual(role.floor, "read-only")
+                self.assertEqual(roles.ROLES[name].floor, "read-only")
+        for name, role in roles.ROLES.items():
+            if role.floor != "read-only":
+                continue
+            with self.subTest(name):
                 self.assertFalse(set(role.tools) & set(roles.EDIT_TOOLS), role.tools)
 
     def test_code_roles_run_under_the_worker_floor(self):
@@ -139,6 +160,20 @@ class RolesTest(unittest.TestCase):
                 with self.subTest(kind=kind, role=run["role"]):
                     self.assertEqual(run["tools"], list(roles.ROLES[run["role"]].tools))
                     self.assertEqual(run["floor"], roles.ROLES[run["role"]].floor)
+
+    def test_every_builtin_brief_fills_from_a_card_with_no_title(self):
+        # title is optional (cards.OPTIONAL); a card the store accepts has only the required keys and its id.
+        self.assertIn("title", cards.OPTIONAL)
+        plain = {line: {"en": "x"} for line in cards.PLAIN_LINES}
+        for kind, t in templates.catalog().items():
+            with self.subTest(kind):
+                card = {"id": "c-1", "kind": kind, "lane": "needs", "feed": "f", "links": [], "pri": "P2",
+                        "origin": "source", "plain": plain}
+                self.assertEqual(set(card) - {"id"}, set(cards.REQUIRED))
+                runs = t.runs(card)
+                self.assertEqual([r["role"] for r in runs], [e["role"] for e in t.data["roles"]])
+                for run in runs:
+                    self.assertIn("c-1", run["brief"])
 
 
 class UserTemplatesTest(TempFolder):
@@ -204,6 +239,12 @@ class UserTemplatesTest(TempFolder):
                                  "floor": roles.ROLES["general"].floor}])
 
 
+# Design 12: the keys that would widen a role, copied from the design, not from templates.py.
+WIDEN_KEYS = ("tools", "tool", "allowed_tools", "disallowed_tools", "permissions", "permission", "permission_mode",
+              "settings", "setting_sources", "mcp", "mcp_servers", "mcp_config", "hooks", "env", "add_dir",
+              "add_dirs", "dangerously_skip_permissions", "floor", "cwd", "folder", "sandbox", "agents",
+              "additional_directories", "default_mode")
+
 # Criterion 4: every key that would widen a role, at the top level and inside a roles entry.
 WIDEN_CASES = [
     ("tools at the top", GOOD + "tools: [Bash]\n", "tools", 10),
@@ -231,6 +272,9 @@ WIDEN_CASES = [
     ("tools in a flow map", GOOD.replace("roles:\n  - role: general\n    brief: \"Check {tracking}.\"\n",
                                          "roles: [{role: general, brief: x, tools: [Bash]}]\n"), "tools", 7),
     ("a widening key beside other errors", GOOD + "colour: red\ntools: [Bash]\n", "tools", 11),
+    ("defaultMode at the top", GOOD + "defaultMode: bypassPermissions\n", "defaultMode", 10),
+    ("additionalDirectories in roles[0]", GOOD + "    additionalDirectories: [/]\n", "additionalDirectories", 10),
+    ("allowed tools, space spelling", GOOD + "allowed tools: [x]\n", "allowed tools", 10),
 ]
 
 
@@ -246,6 +290,14 @@ class NoAddedToolsTest(TempFolder):
                 self.assertIn(f"'{key}'", msg)
                 self.assertEqual((e.exception.file, e.exception.key), (str(path), key))
                 self.assertIsInstance(e.exception, TemplateError)
+
+    def test_every_widening_key_is_refused_at_the_top_and_in_a_role(self):
+        for k in dict.fromkeys(WIDEN_KEYS + tuple(templates._WIDEN)):
+            for where, text in (("top", GOOD + f"{k}: x\n"), ("roles[0]", GOOD + f"    {k}: x\n")):
+                with self.subTest(key=k, where=where):
+                    with self.assertRaises(TemplateWidenError) as e:
+                        templates.parse(text, "parcel.yaml")
+                    self.assertEqual(e.exception.key, k)
 
     def test_a_user_file_with_tools_is_refused_and_the_builtin_stays(self):
         shipped = roles.ROLES["investigate"].tools
@@ -277,7 +329,8 @@ BAD_CASES = [
     ("unknown role", GOOD.replace("role: general", "role: wizard"), "line 8", "unknown role 'wizard'"),
     ("a view entry that is not a block", GOOD.replace("[plan, activity]", "[plan, sidebar]"), "line 2",
      "unknown block 'sidebar'"),
-    ("a view entry that is not text", GOOD.replace("[plan, activity]", "[plan, 3]"), "line 2", "view"),
+    ("a view entry that is not text", GOOD.replace("[plan, activity]", "[plan, [a]]"), "line 2",
+     "view entries must be block names"),
     ("a view block twice", GOOD.replace("[plan, activity]", "[plan, plan]"), "line 2", "'plan' twice"),
     ("an empty view", GOOD.replace("[plan, activity]", "[]"), "line 2", "view"),
     ("a button with no action", GOOD.replace("    lane: done\n", ""), "line 4", "no action"),
@@ -301,13 +354,15 @@ BAD_CASES = [
     ("an empty brief", GOOD.replace("\"Check {tracking}.\"", "\"  \""), "line 9", "brief"),
     ("a brief with a lone brace", GOOD.replace("{tracking}.", "{tracking."), "line 9", "brace"),
     ("a brief with a bad placeholder", GOOD.replace("{tracking}", "{0}"), "line 9", "{0}"),
-    ("roles is not a list", GOOD.split("roles:")[0] + "roles: general\n", "line 7", "roles"),
+    ("roles is not a list", GOOD.split("roles:")[0] + "roles: 3\n", "line 7", "roles must be a list"),
+    ("buttons is not a list", GOOD.replace("buttons:\n  - id: arrived\n    label: It arrived\n    lane: done\n",
+                                           "buttons: 3\n"), "line 3", "buttons must be a list"),
     ("source other than any or none", GOOD + "source: slack\n", "line 10", "source"),
     ("source any without source_block first", GOOD + "source: any\n", "line 2", "source_block"),
     ("source_block without source any", GOOD.replace("[plan, activity]", "[source_block, plan]"), "line 2",
      "source: any"),
     ("title that is not text", GOOD + "title: 3\n", "line 10", "title"),
-    ("a kind with capitals", GOOD.replace("kind: parcel", "kind: Parcel"), "line 1", "kind"),
+    ("a kind with capitals", GOOD.replace("kind: parcel", "kind: Parcel"), "line 1", "kind must be lowercase"),
     ("not the YAML subset", GOOD + "x: &a 1\n", "line 10", "anchors"),
     ("an empty file", "", "parcel.yaml: ", "missing key 'kind'"),
 ]
@@ -325,6 +380,14 @@ class ValidationTest(TempFolder):
                 self.assertTrue(msg.startswith(f"{path}: "), msg)
                 self.assertIn(where, msg)
                 self.assertIn(why, msg)
+
+    def test_a_kind_with_capitals_is_refused_even_when_the_file_name_matches(self):
+        path = self.write("Parcel.yaml", GOOD.replace("kind: parcel", "kind: Parcel"))
+        with self.assertRaises(TemplateError) as e:
+            templates.load_file(path)
+        msg = str(e.exception)
+        self.assertTrue(msg.startswith(f"{path}: line 1: "), msg)
+        self.assertIn("kind must be lowercase", msg)
 
     def test_the_good_file_loads(self):
         t = templates.load_file(self.write("parcel.yaml", GOOD))

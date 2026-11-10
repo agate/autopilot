@@ -22,10 +22,10 @@ buttons:
     restore: last
 roles:
   - role: implement
-    brief: "Implement {title} in the card's worktree: tests first, the repo's checks, evidence, then a hand-back."
+    brief: "Implement card {id} in the card's worktree: tests first, the repo's checks, evidence, then a hand-back."
   - role: review
     when: "after implement hands back"
-    brief: "Review {title} cold: each criterion against its evidence, then a correctness pass over the diff. Give exact fixes."
+    brief: "Review card {id} cold: each criterion against its evidence, then a correctness pass over the diff. Give exact fixes."
   - role: pr-loop
     when: "after the review passes and the PR is open"
-    brief: "Loop on the PR for {title} until CI is green and no reviewer finds anything."
+    brief: "Loop on the PR for card {id} until CI is green and no reviewer finds anything."

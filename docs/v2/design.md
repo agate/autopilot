@@ -765,14 +765,16 @@ Calls the author made without asking (check them):
   - A role entry is `{role, when?, brief}`. `when` is prose. `brief` is prose with `{field}` placeholders, filled
     from the card (`{a.b}` reads a field inside a field; `{{` and `}}` are literal braces). A placeholder the
     card lacks, or holds as null or blank text, is an error (`BriefError`) naming every such field; a value must
-    be text or a number. A filled value is not read again.
+    be text or a number. A filled value is not read again. Built-in briefs use only `{id}`, a field every
+    stored card has, because `title` is optional.
   - No added tools or permissions: a key that would widen a role is refused anywhere in the file (top level,
     a `roles` entry, a button), before any other check, with one error class `TemplateWidenError` naming the
     file, line and key. The keys, compared without letter case, `-`, `_` or spaces: `tools`, `tool`,
     `allowed_tools`, `disallowed_tools`, `permissions`, `permission`, `permission_mode`, `settings`,
     `setting_sources`, `mcp`, `mcp_servers`, `mcp_config`, `hooks`, `env`, `add_dir`, `add_dirs`,
-    `dangerously_skip_permissions`, `floor`, `cwd`, `folder`, `sandbox`, `agents`. Every template error is a
-    `TemplateError`, a `ConfigError`, so `ap2` prints it as one `ap2: <file>: line N: ...` line.
+    `dangerously_skip_permissions`, `floor`, `cwd`, `folder`, `sandbox`, `agents`, `additional_directories`,
+    `default_mode`. Every template error is a `TemplateError`, a `ConfigError`, so `ap2` prints it as one
+    `ap2: <file>: line N: ...` line.
   - Roles are a fixed table in code (`roles.ROLES`, read-only), not a file, so nothing in the data folder can
     change one. Each role has its tools (the only Claude Code tools its session gets) and a permission floor:
     `worker` is v1's worker floor (`lib/autopilot/perms.py`, `generate(role="worker")`: outward MCP tools, the

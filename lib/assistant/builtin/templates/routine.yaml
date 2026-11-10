@@ -16,4 +16,4 @@ buttons:
 roles:
   - role: general
     when: "each scheduled slot"
-    brief: "Run the routine {title} once and write its report. Change nothing outside the card's folder."
+    brief: "Run the routine on card {id} once and write its report. Change nothing outside the card's folder."

@@ -19,7 +19,7 @@ buttons:
     restore: last
 roles:
   - role: general
-    brief: "Split {title} into PR-sized tasks. Read the code first, then list each task with what it waits for."
+    brief: "Split the project on card {id} into PR-sized tasks. Read the code first, then list each task with what it waits for."
   - role: review
     when: "after the split"
-    brief: "Check the split of {title} cold, like a code review: is each task PR-sized, and is what waits for what right?"
+    brief: "Check the split of the project on card {id} cold, like a code review: is each task PR-sized, and is what waits for what right?"

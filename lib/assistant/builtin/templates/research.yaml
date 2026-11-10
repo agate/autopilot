@@ -18,4 +18,4 @@ buttons:
     restore: last
 roles:
   - role: investigate
-    brief: "Look into {title}. Report what you found in plain words, with every file, page or message you used."
+    brief: "Look into the topic on card {id}. Report what you found in plain words, with every file, page or message you used."
