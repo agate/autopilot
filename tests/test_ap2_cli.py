@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import io
 import json
 import os
@@ -521,6 +522,113 @@ class ConfigErrorLineInProcessTest(unittest.TestCase):
                 self.assertEqual(self.run_main(argv, err), (1, ""))
                 self.assertRegex(err.getvalue(), r"\Aap2: [^\n]+\n\Z")
                 self.assertNotIn("cannot write the output", err.getvalue())
+
+
+class ToDevnullTest(unittest.TestCase):
+    """Pointing a failed stream at devnull never raises and never leaks the devnull fd it opens."""
+    FullStream = OutputWriteErrorTest.FullStdout
+    GoneStream = ConfigErrorLineInProcessTest.GoneStream
+
+    def setUp(self):
+        use_temp_home(self)
+        self.tmp = tmp = Path(tempfile.mkdtemp(prefix="ap2-cli-")).resolve()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self.fd = os.open(tmp / "out", os.O_WRONLY | os.O_CREAT)
+        self.addCleanup(os.close, self.fd)
+        self.real_open = os.open
+        self.opened = []  # every fd os.open returned for devnull
+
+    def spy_open(self, path, *args, **kwargs):
+        fd = self.real_open(path, *args, **kwargs)
+        if path == os.devnull:
+            self.opened.append(fd)
+        return fd
+
+    def emfile_on_devnull(self, path, *args, **kwargs):
+        # only devnull fails, so the data folder setup in `main` still opens its files
+        if path == os.devnull:
+            raise OSError(errno.EMFILE, "Too many open files")
+        return self.real_open(path, *args, **kwargs)
+
+    def assert_closed(self, fd):
+        with self.assertRaises(OSError) as cm:
+            os.fstat(fd)
+        self.assertEqual(cm.exception.errno, errno.EBADF)
+
+    def test_closes_the_devnull_fd_it_opens(self):
+        with mock.patch.object(os, "open", side_effect=self.spy_open), \
+                mock.patch.object(os, "close", wraps=os.close) as close:
+            cli._to_devnull(self.FullStream(self.fd))
+        self.assertEqual(len(self.opened), 1)
+        close.assert_called_once_with(self.opened[0])
+        self.assert_closed(self.opened[0])
+        self.assertEqual(os.fstat(self.fd).st_rdev, os.stat(os.devnull).st_rdev)
+
+    def test_does_not_close_the_stream_fd_when_devnull_comes_back_as_it(self):
+        with mock.patch.object(os, "open", return_value=self.fd), \
+                mock.patch.object(os, "close", wraps=os.close) as close:
+            cli._to_devnull(self.FullStream(self.fd))
+        close.assert_not_called()
+        os.fstat(self.fd)  # still open
+
+    def test_returns_quietly_when_devnull_cannot_be_opened(self):
+        with mock.patch.object(os, "open", side_effect=self.emfile_on_devnull), \
+                mock.patch.object(os, "dup2") as dup2:
+            self.assertIsNone(cli._to_devnull(self.FullStream(self.fd)))
+        dup2.assert_not_called()
+        self.assertNotEqual(os.fstat(self.fd).st_rdev, os.stat(os.devnull).st_rdev)
+
+    def test_returns_quietly_and_closes_the_devnull_fd_when_dup2_fails(self):
+        with mock.patch.object(os, "open", side_effect=self.spy_open), \
+                mock.patch.object(os, "dup2", side_effect=OSError(errno.EBADF, "Bad file descriptor")):
+            self.assertIsNone(cli._to_devnull(self.FullStream(self.fd)))
+        self.assertEqual(len(self.opened), 1)
+        self.assert_closed(self.opened[0])
+
+    def test_returns_quietly_when_closing_the_devnull_fd_fails(self):
+        with mock.patch.object(os, "open", side_effect=self.spy_open), \
+                mock.patch.object(os, "close", side_effect=OSError(errno.EIO, "Input/output error")) as close:
+            result = cli._to_devnull(self.FullStream(self.fd))
+        for fd in self.opened:
+            os.close(fd)  # the patched close did not close it; do not leak it in the test
+        self.assertIsNone(result)
+        self.assertEqual(len(self.opened), 1)
+        close.assert_called_once_with(self.opened[0])
+
+    def test_write_still_raises_the_write_error_when_devnull_cannot_be_opened(self):
+        with mock.patch.object(os, "open", side_effect=self.emfile_on_devnull):
+            with self.assertRaises(BrokenPipeError):
+                cli._write("x", self.GoneStream(self.fd))
+            with self.assertRaises(cli._OutputError) as cm:
+                cli._write("x", self.FullStream(self.fd))
+        self.assertEqual(cm.exception.__cause__.errno, errno.ENOSPC)
+
+    def test_write_still_raises_the_write_error_when_dup2_fails(self):
+        with mock.patch.object(os, "open", side_effect=self.spy_open), \
+                mock.patch.object(os, "dup2", side_effect=OSError(errno.EBADF, "Bad file descriptor")):
+            with self.assertRaises(BrokenPipeError):
+                cli._write("x", self.GoneStream(self.fd))
+            with self.assertRaises(cli._OutputError):
+                cli._write("x", self.FullStream(self.fd))
+        self.assertEqual(len(self.opened), 2)
+        for fd in self.opened:
+            self.assert_closed(fd)
+
+    def test_config_with_reader_gone_and_devnull_unopenable_returns_1_with_nothing_on_stderr(self):
+        err = io.StringIO()
+        with mock.patch.object(sys, "stdout", self.GoneStream(self.fd)), mock.patch.object(sys, "stderr", err), \
+                mock.patch.object(os, "open", side_effect=self.emfile_on_devnull):
+            code = cli.main(["config", "--data", str(self.tmp / "data")])
+        self.assertEqual((code, err.getvalue()), (1, ""))
+        self.assertTrue((self.tmp / "data" / "config.yaml").is_file())
+
+    def test_config_on_a_full_disk_and_devnull_unopenable_returns_1_with_one_line(self):
+        err = io.StringIO()
+        with mock.patch.object(sys, "stdout", self.FullStream(self.fd)), mock.patch.object(sys, "stderr", err), \
+                mock.patch.object(os, "open", side_effect=self.emfile_on_devnull):
+            code = cli.main(["config", "--data", str(self.tmp / "data")])
+        self.assertEqual(code, 1)
+        self.assertEqual(err.getvalue(), "ap2: cannot write the output: [Errno 28] No space left on device\n")
 
 
 if __name__ == "__main__":

@@ -83,8 +83,8 @@ class _OutputError(Exception):
 
 def _write(text: str, stream) -> None:
     """Write `text` to `stream` and flush it now, so a write error shows up here and not in the flush at exit.
-    A closed stream (None) gets nothing. When the write fails, the stream is pointed at devnull first, so the
-    flush at exit cannot fail again."""
+    A closed stream (None) gets nothing. When the write fails, the stream is pointed at devnull first (when devnull
+    can be opened), so the flush at exit does not fail again."""
     if stream is None:
         return
     try:
@@ -104,12 +104,27 @@ def _write_out(text: str) -> None:
 
 def _to_devnull(stream) -> None:
     """Point the stream's file descriptor at devnull (the recipe from the Python signal module docs). Does
-    nothing when the stream is not a real file."""
+    nothing when the stream is not a real file. Never raises: when devnull cannot be opened or moved onto the fd
+    (e.g. EMFILE, too many open files), the stream is left as it is and the caller still raises the write's own
+    error. The devnull fd it opens is closed again, unless it landed on the stream's own fd."""
     try:
         fd = stream.fileno()
     except (AttributeError, OSError, ValueError):  # an in-memory stream (io.UnsupportedOperation)
         return
-    os.dup2(os.open(os.devnull, os.O_WRONLY), fd)
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+    except OSError:
+        return
+    try:
+        os.dup2(devnull, fd)
+    except OSError:
+        pass
+    finally:
+        if devnull != fd:  # cannot happen after a fresh os.open while fd is open, but never close the stream's fd
+            try:
+                os.close(devnull)
+            except OSError:
+                pass
 
 
 def _print_json(out) -> None:
