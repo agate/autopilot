@@ -805,18 +805,24 @@ Calls the author made without asking (check them):
     (`gate.run(data, now)`), never read inside.
   - A clock that went back. A routine whose `last_slot`, read in its `tz`, is more than the 5-minute grace after
     now gets one error, `<file>: last_slot <slot> is later than now (<now>); the clock may have gone back. Set
-    last_slot to null or an earlier slot to run it again.`, in `errors` and gate.log. The file is not changed and no
-    card is made, so the routine keeps waiting: moving `last_slot` back by itself could run a slot twice. A watch
-    whose given or saved `last_check_at` is more than the grace after now gets one error
-    `{"watch", "error": "last_check_at <time> is later than now (<now>); ..."}` and is repaired instead: it is due
-    now and its time is written again, since a watch looked at once early is harmless.
+    last_slot to null or an earlier slot to run it again.`, in `errors` and gate.log; after a `tz` change `<slot>` is
+    the file's text and its old zone, then the moved slot in brackets (`2026-11-11T09:00 in Asia/Tokyo
+    (2026-11-10T19:00 in America/New_York)`). The file is not changed and no card is made, so the routine keeps
+    waiting: moving `last_slot` back by itself could run a slot twice. A watch whose given or saved `last_check_at`
+    is more than the grace after now gets one error `{"watch", "error": "last_check_at <time> is later than now
+    (<now>); ..."}` and is repaired instead: that time is left out and the other one still counts, so with no other
+    time the watch is due now and its time is written again, since a watch looked at once early is harmless. A
+    caller that keeps passing a time ahead gets the error on every run, and the watch still runs by `every`.
   - A changed `tz`. Each `last_slot` write also writes `last_slot_tz`, the `tz` in the file it re-reads (the gate
     keeps the three-argument call `write_last_slot(path, slot, write)`). When a file's `last_slot_tz` is set and
     differs from `tz`, the routine reads `last_slot` as a wall time in the old zone and uses that moment as
     wall-clock text in the new zone (Eastern 09:00 becomes Pacific 06:00, so the Pacific 09:00 slot still runs); a
     reset would instead make the routine `start` again and skip the slot. The file changes only at the next write.
     An unknown old zone is refused on `last_slot_tz`; a slot that cannot be moved (past the end of the calendar) is
-    refused on `last_slot`. A file without `last_slot_tz` behaves as before.
+    refused on `last_slot`. A file without `last_slot_tz` behaves as before. A known limit: when the moved slot lands
+    in the second pass of the new zone's repeated hour at the end of daylight saving time, a slot later in that same
+    hour (whose first pass came before the last run) may run once, late. It needs a `tz` change during that hour,
+    and it is accepted.
   - A fatal error. When a run stops with a config error (config.yaml cannot be read, the lock cannot be opened, the
     data folder fails) and the data folder exists, `gate.run` appends `<UTC time> fatal: <error>` to gate.log, best
     effort, then raises the same error; `ap2 gate` still prints one `ap2: ...` line and exits 1. Keeping launchd's

@@ -59,6 +59,9 @@ class Routine:
     missed_run: str
     last_slot: Optional[str]
     paused: bool
+    # When `last_slot` was moved from the file's `last_slot_tz` to `tz`: the file's text and that old zone, such as
+    # "2026-11-11T09:00 in Asia/Tokyo". None when `last_slot` is the file's text as it is.
+    moved_from: Optional[str] = None
 
     def within(self) -> Optional[timedelta]:
         """How late a missed slot may still run: None for `once` (any time), zero for `skip`."""
@@ -171,15 +174,17 @@ def parse(path: Path, obj) -> Routine:
     if not (isinstance(missed, str) and MISSED.match(missed)):
         _fail(path, "missed_run", f"missed_run must be skip, once or once_within: <N>h (N from 1 to 999), "
                                   f"not {missed!r}")
-    last = obj.get("last_slot")
-    if last is not None and not check_slot(last):
-        _fail(path, "last_slot", f"last_slot must be a YYYY-MM-DDTHH:MM time or null, not {last!r}")
-    last = _in_zone(path, last, obj.get("last_slot_tz"), obj["tz"], tz)
+    text = obj.get("last_slot")
+    if text is not None and not check_slot(text):
+        _fail(path, "last_slot", f"last_slot must be a YYYY-MM-DDTHH:MM time or null, not {text!r}")
+    last_tz = obj.get("last_slot_tz")
+    last = _in_zone(path, text, last_tz, obj["tz"], tz)
+    moved_from = f"{text} in {last_tz}" if text is not None and last_tz not in (None, obj["tz"]) else None
     paused = obj.get("paused", False)
     if not isinstance(paused, bool):
         _fail(path, "paused", f"paused must be true or false, not {paused!r}")
     return Routine(name=name, path=path, title=title, days=days, at=at, tz_name=obj["tz"], tz=tz,
-                   missed_run=missed, last_slot=last, paused=paused)
+                   missed_run=missed, last_slot=last, paused=paused, moved_from=moved_from)
 
 
 def _in_zone(path: Path, last: Optional[str], last_tz, tz_name: str, tz) -> Optional[str]:
