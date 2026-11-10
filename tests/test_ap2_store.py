@@ -574,5 +574,148 @@ class SearchIndexTest(StoreCase):
         self.assertEqual([c["id"] for c in self.store.search("lighthouse")], [added["id"]])
 
 
+
+class DamagedFileTest(StoreCase):
+    """A card file that is JSON with the right id but a structure the store cannot use is refused, naming it."""
+
+    SHAPES = {"no audit": lambda c: c.pop("audit"), "plain null": lambda c: c.update(plain=None),
+              "ask text": lambda c: c.update(ask="hi")}
+
+    def damaged(self, damage):
+        added = self.store.add(card(title="Vendor export"), by="w")
+        self.clock.tick(minutes=1)
+        point = self.store.update(added["id"], {"lane": "done"}, by="w")["audit"][-1]["restore"]
+        path = self.store.path(added["id"])
+        on_disk = json.loads(path.read_text(encoding="utf-8"))
+        damage(on_disk)
+        path.write_text(json.dumps(on_disk), encoding="utf-8")
+        return added["id"], point, path
+
+    def points(self):
+        return sorted(p.name for p in (self.data / "restore").glob("r-*.json"))
+
+    def test_each_damaged_shape_is_refused_by_every_call(self):
+        for name, damage in self.SHAPES.items():
+            with self.subTest(name):
+                card_id, point, path = self.damaged(damage)
+                calls = {"get": lambda: self.store.get(card_id),
+                         "list": lambda: self.store.list(),
+                         "search": lambda: self.store.search("vendor"),
+                         "update": lambda: self.store.update(card_id, {"lane": "running"}, by="w"),
+                         "propose": lambda: self.store.propose_opposite(card_id, "close_pr", ["gh", "pr"], by="w"),
+                         "restore": lambda: self.store.restore(point, by="user")}
+                for call_name, call in calls.items():
+                    before = self.points()
+                    with self.assertRaisesRegex(CardError, f"{path}: not a card file", msg=call_name):
+                        call()
+                    self.assertEqual(self.points(), before, call_name)  # no orphan restore point
+                (self.data / "index.sqlite").unlink()
+                with self.assertRaisesRegex(CardError, f"{path}: not a card file"):
+                    self.store.search("vendor")  # met by the rebuild
+                path.unlink()
+
+    def test_search_text_ignores_a_plain_that_is_not_an_object(self):
+        self.assertEqual(cards.search_text({"plain": None, "title": "Vendor"}), "Vendor")
+
+
+class RestoreAnyPointTest(StoreCase):
+    def test_a_point_holding_a_hand_edited_enum_can_be_put_back(self):
+        added = self.store.add(card(), by="w")
+        self.clock.tick(minutes=1)
+        r1 = self.store.update(added["id"], {"lane": "done"}, by="w")["audit"][-1]["restore"]
+        path = self.store.path(added["id"])
+        on_disk = json.loads(path.read_text(encoding="utf-8"))
+        on_disk["lane"] = "blocked"
+        path.write_text(json.dumps(on_disk), encoding="utf-8")
+        self.clock.tick(minutes=1)
+        undone = self.store.restore(r1, by="user")
+        self.assertEqual(undone["lane"], "planned")
+        r2 = undone["audit"][-1]["restore"]
+        self.clock.tick(minutes=1)
+        redone = self.store.restore(r2, by="user")
+        self.assertEqual(redone["lane"], "blocked")
+        self.assertEqual(len(redone["audit"]), len(undone["audit"]) + 1)
+        self.assertEqual(redone["audit"][-1]["did"], f"restore {r2}")
+        self.assertEqual(self.store.get(added["id"])["lane"], "blocked")
+
+
+class BadUnicodeTest(StoreCase):
+    def assert_nothing_written(self):
+        self.assertEqual(list((self.data / "restore").glob("r-*.json")), [])
+        self.assertFalse((self.data / ".index.stale").exists())
+
+    def test_add_with_a_lone_surrogate_is_refused(self):
+        with self.assertRaisesRegex(CardError, "not valid Unicode"):
+            self.store.add(card(title="bad \ud800"), by="w")
+        with self.assertRaisesRegex(CardError, "not valid Unicode"):
+            self.store.add(card(), by="\udcff")
+        self.assertEqual(list(self.data.glob("items/*/*.json")), [])
+        self.assert_nothing_written()
+
+    def test_update_with_a_lone_surrogate_is_refused_before_any_point(self):
+        added = self.store.add(card(), by="w")
+        with self.assertRaisesRegex(CardError, "not valid Unicode"):
+            self.store.update(added["id"], {"title": "bad \ud800"}, by="w")
+        with self.assertRaisesRegex(CardError, "not valid Unicode"):
+            self.store.update(added["id"], {"lane": "done"}, by="\udcff")
+        self.assertEqual(self.store.get(added["id"]), added)
+        self.assert_nothing_written()
+
+    def test_search_with_a_lone_surrogate_is_refused(self):
+        self.store.add(card(), by="w")
+        with self.assertRaisesRegex(CardError, "not valid Unicode"):
+            self.store.search("retry \udcff")
+
+    def test_a_card_file_holding_a_lone_surrogate_is_refused(self):
+        added = self.store.add(card(title="Vendor"), by="w")
+        path = self.store.path(added["id"])
+        on_disk = json.loads(path.read_text(encoding="utf-8"))
+        on_disk["title"] = "Vendor \ud800"
+        path.write_text(json.dumps(on_disk), encoding="utf-8")  # ensure_ascii: the file holds the \\ud800 escape
+        (self.data / "index.sqlite").unlink()
+        for call in (lambda: self.store.get(added["id"]), lambda: self.store.search("vendor"),
+                     lambda: self.store.update(added["id"], {"lane": "done"}, by="w")):
+            with self.assertRaisesRegex(CardError, f"{path}: not a card file: .*not valid Unicode"):
+                call()
+        self.assertEqual(list((self.data / "restore").glob("r-*.json")), [])
+
+
+class UnreadableFolderTest(StoreCase):
+    def test_an_unreadable_month_folder_fails_instead_of_hiding_its_cards(self):
+        added = self.store.add(card(title="Vendor"), by="w")
+        month = self.store.path(added["id"]).parent
+        (self.data / "index.sqlite").unlink()
+        os.chmod(month, 0)
+        self.addCleanup(os.chmod, month, 0o755)  # runs before the temp folder is removed
+        try:
+            os.listdir(month)
+        except PermissionError:
+            pass
+        else:
+            self.skipTest("chmod 000 does not stop this user reading the folder (root?)")
+        with self.assertRaisesRegex(CardError, "cannot use the card store"):
+            self.store.list()
+        with self.assertRaisesRegex(CardError, "cannot use the card store"):
+            self.store.search("vendor")
+        self.assertFalse((self.data / "index.sqlite").exists())  # no empty index left behind
+        os.chmod(month, 0o755)
+        self.assertEqual([c["id"] for c in self.store.search("vendor")], [added["id"]])
+        self.assertEqual([c["id"] for c in self.store.list()], [added["id"]])
+
+
+class JunkIndexRowTest(StoreCase):
+    def test_junk_and_duplicate_rows_are_skipped(self):
+        import sqlite3
+        added = self.store.add(card(title="Vendor"), by="w")
+        conn = sqlite3.connect(str(self.data / "index.sqlite"))
+        with conn:
+            conn.execute("DROP TABLE cards")
+            conn.execute("CREATE TABLE cards(id TEXT, text TEXT NOT NULL)")  # no primary key: duplicates fit
+            conn.executemany("INSERT INTO cards VALUES (?, ?)",
+                             [("bogus", "vendor"), (added["id"], "vendor"), (added["id"], "vendor")])
+        conn.close()
+        self.assertEqual([c["id"] for c in self.store.search("vendor")], [added["id"]])
+
+
 if __name__ == "__main__":
     unittest.main()

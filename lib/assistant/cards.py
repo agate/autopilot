@@ -5,6 +5,7 @@ Keys not named here are kept as they are, so later templates can add their own f
 """
 from __future__ import annotations
 
+import json
 import re
 import secrets
 from datetime import datetime, timezone
@@ -106,6 +107,30 @@ def check_shape(card) -> None:
         raise CardError(f"plain must be an object with what, where and do, not {card['plain']!r}")
 
 
+def check_unicode(value, what: str = "text") -> None:
+    """Refuse text that cannot be written as UTF-8: a lone surrogate, e.g. from command-line bytes that are not
+    UTF-8 or a `\\ud800` escape in a hand-edited file."""
+    try:
+        json.dumps(value, ensure_ascii=False).encode("utf-8")
+    except UnicodeEncodeError as e:
+        raise CardError(f"{what} is not valid Unicode: {e.object[e.start:e.end]!r}") from None
+
+
+def check_stored(card) -> None:
+    """The least the store needs to use a card file it reads (or a card in a restore point): `audit` a list,
+    `plain` an object, `ask` an object or null, and text that is valid Unicode. Enums and required fields are not
+    checked here, so a hand-edited file can still be read, and any point the store saved can be put back."""
+    if not isinstance(card, dict):
+        raise CardError(f"a card is a JSON object, not {type(card).__name__}")
+    if not isinstance(card.get("audit"), list):
+        raise CardError("audit missing" if "audit" not in card else f"audit must be a list, not {card['audit']!r}")
+    if not isinstance(card.get("plain"), dict):
+        raise CardError("plain missing" if "plain" not in card else f"plain must be an object, not {card['plain']!r}")
+    if card.get("ask") is not None and not isinstance(card["ask"], dict):
+        raise CardError(f"ask must be an object or null, not {card['ask']!r}")
+    check_unicode(card)
+
+
 def plain_problems(plain, languages: tuple) -> list:
     """Each missing or empty plain-words line, as `plain.<line>.<language> missing|is empty`."""
     problems = []
@@ -134,6 +159,7 @@ def check_plain(card: dict, langs: tuple) -> None:
 
 def validate(card, langs: tuple) -> None:
     """The full check run on every add and update. Raises CardError (PlainWordsError for the plain words)."""
+    check_unicode(card)
     if isinstance(card, dict) and "plain" not in card:
         check_plain(card, langs)  # name the missing lines and languages, not just "plain missing"
     check_shape(card)
@@ -143,8 +169,10 @@ def validate(card, langs: tuple) -> None:
 def search_text(card: dict) -> str:
     """What the search index holds for a card: its plain words in every language, title, kind and feed."""
     parts = []
+    plain = card.get("plain")
+    plain = plain if isinstance(plain, dict) else {}
     for line in PLAIN_LINES:
-        texts = card.get("plain", {}).get(line)
+        texts = plain.get(line)
         if isinstance(texts, dict):
             parts.extend(str(texts[k]) for k in sorted(texts) if isinstance(texts[k], str))
     for key in ("title", "kind", "feed"):

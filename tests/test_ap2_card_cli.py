@@ -135,6 +135,11 @@ class CardCommandTest(unittest.TestCase):
         self.assertIn(".claude", self.fails("card", "list", data=self.home / ".claude" / "assistant"))
         self.assertFalse((self.home / ".claude").exists())
 
+    def test_undecodable_argument_bytes_are_one_line(self):
+        self.ok("card", "add", str(self.card_file()))
+        self.assertIn("not valid Unicode", self.fails("search", b"\xff"))
+        self.assertIn("not valid Unicode", self.fails("card", "add", str(self.card_file()), "--by", b"\xff"))
+
     def test_corrupt_card_file_is_named(self):
         added = self.ok("card", "add", str(self.card_file()))
         path = next((self.data / "items").glob(f"*/{added['id']}.json"))

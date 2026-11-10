@@ -83,6 +83,10 @@ class Store:
             raise CardError(f"{path}: cannot read the card: {e}") from e
         if not (isinstance(card, dict) and card.get("id") == path.stem):
             raise CardError(f"{path}: not a card file (its id is not its file name)")
+        try:
+            cards.check_stored(card)
+        except CardError as e:
+            raise CardError(f"{path}: not a card file: {e}") from None
         return card
 
     def _load(self, card_id: str) -> dict:
@@ -95,9 +99,14 @@ class Store:
         folder = self.data / ITEMS
         if not folder.is_dir():
             return
-        for p in sorted(folder.glob("*/c-*.json")):
-            if cards.CARD_ID.match(p.stem) and p.parent.name == cards.month(p.stem):
-                yield self._read(p)
+        # iterdir(), not glob(): glob skips a folder it cannot read, and a rebuild would then drop its cards for
+        # good. iterdir() raises, and _guard() turns that into one CardError.
+        for sub in sorted(folder.iterdir()):
+            if not sub.is_dir():
+                continue
+            for p in sorted(sub.iterdir()):
+                if p.suffix == ".json" and cards.CARD_ID.match(p.stem) and sub.name == cards.month(p.stem):
+                    yield self._read(p)
 
     def _write(self, card: dict) -> None:
         behind = self.index.mark_stale()  # before the card file, so a stop in between is caught up later
@@ -111,6 +120,7 @@ class Store:
     def _by(by) -> str:
         if not (isinstance(by, str) and by.strip()):
             raise CardError(f"by must name who made the change, not {by!r}")
+        cards.check_unicode(by, "by")
         return by
 
     # -- the API -------------------------------------------------------------------------------------------------
@@ -188,7 +198,9 @@ class Store:
             point = restore.load(self.data, point_id)
             old = point["card"]
             card_id = cards.check_id(old.get("id"))
-            cards.check_shape(old)  # the plain words are not re-checked: the languages may have changed since
+            # Only what the store needs, not the enums or plain words: a point holds whatever file was there (a
+            # hand edit too), and the languages may have changed since. Any point the store saved can be put back.
+            cards.check_stored(old)
             at = self.clock()
             current = self._read(self.path(card_id)) if self.path(card_id).exists() else None
             saved = restore.save(self.data, current, at, write_json) if current is not None else None
@@ -220,9 +232,12 @@ class Store:
     def search(self, text: str) -> list:
         """The cards whose plain words, title, kind or feed hold every word of `text`, oldest first. Read from the
         card files; the index only picks them."""
+        cards.check_unicode(text, "search text")
         terms = text.casefold().split()
         with self._guard():
-            found = [self._read(self.path(i)) for i in self.index.search(text) if self.path(i).exists()]
+            # The index is never the truth: skip a row that is not a card id, and a duplicate row.
+            ids = [i for i in dict.fromkeys(self.index.search(text)) if isinstance(i, str) and cards.CARD_ID.match(i)]
+            found = [self._read(self.path(i)) for i in ids if self.path(i).exists()]
         # A row can be behind its file (a hand edit); keep only the cards whose file holds every word.
         return [c for c in found if all(t in cards.search_text(c).casefold() for t in terms)]
 

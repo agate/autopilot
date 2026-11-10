@@ -621,6 +621,11 @@ Calls the author made without asking (check them):
     `propose <action>`; `restore` is the point saved just before that change (null for an add). An update that
     changes nothing writes nothing. A restore puts the old card back but keeps the full audit (the current one
     plus the restore entry), so the history never shrinks.
+  - The store reads a card file only when its structure is usable (`audit` a list, `plain` an object, `ask` an
+    object or null, text valid Unicode); otherwise the call fails with one error naming the file, and nothing is
+    written. Restore puts back any point it saved without re-checking enums, so an undo can always be undone.
+    Text that is not valid Unicode (a lone surrogate, e.g. from command-line bytes that are not UTF-8) is refused
+    on add, update, `--by` and search before anything is written.
   - Restore points: one file `<data>/restore/<point id>.json` with
     `{"id", "at", "kind": "card", "card_id", "card"}`, id `r-YYYYMMDD-HHMMSS-xxxxxx`. `Store.prune()` removes points
     older than 30 days (kept at exactly 30); nothing calls it yet, the heartbeat (slice 5) will. A point whose time
@@ -642,7 +647,10 @@ Calls the author made without asking (check them):
   other-version or stale-marked file is rebuilt from `items/` (written to a temp file, then `os.replace`; the temp
   file is removed when the build fails). Results are read from the card files, never from the index, and a card is
   kept only when its file holds every word of the query, so a row that is behind its file never shows a card. A search whose rebuild meets a damaged card file
-  fails with one error naming that file.
+  fails with one error naming that file. Hand edits to card files that remove words are caught by this re-check,
+  but added words are found only after the next rebuild (delete `index.sqlite` to force one). An index row that
+  is not a card id, or a repeated row, is skipped. A month folder in `items/` that cannot be read fails the call
+  with one error; it is never skipped, so a rebuild cannot silently drop its cards.
 - **[decided by the builder]** Card commands: `ap2 card add <file.json|-> [--by NAME]`, `ap2 card show <id>`,
   `ap2 card list [--lane L] [--kind K] [--parent ID]`, `ap2 search <text...>`, `ap2 restore <point id> [--by NAME]`,
   each with `--data PATH`. `--by` defaults to `ap2`. Output is JSON (a card, or a list oldest first; cards made in the same second are in id order); an error is
