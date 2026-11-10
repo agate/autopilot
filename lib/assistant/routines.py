@@ -149,6 +149,10 @@ def parse(path: Path, obj) -> Routine:
     title = obj["title"]
     if not (isinstance(title, str) and title.strip()):
         _fail(path, "title", f"title must be a non-empty text, not {title!r}")
+    try:
+        title.encode("utf-8")
+    except UnicodeEncodeError:  # a lone surrogate, e.g. a \ud800 escape: it could not be written back
+        _fail(path, "title", f"title is not valid Unicode: {title!r}")
     schedule = obj["schedule"]
     if not isinstance(schedule, dict):
         _fail(path, "schedule", f"schedule must be an object with days and at, not {schedule!r}")

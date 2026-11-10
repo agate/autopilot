@@ -153,6 +153,10 @@ def _read_watch_state(data: Path):
     if not isinstance(state, dict):
         return {}, {"watches": str(path),
                     "error": f"{path}: the watch times must be a JSON object, not {type(state).__name__}"}
+    try:
+        cards.check_unicode(state, "the watch times")
+    except CardError as e:  # e.g. a lone surrogate: the file could not be written again
+        return {}, {"watches": str(path), "error": f"{path}: {e}"}
     return state, None
 
 
@@ -178,6 +182,7 @@ def due_watches(data: Path, watches, now: datetime):
         try:
             if not (isinstance(name, str) and name.strip()):
                 raise ValueError(f"a watch needs a name, not {name!r}")
+            cards.check_unicode(name, "the watch name")  # a CardError is a ValueError
             every = parse_every(w.get("every"))
             given = _parse_time(w.get("last_check_at"))
             saved = state.get(name, {}).get("last_check_at") if isinstance(state.get(name), dict) else None
@@ -198,6 +203,11 @@ def due_watches(data: Path, watches, now: datetime):
 
 
 # -- the run ------------------------------------------------------------------------------------------------------
+
+def _safe(value):
+    """Text that can be written as UTF-8: a lone surrogate becomes its backslash escape, as in gate.log."""
+    return value.encode("utf-8", "backslashreplace").decode("utf-8") if isinstance(value, str) else value
+
 
 def run(data, now: datetime, watches=(), store: Optional[Store] = None) -> dict:
     """One gate run at `now` (an aware datetime). Returns what it found, also written to `<data>/gate.json`; a run
@@ -248,7 +258,7 @@ def _run(data: Path, now: datetime, watches, store: Optional[Store]) -> dict:
             else:
                 action = "exists"
             routines.write_last_slot(r.path, d.slot, write_json)
-        except (routines.RoutineError, CardError, OSError) as e:
+        except (routines.RoutineError, CardError, OSError, ValueError) as e:  # e.g. text UTF-8 cannot write
             errors.append({"routine": r.name, "file": str(r.path), "error": str(e)})
             log(f"routine {r.name}: error: {e}")
             continue
@@ -275,6 +285,7 @@ def _run(data: Path, now: datetime, watches, store: Optional[Store]) -> dict:
     if pruned:
         log(f"pruned {len(pruned)} restore point(s) older than 30 days")
 
+    errors = [{k: _safe(v) for k, v in e.items()} for e in errors]  # e.g. a file name that is not UTF-8
     out = {"last_run_at": cards.stamp(now), "routines": found, "watches_due": due_names, "pruned": pruned,
            "errors": errors}
     write_json(data / HEARTBEAT, out)

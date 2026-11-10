@@ -760,7 +760,8 @@ Calls the author made without asking (check them):
     null) and `paused` (default false). An unknown key, a repeated day or time, or a bad value is refused with one
     error, `<file>: <field>: <why>`; a bad routine is listed in the run's `errors` and the others still run. An
     unknown key is quoted with its escapes (`'owner'`, `schedule.'every'`), so a key JSON can hold but UTF-8
-    cannot (a lone `\ud800`) never stops `gate.json` from being written. Hidden files in `routines/` are left out.
+    cannot (a lone `\ud800`) never stops `gate.json` from being written. A title UTF-8 cannot write is refused the
+    same way, and any other such value is one error for its routine. Hidden files in `routines/` are left out.
   - Due slot: the latest slot at or before now, looked for in the last 7 days, in the routine's `tz`, compared with
     `last_slot` as wall-clock text. So each wall-clock slot happens once on a day the clocks change: a time that
     happens twice (clocks going back) runs at its first time; a time that does not exist (clocks going forward)
@@ -785,10 +786,13 @@ Calls the author made without asking (check them):
     `last_check_at` in `<data>/watches.json`, whose time wins when it is later than the one given. The gate does not
     read the source and makes no card for the look. A watches.json that cannot be read, is not JSON or is not an
     object is treated like a damaged saved time: the run logs it, adds `{"watches": <path>, "error": ...}` to
-    `errors`, starts from no saved times (so each watch is due) and writes the file again when a watch is due.
+    `errors`, starts from no saved times (so each watch is due) and writes the file again when a watch is due. A
+    watches.json holding text UTF-8 cannot write (a lone surrogate) is treated the same way; a watch name like that
+    is refused as a bad watch, with an error, and the others still run.
   - Heartbeat: every run writes `<data>/gate.json` atomically: `{"last_run_at": <UTC>, "routines": [{routine,
     slot, key, action (run, late, skip, exists or start), card, late_minutes}], "watches_due": [...], "pruned": [point
-    ids], "errors": [...]}`. Every line of `<data>/gate.log` starts with the run's UTC time
+    ids], "errors": [...]}`; text in `errors` that UTF-8 cannot write (a file name that is not UTF-8) is written with
+    backslash escapes. Every line of `<data>/gate.log` starts with the run's UTC time
     (`2026-11-10T14:30:05Z run: ...`), one line per routine action or error and one summary line; past 1 MB it is
     renamed `gate.log.1` (one old file is kept). Each run calls `Store.prune()`.
   - One run at a time: `<data>/.gate.lock` is taken with a non-blocking `flock`; a run that finds it held prints

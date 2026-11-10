@@ -170,6 +170,36 @@ class RoutineFileTest(GateCase):
                       next(e for e in out["errors"] if e["routine"] == "nested")["error"])
         self.assertEqual(json.loads((self.data / "gate.json").read_text(encoding="utf-8")), out)
 
+    def test_a_lone_surrogate_title_is_refused_and_the_others_still_run(self):
+        a = self.data / "routines" / "a.json"
+        a.write_text(json.dumps({"title": "Bad \ud800", "schedule": {"days": "daily", "at": ["06:00"]},
+                                 "tz": "UTC"}), encoding="utf-8")
+        self.put("b", schedule={"days": "daily", "at": ["06:00"]}, last_slot="2026-11-08T06:00")
+        out = self.gate(utc(2026, 11, 10, 6, 30))
+        self.assertEqual([(f["routine"], f["action"]) for f in out["routines"]], [("b", "late")])
+        self.assertEqual(len(out["errors"]), 1)
+        self.assertEqual(out["errors"][0]["routine"], "a")
+        self.assertIn(f"{a}: title: title is not valid Unicode", out["errors"][0]["error"])
+        self.assertEqual(len(self.routine_cards()), 1)
+        self.assertEqual(json.loads((self.data / "gate.json").read_text(encoding="utf-8")), out)
+
+    def test_any_value_utf8_cannot_write_is_one_error_for_its_routine(self):
+        a = self.put("a", last_slot="2026-11-09T09:00")
+        self.put("b", last_slot="2026-11-09T09:00")
+        real = routines.write_last_slot
+
+        def write_last_slot(path, slot, write):
+            if Path(path) == a:
+                raise UnicodeEncodeError("utf-8", "\ud800", 0, 1, "surrogates not allowed")
+            return real(path, slot, write)
+
+        with mock.patch.object(routines, "write_last_slot", write_last_slot):
+            out = self.gate(utc(2026, 11, 10, 9, 1))
+        self.assertEqual([f["routine"] for f in out["routines"]], ["b"])
+        self.assertEqual([e["routine"] for e in out["errors"]], ["a"])
+        self.assertEqual(self.file("b")["last_slot"], "2026-11-10T09:00")
+        self.assertEqual(json.loads((self.data / "gate.json").read_text(encoding="utf-8")), out)
+
 
 # -- criterion 2: due slots ---------------------------------------------------------------------------------------
 
@@ -487,6 +517,27 @@ class WatchTest(GateCase):
                 self.assertIn(f"watches: error: {path}", (self.data / "gate.log").read_text())
                 self.assertEqual(json.loads(path.read_text()), {"slack": {"last_check_at": "2026-11-10T14:00:00Z"}})
 
+    def test_a_lone_surrogate_in_watches_json_is_a_damaged_file(self):
+        path = self.data / "watches.json"
+        path.write_text('{"\\ud800": {"last_check_at": null}}', encoding="utf-8")
+        out = self.gate(self.T, watches=[{"name": "slack", "every": "5m"}])
+        self.assertEqual(out["watches_due"], ["slack"])
+        self.assertEqual(len(out["errors"]), 1)
+        self.assertEqual(out["errors"][0]["watches"], str(path))
+        self.assertIn("not valid Unicode", out["errors"][0]["error"])
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8")),
+                         {"slack": {"last_check_at": "2026-11-10T14:00:00Z"}})
+        self.assertEqual(json.loads((self.data / "gate.json").read_text(encoding="utf-8")), out)
+
+    def test_a_watch_name_utf8_cannot_write_is_refused(self):
+        out = self.gate(self.T, watches=[{"name": "bad\ud800", "every": "5m"}, {"name": "ok", "every": "5m"}])
+        self.assertEqual(out["watches_due"], ["ok"])
+        self.assertEqual([e["watch"] for e in out["errors"]], ["bad\\ud800"])  # escaped, so it can be written
+        self.assertIn("not valid Unicode", out["errors"][0]["error"])
+        self.assertEqual(json.loads((self.data / "watches.json").read_text(encoding="utf-8")),
+                         {"ok": {"last_check_at": "2026-11-10T14:00:00Z"}})
+        self.assertEqual(json.loads((self.data / "gate.json").read_text(encoding="utf-8")), out)
+
     def test_a_look_is_not_logged_as_a_card(self):
         self.gate(self.T, watches=[{"name": "slack", "every": "5m"}])
         self.assertEqual(self.store().list(), [])
@@ -505,6 +556,18 @@ class HeartbeatTest(GateCase):
         self.assertEqual(sorted(heartbeat), ["errors", "last_run_at", "pruned", "routines", "watches_due"])
         self.gate(utc(2026, 11, 10, 14, 31, 5))
         self.assertEqual(json.loads((self.data / "gate.json").read_text())["last_run_at"], "2026-11-10T14:31:05Z")
+
+    def test_a_file_name_that_is_not_utf8_is_escaped_in_gate_json(self):
+        # On Linux a file name with the byte 0xe9 lists as "caf\udce9.json"; it is refused, and its error text
+        # must still be written.
+        bad = self.data / "routines" / "caf\udce9.json"
+        with mock.patch.object(routines, "files", return_value=[bad]):
+            out = self.gate(utc(2026, 11, 10, 9, 1))
+        self.assertEqual(len(out["errors"]), 1)
+        self.assertEqual(out["errors"][0]["routine"], "caf\\udce9")
+        self.assertIn("caf\\udce9.json", out["errors"][0]["file"])
+        self.assertIn("caf\\udce9.json", out["errors"][0]["error"])
+        self.assertEqual(json.loads((self.data / "gate.json").read_text(encoding="utf-8")), out)
 
     def test_a_non_utc_now_is_written_as_utc(self):
         la = datetime(2026, 11, 10, 6, 30, 5, tzinfo=routines.ZoneInfo(LA))
