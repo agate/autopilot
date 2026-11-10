@@ -191,7 +191,8 @@ def decision_explain(ap: str, did: str, new: dict, check: bool = False) -> str:
             errs.append(f"body: label {out['body']['key']!r} needs args {', '.join(miss)}")
         known = {x["id"] for x in st["decisions"]} | {line.get("id") for line in _archive_lines(ap)}
         related = out["explain"].get("related") if isinstance(out["explain"], dict) else None
-        gone = [r["id"] for r in related if isinstance(r, dict) and r.get("id") not in known] if isinstance(related, list) else []
+        gone = [r["id"] for r in related if isinstance(r, dict) and isinstance(r.get("id"), str)
+                and r["id"] not in known] if isinstance(related, list) else []
         if gone:
             errs.append(f"explain.related: {ap} has no card {', '.join(map(str, gone))}")
         if errs:
@@ -439,7 +440,7 @@ def _decision(args):
     elif len(args) in (4, 5) and args[0] == "explain" and args[4:] in ([], ["--check"]):
         try:
             print(decision_explain(args[1], args[2], _load_arg(args[3]), check="--check" in args))
-        except (ValueError, state.StateError) as e:
+        except (ValueError, OSError, state.StateError) as e:
             print(f"ap decision explain: {e}", file=sys.stderr)
             return 1
     elif len(args) >= 3 and args[0] == "resolve":

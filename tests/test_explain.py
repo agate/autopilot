@@ -264,10 +264,19 @@ class ExplainExistingCardTest(Base):
                            (self.new_part(title=t("x")), "the file holds"),
                            (self.new_part(options={"A": {"does": t("x"), "label": t("y")}}), "the file holds"),
                            ({"body": t("x")}, "the file holds"),
-                           (self.new_part(explain=dict(card()["explain"], related=[{"id": "D9", "why": t("x")}])), "has no card D9")):
+                           (self.new_part(explain=dict(card()["explain"], related=[{"id": "D9", "why": t("x")}])), "has no card D9"),
+                           (self.new_part(explain=dict(card()["explain"], related=[{"why": t("x")}])), "related[0]: missing id"),
+                           (self.new_part(explain=dict(card()["explain"], related=[{"id": ["D1"], "why": t("x")}])), "card id like D12")):
             code, _, err = self.run_cli("D1", bad)
             self.assertEqual(code, 1, bad)
             self.assertIn(words, err)
+
+    def test_a_missing_file_is_a_clear_refusal(self):
+        self.old_card()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(cli.main(["decision", "explain", "checkout", "D1", "/nonexistent/explain.json"]), 1)
+        self.assertIn("ap decision explain:", err.getvalue())
 
     def test_only_cards_in_the_state_and_not_system_cards(self):
         self.old_card()
