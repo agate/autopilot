@@ -110,6 +110,30 @@ class LoadingTest(SourceCase):
         self.assertEqual(src.sort["fyi"], "question")
         self.assertEqual(src.sort["alert"], "alert")
 
+    def test_extends_merges_nested_maps_key_by_key(self):
+        self.builtin("deep", """\
+            source: deep
+            brings: messages
+            read:
+              via: mcp
+              tool: search
+              args:
+                a: one
+                b: two
+            fill: ai
+            form: { id: Id, at: At, text: Text }
+            link: none
+            sort: { all: alert }
+            """)
+        self.user("deep", """\
+            extends: deep
+            read:
+              args:
+                a: changed
+            """)
+        src = self.loader().load("deep")
+        self.assertEqual(src.data["read"], {"via": "mcp", "tool": "search", "args": {"a": "changed", "b": "two"}})
+
     def test_extends_another_name_makes_a_new_source(self):
         self.user("vendor-status")
         self.user("other-status", """\
@@ -226,6 +250,8 @@ class ValidationTest(SourceCase):
          "line 6: read.every must be a text such as 15m, not ['5m']"),
         ("timeout", ("  run: echo []\n", "  run: echo []\n  timeout: 0\n"),
          "line 6: read.timeout must be a whole number of seconds from 1 to 600, not 0"),
+        ("timeout too long", ("  run: echo []\n", "  run: echo []\n  timeout: 601\n"),
+         "line 6: read.timeout must be a whole number of seconds from 1 to 600, not 601"),
         ("fill", ("fill: paths", "fill: magic"), "line 6: fill must be one of paths, ai, not 'magic'"),
         ("form missing", ("form:\n  id: .id\n  at: .at\n  text: .text\n", ""), "form missing"),
         ("form without at", ("  at: .at\n", ""), "line 7: form must name id, at, text; missing: at"),

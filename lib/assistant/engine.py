@@ -25,6 +25,7 @@ from pathlib import Path, PurePosixPath
 from typing import Callable, Optional
 
 from assistant import cards, config, form, sources
+from assistant.cards import CardError
 from assistant.sources import SourceError
 from assistant.store import Store, write_json
 
@@ -115,11 +116,13 @@ class Engine:
         if not self.data.is_dir():
             raise SourceError(f"data folder {self.data} does not exist (run ap2 config to set it up)")
         self._check_languages(src)
+        _check_fill(src, None)
         done = self._run(src, dry_run)
         raw = None if dry_run else self._save_raw(src, done.stdout)
         if done.returncode != 0:
             last = done.stderr.decode("utf-8", "replace").strip().splitlines()[-1:] or ["no output on stderr"]
-            raise SourceError(f"{src.name}: read.run exited with {done.returncode}: {last[0]}")
+            saved = f" (output saved as {raw})" if raw else ""
+            raise SourceError(f"{src.name}: read.run exited with {done.returncode}: {last[0]}{saved}")
         return self._process(src, done.stdout, raw, dry_run, None)
 
     def read_saved(self, name: str, raw_path, records: Optional[list] = None, dry_run: bool = False) -> dict:
@@ -128,6 +131,7 @@ class Engine:
         the raw output is copied under `<data>/sources/.raw/<source>/` first (when it is not there already)."""
         src = self.source(name)
         self._check_languages(src)
+        _check_fill(src, records)
         path = Path(raw_path)
         try:
             raw_bytes = path.read_bytes()
@@ -179,9 +183,8 @@ class Engine:
         return path.relative_to(self.data).as_posix()
 
     def _process(self, src, raw_bytes: bytes, raw: Optional[str], dry_run: bool, records) -> dict:
+        _check_fill(src, records)
         if src.fill == "paths":
-            if records is not None:
-                raise SourceError(f"{src.name}: fill: paths fills its own records; give only the raw output")
             try:
                 reply = json.loads(raw_bytes.decode("utf-8"))
             except (UnicodeDecodeError, ValueError, RecursionError) as e:
@@ -190,9 +193,6 @@ class Engine:
                 raise SourceError(f"{src.name}: the output is not JSON{where}: {why}") from e
             entries, dropped = self.fill(src, reply, raw=raw)
         else:
-            if records is None:
-                raise SourceError(f"{src.name}: fill: ai records are filled by a scan session; give them with the "
-                                  "raw output")
             entries, dropped = self.check_records(src, records, raw_bytes.decode("utf-8", errors="replace"))
         result = self.build(src, entries, dropped, raw, dry_run)
         if raw is not None:
@@ -320,7 +320,11 @@ class Engine:
                     out["would_add"] = new
                     existing[key] = new
                 else:
-                    added = store.add(new, by=f"source:{src.name}")
+                    try:
+                        added = store.add(new, by=f"source:{src.name}")
+                    except CardError as err:
+                        dropped.append({"item": e["item"], "reason": f"new card with key {key}: {err}"})
+                        continue
                     out["card"] = added["id"]
                     existing[key] = added
             else:
@@ -329,8 +333,12 @@ class Engine:
                 out["action"] = "unchanged" if same else "update"
                 out["card"] = old.get("id")
                 if not same and not dry_run:
-                    existing[key] = store.update(old["id"], changes, by=f"source:{src.name}",
-                                                 did=f"read {src.name}")
+                    try:
+                        existing[key] = store.update(old["id"], changes, by=f"source:{src.name}",
+                                                     did=f"read {src.name}")
+                    except CardError as err:
+                        dropped.append({"item": e["item"], "reason": f"card {old['id']}: {err}"})
+                        continue
                 elif not same:
                     out["would_change"] = sorted(k for k, v in changes.items() if not _same(k, old.get(k), v))
                     existing[key] = {**old, **changes}
@@ -372,6 +380,14 @@ class Engine:
             return None
         config.require_live(self.cfg, f"apply {src.name}'s writes.{event}" + (f" for {card_id}" if card_id else ""))
         raise SourceError(f"{src.name}: writes.{event} is not run by this version of ap2")
+
+
+def _check_fill(src: sources.Source, records) -> None:
+    """Refuse records that do not suit the source's `fill`, before anything is run or saved."""
+    if src.fill == "paths" and records is not None:
+        raise SourceError(f"{src.name}: fill: paths fills its own records; give only the raw output")
+    if src.fill == "ai" and records is None:
+        raise SourceError(f"{src.name}: fill: ai records are filled by a scan session; give them with the raw output")
 
 
 def required(src: sources.Source) -> tuple:

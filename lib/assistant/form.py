@@ -79,7 +79,8 @@ def parse_path(text) -> tuple:
             inner = text[i + 1:end]
             if inner == "":
                 steps.append((EACH,))
-            elif inner.strip().isdigit() or (INDEX.fullmatch(inner) and any(ch.isdigit() for ch in inner)):
+            elif inner.strip().isdigit() or (INDEX.fullmatch(inner)
+                                             and (any(ch.isdigit() for ch in inner) or ":" in inner)):
                 raise PathError(f"{text!r}: [{inner}] looks like an index; indexes are not supported")
             elif inner != inner.strip():
                 raise PathError(f"{text!r}: [{inner}] starts or ends with a space")

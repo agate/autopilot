@@ -24,7 +24,8 @@ def reply(name):
 class PathLanguageTest(unittest.TestCase):
     DOC = {"a": {"b": 1, "c d": "x", "list": [{"n": 1, "t": "k"}, {"n": 2, "t": "m"}, 3]},
            "links": [{"type": "is blocked by", "key": "P-1"}, {"type": "blocks", "key": "P-2"},
-                     {"type": {"inward": "is blocked by"}, "inwardIssue": {"key": "P-3"}}]}
+                     {"type": {"inward": "is blocked by"}, "inwardIssue": {"key": "P-3"}},
+                     {"type": "relates to", "note": {"inward": "is blocked by"}, "inwardIssue": {"key": "P-4"}}]}
 
     def test_parse(self):
         self.assertEqual(parse_path("."), ())
@@ -45,7 +46,8 @@ class PathLanguageTest(unittest.TestCase):
                  ".a[": "unclosed '['", '."a': "unclosed quote", '.""': "empty quoted name",
                  ".a[0]": "looks like an index", ".a[ x]": "starts or ends with a space", ".a b": "unexpected ' '",
                  ".a.": "expected a name after '.'", ".a[-1]": "looks like an index", ".a[1:]": "looks like an index",
-                 ".a[:2]": "looks like an index", ".a[-1:-2]": "looks like an index"}
+                 ".a[:2]": "looks like an index", ".a[-1:-2]": "looks like an index",
+                 ".a[:]": "looks like an index"}
         for text, reason in cases.items():
             with self.subTest(text):
                 with self.assertRaisesRegex(PathError, re.escape(reason)):
@@ -62,6 +64,7 @@ class PathLanguageTest(unittest.TestCase):
         self.assertIs(evaluate(parse_path(".a.b.c"), doc), form.MISSING)  # a key on a number gives nothing
         self.assertEqual(evaluate(parse_path(".a.list[].n"), doc), [1, 2])  # 3 has no .n
         self.assertEqual(evaluate(parse_path(".a.b[]"), doc), [])  # [] on a number gives nothing
+        self.assertEqual(evaluate(parse_path(".a[]"), {"a": {"k": 1}}), [])  # nor on a map
         self.assertEqual(evaluate(parse_path(".links[is blocked by].key"), doc), ["P-1"])
         self.assertEqual(evaluate(parse_path(".links[blocks].key"), doc), ["P-2"])
         self.assertEqual(evaluate(parse_path(".links[type.inward=is blocked by].inwardIssue.key"), doc), ["P-3"])
@@ -168,6 +171,12 @@ class FillPathsTest(FillCase):
         with self.assertRaises(ValueError) as cm:
             form.check_record({"id": "1", "at": "t", "text": "x", "depends_on": ["\ud800"]})
         self.assertEqual(str(cm.exception), "form.depends_on: an item is not valid Unicode")
+        with self.assertRaises(ValueError) as cm:
+            form.check_record({"id": "1", "at": "t", "text": "x", "summary": "y"})
+        self.assertEqual(str(cm.exception), "unknown field 'summary'")
+        # depends_on from a path that gives one value is a list of that one value
+        self.assertEqual(form.fill_item({**paths, "depends_on": parse_path(".dep")}, (),
+                                        {"id": 1, "at": "t", "text": "x", "dep": "X"})["depends_on"], ["X"])
         # a missing optional field is simply left out
         self.assertEqual(form.fill_item(paths, (), {"id": 1, "at": "t", "text": "x"}), {"id": "1", "at": "t", "text": "x"})
 

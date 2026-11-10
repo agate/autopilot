@@ -4,6 +4,7 @@ import json
 import os
 import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -13,7 +14,8 @@ from pathlib import Path
 from unittest import mock
 
 from tests.helpers import ROOT
-from assistant import datadir
+from assistant import datadir, sources
+from assistant.cards import CardError
 from assistant.config import Config, ShadowModeError
 from assistant.engine import Engine, plain_words, snippet
 from assistant.sources import Loader, SourceError
@@ -135,8 +137,9 @@ class CommandReadTest(EngineCase):
         self.status_source(reply, self.tmp / "cwd.txt", 3)
         with self.assertRaises(SourceError) as cm:
             self.engine().read("vendor-status")
-        self.assertEqual(str(cm.exception), "vendor-status: read.run exited with 3: it went wrong")
-        self.assertEqual(len(list((self.data / "sources" / ".raw" / "vendor-status").glob("*.json"))), 1)
+        [raw] = (self.data / "sources" / ".raw" / "vendor-status").glob("*.json")
+        self.assertEqual(str(cm.exception), "vendor-status: read.run exited with 3: it went wrong (output saved as "
+                                            f"{raw.relative_to(self.data).as_posix()})")
         self.assertEqual(self.store().list(), [])
 
     def test_no_shell_runs_the_command(self):
@@ -189,6 +192,32 @@ class CommandReadTest(EngineCase):
             self.engine().read("slow")
         [raw] = (self.data / "sources" / ".raw" / "slow").glob("*.json")
         self.assertEqual(raw.read_text(), "[1, 2")
+
+    def test_a_source_without_a_timeout_gets_the_default(self):
+        self.status_source(self.reply_copy("status-incidents.json"))
+        done = subprocess.CompletedProcess([], 0, stdout=b'{"incidents": []}', stderr=b"")
+        with mock.patch("assistant.engine.subprocess.run", return_value=done) as run:
+            self.engine().read("vendor-status")
+        run.assert_called_once()
+        self.assertEqual(run.call_args.kwargs["timeout"], sources.DEFAULT_TIMEOUT)
+
+    def test_a_fill_ai_command_source_is_refused_before_its_command_runs(self):
+        marker = self.tmp / "ran"
+        script = self.tmp / "mark.py"
+        script.write_text("import sys; open(sys.argv[1], 'w').write('ran'); print('[]')\n")
+        self.user_source("cmd-ai", f"""\
+            source: cmd-ai
+            brings: messages
+            read: {{ via: command, run: '{sys.executable} {script} {marker}' }}
+            fill: ai
+            form: {{ id: Message_ts, at: Message_ts, text: Text }}
+            link: none
+            sort: {{ all: alert }}
+            """)
+        with self.assertRaisesRegex(SourceError, "^cmd-ai: fill: ai records are filled by a scan session"):
+            self.engine().read("cmd-ai")
+        self.assertFalse(marker.exists())
+        self.assertFalse((self.data / "sources" / ".raw").exists())
 
     def test_other_vias_are_not_run_here(self):
         with self.assertRaisesRegex(SourceError, r"read\.via is connector; only a scan session can make that read"):
@@ -298,6 +327,14 @@ class SavedReadTest(EngineCase):
     def test_fill_paths_refuses_records(self):
         with self.assertRaisesRegex(SourceError, "fill: paths fills its own records"):
             self.engine().read_saved("gh-mine", self.reply_copy("gh-pr-list.json"), records=[])
+        self.assertFalse((self.data / "sources" / ".raw").exists())  # refused before the copy
+
+    def test_fill_ai_without_records_is_refused_before_the_copy(self):
+        raw = self.tmp / "slack.txt"
+        raw.write_text(self.SLACK_RAW)
+        with self.assertRaisesRegex(SourceError, "^slack-mentions: fill: ai records are filled by a scan session"):
+            self.engine().read_saved("slack-mentions", raw)
+        self.assertFalse((self.data / "sources" / ".raw").exists())
 
     def test_a_missing_saved_file(self):
         with self.assertRaisesRegex(SourceError, "^gh-mine: cannot read the saved output"):
@@ -376,9 +413,51 @@ class SortToCardTest(EngineCase):
         incidents["incidents"][1]["id"] = "inc01abcd"
         reply.write_text(json.dumps(incidents))
         self.status_source(reply)
+        dry = self.engine().read("vendor-status", dry_run=True)
+        self.assertEqual([i["action"] for i in dry["items"]], ["add", "update"])
+        self.assertEqual(self.store().list(), [])
         result = self.engine().read("vendor-status")
         self.assertEqual([i["action"] for i in result["items"]], ["add", "update"])
         self.assertEqual(len(self.store().list()), 1)
+
+    def test_a_bad_stored_card_is_dropped_and_the_read_goes_on(self):
+        reply = self.tmp / "three.json"
+        incidents = json.loads((REPLIES / "status-incidents.json").read_text())
+        incidents["incidents"][2]["name"] = "Slow logins"
+        reply.write_text(json.dumps(incidents))
+        self.status_source(reply)
+        self.engine().read("vendor-status")
+        ids = {c["key"]: c["id"] for c in self.store().list()}
+        self.assertEqual(sorted(ids), ["inc01abcd", "inc02efgh", "inc03ijkl"])
+        # The middle card was edited by hand into one the store refuses.
+        path = self.store().path(ids["inc02efgh"])
+        bad = json.loads(path.read_text())
+        bad["pri"] = "P9"
+        path.write_text(json.dumps(bad))
+        for n, inc in enumerate(incidents["incidents"]):
+            inc["name"] = f"Renamed {n}"
+        reply.write_text(json.dumps(incidents))
+        self.clock.tick()
+        result = self.engine().read("vendor-status")
+        self.assertEqual([(i["item"], i["action"], i["card"]) for i in result["items"]],
+                         [(0, "update", ids["inc01abcd"]), (2, "update", ids["inc03ijkl"])])
+        [dropped] = result["dropped"]
+        self.assertEqual(dropped["item"], 1)
+        self.assertRegex(dropped["reason"], rf"^card {ids['inc02efgh']}: pri must be one of ")
+        self.assertEqual(self.store().get(ids["inc03ijkl"])["title"], "Renamed 2")
+        raw = self.data / result["raw"]
+        self.assertEqual(json.loads(raw.with_name(raw.stem + ".report.json").read_text()), result)
+
+    def test_a_card_the_store_will_not_add_is_dropped_and_the_read_goes_on(self):
+        self.status_source(self.reply_copy("status-incidents.json"))
+        with mock.patch.object(Store, "add", side_effect=CardError("refused")):
+            result = self.engine().read("vendor-status")
+        self.assertEqual(result["items"], [])
+        self.assertEqual(result["dropped"], [{"item": 2, "reason": "form.text missing"},
+                                             {"item": 0, "reason": "new card with key inc01abcd: refused"},
+                                             {"item": 1, "reason": "new card with key inc02efgh: refused"}])
+        raw = self.data / result["raw"]
+        self.assertTrue(raw.with_name(raw.stem + ".report.json").exists())
 
     def test_update_card_only_updates_and_none_makes_nothing(self):
         reply = self.reply_copy("status-incidents.json")

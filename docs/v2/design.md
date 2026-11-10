@@ -778,7 +778,7 @@ Calls the author made without asking (check them):
   - The path language (`fill: paths`), jq-like: a path starts with `.`; `.` alone is the whole item; `.name`
     takes a key (`."a key"` quotes one); `[]` takes every item of a list (`.[]` at the top); `[text]` keeps the
     list items holding `text` word for word as a text value at any depth (`.fields.issuelinks[is blocked by].key`);
-    `[a.b=text]` keeps those whose `.a.b` is `text`. No indexes or slices (`[0]`, `[-1]`, `[1:]` are refused). A step on the wrong type
+    `[a.b=text]` keeps those whose `.a.b` is `text`. No indexes or slices (`[0]`, `[-1]`, `[1:]`, `[:]` are refused). A step on the wrong type
     gives nothing. The `id` path up to its first `[]` is the item path: every other path (and a `link` path)
     must start with it, and each item is one record; with no `[]`, a list reply is the items and anything else
     is one item. When nothing fans out before the item path's `[]`, a reply with no list there (an error object such as
@@ -805,7 +805,8 @@ Calls the author made without asking (check them):
     card also gets `status`, through `status_map`. The same `key` updates the card that has it (`plain`,
     `title`, `source`, `status`; never `kind`, `lane`, `pri` or `ask`) with `by: source:<name>` and
     `did: read <name>`; when only `raw` would change, nothing is written. `update_card` updates only, `none`
-    makes nothing. The cards are found by key with `Store.list()` once per read.
+    makes nothing. The cards are found by key with `Store.list()` once per read. A card the store refuses to
+    add or update (a stored card edited by hand into a bad one) drops only that item, naming the card or key.
   - Code-made plain words (no AI), per language, in `engine.PHRASES` (`en` and `zh`; a code like `zh-Hans`
     uses `zh`): what, "New from <source> by <author> in <place>: <first line of the text>"; where, "It was
     written at <at>. [Its status there is "<status>".] Nothing has been done with it yet."; do, "Read it at the
@@ -816,10 +817,11 @@ Calls the author made without asking (check them):
     folder as the working folder, `read.timeout`). Its stdout is saved first, as is, to
     `<data>/sources/.raw/<source>/<YYYYMMDDTHHMMSSZ>-<6 hex>.json`, even when the command fails or the output is
     not JSON; a read that passes `read.timeout` is stopped and its partial stdout is saved the same way (the
-    error names the file; a dry run keeps nothing); then what the engine made of it goes next to it as `<same name>.report.json` (items, dropped).
+    error names the file, as it does for a nonzero exit; a dry run keeps nothing); then what the engine made of it goes next to it as `<same name>.report.json` (items, dropped).
     `mcp`, `connector` and `skill` reads are not run here: `Engine.read_saved(source, raw_path, records=None)`
     takes a scan session's saved output (copied under `.raw/<source>/` unless it is there already) and, for
-    `fill: ai`, its records. Old raw files are not pruned yet.
+    `fill: ai`, its records. Records with `fill: paths`, or none with `fill: ai`, are refused before anything
+    is run or saved. Old raw files are not pruned yet.
   - Shadow mode: a source's `writes` are never run. `Engine.apply_writes(source, event)` calls
     `config.require_live` first (shadow mode raises `ShadowModeError`), and in live mode still runs nothing and
     says so; a later slice runs the writes.
