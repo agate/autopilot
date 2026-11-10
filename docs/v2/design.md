@@ -352,6 +352,63 @@ A user template, or one Claude drafts, can combine roles and write briefs. It ca
 role keeps the tools and permission floor it ships with. Which folder a role runs in comes from the card (its repo
 worktree, or the data folder).
 
+### 6.1 Review angles **[proposed]**
+
+What a code review checks lives in one place, and the user can extend it without code. Today it lives in two
+tables that do not know about each other: v1's PR loop (`commands/pr-loop.md`, "Roles to add beside Correctness")
+and secretary's PR review (`lib/secretary/review.py`, the role lists by PR kind). v2 has one table, used by both
+the PR loop on the user's own PRs and the PR review of other people's PRs.
+
+- An **angle** is one reviewer's point of view. It has a `name`, the one `question` it answers, `when` it applies
+  (path globs, a PR kind such as `ui`, `api`, `ci`, `infra`, `data`, `tests`, `docs`, or `always`), and a prose
+  `brief` for the reviewer.
+- Three layers, the later one winning on the same name: built in (`<plugin>/review/angles.yaml`, v1's and
+  secretary's tables merged), the user's own (`<data>/review/angles.yaml`), and the repo's own
+  (`<repo>/.autopilot/review.yaml`, read from the reviewed commit). A layer may add an angle, replace one, change
+  only some fields with `extends:`, or turn one off with `off: true`. This follows 5.7: plugin updates never touch
+  the user's or the repo's file, and the page shows when a built-in angle the user changed was updated.
+- How many: Correctness always, plus the matching angles, 2 to 4 reviewers in all (the PR loop), or 2 to 3 (a PR
+  review; 2 for a small PR). When more angles match than fit, the repo's come first, then the user's, then built in.
+- Each round's report and each review card say which angles ran and which layer each came from.
+- An angle is prose for a reviewer; it cannot add tools. Reviewers stay read-only (6, last paragraph).
+
+```yaml
+# <repo>/.autopilot/review.yaml
+- name: Payments safety
+  question: "Can this change charge a customer twice, or not at all?"
+  when: { paths: ["billing/**", "payments/**"] }
+  brief: "Read every caller of the changed charge functions. Idempotency keys must survive retries."
+- name: Accessibility & UX
+  off: true            # this repo has no UI
+```
+
+### 6.2 PR review cards **[proposed]**
+
+A review request becomes a card that reviews itself, as secretary does today: the user opens it to a verdict, not a
+to-do.
+
+1. **In**: the GitHub review requests source (built in), and a Slack or other message that asks the user to review
+   a PR ("PTAL", "take a look", a review-assignment bot). Both key on `{repo}#{number}` (5.4), so they land on one
+   card.
+2. **Start**: reviewing starts on its own (3.6). The `pr-review` role reads the PR, the ticket or the PR body as the
+   requirement, the code around the change and CI at the head, then runs its angles (6.1) in parallel. Each
+   finding is checked against the code before it counts.
+3. **Report**: the first line is a TL;DR that leads with the verdict, `approve`, `changes` or `question` ("Approve:
+   does what the ticket asks; 1 nit."). Then background, problem, solution, and the findings in four groups:
+   confirmed, out of scope, rejected (with the reason) and questions for the author. A draft review comment may be
+   attached, marked as not sent.
+4. **Plain words** (3.7): what this is, "<who> asked you to review PR #<n>: <title>"; where it stands, the TL;DR
+   line; what you do, "Read the <n> findings, then approve or ask for changes on GitHub yourself."
+5. **New commits**: a delta review of only the commits since the reviewed one updates the same card; it reviews
+   the whole PR again when the new commits include a merge commit or the branch was rewritten. Each earlier finding
+   is marked fixed or still open.
+6. **Closes** when the user has reviewed, the request is removed, or the PR is closed or merged.
+7. **Never posts**: nothing is sent to GitHub or any chat in either mode. A later "post this review" button would be
+   a `live`-mode write the user taps each time; it is not part of this design.
+
+Built from secretary's `commands/review.md`, `agents/reviewer.md` and its report checks (`review roles`, `review
+verdict`, `report validate`), copied, not called (3.2).
+
 ## 7. Scheduling
 
 ### 7.1 The gate **[decided, from v1]**
@@ -552,6 +609,8 @@ Calls the author made without asking (check them):
 - v1's dispatcher pass stays as the layer that decides what happens next (8.0).
 - MCP and connector reads go through one small scan session per gate run (5.3).
 - v2 runs next to v1 under its own names (10).
+- One review-angle table for both the PR loop and PR review, in three layers with the repo's winning (6.1).
+- PR review cards as secretary makes them today, with the TL;DR as "where it stands" (6.2).
 
 ## 12. Left to the builder
 
