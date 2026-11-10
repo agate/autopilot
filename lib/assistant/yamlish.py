@@ -9,10 +9,14 @@ In the subset (enough for config.yaml, source files and routines):
 - `#` comments, full-line and trailing (a `#` starts a comment at the start of a line or after a space or tab,
   never inside quotes).
 
+Only space and tab are white space (YAML 1.2): a no-break space or other Unicode space is part of the text.
+
 Everything else raises `YamlError`, whose message starts with `line N:` and says why: tabs in indentation,
 a tab after a `-` or `?` indicator, anchors, aliases, tags, `|`/`>` multi-line scalars, `---`/`...` document markers, bad indentation, unclosed
-quotes or brackets, duplicate keys, complex `?` keys, a `- ` list item inside a flow collection, a plain value
-holding `: `, and a plain value starting with `@`, `` ` ``, `%`, `]`, `}`, `,` or `? ` (quote it).
+quotes or brackets, duplicate keys, complex `?` keys, a quoted block key followed by a space or tab before `:`
+(`"k" : v`), a `- ` list item inside a flow collection, a plain value holding `: `, a plain value starting with
+`@`, `` ` ``, `%`, `]`, `}`, `,` or `? ` (quote it), hex, octal, `.inf` and `.nan` numbers (write a decimal
+number or quote it), and nesting too deep to read.
 """
 from __future__ import annotations
 
@@ -22,6 +26,8 @@ __all__ = ["YamlError", "load", "parse"]
 
 INT = re.compile(r"[-+]?[0-9]+\Z")
 FLOAT = re.compile(r"[-+]?(\.[0-9]+|[0-9]+(\.[0-9]*)?)([eE][-+]?[0-9]+)?\Z")
+# YAML 1.2 reads these as numbers; this reader refuses them rather than read them as strings.
+OTHER_NUMBER = re.compile(r"([-+]?0x[0-9a-f]+|[-+]?0o[0-7]+|[-+]?\.inf|\.nan)\Z", re.IGNORECASE)
 TRUE, FALSE, NULL = ("true", "True", "TRUE"), ("false", "False", "FALSE"), ("null", "Null", "NULL", "~")
 RESERVED = {"&": "anchors ('&') are not supported", "*": "aliases ('*') are not supported",
             "!": "tags ('!') are not supported", "|": "multi-line scalars ('|') are not supported",
@@ -59,7 +65,10 @@ def parse(text: str) -> tuple:
         raise YamlError(first.no, "the top level must be a map of 'key: value' lines, not a list")
     if _split_key(first.text, first.no) is None:
         raise YamlError(first.no, "the top level must be a map of 'key: value' lines")
-    data = p.block(first.indent, ())
+    try:
+        data = p.block(first.indent, ())
+    except RecursionError:
+        raise YamlError(p.at, "nested too deeply") from None
     if p.i < len(lines):
         ln = lines[p.i]
         raise YamlError(ln.no, f"bad indentation: expected {first.indent} spaces, found {ln.indent}")
@@ -79,11 +88,11 @@ def _lines(text: str) -> list:
     for no, raw in enumerate(text.lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n").split("\n"), 1):
         body = raw.lstrip(" ")
         indent = len(raw) - len(body)
-        if not body.strip():
+        if not body.strip(" \t"):
             continue
         if body.startswith("\t"):
             raise YamlError(no, "tabs are not allowed in indentation; use spaces")
-        body = _strip_comment(body, no).rstrip()
+        body = _strip_comment(body, no).rstrip(" \t")
         if not body:
             continue
         if indent == 0 and (body == "---" or body == "..." or body.startswith(("--- ", "... ", "---\t", "...\t"))):
@@ -160,21 +169,21 @@ def _split_key(text: str, no: int):
     if text[0] in "\"'":
         end = _quote_end(text, 0, no)
         after = text[end + 1:]
-        if re.match(r":(\s|\Z)", after):
-            return _quoted(text[:end + 1], no), after[1:].strip()
-        if after.lstrip().startswith(":"):
+        if re.match(r":([ \t]|\Z)", after):
+            return _quoted(text[:end + 1], no), after[1:].strip(" \t")
+        if after.lstrip(" \t").startswith(":"):
             raise YamlError(no, "a quoted key must be followed by ': '")
         return None
     if text[0] in "[{":
-        if re.match(r"[\[{].*[\]}]\s*:(\s|\Z)", text):
+        if re.match(r"[\[{].*[\]}][ \t]*:([ \t]|\Z)", text):
             raise YamlError(no, "flow collections cannot be keys")
         return None
-    m = re.search(r":(\s|\Z)", text)
+    m = re.search(r":([ \t]|\Z)", text)
     if not m:
         return None
-    key = text[:m.start()].rstrip()
+    key = text[:m.start()].rstrip(" \t")
     _check_plain(key, no)
-    return key, text[m.end():].strip()
+    return key, text[m.end():].strip(" \t")
 
 
 def _check_plain(s: str, no: int) -> None:
@@ -186,6 +195,7 @@ class _Parser:
     def __init__(self, lines: list):
         self.lines = lines
         self.i = 0
+        self.at = lines[0].no  # the line being read, for an error that has no line of its own
         self.key_lines = {}
 
     def peek(self):
@@ -201,6 +211,7 @@ class _Parser:
             ln = self.peek()
             if ln is None or ln.indent < indent:
                 return out
+            self.at = ln.no
             if ln.indent > indent:
                 raise YamlError(ln.no, f"bad indentation: expected {indent} spaces, found {ln.indent}"
                                        " (multi-line values are not supported)")
@@ -231,6 +242,7 @@ class _Parser:
             ln = self.peek()
             if ln is None or ln.indent < indent:
                 return out
+            self.at = ln.no
             if ln.indent > indent:
                 raise YamlError(ln.no, f"bad indentation: expected {indent} spaces, found {ln.indent}")
             if not _is_item(ln.text):
@@ -266,8 +278,9 @@ class _Parser:
             return value
         if text[0] in "\"'":
             end = _quote_end(text, 0, no)
-            if text[end + 1:].strip():
-                raise YamlError(no, f"unexpected text after a quoted string: {text[end + 1:].strip()!r}")
+            extra = text[end + 1:].strip(" \t")
+            if extra:
+                raise YamlError(no, f"unexpected text after a quoted string: {extra!r}")
             return _quoted(text, no)
         if _is_item(text):
             raise YamlError(no, "a list cannot start after 'key:' on the same line; put '- ' items on the next lines")
@@ -275,12 +288,12 @@ class _Parser:
         if text == "?" or text.startswith("? "):
             raise YamlError(no, "complex keys ('?') are not supported")
         _check_plain(text, no)
-        if re.search(r":(\s|\Z)", text):
+        if re.search(r":([ \t]|\Z)", text):
             raise YamlError(no, "a plain value cannot contain ': '; quote the value")
-        return _plain(text)
+        return _plain(text, no)
 
 
-def _plain(s: str):
+def _plain(s: str, no: int):
     if s in TRUE:
         return True
     if s in FALSE:
@@ -291,6 +304,9 @@ def _plain(s: str):
         return int(s)
     if FLOAT.match(s):
         return float(s)
+    if OTHER_NUMBER.match(s):
+        raise YamlError(no, f"{s!r} is a YAML number form this reader does not support; write a decimal number"
+                            " or quote it")
     return s
 
 
@@ -353,7 +369,7 @@ class _Flow:
             if ch in ",[]{}" or (ch == ":" and (self.i + 1 == len(self.s) or self.s[self.i + 1] in " \t,]}")):
                 break
             self.i += 1
-        tok = self.s[start:self.i].strip()
+        tok = self.s[start:self.i].strip(" \t")
         if not tok:
             raise YamlError(self.no, "empty entry in a flow collection")
         _check_indicator_tab(tok, self.no)
@@ -362,7 +378,7 @@ class _Flow:
         if tok == "-" or tok.startswith("- "):
             raise YamlError(self.no, "a block list item ('- ') cannot appear inside a flow collection")
         _check_plain(tok, self.no)
-        return tok if key else _plain(tok)
+        return tok if key else _plain(tok, self.no)
 
     def expect_more(self, close: str) -> bool:
         """After an entry: True when a ',' leads to another entry, False when `close` ends the collection."""

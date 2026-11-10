@@ -88,6 +88,7 @@ class DefaultsTest(unittest.TestCase):
 REFUSALS = [
     ("mode not shadow or live", "mode: dry-run\n", "mode"),
     ("mode not a string", "mode: true\n", "mode"),
+    ("mode with a trailing no-break space", "mode: live\u00a0\n", "mode must be shadow or live"),
     ("keep_transcripts unknown word", "keep_transcripts: sometimes\n", "keep_transcripts"),
     ("keep_transcripts bare number", "keep_transcripts: 90\n", "keep_transcripts"),
     ("keep_transcripts zero days", "keep_transcripts: 0d\n", "keep_transcripts"),
@@ -140,6 +141,12 @@ class ValidationTest(unittest.TestCase):
     def test_top_level_must_be_a_map(self):
         with self.assertRaises(ConfigError):
             config.load(write_config(self.data, "- mode\n"))
+
+    def test_no_break_space_after_colon_is_not_a_map(self):
+        # YAML reads 'mode:<U+00A0>live' as one plain scalar, not a 'key: value' line.
+        with self.assertRaises(ConfigError) as ctx:
+            config.parse("mode:\u00a0live\n")
+        self.assertIn("line 1:", str(ctx.exception))
 
 
 class RequireLiveTest(unittest.TestCase):
@@ -209,11 +216,24 @@ class LookupTest(unittest.TestCase):
         # Path.resolve() keeps the /System/Volumes/Data firmlink prefix, so only the same-folder check catches it.
         with TempHome() as home:
             (home / ".claude").mkdir()
-            alias = "/System/Volumes/Data" + str(home.resolve()) + "/.claude/x"
-            if not Path("/System/Volumes/Data" + str(home.resolve())).exists():
+            base = "/System/Volumes/Data" + str(home.resolve())
+            if not Path(base).exists():
                 self.skipTest("no /System/Volumes/Data firmlink")
-            with self.assertRaises(ConfigError):
-                datadir.resolve(alias)
+            for alias in (base + "/.claude", base + "/.claude/x"):
+                with self.subTest(alias):
+                    with self.assertRaises(ConfigError):
+                        datadir.resolve(alias)
+
+    def test_same_folder_check_catches_an_unfolded_alias(self):
+        # Any OS: stand in a resolve() that does not follow symlinks, so only the same-folder check can refuse.
+        self.assertIs(datadir.Path, Path)
+        with TempHome() as home:
+            (home / ".claude").mkdir()
+            (home / "link").symlink_to(home / ".claude")
+            with mock.patch.object(datadir.Path, "resolve", lambda self, strict=False: Path(os.path.abspath(self))):
+                self.assertEqual(datadir.resolve(str(home / "other")), home / "other")
+                with self.assertRaises(ConfigError):
+                    datadir.resolve(str(home / "link" / "x"))
 
     def test_other_case_of_dot_claude_is_refused(self):
         # On a case-insensitive file system (macOS APFS by default) ~/.CLAUDE is the same folder as ~/.claude.
@@ -238,6 +258,43 @@ class LookupTest(unittest.TestCase):
             self.assertEqual(datadir.resolve("~/.claude-notes"), home / ".claude-notes")
             self.assertEqual(datadir.resolve("~/.claudex"), home / ".claudex")
             self.assertEqual(datadir.resolve("~/.CLAUDEX/x"), home / ".CLAUDEX" / "x")
+
+
+def locked_parent(test: unittest.TestCase, base: Path) -> Path:
+    """`base/np` with no permissions (restored in cleanup); returns a path below it."""
+    if os.geteuid() == 0:
+        test.skipTest("root ignores folder permissions")
+    np = base / "np"
+    (np / "inner").mkdir(parents=True)
+    np.chmod(0)
+    test.addCleanup(np.chmod, 0o755)
+    return np / "inner" / "x"
+
+
+class FileSystemErrorTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="ap2-data-")).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def test_resolve_reports_an_unreadable_parent(self):
+        with TempHome() as home:
+            (home / ".claude").mkdir()  # so the same-folder check looks at the path
+            target = locked_parent(self, home)
+            with self.assertRaises(ConfigError) as ctx:
+                datadir.resolve(str(target))
+            self.assertIn(str(target), str(ctx.exception))
+
+    def test_ensure_reports_an_unreadable_parent(self):
+        target = locked_parent(self, self.tmp)
+        with self.assertRaises(ConfigError) as ctx:
+            datadir.ensure(target)
+        self.assertIn(str(target), str(ctx.exception))
+
+    def test_unknown_user_in_tilde_is_refused(self):
+        with TempHome():
+            with self.assertRaises(ConfigError) as ctx:
+                datadir.resolve("~nosuchuser_zz/x")
+            self.assertIn("~nosuchuser_zz/x", str(ctx.exception))
 
 
 class LayoutTest(unittest.TestCase):

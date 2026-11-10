@@ -123,6 +123,18 @@ class ScalarTest(unittest.TestCase):
         self.assertIsInstance(self.one("1e3"), float)
         self.assertEqual(self.one("09:30"), "09:30")
 
+    def test_quoted_non_decimal_numbers_stay_strings(self):
+        self.assertEqual(self.one("'0x1F'"), "0x1F")
+        self.assertEqual(self.one('".inf"'), ".inf")
+        self.assertEqual(load("a: ['0o17', \".nan\"]\n"), {"a": ["0o17", ".nan"]})
+
+    def test_only_space_and_tab_are_white_space(self):
+        # YAML white space is only space and tab: a no-break space (U+00A0) or an ideographic space (U+3000)
+        # is part of the text.
+        self.assertEqual(load("k: 1\u00a0\n"), {"k": "1\xa0"})
+        self.assertEqual(load("k: x\u3000\n"), {"k": "x\u3000"})
+        self.assertEqual(load("k: [a\u00a0, b]\n"), {"k": ["a\xa0", "b"]})
+
     def test_booleans_and_null(self):
         self.assertIs(self.one("true"), True)
         self.assertIs(self.one("false"), False)
@@ -196,6 +208,20 @@ class StructureTest(unittest.TestCase):
         self.assertEqual(lines, {("a",): 1, ("b",): 2})
         self.assertEqual(yamlish.parse("a: 1\rb: 2\r\nc: 3")[1], {("a",): 1, ("b",): 2, ("c",): 3})
 
+    def test_tabs_inside_list_item_text(self):
+        self.assertEqual(load("k:\n  - a\tb\n  - name: c\td\n"), {"k": ["a\tb", {"name": "c\td"}]})
+
+    def test_deep_nesting_is_refused(self):
+        with self.assertRaises(YamlError) as ctx:
+            load("k: " + "[" * 2000 + "]" * 2000 + "\n")
+        self.assertEqual(ctx.exception.line, 1)
+        self.assertIn("nested too deeply", str(ctx.exception))
+        text = "".join("  " * n + "a:\n" for n in range(2000))
+        with self.assertRaises(YamlError) as ctx:
+            load(text)
+        self.assertIn("nested too deeply", str(ctx.exception))
+        self.assertGreaterEqual(ctx.exception.line, 1)
+
     def test_quoted_keys(self):
         self.assertEqual(load('"To Do": 1\n\'a: b\': 2\n'), {"To Do": 1, "a: b": 2})
         self.assertEqual(load("'k':\tv\n"), {"k": "v"})  # a tab after the ':' like a plain key
@@ -222,6 +248,7 @@ ERRORS = [
     ("document end marker", "a: 1\n...\n", 2, "document"),
     ("document marker then tab", "a: 1\n---\tb: 2\n", 2, "document"),
     ("document marker then tab on the first line", "---\ta: 1\n", 1, "document"),
+    ("document end marker then tab", "a: 1\n...\tb: 2\n", 2, "document"),
     ("dedent to no level", "a:\n    b: 1\n  c: 2\n", 3, "indentation"),
     ("unexpected indent", "a: 1\n  b: 2\n", 2, "indentation"),
     ("multi-line plain value", "a: one\n   two\n", 2, "indentation"),
@@ -264,10 +291,19 @@ ERRORS = [
     ("tab after a nested '-' in a block list", "k:\n  - -\tx\n", 2, "a tab after '-' or '?'"),
     ("tab after '-' starting a block list item", "k:\n  -\tx\n", 2, "a tab after '-' or '?'"),
     ("space then tab after '-' in a block list", "k:\n  - \t3\n", 2, "a tab after '-' or '?'"),
+    ("spaces then tab after '-' in a block list", "k:\n  -   \t3\n", 2, "a tab after '-' or '?'"),
     ("space then tab before a key in a block list", "k:\n  - \tname: a\n", 2, "a tab after '-' or '?'"),
     ("space then tab after a nested '-' in a block list", "k:\n  - - \tx\n", 2, "a tab after '-' or '?'"),
     ("form feed is not a line break", "a: x\x0cy\nc: [\n", 2, "unclosed"),
     ("line separator is not a line break", "a: x\u2028y\nc: [\n", 2, "unclosed"),
+    ("no-break space after ':' is not white space", "mode:\u00a0live\n", 1, "key: value"),
+    ("hex number", "a: 0x1F\n", 1, "'0x1F' is a YAML number form this reader does not support"),
+    ("octal number", "a: 1\nb: 0o17\n", 2, "number form"),
+    ("infinity", "a: .inf\n", 1, "number form"),
+    ("negative infinity", "a: -.Inf\n", 1, "number form"),
+    ("not a number", "a: .NaN\n", 1, "number form"),
+    ("hex number in a flow list", "a: [1, 0X1f]\n", 1, "'0X1f' is a YAML number form"),
+    ("infinity in a flow map", "a: {b: +.INF}\n", 1, "number form"),
 ]
 
 

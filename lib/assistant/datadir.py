@@ -24,15 +24,21 @@ def resolve(flag: Optional[str] = None) -> Path:
     """The data folder as an absolute path, symlinks followed. Nothing is created. Raises ConfigError."""
     if flag == "":
         raise ConfigError("--data is empty; give a folder path")
-    raw = flag if flag is not None else (os.environ.get(ENV) or str(default()))
-    path = Path(raw).expanduser().resolve()
-    claude = (Path.home() / ".claude").resolve()
-    # resolve() follows symlinks. The name check ignores letter case (on a case-insensitive file system ~/.CLAUDE
-    # is ~/.claude, even before ~/.claude exists). The same-folder check then catches paths resolve() does not fold
-    # (macOS firmlinks such as /System/Volumes/Data/..., bind mounts).
-    parts, claude_parts = [p.casefold() for p in path.parts], [p.casefold() for p in claude.parts]
-    if parts[:len(claude_parts)] == claude_parts or (
-            claude.exists() and any(p.exists() and os.path.samefile(p, claude) for p in (path, *path.parents))):
+    raw = flag
+    try:
+        if raw is None:
+            raw = os.environ.get(ENV) or str(default())
+        path = Path(raw).expanduser().resolve()
+        claude = (Path.home() / ".claude").resolve()
+        # resolve() follows symlinks. The name check ignores letter case (on a case-insensitive file system
+        # ~/.CLAUDE is ~/.claude, even before ~/.claude exists). The same-folder check then catches paths resolve()
+        # does not fold (macOS firmlinks such as /System/Volumes/Data/..., bind mounts).
+        parts, claude_parts = [p.casefold() for p in path.parts], [p.casefold() for p in claude.parts]
+        inside = parts[:len(claude_parts)] == claude_parts or (
+            claude.exists() and any(p.exists() and os.path.samefile(p, claude) for p in (path, *path.parents)))
+    except (OSError, RuntimeError) as e:  # a folder we may not read, a name too long, no such user for ~name
+        raise ConfigError(f"cannot use the data folder {raw or '~/Documents/Assistant'}: {e}") from e
+    if inside:
         raise ConfigError(f"data folder {path} is inside {claude}; pick a folder outside ~/.claude "
                           "(for example ~/Documents/Assistant)")
     return path
@@ -41,9 +47,9 @@ def resolve(flag: Optional[str] = None) -> Path:
 def ensure(path: Path) -> Path:
     """Create the layout on first use. An existing config.yaml is never overwritten. Raises ConfigError."""
     path = Path(path)
-    if path.exists() and not path.is_dir():
-        raise ConfigError(f"data folder {path} exists and is not a folder")
     try:
+        if path.exists() and not path.is_dir():
+            raise ConfigError(f"data folder {path} exists and is not a folder")
         for name in FOLDERS:
             (path / name).mkdir(parents=True, exist_ok=True)
         try:

@@ -567,13 +567,16 @@ Calls the author made without asking (check them):
       stay strings (YAML 1.2). A quote starts a quoted string only at the start of a value or key (the line's
       start, after the leading `- ` / `? `, after `:` and a space or tab, or inside a flow collection after `[`,
       `{`, `,`, or `:` and a space or tab, or a `:` that follows a closing quote, JSON style `"a":"b"`), so `don't`,
-      `well-'known` and `Bob, 'the builder` are plain text.
+      `well-'known` and `Bob, 'the builder` are plain text. Only space and tab are white space (YAML 1.2), so a
+      no-break space or other Unicode space is part of the text. Numbers are decimal ints and floats; hex, octal,
+      `.inf` and `.nan` are refused so nothing is silently read as a string.
     - Refused, with one error class (`YamlError`) whose message starts with `line N:` and says why: tabs in
       indentation, a tab after a `-` or `?` indicator (straight after it or after its spaces), anchors `&`, aliases `*`, tags `!`, multi-line scalars `|`/`>` and multi-line plain values,
       document markers `---`/`...`, bad indentation, unclosed quotes or brackets (a flow collection must close on
-      its line), duplicate keys, complex `?` keys, a `- ` list item inside a flow collection, a plain value
-      holding `: ` (quote it), and a plain value starting with `@`, `` ` ``, `%`, `]`, `}`, `,` or `? ` (quote
-      it). The top level must be a map. Refusing is safer than guessing: a file either reads exactly as written or names its bad line.
+      its line), duplicate keys, complex `?` keys, a quoted block key followed by a space or tab before `:`
+      (`"k" : v`), a `- ` list item inside a flow collection, a plain value holding `: ` (quote it), a plain value
+      starting with `@`, `` ` ``, `%`, `]`, `}`, `,` or `? ` (quote it), hex, octal, `.inf` and `.nan` numbers
+      (write a decimal number or quote it), and nesting too deep to read. The top level must be a map. Refusing is safer than guessing: a file either reads exactly as written or names its bad line.
 - **[decided by the builder]** The data folder and its lookup. The folder is `--data <path>` if given, else the
   environment variable `AP2_DATA`, else `~/Documents/Assistant`. A folder inside `~/.claude` is refused (3.4),
   symlinks followed (by `resolve()`) and in any letter case (the name check ignores case, so `~/.CLAUDE` is

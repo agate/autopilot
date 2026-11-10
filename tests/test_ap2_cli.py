@@ -78,6 +78,18 @@ class Ap2CommandTest(unittest.TestCase):
         self.assertIn(".claude", r.stderr)
         self.assertFalse((self.home / ".claude").exists())
 
+    @unittest.skipIf(os.geteuid() == 0, "root ignores folder permissions")
+    def test_unreadable_data_folder_exits_1_without_a_traceback(self):
+        np = self.tmp / "np"
+        (np / "inner").mkdir(parents=True)
+        np.chmod(0)
+        self.addCleanup(np.chmod, 0o755)
+        r = self.run_ap2("config", "--data", str(np / "inner" / "x"))
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.stdout, "")
+        self.assertIn("ap2:", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
