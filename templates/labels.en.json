@@ -164,5 +164,16 @@
   "self_remind": "{n} decisions it made by itself are unread, the oldest from {when}.",
   "self_remind_go": "Look through them",
   "self_task": "Decided by itself in this task ({n})",
-  "hero_look": "{n} of its own decisions are worth a look"
+  "hero_look": "{n} of its own decisions are worth a look",
+  "explain_terms": "First, a few words",
+  "explain_analogy": "Think of it like this",
+  "explain_example": "A real example",
+  "explain_steps": "Where it goes wrong, step by step",
+  "explain_options": "The options",
+  "explain_why": "What I recommend, and why",
+  "explain_why_self": "Why I chose this",
+  "explain_related": "How it ties to other cards",
+  "explain_next": "How to answer",
+  "opt_does": "What happens",
+  "opt_cost": "Cost"
 }

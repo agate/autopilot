@@ -199,6 +199,22 @@ class DocsTest(unittest.TestCase):
         self.assertIn("older run directory", briefs)
         self.assertIn("`ap dir <name>`", (ROOT / "references" / "talk.md").read_text())
 
+    def test_cards_explain_themselves_and_talk_walks_through_them(self):
+        from autopilot import state
+        rb = (ROOT / "RUNBOOK.md").read_text()
+        card = rb[rb.index("## A decision card"):rb.index("## The pass")]
+        for k in state.EXPLAIN_REQ + state.EXPLAIN_OPT + ("does", "cost"):
+            self.assertIn(f"`{k}`", card, k)                      # every section the command checks is described
+        self.assertIn("refuses", card)
+        self.assertIn("read every\nline you cite", card)
+        talk = (ROOT / "references" / "talk.md").read_text()
+        walk = talk[talk.index("## Walking the user through the cards"):talk.index("## Changing things")]
+        self.assertIn("card 2 of 5", walk)                        # one card at a time, saying where we are
+        self.assertIn("still true", walk)                         # checked against the code before explaining
+        self.assertIn("`path:line`", walk)
+        self.assertIn("attention: true", walk)
+        self.assertIn("walk through them one at a time", (ROOT / "SKILL.md").read_text())
+
 
 if __name__ == "__main__":
     unittest.main()

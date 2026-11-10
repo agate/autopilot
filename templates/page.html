@@ -118,6 +118,24 @@ h1 { font-size: 16px; font-weight: 700; letter-spacing: -.01em }
 .meta { color: var(--muted); font-size: 12px; overflow-wrap: anywhere }
 .age { margin-left: auto }
 .body { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink-2) }
+/* A card's walk-through: the one sentence first, then each section under a small heading, in a fixed order. */
+.body.lead { color: var(--ink); font-size: 14.5px }
+.explain { display: grid; gap: 14px; min-width: 0 }
+.ex { display: grid; gap: 4px; min-width: 0 }
+.ex h4 { margin: 0; font-size: 12.5px; color: var(--muted); font-weight: 650; letter-spacing: .02em }
+.ex p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink-2) }
+.ex ol, .ex ul { margin: 0; padding-left: 1.4em; display: grid; gap: 4px; color: var(--ink-2); overflow-wrap: anywhere }
+.ex-terms { margin: 0; display: grid; gap: 6px }
+.ex-terms div { display: grid; gap: 0; padding-left: 10px; border-left: 3px solid var(--line-strong) }
+.ex-terms dt { font-weight: 650; overflow-wrap: anywhere }
+.ex-terms dd { margin: 0; color: var(--ink-2); overflow-wrap: anywhere }
+.ex .ex-opts { list-style: none; padding: 0; gap: 8px }
+.ex-opts li { display: grid; gap: 2px; padding: 8px 12px; border-radius: var(--r-sm); border: 1px solid var(--line) }
+.ex-opts li.rec { border: 2px solid var(--accent) }
+.ex-opts .opt-top { color: var(--ink) }
+.ex-k { color: var(--muted); font-weight: 600 }
+.ex .ex-related { list-style: none; padding: 0 }
+.ex-related li { display: grid; gap: 0 }
 .links { display: flex; flex-wrap: wrap; gap: 8px }
 .pill { display: inline-flex; align-items: center; gap: 5px; min-height: 30px; padding: 0 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--bg); color: var(--accent); font-size: 12.5px; font-weight: 600; text-decoration: none; white-space: nowrap }
 .pill:hover { border-color: var(--accent) }
@@ -512,6 +530,44 @@ async function sendReply(key, body) {
 }
 function errNote(key) { return sendErrors[key] ? el("div", { class: "note crit", role: "alert" }, sendErrors[key]) : null; }
 function decMeta(d) { return [filterAp ? null : d.ap, d.id, d.task].filter(Boolean).join(" · "); }
+/* A card that explains itself (`explain`, required on every ask and self card since it existed): the body is its one
+   sentence, then these sections in this order. A card saved before has only its body. `find(ap, id)` looks up a
+   related card so its title can show. Section text stays raw here; explainBlock turns it into text. */
+function explainSections(d, find) {
+  const x = d.explain;
+  if (!x || typeof x !== "object") return [];
+  const list = (v) => Array.isArray(v) ? v : [];
+  const opts = list(d.options).filter((o) => o && (o.does || o.cost));
+  const related = list(x.related).filter((r) => r && r.id).map((r) => ({ id: r.id, why: r.why, title: (find(d.ap, r.id) || {}).title }));
+  return [
+    { label: "explain_terms", kind: "terms", items: list(x.terms) },
+    { label: "explain_analogy", kind: "text", items: x.analogy ? [x.analogy] : [] },
+    { label: "explain_example", kind: "text", items: x.example ? [x.example] : [] },
+    { label: "explain_steps", kind: "steps", items: list(x.steps) },
+    { label: "explain_options", kind: "options", items: opts },
+    { label: d.kind === "self" ? "explain_why_self" : "explain_why", kind: "text", items: x.why ? [x.why] : [] },
+    { label: "explain_related", kind: "related", items: related },
+    { label: "explain_next", kind: "text", items: x.next ? [x.next] : [] },
+  ].filter((sec) => sec.items.length);
+}
+const findDecision = (ap, id) => S.decisions[ap + ":" + id] || S.archive[ap + ":" + id] || null;
+function explainBlock(d) {
+  const secs = explainSections(d, findDecision);
+  if (!secs.length) return null;
+  const kv = (k, v) => v ? el("div", {}, el("span", { class: "ex-k" }, L(k) + ": "), T(v)) : null;
+  const body = (sec) => {
+    if (sec.kind === "terms") return el("dl", { class: "ex-terms" }, sec.items.map((i) => el("div", {}, el("dt", {}, T(i.term)), el("dd", {}, T(i.means)))));
+    if (sec.kind === "steps") return el("ol", {}, sec.items.map((i) => el("li", {}, T(i))));
+    if (sec.kind === "options") return el("ul", { class: "ex-opts" }, sec.items.map((o) => el("li", { class: o.recommended ? "rec" : null },
+      el("span", { class: "opt-top" }, el("span", { class: "opt-label" }, T(o.label)), o.recommended ? el("span", { class: "rec-tag" }, L("recommended")) : null),
+      kv("opt_does", o.does), kv("opt_cost", o.cost))));
+    if (sec.kind === "related") return el("ul", { class: "ex-related" }, sec.items.map((r) => el("li", {},
+      el("span", {}, el("b", { class: "mono" }, r.id), r.title ? " · " + T(r.title) : ""), el("span", {}, T(r.why)))));
+    return sec.items.map((i) => el("p", {}, T(i)));
+  };
+  return el("div", { class: "explain" }, secs.map((sec) => el("section", { class: "ex" }, el("h4", {}, L(sec.label)), body(sec))));
+}
+const bodyLine = (d, cls) => T(d.body) ? el("div", { class: cls + (d.explain ? " lead" : "") }, T(d.body)) : null;
 function askCard(d) {
   const key = d.ap + ":" + d.id, rep = replyFor(key), gate = d.kind === "gate";
   const disabled = !!rep || canWrite === false || !db;
@@ -522,7 +578,8 @@ function askCard(d) {
       el("span", { class: "meta mono" }, decMeta(d)),
       el("span", { class: "meta age" }, L("asked_at", { when: rel(d.created_at) }))),
     el("h3", {}, T(d.title)),
-    T(d.body) ? el("div", { class: "body" }, T(d.body)) : null,
+    bodyLine(d, "body"),
+    explainBlock(d),
     links.length ? el("div", { class: "links" }, links) : null,
   ];
   if (!gate) {
@@ -530,7 +587,7 @@ function askCard(d) {
       type: "button", class: "opt" + (o.recommended ? " rec" : "") + (rep && rep.option === o.id ? " chosen" : ""), disabled,
       onclick: () => sendReply(key, { option: o.id }) },
       el("span", { class: "opt-top" }, el("span", { class: "opt-label" }, T(o.label)), o.recommended ? el("span", { class: "rec-tag" }, L("recommended")) : null),
-      o.cost ? el("span", { class: "opt-cost" }, T(o.cost)) : null))));
+      o.cost && !d.explain ? el("span", { class: "opt-cost" }, T(o.cost)) : null))));
     const input = el("input", { type: "text", placeholder: L("reply_placeholder"), "aria-label": L("reply_placeholder"), disabled });
     kids.push(el("form", { class: "reply", onsubmit: (e) => { e.preventDefault(); if (input.value.trim()) sendReply(key, { text: input.value.trim() }); } },
       input, el("button", { type: "submit", class: "btn", disabled }, L("send"))));
@@ -596,7 +653,8 @@ function selfRow(d) {
   const more = el("details", { class: "self-body", open: openBodies.has(key),
     ontoggle: (e) => { if (e.target.open) openBodies.add(key); else openBodies.delete(key); } },
     el("summary", {}, el("span", { class: "row-title" }, T(d.title))),
-    T(d.body) ? el("div", { class: "row-sub body" }, T(d.body)) : null,
+    bodyLine(d, "row-sub body"),
+    explainBlock(d),
     links.length ? el("div", { class: "links" }, links) : null);
   return el("div", { class: "row" },
     el("div", {}, more, el("div", { class: "meta mono" }, d.attention === true ? el("span", { class: "tag look" }, "! " + L("look_tag")) : null,
@@ -613,7 +671,8 @@ function selfCard(d) {
       el("span", { class: "meta mono" }, decMeta(d)),
       el("span", { class: "meta age" }, rel(d.created_at))),
     el("h3", {}, T(d.title)),
-    T(d.body) ? el("div", { class: "body" }, T(d.body)) : null,
+    bodyLine(d, "body"),
+    explainBlock(d),
     links.length ? el("div", { class: "links" }, links) : null,
     el("div", { class: "self-actions" }, selfButtons(d), taskButton(d)),
     errNote(key));

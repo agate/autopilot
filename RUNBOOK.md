@@ -30,12 +30,12 @@ a field missing a language.
 | Push fixes for human review comments; resolve review-bot threads | A PR on any repo other than the autopilot's `repo` |
 
 - A reversible decision is yours: take the recommended option, then `ap decision add` with
-  `kind: self`, the reason in `body`, and how it is undone. Look for a reversible route before calling
-  something irreversible.
+  `kind: self`, why you chose it in `explain.why`, and what undo does in `explain.next`. Look for a
+  reversible route before calling something irreversible.
 - Every `self` card sets `attention`. `true` when the user should look at it: it goes against the
   spec or the ticket's words, widens or narrows the scope, is hard to undo once merged, or changes
   what people see or use. Otherwise `false`: the page folds routine calls into one line, and the user
-  reads them when they like. Start the body with one sentence that says what you chose.
+  reads them when they like. Either way the card explains itself in full (below).
 - Something only a person can pass (a required approval, a teammate's review) is a `kind: gate` card,
   added once. Keep other work moving.
 - Never wait for a reply. Add the card and continue.
@@ -60,13 +60,43 @@ Never start a login yourself. How to add a check: `references/access.md`.
 
 ## A decision card
 
-`ap decision add <ap> <file.json>` with: `kind` (`ask | gate | self`), `task` (optional: blocks that
-task until answered), `title`, `body` (what it is in plain words, why the user must decide, what each
-option costs, your recommendation), `options` (`[{id, label, cost?, recommended?}]`), `links`
-(`[{label, url}]`: every ticket, PR, run or page the user must look at; a card without links is not
-done), and `action` (`{tool, option, prompt}`) when one answer should carry out one outward action:
-`option` is the id of the approving option, `prompt` the exact instruction that does it (also quote it
-in `body`, so the user sees what will run).
+The user decides from the card alone. Write it the way a patient colleague explains a problem at a
+whiteboard to someone who has not seen this code: plain everyday words, short sentences, one idea
+each, nothing assumed. Simpler words, never a wrong fact: keep the numbers, files and lines exact.
+
+`ap decision add <ap> <file.json>` with:
+
+- `kind` (`ask | gate | self`), `task` (optional: blocks that task until answered), `title`.
+- `body`: one or two sentences: what this is about, in everyday words. On a `self` card, what you chose.
+- `explain`, the walk-through the page shows section by section, in this order:
+  - `terms`: `[{term, means}]`, every word the reader needs that is not everyday language (a tool, a
+    file, a flag, a ticket's own jargon, an abbreviation with its full name). Say what it does before
+    what it is called, in one sentence.
+  - `analogy`: one comparison from daily life (a fridge, a library, a recipe) that works the same way
+    as the mechanism, and where it stops fitting when that matters.
+  - `example`: a real case from this work: the file and line, the command, the run or review that
+    showed it, and what actually happened.
+  - `steps`: `[text]`, how the problem happens, one step per entry, in order (at least 2).
+  - `why`: your recommendation and its reasons, including what the other options would break. On a
+    `self` card: why you chose this.
+  - `related` (optional): `[{id, why}]`, another card of this autopilot this one depends on or
+    changes, and how (for example "B is safe only because D94 chose A").
+  - `next`: how to answer and what happens then: which pass acts, what it runs, what the user will see.
+    On a `self` card: what undo does.
+- `options`: `[{id, label, does, cost, recommended?}]`. `does` says what happens if this one is picked,
+  `cost` what it costs (time, risk, what stays broken). A `self` card's options are `keep` and `undo`:
+  their `does` and `cost` compare what you did with the way back.
+- `links`: `[{label, url}]`, every ticket, PR, run or page the user must look at. A card without links
+  is not done.
+- `action` (`{tool, option, prompt}`) when one answer should carry out one outward action: `option` is
+  the id of the approving option, `prompt` the exact instruction that does it (also quote it in
+  `explain.next`, so the user sees what will run).
+
+`ap decision add` refuses an `ask` or `self` card without every `explain` section, every option's
+`does` and `cost`, and every text in each required language; the error names what is missing. A `gate`
+card may carry `explain`. Build the walk-through from the worker's files and from the code: read every
+line you cite. Write the reader's language as plainly as the English, not as a word-for-word
+translation. Keep a section short when the thing is simple, but fill it.
 
 A title or body written as `{"key": ..., "args": {...}}` must fill every `{placeholder}` of that label
 in `templates/labels.en.json` with `args`, or the page shows the raw `{session}`. `ap decision add`
@@ -164,7 +194,8 @@ rejects one that does not.
      reply). Do only what the answer asks that is not done yet; never repeat a step that already happened.
    - Exit 3: the card already has a different answer (two devices, or the page and a talk session).
      Change nothing. Add an `ask` card with title `{"key": "two_answers", "args": {"id": "<D-id>"}}`,
-     both answers as options and the original card's links. When that card is answered, run
+     both answers as options, the original card's links, and the original card in `explain.related`.
+     When that card is answered, run
      `ap decision resolve <ap> <D-id> --answer "<the chosen one>" --replace --handling` and act on it.
    - **Tell the page now**, before acting on anything: run `ap publish diff --only decisions`, send its
      `set` and `delete` rows in one `ArtifactData` batch (read each document's `version` first and pin

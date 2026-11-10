@@ -16,9 +16,12 @@ WORKER_REQ = {"task", "role", "session_name", "session_id", "short_id", "ports",
 WORKER_OPT = {"cwd", "parked"}
 ROLES = {"implement", "review", "pr"}
 DEC_REQ = {"id", "kind", "title", "body", "options", "links", "status", "created_at"}
-DEC_OPT = {"task", "answer", "action", "answered_at", "access", "handling", "attention"}
+DEC_OPT = {"task", "answer", "action", "answered_at", "access", "handling", "attention", "explain"}
 DEC_KINDS = {"ask", "gate", "self", "system"}
 DEC_STATUS = {"open", "answered", "undone", "resolved"}
+# A card's walk-through, in the order the page shows it after the body's one sentence.
+EXPLAIN_REQ = ("terms", "analogy", "example", "steps", "why", "next")
+EXPLAIN_OPT = ("related",)
 
 
 class StateError(Exception):
@@ -88,8 +91,45 @@ def validate(st: dict, langs: set) -> list:
                 errs += text.check(d[f], langs, f"{w}.{f}")
         for j, o in enumerate(d.get("options") or []):
             errs += text.check(o.get("label"), langs, f"{w}.options[{j}].label")
-            if "cost" in o:
-                errs += text.check(o["cost"], langs, f"{w}.options[{j}].cost")
+            for f in ("does", "cost"):
+                if f in o:
+                    errs += text.check(o[f], langs, f"{w}.options[{j}].{f}")
+        if "explain" in d:
+            errs += explain_errors(d["explain"], langs, f"{w}.explain")
+    return errs
+
+
+def explain_errors(ex, langs: set, where: str) -> list:
+    """Errors for a card's `explain`: the words to know, an analogy, a real example, the steps, the
+    reasons and how to answer. Every text in every required language."""
+    if not isinstance(ex, dict):
+        return [f"{where}: must be an object"]
+    errs = _keys(ex, set(EXPLAIN_REQ), set(EXPLAIN_OPT), where)
+    for k in ("analogy", "example", "why", "next"):
+        if k in ex:
+            errs += text.check(ex[k], langs, f"{where}.{k}")
+    for k, least, fields in (("terms", 1, ("term", "means")), ("steps", 2, None), ("related", 0, ("id", "why"))):
+        if k not in ex:
+            continue
+        items = ex[k]
+        if not isinstance(items, list) or len(items) < least:
+            what = "{" + ", ".join(fields) + "}" if fields else "texts"
+            errs.append(f"{where}.{k}: must be a list of {'at least ' + str(least) + ' ' if least else ''}{what}")
+            continue
+        for i, it in enumerate(items):
+            at = f"{where}.{k}[{i}]"
+            if fields is None:
+                errs += text.check(it, langs, at)
+                continue
+            errs += _keys(it, set(fields), set(), at)
+            if not isinstance(it, dict):
+                continue
+            for f in fields:
+                if f == "id":
+                    if not (isinstance(it.get("id"), str) and it["id"][:1] == "D" and it["id"][1:].isdigit()):
+                        errs.append(f"{at}.id: must be a card id like D12")
+                elif f in it:
+                    errs += text.check(it[f], langs, f"{at}.{f}")
     return errs
 
 

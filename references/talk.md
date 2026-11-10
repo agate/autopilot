@@ -20,6 +20,34 @@ elsewhere until the gate moves it.
 
 Answer with the facts and the file or command they came from. Say plainly what you could not find.
 
+## Walking the user through the cards
+
+When the talk starts (the user named this autopilot or picked it) and the newest snapshot shows cards
+waiting on the user or decisions worth a look, say how many there are and start with the first one.
+If the user asked something else first, answer that, then offer the walk-through in one line.
+
+Order: open `ask` cards, oldest first (they hold up work), then open `self` cards with
+`attention: true`. Routine `self` cards only when the user asks for them.
+
+For each card:
+
+1. Read the whole card in `<ap dir>/state.json` and check it is still true: open the files and lines
+   it cites, and look at the PR or run it links. When something has changed since the card was
+   written, say what changed and that the card may be out of date.
+2. Explain it in the reader's language, in the page's order: the one sentence (`body`), the words to
+   know (`terms`), the analogy, the real example with its `path:line` or link, the steps, each option
+   with what it does and costs, the recommendation and its reasons (and the `related` cards: how this
+   answer depends on theirs), and how to answer (`next`). A card without `explain` (written before
+   cards carried one) gets the same explanation, built from its body, its links and the code.
+3. Say where you are ("card 2 of 5") and stop. Wait for the user.
+4. A question about it: answer from the code, the docs or the run files, citing `path:line`; never from
+   memory. Say so when the answer changes the recommendation.
+5. An answer: record it as the table below says, say in one line what happens next and when, then go
+   to the next card.
+
+After the last card, list what you recorded and when the next pass acts on it. "Later" or "stop" ends
+the walk-through: say how many cards are left.
+
 ## Changing things on the user's word
 
 | The user says | Run |

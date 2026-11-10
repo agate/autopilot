@@ -73,7 +73,32 @@ def task_add(ap: str, task: dict) -> None:
     events.append(ap, "task_added", {"task": task["id"]})
 
 
-def decision_add(ap: str, d: dict) -> str:
+# Cards the user decides from carry the full walk-through. A gate (an approval someone gives) may carry one.
+EXPLAINED = ("ask", "self")
+
+
+def _explain_errors(d: dict) -> list:
+    """What an `ask` or `self` card lacks before the user can decide from it alone (RUNBOOK, "A decision card")."""
+    langs = state.langs()
+    errs = []
+    if d.get("kind") in EXPLAINED:
+        if "explain" not in d:
+            errs.append("missing explain {terms, analogy, example, steps, why, next}")
+        for j, o in enumerate(d.get("options") or []):
+            if isinstance(o, dict):
+                errs += [f"options[{j}]: missing {f}" for f in ("does", "cost") if f not in o]
+    if "explain" in d:
+        errs += state.explain_errors(d["explain"], langs, "explain")
+    for j, o in enumerate(d.get("options") or []):
+        for f in ("does", "cost"):
+            if isinstance(o, dict) and f in o:
+                errs += text.check(o[f], langs, f"options[{j}].{f}")
+    return errs
+
+
+def decision_add(ap: str, d: dict, explained: bool = False) -> str:
+    """Add a card. `explained` (every `ap decision add`) requires the walk-through; the gate's own
+    built-in cards are fixed labels and go in without one."""
     if d.get("kind") == "self" and not isinstance(d.get("attention"), bool):
         raise ValueError("a self card needs \"attention\": true when the user should look at it (see the runbook), "
                          "false for a routine call")
@@ -82,11 +107,22 @@ def decision_add(ap: str, d: dict) -> str:
         if miss:
             raise ValueError(f"{f}: label {d[f]['key']!r} needs args {', '.join(miss)} "
                              f"(for example {{\"key\": \"{d[f]['key']}\", \"args\": {{\"{miss[0]}\": \"...\"}}}})")
+    unexplained = "the card does not explain itself yet (RUNBOOK.md, \"A decision card\"): "
+    if explained:
+        errs = _explain_errors(d)
+        if errs:
+            raise ValueError(unexplained + "; ".join(errs))
     with state.mutate(ap) as st:
         nums = [int(x["id"][1:]) for x in st["decisions"] if x["id"][1:].isdigit()]
+        known = {x["id"] for x in st["decisions"]}
         for line in _archive_lines(ap):
+            known.add(line.get("id"))
             if line.get("id", "")[1:].isdigit():
                 nums.append(int(line["id"][1:]))
+        related = (d.get("explain") or {}).get("related") or []
+        gone = [r["id"] for r in related if isinstance(r, dict) and r.get("id") not in known]
+        if explained and gone:
+            raise ValueError(unexplained + f"explain.related: {ap} has no card {', '.join(map(str, gone))}")
         new = dict(d)
         new["id"] = f"D{max(nums, default=0) + 1}"
         new["status"] = "open"
@@ -320,7 +356,7 @@ def _task(args):
 def _decision(args):
     if len(args) == 3 and args[0] == "add":
         try:
-            print(decision_add(args[1], _load_arg(args[2])))
+            print(decision_add(args[1], _load_arg(args[2]), explained=True))
         except ValueError as e:
             print(f"ap decision add: {e}", file=sys.stderr)
             return 1
