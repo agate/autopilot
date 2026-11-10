@@ -1,0 +1,19 @@
+# Built-in template: one run of a routine (a daily digest, a Friday cleanup).
+kind: routine
+title: Routine
+description: A job that runs at set times. Every run is filed in History.
+view: [schedule, runs, report, activity]
+buttons:
+  - id: pause
+    label: Pause
+    lane: planned
+  - id: resume
+    label: Resume
+    lane: running
+  - id: undo
+    label: Undo
+    restore: last
+roles:
+  - role: general
+    when: "each scheduled slot"
+    brief: "Run the routine {title} once and write its report. Change nothing outside the card's folder."

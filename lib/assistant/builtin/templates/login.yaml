@@ -1,0 +1,19 @@
+# Built-in template: something the user must repair, such as an expired login.
+kind: login
+title: Login
+description: A tool lost its login. You fix it; Claude checks that it works again.
+view: [fix_steps, activity]
+buttons:
+  - id: fixed
+    label: I fixed it
+    lane: running
+  - id: later
+    label: Later
+    lane: planned
+  - id: undo
+    label: Undo
+    restore: last
+roles:
+  - role: general
+    when: "after you say it is fixed"
+    brief: "Check that {title} works again with one read that changes nothing. Say what you ran and what it returned."

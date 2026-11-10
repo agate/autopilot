@@ -1,0 +1,31 @@
+# Built-in template: one PR-sized code task (from a Jira epic or ticket, or the chat box).
+kind: code
+title: Code task
+description: One PR-sized change in a repo. Implemented, reviewed cold, then looped on its PR.
+source: any
+view: [source_block, plan, pr, findings, merge_checks, children, questions, activity]
+buttons:
+  - id: start
+    label: Start
+    lane: running
+  - id: park
+    label: Not now
+    lane: planned
+  - id: split
+    label: Split off a step
+    child: step
+  - id: cancel
+    label: Cancel
+    lane: done
+  - id: undo
+    label: Undo
+    restore: last
+roles:
+  - role: implement
+    brief: "Implement {title} in the card's worktree: tests first, the repo's checks, evidence, then a hand-back."
+  - role: review
+    when: "after implement hands back"
+    brief: "Review {title} cold: each criterion against its evidence, then a correctness pass over the diff. Give exact fixes."
+  - role: pr-loop
+    when: "after the review passes and the PR is open"
+    brief: "Loop on the PR for {title} until CI is green and no reviewer finds anything."

@@ -1,0 +1,22 @@
+# Built-in template: someone asked the user to do something that needs no repo.
+kind: errand
+title: Errand
+description: A thing to do. Claude plans it, you confirm, then it runs.
+source: any
+view: [source_block, plan, children, questions, activity]
+buttons:
+  - id: confirm
+    label: Confirm the plan
+    lane: running
+  - id: add_step
+    label: Add a step
+    child: step
+  - id: cancel
+    label: Cancel
+    lane: done
+  - id: undo
+    label: Undo
+    restore: last
+roles:
+  - role: general
+    brief: "Do the errand in {title}. First write a plan: what you will do, what it touches, and how to undo it. Draft anything meant for other people; never send or post it."

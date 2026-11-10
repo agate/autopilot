@@ -1,0 +1,19 @@
+# Built-in template: a production alert from an alert channel.
+kind: alert
+title: Alert
+description: An alert fired. Claude checks whether it still fires, how big it is and what changed.
+source: any
+view: [source_block, analysis, findings, links, activity]
+buttons:
+  - id: resolved
+    label: Resolved
+    lane: done
+  - id: dig
+    label: Dig deeper
+    child: research
+  - id: undo
+    label: Undo
+    restore: last
+roles:
+  - role: analyze
+    brief: "Analyze the alert in {title}: is it still firing, how big is it, what changed just before it, and what does the playbook say. Name every dashboard, log or commit you used."
