@@ -604,8 +604,9 @@ Calls the author made without asking (check them):
   their own exit code (0 or 2) instead of 1, because help text is not a result a script reads, while
   `ap2 config`'s JSON is, and a script must see that it was cut short. A closed stream gets nothing (help is
   never sent to stderr instead) and a failed write prints the one line and exits 1 (when stderr is the stream that failed, the line is lost
-  and ap2 still exits 1). None of these prints a
-  traceback or an `Exception ignored` line.
+  and ap2 still exits 1). The `ap2: <message>` line for a refused config or data folder follows the same
+  rules: when stderr's reader is gone or its write fails, the line is lost and ap2 still exits 1, with nothing
+  more. None of these prints a traceback or an `Exception ignored` line.
 - The search index schema.
 - How the local server pushes updates to an open page (polling is fine).
 - Exact limits: idle timeout, grace for missed slots, page sizes.
