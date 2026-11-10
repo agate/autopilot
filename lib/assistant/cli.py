@@ -83,8 +83,8 @@ class _OutputError(Exception):
 
 def _write(text: str, stream) -> None:
     """Write `text` to `stream` and flush it now, so a write error shows up here and not in the flush at exit.
-    A closed stream (None) gets nothing. When the write fails, the stream is pointed at devnull first, so the
-    flush at exit cannot fail again."""
+    A closed stream (None) gets nothing. When the write fails, the stream is pointed at devnull first (when devnull
+    can be opened), so the flush at exit does not fail again."""
     if stream is None:
         return
     try:
