@@ -120,6 +120,21 @@ class ExplainedCardTest(Base):
         d["options"] = [{"id": "keep", "label": t("OK"), "does": t("Nothing changes.")}]
         self.refused(d, "options[0]: missing cost")
 
+    def test_a_label_in_a_section_or_option_must_fill_its_placeholders(self):
+        # A label text is allowed, but one with an empty placeholder would show the raw {id} on the page.
+        d = card()
+        d["explain"]["why"] = {"key": "two_answers"}
+        self.refused(d, "explain.why: label 'two_answers' needs args id")
+        d = card()
+        d["explain"]["steps"][1] = {"key": "worker_blocked", "args": {}}
+        self.refused(d, "explain.steps[1]: label 'worker_blocked' needs args session")
+        d = card()
+        d["options"][0]["does"] = {"key": "worker_blocked"}
+        self.refused(d, "options[0].does: label 'worker_blocked' needs args session")
+        d = card()
+        d["explain"]["why"] = {"key": "two_answers", "args": {"id": "D3"}}
+        self.assertEqual(self.add(d), (0, ""))
+
     def test_an_unknown_section_is_refused(self):
         d = card()
         d["explain"]["summary"] = t("x")

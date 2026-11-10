@@ -175,5 +175,8 @@
   "explain_related": "How it ties to other cards",
   "explain_next": "How to answer",
   "opt_does": "What happens",
-  "opt_cost": "Cost"
+  "opt_cost": "Cost",
+  "explain_why_gate": "Why it is needed",
+  "explain_next_self": "Keep it or undo it",
+  "explain_next_gate": "What you can do"
 }

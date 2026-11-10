@@ -8,7 +8,8 @@
 2. Write `<ap dir>/plan.md` (the folder `ap dir <ap>` prints): 2-10 slices, each one PR: an id `<key>-s<n>`, a title, what it
    changes, the slices it depends on, and how it is proven.
 3. Add an `ask` card "Approve the plan" with options `approve` (recommended) and `change`, and a link
-   to the ticket. Add no tasks yet.
+   to the ticket. It is a full card (RUNBOOK.md, "A decision card"): its walk-through explains the
+   plan's slices. Add no tasks yet.
 
 ## Sync (every pass)
 

@@ -287,17 +287,22 @@ console.log(JSON.stringify(explainSections(""" + card + """, find)));
 
     @unittest.skipUnless(shutil.which("node"), "needs node")
     def test_a_self_card_says_why_it_chose_and_an_old_card_shows_its_body_only(self):
-        secs = self.run_sections(self.FULL.replace('kind: "ask"', 'kind: "self"'))
-        self.assertIn("explain_why_self", [x["label"] for x in secs])
-        self.assertNotIn("explain_why", [x["label"] for x in secs])
+        for kind in ("self", "gate"):
+            labels = [x["label"] for x in self.run_sections(self.FULL.replace('kind: "ask"', f'kind: "{kind}"'))]
+            self.assertEqual(labels[5], f"explain_why_{kind}")
+            self.assertEqual(labels[-1], f"explain_next_{kind}")
+            self.assertNotIn("explain_why", labels)
         self.assertEqual(self.run_sections('{ ap: "a", kind: "ask", body: { en: "b" }, options: [] }'), [])
         part = self.run_sections('{ ap: "a", kind: "gate", body: { en: "b" }, explain: { steps: [{ en: "x" }, { en: "y" }] } }')
         self.assertEqual([x["label"] for x in part], ["explain_steps"])
 
     def test_every_section_label_is_defined(self):
-        for k in self.ORDER + ["explain_why_self", "opt_does", "opt_cost"]:
+        for k in self.ORDER + ["opt_does", "opt_cost"]:
             self.assertIn(k, LABELS)
             self.assertIn(f'"{k}"', PAGE)
+        for k in ("explain_why", "explain_next"):
+            for kind in ("self", "gate"):
+                self.assertIn(f"{k}_{kind}", LABELS)
 
     def test_every_card_view_shows_the_walk_through(self):
         for fn, nxt in (("askCard", "function systemCard"), ("selfRow", "function selfCard"), ("selfCard", "async function keepAll")):

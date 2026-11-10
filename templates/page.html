@@ -537,6 +537,8 @@ function explainSections(d, find) {
   const x = d.explain;
   if (!x || typeof x !== "object") return [];
   const list = (v) => Array.isArray(v) ? v : [];
+  // A self card says why it chose and what OK or undo do; a gate says why the approval is needed and how to get it.
+  const byKind = (k) => d.kind === "self" ? k + "_self" : d.kind === "gate" ? k + "_gate" : k;
   const opts = list(d.options).filter((o) => o && (o.does || o.cost));
   const related = list(x.related).filter((r) => r && r.id).map((r) => ({ id: r.id, why: r.why, title: (find(d.ap, r.id) || {}).title }));
   return [
@@ -545,9 +547,9 @@ function explainSections(d, find) {
     { label: "explain_example", kind: "text", items: x.example ? [x.example] : [] },
     { label: "explain_steps", kind: "steps", items: list(x.steps) },
     { label: "explain_options", kind: "options", items: opts },
-    { label: d.kind === "self" ? "explain_why_self" : "explain_why", kind: "text", items: x.why ? [x.why] : [] },
+    { label: byKind("explain_why"), kind: "text", items: x.why ? [x.why] : [] },
     { label: "explain_related", kind: "related", items: related },
-    { label: "explain_next", kind: "text", items: x.next ? [x.next] : [] },
+    { label: byKind("explain_next"), kind: "text", items: x.next ? [x.next] : [] },
   ].filter((sec) => sec.items.length);
 }
 const findDecision = (ap, id) => S.decisions[ap + ":" + id] || S.archive[ap + ":" + id] || null;

@@ -93,7 +93,27 @@ def _explain_errors(d: dict) -> list:
         for f in ("does", "cost"):
             if isinstance(o, dict) and f in o:
                 errs += text.check(o[f], langs, f"options[{j}].{f}")
+    for where, t in _walk_texts(d):
+        miss = text.unfilled(t)
+        if miss:
+            errs.append(f"{where}: label {t['key']!r} needs args {', '.join(miss)}")
     return errs
+
+
+def _walk_texts(d: dict) -> list:
+    """(where, text) for every text the walk-through and the options add, so a label in one fills its placeholders too."""
+    ex = d.get("explain") if isinstance(d.get("explain"), dict) else {}
+    lst = lambda v: v if isinstance(v, list) else []
+    out = [(f"explain.{k}", ex.get(k)) for k in ("analogy", "example", "why", "next")]
+    out += [(f"explain.steps[{i}]", s) for i, s in enumerate(lst(ex.get("steps")))]
+    for k, fields in (("terms", ("term", "means")), ("related", ("why",))):
+        for i, it in enumerate(lst(ex.get(k))):
+            if isinstance(it, dict):
+                out += [(f"explain.{k}[{i}].{f}", it.get(f)) for f in fields]
+    for j, o in enumerate(lst(d.get("options"))):
+        if isinstance(o, dict):
+            out += [(f"options[{j}].{f}", o.get(f)) for f in ("does", "cost")]
+    return out
 
 
 def decision_add(ap: str, d: dict, explained: bool = False) -> str:

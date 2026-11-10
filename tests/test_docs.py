@@ -206,6 +206,9 @@ class DocsTest(unittest.TestCase):
         for k in state.EXPLAIN_REQ + state.EXPLAIN_OPT + ("does", "cost"):
             self.assertIn(f"`{k}`", card, k)                      # every section the command checks is described
         self.assertIn("refuses", card)
+        self.assertIn("(at least 1)", card)                       # the same minimums the command checks
+        self.assertIn("(at least 2)", card)
+        self.assertIn("word for word", card)                      # a drafted message is shown exactly
         self.assertIn("read every\nline you cite", card)
         talk = (ROOT / "references" / "talk.md").read_text()
         walk = talk[talk.index("## Walking the user through the cards"):talk.index("## Changing things")]
@@ -213,6 +216,9 @@ class DocsTest(unittest.TestCase):
         self.assertIn("still true", walk)                         # checked against the code before explaining
         self.assertIn("`path:line`", walk)
         self.assertIn("attention: true", walk)
+        self.assertIn("`replies`", walk)                          # a card answered on the page is not asked again
+        for preset in ("jira-ticket.md", "idea.md"):
+            self.assertIn('"A decision card"', (ROOT / "presets" / preset).read_text(), preset)
         self.assertIn("walk through them one at a time", (ROOT / "SKILL.md").read_text())
 
 

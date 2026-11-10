@@ -29,6 +29,11 @@ If the user asked something else first, answer that, then offer the walk-through
 Order: open `ask` cards, oldest first (they hold up work), then open `self` cards with
 `attention: true`. Routine `self` cards only when the user asks for them.
 
+Skip a card the user already answered on the page: read the page's `replies` collection with
+`ArtifactData` (`ap publish url`, with no argument, prints the page). A reply whose `decision` is
+`<name>:<D-id>`, or whose `decisions` list holds it, is an answer on its way to the next pass: say so
+in one line, and do not ask again. When the replies cannot be read, say that before the first card.
+
 For each card:
 
 1. Read the whole card in `<ap dir>/state.json` and check it is still true: open the files and lines

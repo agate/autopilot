@@ -69,20 +69,21 @@ each, nothing assumed. Simpler words, never a wrong fact: keep the numbers, file
 - `kind` (`ask | gate | self`), `task` (optional: blocks that task until answered), `title`.
 - `body`: one or two sentences: what this is about, in everyday words. On a `self` card, what you chose.
 - `explain`, the walk-through the page shows section by section, in this order:
-  - `terms`: `[{term, means}]`, every word the reader needs that is not everyday language (a tool, a
-    file, a flag, a ticket's own jargon, an abbreviation with its full name). Say what it does before
-    what it is called, in one sentence.
+  - `terms`: `[{term, means}]` (at least 1), every word the reader needs that is not everyday language
+    (a tool, a file, a flag, a ticket's own jargon, an abbreviation with its full name). Say what it
+    does before what it is called, in one sentence.
   - `analogy`: one comparison from daily life (a fridge, a library, a recipe) that works the same way
     as the mechanism, and where it stops fitting when that matters.
   - `example`: a real case from this work: the file and line, the command, the run or review that
     showed it, and what actually happened.
   - `steps`: `[text]`, how the problem happens, one step per entry, in order (at least 2).
   - `why`: your recommendation and its reasons, including what the other options would break. On a
-    `self` card: why you chose this.
+    `self` card: why you chose this. On a `gate` card: why the approval is needed.
   - `related` (optional): `[{id, why}]`, another card of this autopilot this one depends on or
     changes, and how (for example "B is safe only because D94 chose A").
   - `next`: how to answer and what happens then: which pass acts, what it runs, what the user will see.
-    On a `self` card: what undo does.
+    A drafted message or reply goes here word for word, so the user approves the exact text. On a
+    `self` card: what OK keeps and what undo does. On a `gate` card: what the user can do to get it.
 - `options`: `[{id, label, does, cost, recommended?}]`. `does` says what happens if this one is picked,
   `cost` what it costs (time, risk, what stays broken). A `self` card's options are `keep` and `undo`:
   their `does` and `cost` compare what you did with the way back.
