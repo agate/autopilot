@@ -460,12 +460,18 @@ Each gate run, per routine:
    the next run finds the card and does not make a second one.
 4. The run card goes to Running like any other card.
 
-**[open] Missed runs.** The user first chose "skip, never catch up" when told that catching up was impossible. That
+**Missed runs.** The user first chose "skip, never catch up" when told that catching up was impossible. That
 was wrong: v1's report already runs the latest missed slot once after the Mac wakes. The choices are:
 
 - `skip` (what the prototype shows now);
 - `once`: run the latest missed slot once, late (v1's report);
 - `once_within: 3h`: run it late only if it is still useful (the author's recommendation).
+
+**[decided by the builder, slice 5]** `once_within: 3h` is the default (a routine file without `missed_run` gets
+it); each routine may set `skip`, `once` or `once_within: <N>h`. A slot more than 5 minutes old at the run is
+missed. Only the latest missed slot is considered, never a burst of catch-ups: a Mac asleep from Monday to
+Wednesday runs (or skips) Wednesday's slot only. A missed slot that is not run late gets a Done card marked
+`skipped`, so History shows it.
 
 Whatever is chosen, a new routine shows a notice about this limit once, and the user can dismiss it **[decided]**.
 History marks each skipped run.
@@ -614,7 +620,9 @@ archived with the card.
 
 ## 11. Open questions, most important first
 
-1. **Missed routine runs**: `skip`, `once`, or `once_within: 3h` (7.3).
+1. **Missed routine runs**: `skip`, `once`, or `once_within: 3h` (7.3). **Answered (slice 5):** `once_within: 3h`, the
+   recommendation, as the default; a routine may set `skip` or `once` instead. Only the latest missed slot is
+   considered.
 2. **Worker lifecycle**: confirm "no process waits for a human" and the idle timeout (8.2, points 3 to 5).
 3. **Replies on the local page** resume the session immediately (8.3)?
 4. **Drafts and quotes in two languages** (3.1, proposed part).
@@ -672,9 +680,10 @@ Calls the author made without asking (check them):
   calls first and which refuses in shadow mode), `datadir.py` (lookup and layout), `cli.py` (the `ap2` command,
   run by `bin/ap2`), and the card store: `cards.py` (card shape, ids and checks), `store.py` (the `Store` API:
   add, get, update, list, restore, propose_opposite, prune, search), `restore.py` (restore points and proposed
-  opposite actions) and `index.py` (`index.sqlite`), and the source engine: `sources.py` (loading, `extends:`,
-  checks), `form.py` (the form, the path language, `{field}` patterns and derived fields) and `engine.py` (read,
-  fill, check, link and key, sort, card). `ap2 config [--data PATH]` prints the effective config and `data_dir` as JSON. With stdout
+  opposite actions) and `index.py` (`index.sqlite`); the gate: `routines.py` (routine files and slots) and `gate.py`
+  (one gate run, `ap2 gate`); and the source engine: `sources.py` (loading, `extends:`, checks), `form.py` (the form,
+  the path language, `{field}` patterns and derived fields) and `engine.py` (read, fill, check, link and key, sort,
+  card). `ap2 config [--data PATH]` prints the effective config and `data_dir` as JSON. With stdout
   closed, `ap2 config` sets up the folder, prints nothing and exits 0; when its reader goes away
   (`ap2 config | true`) it exits 1 with nothing on stderr; when a write fails (a full disk) it prints one line,
   `ap2: cannot write the output: ...`, and exits 1. `ap2` with no arguments prints the usage, listing the
@@ -720,7 +729,7 @@ Calls the author made without asking (check them):
     `{"id", "at", "kind": "card", "card_id", "card"}`, id `r-YYYYMMDD-HHMMSS-xxxxxx` (ASCII digits only). A point
     is refused, naming its file, unless its `id` is its file name and its `card_id` is its card's `id`, and its
     card passes the same structure check as a card file. `Store.prune()` removes points
-    older than 30 days (kept at exactly 30); nothing calls it yet, the heartbeat (slice 5) will. A point whose time
+    older than 30 days (kept at exactly 30); every gate run calls it (slice 5). A point whose time
     cannot be read is kept.
   - Proposed opposite action: `Store.propose_opposite(id, action, run, by)` sets the card's `ask` to
     `{"type": "approve", "action": <move_ticket_back|close_pr|force_push_saved_ref|revert_pr>, "run": [argv...],
@@ -819,6 +828,63 @@ Calls the author made without asking (check them):
     [--records FILE] [--dry-run]`. `--dry-run` runs the read and prints each item with `action` (`add`,
     `update`, `unchanged`, `none`) and the card it would add (`would_add`) or the fields it would change
     (`would_change`), and writes nothing, not even the data folder's layout.
+- **[decided by the builder]** The gate and routines (slice 5, design 4.3 and 7.1 to 7.4). Modules:
+  `lib/assistant/routines.py` (routine files, slots, missed runs) and `lib/assistant/gate.py` (one run).
+  - Routine files are JSON, `<data>/routines/<name>.json`, not YAML: the gate writes `last_slot` back, and a JSON
+    file reads back exactly as written (a YAML rewrite would lose the user's comments). The name is the file name:
+    lowercase letters, digits, `-` and `_`. Keys: `title` (text), `schedule` (`days`: `daily`, `weekdays` or a
+    list of `mon`..`sun`; `at`: a list of `HH:MM`), `tz` (an IANA name, read with `zoneinfo`), and optional
+    `missed_run` (default `once_within: 3h`; see 7.3), `last_slot` (`YYYY-MM-DDTHH:MM` wall-clock time in `tz`, or
+    null) and `paused` (default false). An unknown key, a repeated day or time, or a bad value is refused with one
+    error, `<file>: <field>: <why>`; a bad routine is listed in the run's `errors` and the others still run. An
+    unknown key is quoted with its escapes (`'owner'`, `schedule.'every'`), so a key JSON can hold but UTF-8
+    cannot (a lone `\ud800`) never stops `gate.json` from being written. A title UTF-8 cannot write is refused the
+    same way, and any other such value is one error for its routine. Hidden files in `routines/` are left out.
+  - Due slot: the latest slot at or before now, looked for in the last 7 days, in the routine's `tz`, compared with
+    `last_slot` as wall-clock text. So each wall-clock slot happens once on a day the clocks change: a time that
+    happens twice (clocks going back) runs at its first time; a time that does not exist (clocks going forward)
+    runs at the moment the clocks jump (02:30 runs at 03:00). So a slot never runs after a slot with a later
+    time, and two slots that land on the same moment run once, as the later one. The grace before a slot counts as
+    missed is 5 minutes (on time at exactly 5). A paused routine is not looked at, and its `last_slot` is not moved. A
+    routine that never ran (`last_slot` null) runs a slot inside the grace; an older slot is not a missed run (it
+    came before the routine), so the gate only writes it as `last_slot` (action `start`, no card) and the routine
+    counts from its next slot.
+  - The run card: made through `Store.add` with `by: gate`, `kind: routine`, `feed: routines`, `lane: running`
+    (or `done` with `skipped: true` for a skipped run), `pri: P2`, `origin: source`, and the extra fields `key`
+    (`<routine>@<slot>`), `routine`, `slot`, `slot_tz`, `slot_at` (UTC), `late`, `skipped`, `late_minutes`. Then
+    `last_slot` is written atomically (the file is read again first, so a change made meanwhile is kept). Before
+    making a card the gate reads the routine cards once per run and looks for the key; a card found means it only
+    writes `last_slot`. A damaged card file makes that read fail, so the routine waits (with an error) rather than
+    risk a second card. A routine card whose `key` is not text is passed over in that look. The plain words are
+    built in for English and Chinese (`zh`, `zh-*`); any other configured language gets the English lines, since
+    the gate has no AI to write them.
+  - Watches: until the source loader (slice 3) is on `v2`, the watch list is a plain argument of `gate.run`
+    (`[{name, every, last_check_at?}]`, `every` is `<N>m` or `<N>h`); `ap2 gate` passes none. A watch is due when
+    `now - last_check_at >= every` (or it was never checked); the gate lists it in `watches_due` and saves
+    `last_check_at` in `<data>/watches.json`, whose time wins when it is later than the one given. The gate does not
+    read the source and makes no card for the look. A watches.json that cannot be read, is not JSON or is not an
+    object is treated like a damaged saved time: the run logs it, adds `{"watches": <path>, "error": ...}` to
+    `errors`, starts from no saved times (so each watch is due) and writes the file again when a watch is due. A
+    watches.json holding text UTF-8 cannot write (a lone surrogate) is treated the same way; a watch name like that
+    is refused as a bad watch, with an error, and the others still run.
+  - Heartbeat: every run writes `<data>/gate.json` atomically: `{"last_run_at": <UTC>, "routines": [{routine,
+    slot, key, action (run, late, skip, exists or start), card, late_minutes}], "watches_due": [...], "pruned": [point
+    ids], "errors": [...]}`; text in `errors` that UTF-8 cannot write (a file name that is not UTF-8) is written with
+    backslash escapes. Every line of `<data>/gate.log` starts with the run's UTC time
+    (`2026-11-10T14:30:05Z run: ...`), one line per routine action or error and one summary line; past 1 MB it is
+    renamed `gate.log.1` (one old file is kept). Each run calls `Store.prune()`.
+  - One run at a time: `<data>/.gate.lock` is taken with a non-blocking `flock`; a run that finds it held prints
+    `{"locked": true, "lock": <path>}`, writes nothing and exits 0. A lock that cannot be taken for any other reason
+    (`ENOLCK` on a network share) is a config error: one `ap2: cannot lock the gate ...` line and exit 1. The gate
+    starts no process, opens no socket and writes only inside the data folder; the time is passed in
+    (`gate.run(data, now)`), never read inside.
+  - `ap2 gate [--data PATH] [--now ISO]` runs once and prints the run as JSON. `--now` needs a zone (`Z` or an
+    offset); a time without one is an argument error (exit 2). `--now` may not be later than the real time plus
+    the 5-minute grace, also an argument error: a run writes `last_slot`, makes cards and prunes restore points,
+    so a run in the future would hold back every real slot until then and prune points that are only days old. A
+    year before 1971 (or a time too far out to turn into UTC) is an argument error too. A bad routine or watch is
+    in `errors` and still exits 0 (launchd runs it again in a minute); a bad `config.yaml` or data folder is one
+    `ap2: ...` line and exit 1. Nothing is installed: no launchd job is written in this slice.
 - How the local server pushes updates to an open page (polling is fine).
 - Exact limits: idle timeout, grace for missed slots, page sizes.
 
