@@ -6,6 +6,7 @@ import json
 import subprocess
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 from unittest import mock
 
@@ -137,6 +138,25 @@ class CardsTest(Base):
         self.assertEqual([e["type"] for e in self.events()].count("access_broken"), 1)
         self.assertEqual(len(self.notes), 1)
         self.assertEqual(state.validate(state.load("alpha"), {"en"}), [])
+
+    def test_fail_takes_text_in_two_languages(self):
+        self.ap()
+        info = {"error": {"en": "fetch fails", "zh": "拉取失败"}, "fix": {"en": "run it", "zh": "运行它"}}
+        with redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.main(["access", "fail", "alpha", "gh", json.dumps(info)]), 0)
+        card = self.system_cards(status="open")[0]
+        self.assertEqual(card["access"]["error"], info["error"])
+        self.assertEqual(card["access"]["fix"], info["fix"])
+        self.assertEqual(card["body"], {"key": "access_body", "args": {"error": info["error"]}})
+
+    def test_fail_refuses_text_that_is_neither_a_string_nor_languages(self):
+        self.ap()
+        for bad in ({"error": {"zh": "只有中文"}}, {"error": ["a"]}, {"fix": {"en": 3}}, {"error": {"en": ""}}):
+            err = io.StringIO()
+            with redirect_stderr(err):
+                self.assertEqual(cli.main(["access", "fail", "alpha", "gh", json.dumps(bad)]), 2, bad)
+            self.assertIn("ap access fail", err.getvalue())
+        self.assertEqual(self.system_cards(), [])
 
     def test_since_is_the_first_failure(self):
         self.ap()

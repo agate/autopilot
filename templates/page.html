@@ -368,7 +368,8 @@ function labelsFor(l) {
 function L(key, args) {
   let s = labelsFor(lang)[key];
   if (s === undefined) s = key;
-  for (const [k, v] of Object.entries(args || {})) s = s.split("{" + k + "}").join(String(v));
+  // An argument may itself be text in several languages ({en, zh}) or a label; String() would print [object Object].
+  for (const [k, v] of Object.entries(args || {})) s = s.split("{" + k + "}").join(v && typeof v === "object" ? T(v) : String(v));
   return s;
 }
 function T(obj) {
@@ -610,7 +611,7 @@ function systemCard(d) {
     el("h3", {}, T(d.title)),
     el("div", { class: "body" }, T(d.body)),
     el("div", { class: "sys-line" }, el("b", {}, L("sys_blocks") + ": "), T(a.blocks)),
-    el("div", { class: "sys-line" }, el("b", {}, L("sys_fix") + ": "), el("code", { class: "mono" }, a.fix || "–")),
+    el("div", { class: "sys-line" }, el("b", {}, L("sys_fix") + ": "), el("code", { class: "mono" }, T(a.fix) || "–")),
     el("div", { class: "note" }, L("sys_checked", { when: rel(a.last_checked) })));
 }
 /* Decisions it made by itself. The pass flags the few worth a look (`attention`): they sit on top as cards.

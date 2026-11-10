@@ -161,6 +161,30 @@ def node(js: str) -> str:
     return out.stdout.strip()
 
 
+class TextObjectsTest(unittest.TestCase):
+    """A label argument or a field may hold {en, <lang>} text; the page shows the reader's language, never
+    "[object Object]" (seen 2026-11-10 on an access card whose error and fix the pass wrote in two languages)."""
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_label_args_and_fields_in_two_languages(self):
+        js = ("const S = {meta: {labels: {}}}; const LABELS_EN = {access_body: 'Error: {error}'}; let lang = 'zh';\n"
+              + js_fn("labelsFor") + js_fn("L") + js_fn("T") + """
+        const err = {en: 'fetch fails', zh: '拉取失败'};
+        const out = [L('access_body', {error: err}), T({key: 'access_body', args: {error: err}}),
+                     T({en: 'run it'}), L('access_body', {error: 'plain'}), L('access_body', {error: 3})];
+        lang = 'en';
+        out.push(L('access_body', {error: err}));
+        console.log(JSON.stringify(out));
+        """)
+        self.assertEqual(json.loads(node(js)),
+                         ["Error: 拉取失败", "Error: 拉取失败", "run it", "Error: plain", "Error: 3", "Error: fetch fails"])
+
+    def test_system_card_shows_the_fix_as_text(self):
+        body = PAGE[PAGE.index("function systemCard"):PAGE.index("function selfGroups")]
+        self.assertIn("T(a.fix)", body)
+        self.assertNotIn("a.fix ||", body)
+
+
 class SelfDecisionsTest(unittest.TestCase):
     """Decisions the autopilot made by itself: the few worth a look on top, the routine rest folded, the read ones
     in the history and on their task's evidence page."""

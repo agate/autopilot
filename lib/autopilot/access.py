@@ -14,7 +14,7 @@ import re
 import subprocess
 import sys
 
-from autopilot import cli, config, events, ops, paths, state, workers
+from autopilot import cli, config, events, ops, paths, state, text, workers
 
 TIMEOUT_S = 20
 NAMES = {"gh": "GitHub (gh)", "page": "claude.ai login", "artifact": "Artifact tools",
@@ -154,6 +154,20 @@ def _texts(t, langs: set) -> dict:
     return t
 
 
+def _bad_texts(info) -> list:
+    """Errors for the error and fix of `ap access fail`: each is a string, or text in every reader language."""
+    if not isinstance(info, dict):
+        return ["the argument must be a JSON object"]
+    out = []
+    for f in ("error", "fix"):
+        v = info.get(f)
+        if v is None or isinstance(v, str):
+            continue
+        out += text.check(v, state.langs(), f) if isinstance(v, dict) and "key" not in v else \
+            [f"{f}: must be a string or text in each language, got {type(v).__name__}"]
+    return out
+
+
 def _info(ap: str, check: str) -> dict:
     try:
         return next((c for c in checks(ap) if c["id"] == check), {})
@@ -222,6 +236,11 @@ def _cmd(args: list) -> int:
         return 0 if ok else 1
     if args[:1] == ["fail"] and len(args) == 4:
         info = json.loads(args[3])
+        bad = _bad_texts(info)
+        if bad:
+            print(f"ap access fail: {'; '.join(bad)} (each of error and fix is a string or "
+                  "{\"en\": ..., \"<lang>\": ...})", file=sys.stderr)
+            return 2
         events.append(args[1], "access_failure", dict(info, check=args[2]))
         record(args[1], args[2], False, info.get("error") or "", info.get("fix") or "", info.get("blocks"))
         return 0
