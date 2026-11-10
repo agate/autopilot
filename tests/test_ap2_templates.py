@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
 import unittest
@@ -23,8 +24,8 @@ EXPECTED_ROLES = {
                    "Write"), "worker"),
     "review": (("Agent", "Bash", "Glob", "Grep", "Read", "Skill", "Write"), "worker"),
     "pr-loop": (("Agent", "Bash", "Edit", "Glob", "Grep", "Read", "Skill", "Write"), "worker"),
-    "investigate": (("Bash", "Glob", "Grep", "Read", "WebFetch", "WebSearch"), "read-only"),
-    "analyze": (("Bash", "Glob", "Grep", "Read", "WebFetch", "WebSearch"), "read-only"),
+    "investigate": (("Bash", "Glob", "Grep", "Read", "WebFetch", "WebSearch", "Write"), "read-only"),
+    "analyze": (("Bash", "Glob", "Grep", "Read", "WebFetch", "WebSearch", "Write"), "read-only"),
     "reviewer-angle": (("Bash", "Glob", "Grep", "Read"), "read-only"),
     "general": (("Bash", "Edit", "Glob", "Grep", "Read", "WebFetch", "WebSearch", "Write"), "worker"),
 }
@@ -126,6 +127,7 @@ class RolesTest(unittest.TestCase):
                 self.assertEqual(role.floor, floor)
 
     def test_read_only_roles_have_no_file_editing_tools(self):
+        self.assertEqual(set(roles.READ_ONLY_DENIED), {"Edit", "NotebookEdit"})
         for name in ("reviewer-angle", "investigate", "analyze"):
             with self.subTest(name):
                 self.assertEqual(roles.ROLES[name].floor, "read-only")
@@ -133,7 +135,17 @@ class RolesTest(unittest.TestCase):
             if role.floor != "read-only":
                 continue
             with self.subTest(name):
-                self.assertFalse(set(role.tools) & set(roles.EDIT_TOOLS), role.tools)
+                self.assertFalse(set(role.tools) & {"Edit", "NotebookEdit"}, role.tools)
+
+    def test_read_only_roles_write_only_their_result_file(self):
+        # The copied secretary agents: the investigator and analyst write their report; the reviewer returns
+        # its findings to the loop that started it, so it has no Write.
+        for name in ("investigate", "analyze"):
+            with self.subTest(name):
+                self.assertIn("Write", roles.ROLES[name].tools)
+        self.assertNotIn("Write", roles.ROLES["reviewer-angle"].tools)
+        self.assertIn("result file", roles.FLOORS["read-only"])
+        self.assertIn("reviewer-angle", roles.FLOORS["read-only"])
 
     def test_code_roles_run_under_the_worker_floor(self):
         for name in ("implement", "pr-loop"):
@@ -196,6 +208,15 @@ class UserTemplatesTest(TempFolder):
         self.assertTrue(q.replaces_builtin)
         self.assertEqual(set(cat), BUILTIN_KINDS)  # replaced, nothing added
         self.assertEqual(templates.catalog()["question"].origin, "builtin")  # the plugin's file is untouched
+
+    def test_an_unreadable_templates_folder_is_a_template_error(self):
+        folder = self.data / "templates"
+        shutil.rmtree(folder)
+        folder.write_text("not a folder\n", encoding="utf-8")
+        with self.assertRaises(TemplateError) as e:
+            templates.catalog(self.data)
+        self.assertIn(str(folder), str(e.exception))
+        self.assertIn("cannot read", str(e.exception))
 
     def test_a_new_kind_is_added(self):
         shutil.copy(FIXTURES / "parcel.yaml", self.data / "templates" / "parcel.yaml")
@@ -313,7 +334,7 @@ class NoAddedToolsTest(TempFolder):
             templates.catalog(self.data)
         self.assertEqual(e.exception.file, str(path))
         self.assertEqual(roles.ROLES["investigate"].tools, shipped)
-        self.assertNotIn("Write", shipped)
+        self.assertNotIn("Edit", shipped)  # the file asked for Edit; the role still does not have it
         path.unlink()
         runs = templates.catalog(self.data)["question"].runs({"id": "c-1", "title": "t"})
         self.assertEqual([r["tools"] for r in runs], [list(shipped)])
@@ -513,6 +534,22 @@ class CheckTest(TempFolder):
         shutil.copy(path, self.data / "templates" / "question.yaml")
         self.assertEqual(templates.check(path, self.data)["replaces"], "user")
         out = templates.check(self.data / "templates" / "question.yaml", self.data)
+        self.assertEqual((out["replaces"], out["installed"]), ("builtin", True))
+
+    def test_check_knows_the_installed_file_by_another_spelling(self):
+        installed = self.data / "templates" / "question.yaml"
+        shutil.copy(FIXTURES / "question.yaml", installed)
+        old_cwd = os.getcwd()
+        self.addCleanup(os.chdir, old_cwd)
+        os.chdir(self.data / "templates")
+        out = templates.check("question.yaml", self.data)  # relative to the templates folder
+        self.assertEqual((out["replaces"], out["installed"]), ("builtin", True))
+        os.chdir(old_cwd)
+        link_dir = self.tmp / "links"
+        link_dir.mkdir()
+        link = link_dir / "question.yaml"
+        link.symlink_to(installed)
+        out = templates.check(link, self.data)  # a symlink to the installed file
         self.assertEqual((out["replaces"], out["installed"]), ("builtin", True))
 
     def test_check_ignores_other_bad_user_files(self):

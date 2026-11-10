@@ -82,6 +82,15 @@ class TemplateCommandTest(unittest.TestCase):
         kinds = [t["kind"] for t in self.ok("template", "list", "--data", str(other))]
         self.assertIn("parcel", kinds)
         self.assertNotIn("parcel", [t["kind"] for t in self.ok("template", "list")])
+        self.assertEqual(self.ok("template", "show", "parcel", "--data", str(other))["origin"], "user")
+        self.fails("template", "show", "parcel")  # AP2_DATA has no parcel
+
+    def test_list_fails_on_one_line_when_the_templates_folder_cannot_be_read(self):
+        self.data.mkdir()
+        (self.data / "templates").write_text("not a folder\n", encoding="utf-8")
+        line = self.fails("template", "list")
+        self.assertIn(str(self.data / "templates"), line)
+        self.assertIn("cannot read", line)
 
     def test_show_prints_the_template_with_each_roles_shipped_tools(self):
         self.install("parcel.yaml")

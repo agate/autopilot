@@ -21,12 +21,14 @@ FLOORS = MappingProxyType({
               "user's templates and sources (`<data>/templates/`, `<data>/sources/`) cannot be edited, because "
               "changing a template or a source asks first (design 3.6); the worker sessions (slice 6) add these "
               "as Edit and Write deny rules.",
-    "read-only": "the worker floor, and no file-editing tool (Edit, Write, NotebookEdit): the role reads, runs "
-                 "commands that change nothing, and reports what it found (its result file is its one write).",
+    "read-only": "the worker floor, and no Edit or NotebookEdit: the role reads and runs commands that change "
+                 "nothing. Its one write is its result file: Write only there, which the worker sessions (slice 6) "
+                 "add as a deny rule for every other path. A role without Write (reviewer-angle) returns its "
+                 "findings to the loop that started it.",
 })
 
-# Tools that change files. A read-only role has none of them.
-EDIT_TOOLS = ("Edit", "Write", "NotebookEdit")
+# Tools a read-only role never has. Write is not here: it writes the role's result file and nothing else.
+READ_ONLY_DENIED = ("Edit", "NotebookEdit")
 
 
 @dataclass(frozen=True)
@@ -53,9 +55,9 @@ _SHIPPED = (
          ("Agent", "Bash", "Edit", "Glob", "Grep", "Read", "Skill", "Write"), "worker", "commands/pr-loop.md"),
     Role("investigate", "Investigates one question (code, docs, history, trackers) and drafts a reply that is "
                         "never sent.",
-         _READ + _WEB, "read-only", "secretary's investigator agent"),
+         _READ + _WEB + ("Write",), "read-only", "secretary's investigator agent"),
     Role("analyze", "Analyzes one alert (still firing, how big, what changed, what the playbook says).",
-         _READ + _WEB, "read-only", "secretary's analyst agent"),
+         _READ + _WEB + ("Write",), "read-only", "secretary's analyst agent"),
     Role("reviewer-angle", "Reviews a PR from one review angle, adversarially, and returns findings.",
          _READ, "read-only", "secretary's reviewer agent; the PR loop's role reviewers"),
     Role("general", "Does one errand from its brief: reads, checks, drafts, and edits files only in the card's "

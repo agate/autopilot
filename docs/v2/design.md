@@ -780,14 +780,17 @@ Calls the author made without asking (check them):
     `worker` is v1's worker floor (`lib/autopilot/perms.py`, `generate(role="worker")`: outward MCP tools, the
     protected data files, the plugin and `gh` comment and review commands denied, the park hook), plus the
     user's templates and sources (`<data>/templates/`, `<data>/sources/`) cannot be edited, because changing a
-    template or a source asks first (3.6); `read-only` is that floor with no file-editing tool. The worker
-    sessions (slice 6) turn a floor into settings, with Edit and Write deny rules for those two folders.
+    template or a source asks first (3.6); `read-only` is that floor with no Edit or NotebookEdit: the role
+    reads and runs commands that change nothing, and its one write is its result file (Write only there, which
+    the worker sessions add as a deny rule for every other path); a role without Write (`reviewer-angle`)
+    returns its findings to the loop that started it. The worker sessions (slice 6) turn a floor into settings,
+    with Edit and Write deny rules for those two folders.
     - `implement` (`agents/implementer.md`), worker: Agent, Bash, Edit, Glob, Grep, NotebookEdit, Read, Skill,
       WebFetch, WebSearch, Write.
     - `review` (`agents/reviewer.md`), worker: Agent, Bash, Glob, Grep, Read, Skill, Write.
     - `pr-loop` (`commands/pr-loop.md`), worker: Agent, Bash, Edit, Glob, Grep, Read, Skill, Write.
     - `investigate` and `analyze` (secretary's investigator and analyst), read-only: Bash, Glob, Grep, Read,
-      WebFetch, WebSearch.
+      WebFetch, WebSearch, Write (the result file only).
     - `reviewer-angle` (secretary's reviewer; one review angle, 6.1), read-only: Bash, Glob, Grep, Read.
     - `general`, worker: Bash, Edit, Glob, Grep, Read, WebFetch, WebSearch, Write.
     - Adding a role is one more entry in the table; the PR review cards slice adds `pr-review` (6.2) and moves the
