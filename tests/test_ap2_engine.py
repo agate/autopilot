@@ -251,6 +251,90 @@ class CommandReadTest(EngineCase):
                 self.fail(f"the command's child {pid} is still running after the timeout")
             time.sleep(0.05)
 
+    def test_an_interrupted_read_stops_the_command(self):
+        script = self.tmp / "sleeper.py"
+        script.write_text("import time; time.sleep(30)\n")
+        started = []
+        real = subprocess.Popen.communicate
+
+        def interrupt(proc, *args, **kwargs):
+            if not started:
+                started.append(proc.pid)
+                raise KeyboardInterrupt
+            return real(proc, *args, **kwargs)
+
+        def kill_left_over():
+            for pid in started:
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+
+        self.addCleanup(kill_left_over)
+        self.user_source("sleeper", f"""\
+            source: sleeper
+            brings: messages
+            read: {{ via: command, run: '{sys.executable} {script}', timeout: 20 }}
+            fill: paths
+            form: {{ id: .id, at: .at, text: .text }}
+            link: none
+            sort: {{ all: alert }}
+            """)
+        with mock.patch.object(subprocess.Popen, "communicate", autospec=True, side_effect=interrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.engine().read("sleeper")
+        [pid] = started
+        deadline = time.monotonic() + 2
+        while True:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break  # gone
+            if time.monotonic() > deadline:
+                self.fail(f"the command {pid} is still running after the interrupt")
+            time.sleep(0.05)
+
+    def test_a_helper_that_keeps_the_output_open_does_not_hold_the_read_past_the_drain_limit(self):
+        pid_file = self.tmp / "helper.pid"
+        script = self.tmp / "forker.py"
+        script.write_text(textwrap.dedent("""\
+            import os, sys, time
+            sys.stdout.write("[1"); sys.stdout.flush()
+            if os.fork() == 0:
+                os.setsid()  # leaves the command's group, so the timeout kill does not reach it
+                with open(sys.argv[1] + ".tmp", "w") as f:
+                    f.write(str(os.getpid()))
+                os.rename(sys.argv[1] + ".tmp", sys.argv[1])
+                time.sleep(15)
+                os._exit(0)
+            time.sleep(15)
+            """))
+
+        def kill_left_over():
+            try:
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+            except (OSError, ValueError):
+                pass
+
+        self.addCleanup(kill_left_over)
+        self.user_source("forker", f"""\
+            source: forker
+            brings: messages
+            read: {{ via: command, run: '{sys.executable} {script} {pid_file}', timeout: 1 }}
+            fill: paths
+            form: {{ id: .id, at: .at, text: .text }}
+            link: none
+            sort: {{ all: alert }}
+            """)
+        started = time.monotonic()
+        with mock.patch("assistant.engine.DRAIN", 1):
+            with self.assertRaisesRegex(SourceError, r"^forker: read.run took longer than 1 seconds; stopped "
+                                                     r"\(partial output saved as "):
+                self.engine().read("forker")
+        self.assertLess(time.monotonic() - started, 1 + 1 + 3)
+        [raw] = (self.data / "sources" / ".raw" / "forker").glob("*.json")
+        self.assertEqual(raw.read_text(), "[1")
+
     def test_values_in_a_link_pattern_are_percent_encoded(self):
         reply = self.tmp / "odd-id.json"
         reply.write_text(json.dumps([{"id": "a/b?c d", "at": "2026-11-10T14:00:00Z", "text": "Odd id"}]))

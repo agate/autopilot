@@ -37,6 +37,8 @@ SNIPPET = 120
 TITLE = 80
 LANE = {"messages": "needs", "work": "planned"}
 PRI = "P2"
+# Seconds a read waits for the rest of its output after its timeout kill.
+DRAIN = 5
 # fill: ai fields that must appear word for word in the raw tool output (design 5.3).
 WORD_FOR_WORD = ("id", "thread_id", "at")
 
@@ -163,14 +165,23 @@ class Engine:
             raise SourceError(f"{src.name}: cannot run {argv[0]!r}: {e.strerror or e}") from e
         try:
             out, err = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as first:
+            _stop(proc)
             try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-            out, _ = proc.communicate()
+                out, _ = proc.communicate(timeout=DRAIN)
+            except subprocess.TimeoutExpired as late:
+                # Something outside the group still holds the output open: keep what came so far.
+                out = max(first.stdout or b"", late.stdout or b"", key=len)
+                proc.stdout.close()
+                proc.stderr.close()
+                proc.wait()
             saved = "" if dry_run else f" (partial output saved as {self._save_raw(src, out or b'')})"
             raise SourceError(f"{src.name}: read.run took longer than {timeout} seconds; stopped{saved}") from None
+        except BaseException:
+            # Ctrl-C does not reach the command's own group, so an interrupted read stops it here.
+            _stop(proc)
+            proc.wait()
+            raise
         return subprocess.CompletedProcess(argv, proc.returncode, stdout=out, stderr=err)
 
     def _save_raw(self, src: sources.Source, raw: bytes) -> str:
@@ -400,6 +411,14 @@ class Engine:
             return None
         config.require_live(self.cfg, f"apply {src.name}'s writes.{event}" + (f" for {card_id}" if card_id else ""))
         raise SourceError(f"{src.name}: writes.{event} is not run by this version of ap2")
+
+
+def _stop(proc: subprocess.Popen) -> None:
+    """Kill a read's whole process group; a group that is already gone is fine."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 def _check_fill(src: sources.Source, records) -> None:

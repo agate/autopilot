@@ -823,7 +823,9 @@ Calls the author made without asking (check them):
     `<data>/sources/.raw/<source>/<YYYYMMDDTHHMMSSZ>-<6 hex>.json`, even when the command fails or the output is
     not JSON; a read that passes `read.timeout` is stopped and its partial stdout is saved the same way (the
     error names the file, as it does for a nonzero exit; a dry run keeps nothing). The command runs in its own
-    process group, and the whole group is killed on timeout, so the children it started stop too; then what the engine made of it goes next to it as `<same name>.report.json` (items, dropped).
+    process group, and the whole group is killed on timeout, so the children it started stop too. An
+    interrupted read (Ctrl-C, or any error while waiting) kills the command's group too. After a timeout kill
+    the engine waits at most 5 more seconds for the rest of the output, then keeps what it has. Then what the engine made of it goes next to it as `<same name>.report.json` (items, dropped).
     `mcp`, `connector` and `skill` reads are not run here: `Engine.read_saved(source, raw_path, records=None)`
     takes a scan session's saved output (copied under `.raw/<source>/` unless it is there already) and, for
     `fill: ai`, its records. Records with `fill: paths`, or none with `fill: ai`, are refused before anything
