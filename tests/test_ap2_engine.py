@@ -4,11 +4,13 @@ import json
 import os
 import shlex
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -196,12 +198,58 @@ class CommandReadTest(EngineCase):
 
     def test_a_source_without_a_timeout_gets_the_default(self):
         self.status_source(self.reply_copy("status-incidents.json"))
-        done = subprocess.CompletedProcess([], 0, stdout=b'{"incidents": []}', stderr=b"")
-        with mock.patch("assistant.engine.subprocess.run", return_value=done) as run:
-            self.engine().read("vendor-status")
-        run.assert_called_once()
-        self.assertEqual(run.call_args.kwargs["timeout"], sources.DEFAULT_TIMEOUT)
-        self.assertIs(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
+        with mock.patch("assistant.engine.subprocess.Popen") as popen:
+            proc = popen.return_value
+            proc.communicate.return_value = (b'{"incidents": []}', b"")
+            proc.returncode = 0
+            result = self.engine().read("vendor-status")
+        self.assertEqual((result["items"], result["dropped"]), ([], []))
+        popen.assert_called_once()
+        self.assertIs(popen.call_args.kwargs["stdin"], subprocess.DEVNULL)
+        proc.communicate.assert_called_once()
+        self.assertEqual(proc.communicate.call_args.kwargs["timeout"], sources.DEFAULT_TIMEOUT)
+
+    def test_a_timeout_stops_the_children_of_the_command_too(self):
+        pid_file = self.tmp / "grandchild.pid"
+        script = self.tmp / "wrapper.py"
+        script.write_text(textwrap.dedent("""\
+            import subprocess, sys, time
+            child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+            with open(sys.argv[1], "w") as f:
+                f.write(str(child.pid))
+            time.sleep(30)
+            """))
+
+        def kill_left_over():
+            try:
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+            except (OSError, ValueError):
+                pass
+
+        self.addCleanup(kill_left_over)
+        self.user_source("wrapper", f"""\
+            source: wrapper
+            brings: messages
+            read: {{ via: command, run: '{sys.executable} {script} {pid_file}', timeout: 1 }}
+            fill: paths
+            form: {{ id: .id, at: .at, text: .text }}
+            link: none
+            sort: {{ all: alert }}
+            """)
+        started = time.monotonic()
+        with self.assertRaisesRegex(SourceError, "^wrapper: read.run took longer than 1 seconds; stopped"):
+            self.engine().read("wrapper")
+        self.assertLess(time.monotonic() - started, 10)
+        pid = int(pid_file.read_text())
+        deadline = time.monotonic() + 2
+        while True:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break  # gone
+            if time.monotonic() > deadline:
+                self.fail(f"the command's child {pid} is still running after the timeout")
+            time.sleep(0.05)
 
     def test_values_in_a_link_pattern_are_percent_encoded(self):
         reply = self.tmp / "odd-id.json"
@@ -403,6 +451,7 @@ class SortToCardTest(EngineCase):
         self.assertEqual(updated["title"], "Payments API errors are falling")
         self.assertEqual(updated["source"]["raw"], third["raw"])
         self.assertEqual(updated["audit"][-1]["did"], "read vendor-status")
+        self.assertEqual(updated["audit"][-1]["by"], "source:vendor-status")
         self.assertIsNotNone(updated["audit"][-1]["restore"])
         self.assertEqual(len(updated["audit"]), 2)
 
@@ -480,31 +529,40 @@ class SortToCardTest(EngineCase):
         raw = self.data / result["raw"]
         self.assertTrue(raw.with_name(raw.stem + ".report.json").exists())
 
+    STORE_FAILURES = (OSError("boom"), sqlite3.DatabaseError("broken"))
+
     def test_a_card_store_that_cannot_add_at_all_stops_the_read(self):
-        self.status_source(self.reply_copy("status-incidents.json"))
+        for n, cause in enumerate(self.STORE_FAILURES):
+            with self.subTest(type(cause).__name__):
+                self.data = datadir.ensure(self.tmp / f"data-add-{n}")
+                self.status_source(self.reply_copy("status-incidents.json"))
 
-        def fail(*args, **kwargs):
-            raise CardError("cannot use the card store in X: boom") from OSError("boom")
+                def fail(*args, **kwargs):
+                    raise CardError("cannot use the card store in X: failed") from cause
 
-        with mock.patch.object(Store, "add", side_effect=fail):
-            with self.assertRaisesRegex(CardError, "^cannot use the card store in X: boom$"):
-                self.engine().read("vendor-status")
+                with mock.patch.object(Store, "add", side_effect=fail):
+                    with self.assertRaisesRegex(CardError, "^cannot use the card store in X: failed$"):
+                        self.engine().read("vendor-status")
 
     def test_a_card_store_that_cannot_update_at_all_stops_the_read(self):
-        reply = self.reply_copy("status-incidents.json")
-        self.status_source(reply)
-        self.engine().read("vendor-status")
-        incidents = json.loads(reply.read_text())
-        incidents["incidents"][0]["name"] = "Renamed"
-        reply.write_text(json.dumps(incidents))
-        self.clock.tick()
-
-        def fail(*args, **kwargs):
-            raise CardError("search index X: broken") from sqlite3.DatabaseError("broken")
-
-        with mock.patch.object(Store, "update", side_effect=fail):
-            with self.assertRaisesRegex(CardError, "^search index X: broken$"):
+        for n, cause in enumerate(self.STORE_FAILURES):
+            with self.subTest(type(cause).__name__):
+                self.data = datadir.ensure(self.tmp / f"data-update-{n}")
+                reply = self.reply_copy("status-incidents.json")
+                self.status_source(reply)
                 self.engine().read("vendor-status")
+                self.assertEqual(len(self.store().list()), 2)
+                incidents = json.loads(reply.read_text())
+                incidents["incidents"][0]["name"] = "Renamed"
+                reply.write_text(json.dumps(incidents))
+                self.clock.tick()
+
+                def fail(*args, **kwargs):
+                    raise CardError("search index X: failed") from cause
+
+                with mock.patch.object(Store, "update", side_effect=fail):
+                    with self.assertRaisesRegex(CardError, "^search index X: failed$"):
+                        self.engine().read("vendor-status")
 
     def test_update_card_only_updates_and_none_makes_nothing(self):
         reply = self.reply_copy("status-incidents.json")
@@ -565,6 +623,17 @@ class SortToCardTest(EngineCase):
         self.assertEqual(self.store().list(), [])
         self.assertFalse((self.data / "sources" / ".raw").exists())  # refused before the read ran
 
+    def test_a_long_first_line_makes_an_80_character_title(self):
+        reply = self.tmp / "long.json"
+        incidents = json.loads((REPLIES / "status-incidents.json").read_text())
+        incidents["incidents"][0]["name"] = "y" * 100 + "\nsecond line"
+        reply.write_text(json.dumps(incidents))
+        self.status_source(reply)
+        self.engine().read("vendor-status")
+        card = next(c for c in self.store().list() if c["key"] == "inc01abcd")
+        self.assertEqual(len(card["title"]), 80)
+        self.assertEqual(card["title"], "y" * 79 + "…")
+
     def test_snippet(self):
         self.assertEqual(snippet("\n  first   line \nsecond"), "first line")
         self.assertEqual(snippet("x" * 200, 10), "xxxxxxxxx…")
@@ -598,6 +667,31 @@ class DryRunTest(EngineCase):
         self.assertEqual(tree(self.data), before)
         self.assertEqual([(i["action"], i.get("would_change")) for i in result["items"]],
                          [("update", ["plain", "source", "title"]), ("unchanged", None)])
+
+    def test_a_dry_run_drops_a_stored_card_the_store_would_refuse_as_the_read_does(self):
+        reply = self.reply_copy("status-incidents.json")
+        self.status_source(reply)
+        self.engine().read("vendor-status")
+        card = next(c for c in self.store().list() if c["key"] == "inc01abcd")
+        # The card was edited by hand into one the store refuses.
+        path = self.store().path(card["id"])
+        bad = json.loads(path.read_text())
+        bad["lane"] = "bogus"
+        path.write_text(json.dumps(bad))
+        changed = json.loads(reply.read_text())
+        changed["incidents"][0]["name"] = "Renamed"
+        reply.write_text(json.dumps(changed))
+        self.clock.tick()
+        before = tree(self.data)
+        dry = self.engine().read("vendor-status", dry_run=True)
+        self.assertEqual(tree(self.data), before)
+        real = self.engine().read("vendor-status")
+        for result in (dry, real):
+            self.assertEqual([(i["item"], i["action"]) for i in result["items"]], [(1, "unchanged")])
+            self.assertEqual(result["dropped"][0], {"item": 2, "reason": "form.text missing"})
+            self.assertEqual(result["dropped"][1]["item"], 0)
+            self.assertRegex(result["dropped"][1]["reason"], rf"^card {card['id']}: lane must be one of ")
+        self.assertEqual(dry["dropped"], real["dropped"])
 
 
 class ReplyShapeTest(EngineCase):

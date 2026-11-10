@@ -19,6 +19,7 @@ import os
 import re
 import secrets
 import shlex
+import signal
 import sqlite3
 import subprocess
 from datetime import timezone
@@ -155,13 +156,22 @@ class Engine:
             raise SourceError(f"{src.file}: read.run is empty")
         timeout = src.data["read"].get("timeout", sources.DEFAULT_TIMEOUT)
         try:
-            return subprocess.run(argv, cwd=str(self.data), stdin=subprocess.DEVNULL, capture_output=True,
-                                  timeout=timeout, shell=False)
-        except subprocess.TimeoutExpired as e:
-            saved = "" if dry_run else f" (partial output saved as {self._save_raw(src, e.stdout or b'')})"
-            raise SourceError(f"{src.name}: read.run took longer than {timeout} seconds; stopped{saved}") from None
+            # Its own process group, so a timeout stops the children it started too, not only the command.
+            proc = subprocess.Popen(argv, cwd=str(self.data), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, shell=False, start_new_session=True)
         except OSError as e:
             raise SourceError(f"{src.name}: cannot run {argv[0]!r}: {e.strerror or e}") from e
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            out, _ = proc.communicate()
+            saved = "" if dry_run else f" (partial output saved as {self._save_raw(src, out or b'')})"
+            raise SourceError(f"{src.name}: read.run took longer than {timeout} seconds; stopped{saved}") from None
+        return subprocess.CompletedProcess(argv, proc.returncode, stdout=out, stderr=err)
 
     def _save_raw(self, src: sources.Source, raw: bytes) -> str:
         """Save one read's raw output; return its path relative to the data folder."""
@@ -345,6 +355,11 @@ class Engine:
                         dropped.append({"item": e["item"], "reason": f"card {old['id']}: {err}"})
                         continue
                 elif not same:
+                    try:
+                        cards.validate({**old, **changes}, self.languages)  # as store.update checks it
+                    except CardError as err:
+                        dropped.append({"item": e["item"], "reason": f"card {old['id']}: {err}"})
+                        continue
                     out["would_change"] = sorted(k for k, v in changes.items() if not _same(k, old.get(k), v))
                     existing[key] = {**old, **changes}
             items.append(out)

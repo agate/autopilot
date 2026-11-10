@@ -806,8 +806,10 @@ Calls the author made without asking (check them):
     `title`, `source`, `status`; never `kind`, `lane`, `pri` or `ask`) with `by: source:<name>` and
     `did: read <name>`; when only `raw` would change, nothing is written. `update_card` updates only, `none`
     makes nothing. The cards are found by key with `Store.list()` once per read. A card the store refuses to
-    add or update (a stored card edited by hand into a bad one) drops only that item, naming the card or key;
-    a failure of the store itself (a file or index error) still stops the read with one `ap2:` line.
+    add or update (a stored card edited by hand into a bad one) drops only that item, naming the card or key,
+    and a dry run drops it the same way; a failure of the store itself (a file or index error) still stops the
+    read with one `ap2:` line, and so does a card file the store cannot read at all (not JSON, or not a card),
+    as `ap2 card list` does.
   - Code-made plain words (no AI), per language, in `engine.PHRASES` (`en` and `zh`; a code like `zh-Hans`
     uses `zh`): what, "New from <source> by <author> in <place>: <first line of the text>"; where, "It was
     written at <at>. [Its status there is "<status>".] Nothing has been done with it yet."; do, "Read it at the
@@ -818,7 +820,8 @@ Calls the author made without asking (check them):
     folder as the working folder, `read.timeout`). Its stdout is saved first, as is, to
     `<data>/sources/.raw/<source>/<YYYYMMDDTHHMMSSZ>-<6 hex>.json`, even when the command fails or the output is
     not JSON; a read that passes `read.timeout` is stopped and its partial stdout is saved the same way (the
-    error names the file, as it does for a nonzero exit; a dry run keeps nothing); then what the engine made of it goes next to it as `<same name>.report.json` (items, dropped).
+    error names the file, as it does for a nonzero exit; a dry run keeps nothing). The command runs in its own
+    process group, and the whole group is killed on timeout, so the children it started stop too; then what the engine made of it goes next to it as `<same name>.report.json` (items, dropped).
     `mcp`, `connector` and `skill` reads are not run here: `Engine.read_saved(source, raw_path, records=None)`
     takes a scan session's saved output (copied under `.raw/<source>/` unless it is there already) and, for
     `fill: ai`, its records. Records with `fill: paths`, or none with `fill: ai`, are refused before anything
