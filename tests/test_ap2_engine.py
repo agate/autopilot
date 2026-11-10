@@ -201,6 +201,26 @@ class CommandReadTest(EngineCase):
             self.engine().read("vendor-status")
         run.assert_called_once()
         self.assertEqual(run.call_args.kwargs["timeout"], sources.DEFAULT_TIMEOUT)
+        self.assertIs(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
+
+    def test_values_in_a_link_pattern_are_percent_encoded(self):
+        reply = self.tmp / "odd-id.json"
+        reply.write_text(json.dumps([{"id": "a/b?c d", "at": "2026-11-10T14:00:00Z", "text": "Odd id"}]))
+        self.user_source("odd", f"""\
+            source: odd
+            brings: messages
+            read: {{ via: command, run: '{self.command(reply)}' }}
+            fill: paths
+            form: {{ id: .id, at: .at, text: .text }}
+            link: "https://status.example.com/i/{{id}}"
+            key: "{{id}}"
+            sort: {{ all: alert }}
+            """)
+        result = self.engine().read("odd")
+        self.assertEqual(result["dropped"], [])
+        [card] = self.store().list()
+        self.assertEqual(card["key"], "a/b?c d")  # the key keeps the value as it is
+        self.assertEqual(card["source"]["link"], "https://status.example.com/i/a%2Fb%3Fc%20d")
 
     def test_a_fill_ai_command_source_is_refused_before_its_command_runs(self):
         marker = self.tmp / "ran"
