@@ -27,8 +27,9 @@ def resolve(flag: Optional[str] = None) -> Path:
     raw = flag if flag is not None else (os.environ.get(ENV) or str(default()))
     path = Path(raw).expanduser().resolve()
     claude = (Path.home() / ".claude").resolve()
-    # The name check ignores letter case (on a case-insensitive file system ~/.CLAUDE is ~/.claude, even before
-    # ~/.claude exists); the same-folder check then catches symlinks into ~/.claude.
+    # resolve() follows symlinks. The name check ignores letter case (on a case-insensitive file system ~/.CLAUDE
+    # is ~/.claude, even before ~/.claude exists). The same-folder check then catches paths resolve() does not fold
+    # (macOS firmlinks such as /System/Volumes/Data/..., bind mounts).
     parts, claude_parts = [p.casefold() for p in path.parts], [p.casefold() for p in claude.parts]
     if parts[:len(claude_parts)] == claude_parts or (
             claude.exists() and any(p.exists() and os.path.samefile(p, claude) for p in (path, *path.parents))):

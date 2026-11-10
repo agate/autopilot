@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -202,6 +203,17 @@ class LookupTest(unittest.TestCase):
             (home / "link").symlink_to(home / ".claude")
             with self.assertRaises(ConfigError):
                 datadir.resolve(str(home / "link"))
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS firmlinks")
+    def test_alias_that_resolve_does_not_fold_is_refused(self):
+        # Path.resolve() keeps the /System/Volumes/Data firmlink prefix, so only the same-folder check catches it.
+        with TempHome() as home:
+            (home / ".claude").mkdir()
+            alias = "/System/Volumes/Data" + str(home.resolve()) + "/.claude/x"
+            if not Path("/System/Volumes/Data" + str(home.resolve())).exists():
+                self.skipTest("no /System/Volumes/Data firmlink")
+            with self.assertRaises(ConfigError):
+                datadir.resolve(alias)
 
     def test_other_case_of_dot_claude_is_refused(self):
         # On a case-insensitive file system (macOS APFS by default) ~/.CLAUDE is the same folder as ~/.claude.

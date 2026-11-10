@@ -179,6 +179,10 @@ class StructureTest(unittest.TestCase):
     def test_tab_after_a_colon_in_a_flow_map(self):
         self.assertEqual(load("a: {k:\tv}\n"), {"a": {"k": "v"}})
 
+    def test_tab_after_a_colon_in_a_block_map(self):
+        self.assertEqual(load("k: \tx\n"), {"k": "x"})  # only a tab after a block indicator is refused
+        self.assertEqual(load("k:\t'x # y'\n"), {"k": "x # y"})
+
     def test_quotes_after_block_list_indicators(self):
         self.assertEqual(load("a:\n  - 'x # y'\n  - - 'z # w'\n"), {"a": ["x # y", ["z # w"]]})
         self.assertEqual(load("a:\n  - -'x # y'\n"), {"a": ["-'x"]})
@@ -216,6 +220,8 @@ ERRORS = [
     ("folded block scalar", "a: >-\n  text\n", 1, "multi-line"),
     ("document marker", "a: 1\n---\nb: 2\n", 2, "document"),
     ("document end marker", "a: 1\n...\n", 2, "document"),
+    ("document marker then tab", "a: 1\n---\tb: 2\n", 2, "document"),
+    ("document marker then tab on the first line", "---\ta: 1\n", 1, "document"),
     ("dedent to no level", "a:\n    b: 1\n  c: 2\n", 3, "indentation"),
     ("unexpected indent", "a: 1\n  b: 2\n", 2, "indentation"),
     ("multi-line plain value", "a: one\n   two\n", 2, "indentation"),
@@ -257,6 +263,9 @@ ERRORS = [
     ("tab after '?' in a flow map key", "k: {?\tx: 1}\n", 1, "a tab after '-' or '?'"),
     ("tab after a nested '-' in a block list", "k:\n  - -\tx\n", 2, "a tab after '-' or '?'"),
     ("tab after '-' starting a block list item", "k:\n  -\tx\n", 2, "a tab after '-' or '?'"),
+    ("space then tab after '-' in a block list", "k:\n  - \t3\n", 2, "a tab after '-' or '?'"),
+    ("space then tab before a key in a block list", "k:\n  - \tname: a\n", 2, "a tab after '-' or '?'"),
+    ("space then tab after a nested '-' in a block list", "k:\n  - - \tx\n", 2, "a tab after '-' or '?'"),
     ("form feed is not a line break", "a: x\x0cy\nc: [\n", 2, "unclosed"),
     ("line separator is not a line break", "a: x\u2028y\nc: [\n", 2, "unclosed"),
 ]

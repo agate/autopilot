@@ -86,7 +86,7 @@ def _lines(text: str) -> list:
         body = _strip_comment(body, no).rstrip()
         if not body:
             continue
-        if indent == 0 and (body == "---" or body == "..." or body.startswith(("--- ", "... "))):
+        if indent == 0 and (body == "---" or body == "..." or body.startswith(("--- ", "... ", "---\t", "...\t"))):
             raise YamlError(no, "document markers ('---', '...') are not supported; use one document per file")
         out.append(_Line(no, indent, body))
     return out
@@ -112,7 +112,7 @@ def _strip_comment(s: str, no: int) -> str:
 
 def _value_start(before: str, depth: int, quote_end: int) -> bool:
     """True when a value or key may start after the text `before`. Outside brackets (`depth` 0): at the line's
-    start, after only the leading block indicators `- ` / `? `, or after `: `. Inside a flow collection: after
+    start, after only the leading block indicators `- ` / `? `, or after `:` and a space or tab. Inside a flow collection: after
     `[`, `{`, `,`, or a `:` followed by a space or tab, or a `:` that follows the closing quote at `quote_end`
     with only spaces or tabs between (JSON style `"a":"b"`, `"a" :"b"`)."""
     if not depth:
@@ -239,6 +239,8 @@ class _Parser:
                 raise YamlError(ln.no, "expected a list item ('- ') at this indent")
             rest = ln.text[1:]
             content = rest.lstrip(" ")
+            if content.startswith("\t"):
+                raise YamlError(ln.no, "a tab after '-' or '?' is not supported; use a space")
             item_path = path + (len(out),)
             if not content:
                 self.i += 1
