@@ -13,13 +13,32 @@ from pathlib import Path
 from unittest import mock
 
 from tests.helpers import ROOT
-from assistant import cli
+from tests.test_ap2_config import TempHome
+from assistant import cli, datadir
 
 AP2 = ROOT / "bin" / "ap2"
 
 
+def temp_inside_the_accounts_claude() -> bool:
+    """True when the temp folder is inside ~/.claude of the account's home in the user database. ap2 then refuses
+    every temp data folder, and a subprocess cannot be patched to see another account home."""
+    if datadir.pwd is None:
+        return False
+    try:
+        pw_dir = datadir.pwd.getpwuid(os.getuid()).pw_dir
+    except KeyError:
+        return False
+    if not os.path.isabs(pw_dir):
+        return False
+    parts = [p.casefold() for p in Path(tempfile.gettempdir()).resolve().parts]
+    claude = [p.casefold() for p in (Path(pw_dir) / ".claude").resolve().parts]
+    return parts[:len(claude)] == claude
+
+
 class Ap2CommandTest(unittest.TestCase):
     def setUp(self):
+        if temp_inside_the_accounts_claude():
+            self.skipTest("the temp folder is inside the account's ~/.claude, so ap2 refuses every temp data folder")
         self.tmp = Path(tempfile.mkdtemp(prefix="ap2-cli-")).resolve()
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.home = self.tmp / "home"
@@ -152,8 +171,7 @@ class Ap2CommandTest(unittest.TestCase):
         _, err = proc.communicate(timeout=30)
         err = err.decode("utf-8", "replace")
         self.assertEqual(proc.returncode, 1, err)
-        self.assertNotIn("Exception ignored", err)
-        self.assertNotIn("Traceback", err)
+        self.assertEqual(err, "")
         self.assertTrue((self.data / "config.yaml").is_file())
 
     @unittest.skipUnless(os.path.exists("/dev/full"), "needs /dev/full (Linux)")
@@ -179,8 +197,18 @@ class Ap2CommandTest(unittest.TestCase):
         self.assertNotIn("Traceback", r.stderr)
 
 
+def use_temp_home(test: unittest.TestCase) -> None:
+    """Run the test under TempHome, so the real home's ~/.claude (which may hold the temp folder) is never checked."""
+    home = TempHome()
+    home.__enter__()
+    test.addCleanup(home.__exit__)
+
+
 class ClosedStderrTest(unittest.TestCase):
     # With stderr closed, sys.stderr is None, and print(file=None) would write to stdout instead.
+    def setUp(self):
+        use_temp_home(self)
+
     def run_main(self, argv):
         out = io.StringIO()
         with mock.patch.object(sys, "stderr", None), contextlib.redirect_stdout(out):
@@ -214,6 +242,9 @@ class OutputWriteErrorTest(unittest.TestCase):
 
         def fileno(self):
             return self.fd
+
+    def setUp(self):
+        use_temp_home(self)
 
     def test_disk_full_returns_1_with_one_line_and_points_stdout_at_devnull(self):
         tmp = Path(tempfile.mkdtemp(prefix="ap2-cli-")).resolve()

@@ -594,10 +594,11 @@ Calls the author made without asking (check them):
 - **[decided by the builder]** Module layout so far, in `lib/assistant/`: `yamlish.py` (the subset reader),
   `config.py` (defaults, validation, and `require_live(cfg, what)`, which every write outside the data folder
   calls first and which refuses in shadow mode), `datadir.py` (lookup and layout), `cli.py` (the `ap2` command,
-  run by `bin/ap2`). `ap2 config [--data PATH]` prints the effective config and `data_dir` as JSON. When stdout
-  is closed, its reader goes away, or a write fails (a full disk), `ap2` exits without a traceback: 1 when the
-  output could not be written, with a one-line `ap2: cannot write the output: ...` for a write error. `ap2` with
-  no arguments prints the usage, listing the commands, to stderr and exits 2, like v1's `bin/ap`.
+  run by `bin/ap2`). `ap2 config [--data PATH]` prints the effective config and `data_dir` as JSON. With stdout
+  closed, `ap2 config` sets up the folder, prints nothing and exits 0; when its reader goes away
+  (`ap2 config | true`) it exits 1 with nothing on stderr; when a write fails (a full disk) it prints one line,
+  `ap2: cannot write the output: ...`, and exits 1. None of these prints a traceback. `ap2` with no arguments
+  prints the usage, listing the commands, to stderr and exits 2, like v1's `bin/ap`.
 - The search index schema.
 - How the local server pushes updates to an open page (polling is fine).
 - Exact limits: idle timeout, grace for missed slots, page sizes.

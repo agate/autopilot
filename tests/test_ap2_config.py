@@ -14,18 +14,25 @@ from assistant.config import Config, ConfigError, ShadowModeError
 
 
 class TempHome:
-    """A fresh temp folder used as HOME, with AP2_DATA cleared, so no test can reach the real home folder."""
+    """A fresh temp folder used as HOME and as the account's home in the user database, with AP2_DATA cleared, so
+    no test can reach the real home folder (or its ~/.claude, which may hold the temp folder)."""
 
     def __enter__(self) -> Path:
         self.dir = Path(tempfile.mkdtemp(prefix="ap2-home-")).resolve()
         env = {k: v for k, v in os.environ.items() if k != "AP2_DATA"}
         env["HOME"] = str(self.dir)
-        self.patch = mock.patch.dict(os.environ, env, clear=True)
-        self.patch.start()
+        self.patches = [mock.patch.dict(os.environ, env, clear=True)]
+        if datadir.pwd is not None:
+            # datadir.pwd is the pwd module, so this also covers Path.home() when a test removes HOME.
+            self.patches.append(mock.patch.object(datadir.pwd, "getpwuid",
+                                                  return_value=mock.Mock(pw_dir=str(self.dir))))
+        for patch in self.patches:
+            patch.start()
         return self.dir
 
     def __exit__(self, *exc) -> None:
-        self.patch.stop()
+        for patch in reversed(self.patches):
+            patch.stop()
         shutil.rmtree(self.dir, ignore_errors=True)
 
 
@@ -279,6 +286,35 @@ class LookupTest(unittest.TestCase):
                         datadir.resolve()
                     self.assertIn("HOME", str(ctx.exception))
                     self.assertIn("--data", str(ctx.exception))
+
+    @unittest.skipUnless(os.name == "posix", "HOME decides the home folder only on POSIX")
+    def test_empty_home_is_fine_when_ap2_data_is_set(self):
+        with TempHome() as home:
+            os.environ["HOME"] = ""
+            os.environ["AP2_DATA"] = str(home / "d")
+            self.assertEqual(datadir.resolve(), home / "d")
+
+    @unittest.skipIf(datadir.pwd is None, "no user database")
+    def test_unset_home_takes_the_accounts_home(self):
+        # With HOME unset, Path.home() asks the user database (pwd.getpwuid), the same function datadir checks.
+        with TempHome() as home:
+            del os.environ["HOME"]
+            with mock.patch.object(datadir.pwd, "getpwuid", return_value=mock.Mock(pw_dir=str(home))):
+                self.assertEqual(datadir.resolve(), home / "Documents" / "Assistant")
+
+    @unittest.skipIf(datadir.pwd is None, "no user database")
+    def test_no_usable_account_home_checks_only_home(self):
+        # A user id with no entry in the user database (some containers), or an entry with an empty home: only
+        # HOME's ~/.claude is checked, and an empty home is not taken as the current folder.
+        with TempHome() as home:
+            work = home / "work"
+            work.mkdir()
+            self.addCleanup(os.chdir, os.getcwd())
+            os.chdir(work)
+            for name, kwargs in (("no entry", {"side_effect": KeyError("uid")}),
+                                 ("empty home", {"return_value": mock.Mock(pw_dir="")})):
+                with self.subTest(name), mock.patch.object(datadir.pwd, "getpwuid", **kwargs):
+                    self.assertEqual(datadir.resolve(".claude/x"), work / ".claude" / "x")
 
     def test_similar_name_is_allowed(self):
         with TempHome() as home:
