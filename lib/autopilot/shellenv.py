@@ -16,15 +16,20 @@ import os
 import pwd
 import signal
 import subprocess
+import tempfile
 
 TIMEOUT_S = 30  # an interactive login shell may take several seconds; a launch takes longer anyway
-MARK = "__AUTOPILOT_PROJECT_ENV__"
 SH_FAMILY = ("zsh", "bash", "sh", "ksh")
-# $1 is the folder. direnv exports in sh syntax for every sh-family shell, and only for an allowed .envrc.
+UNSUPPORTED = "unsupported shell"
+# $1 is the folder, $2 the file the environment goes to. A file, not stdout: a profile's background job may hold
+# stdout open long after the shell is done. direnv exports in sh syntax, and only for an allowed .envrc.
 SCRIPT = ('cd -- "$1" || exit 97\n'
           'if command -v direnv >/dev/null 2>&1; then eval "$(direnv export bash 2>/dev/null)"; fi\n'
-          f"printf '%s\\0' {MARK}\n"
-          "exec env -0\n")
+          'exec env -0 > "$2"\n')
+
+
+def enabled() -> bool:
+    return os.environ.get("AUTOPILOT_PROJECT_ENV") != "off"
 
 
 def _login_shell() -> str:
@@ -34,45 +39,59 @@ def _login_shell() -> str:
         return os.environ.get("SHELL") or "/bin/zsh"
 
 
-def _parse(out: bytes):
-    head, sep, body = out.rpartition(MARK.encode() + b"\0")
-    if not sep:
-        return None
+def _parse(raw: bytes):
     env = {}
-    for item in body.split(b"\0"):
+    for item in raw.split(b"\0"):
         k, eq, v = item.partition(b"=")
         if eq and k:
-            env[k.decode(errors="replace")] = v.decode(errors="replace")
+            env[os.fsdecode(k)] = os.fsdecode(v)
     return env if env.get("PATH") else None
 
 
-def enabled() -> bool:
-    return os.environ.get("AUTOPILOT_PROJECT_ENV") != "off"
+def _kill_group(pid: int) -> None:
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except OSError:  # the group is already gone
+        pass
+
+
+def read(cwd: str, shell: str = None) -> tuple:
+    """(environment, None) as the user's terminal has it in `cwd`, or (None, why it could not be read)."""
+    if not enabled():
+        return None, "off"
+    if shell is None:
+        shell = _login_shell()
+        if os.path.basename(shell) not in SH_FAMILY:  # fish and others do not run this sh script
+            return None, UNSUPPORTED
+    fd, out = tempfile.mkstemp(prefix="autopilot-env-")
+    os.close(fd)
+    try:
+        try:
+            proc = subprocess.Popen([shell, "-lic", SCRIPT, "autopilot-env", str(cwd), out],
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL, start_new_session=True)
+        except OSError as e:
+            return None, str(e)
+        try:
+            rc = proc.wait(timeout=TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            rc = None
+        _kill_group(proc.pid)  # also ends a profile's leftover background jobs
+        if rc is None:
+            proc.wait()
+            return None, f"timed out after {TIMEOUT_S}s"
+        if rc != 0:
+            return None, f"exit {rc}"
+        with open(out, "rb") as f:
+            env = _parse(f.read())
+        return (env, None) if env else (None, "no environment printed")
+    finally:
+        try:
+            os.unlink(out)
+        except OSError:
+            pass
 
 
 def load(cwd: str, shell: str = None):
     """The environment the user's terminal has in `cwd`, or None when it cannot be read."""
-    if not enabled():
-        return None
-    if shell is None:
-        shell = _login_shell()
-        if os.path.basename(shell) not in SH_FAMILY:  # fish and others do not run this sh script
-            return None
-    try:
-        proc = subprocess.Popen([shell, "-lic", SCRIPT, "autopilot-env", str(cwd)], stdout=subprocess.PIPE,
-                                stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, start_new_session=True)
-    except OSError:
-        return None
-    try:
-        out, _ = proc.communicate(timeout=TIMEOUT_S)
-    except subprocess.TimeoutExpired:
-        # The whole group: a profile's own background child must not keep the pipe (and this call) open.
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except OSError:
-            pass
-        proc.communicate()
-        return None
-    if proc.returncode != 0:
-        return None
-    return _parse(out)
+    return read(cwd, shell)[0]

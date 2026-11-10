@@ -5,6 +5,7 @@ import os
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from contextlib import redirect_stderr
@@ -62,6 +63,21 @@ class ShellEnvTest(unittest.TestCase):
         self.assertNotIn("welcome ", env)
         self.assertIn("PATH", env)
 
+    def test_profile_job_holding_stdout_does_not_hold_the_read(self):
+        # A profile that leaves a job running with the shell's stdout and stderr, even in its own session.
+        held = _script(self.bin / "held-shell",
+                       f'( sleep 8 ) & /usr/bin/python3 -c "import os,time; os.setsid(); time.sleep(8)" & '
+                       f'PATH="{self.bin}:/usr/bin:/bin"; export PATH; shift; exec /bin/sh -c "$@"\n')
+        began = time.monotonic()
+        env = shellenv.load(str(self.proj), shell=held)
+        self.assertLess(time.monotonic() - began, 4)
+        self.assertIn("PATH", env)
+
+    def test_slow_shell_says_why(self):
+        slow = _script(self.bin / "slow-shell2", "sleep 5\n")
+        with mock.patch.object(shellenv, "TIMEOUT_S", 0.5):
+            self.assertEqual(shellenv.read(str(self.proj), shell=slow), (None, "timed out after 0.5s"))
+
     def test_missing_folder_gives_none(self):
         self.assertIsNone(shellenv.load(str(self.tmp / "gone"), shell=self.shell))
 
@@ -96,18 +112,18 @@ class LaunchUsesProjectEnvTest(unittest.TestCase):
     def tearDown(self):
         self.td.__exit__(None, None, None)
 
-    def _launch(self, project_env):
+    def _launch(self, project_env, gate_env=None):
         done = subprocess.CompletedProcess([], 0, stdout="backgrounded · abcd1234 · x\n", stderr="")
         with mock.patch.object(workers.shellenv, "enabled", return_value=True), \
-                mock.patch.object(workers.shellenv, "load", return_value=project_env) as load, \
+                mock.patch.object(workers.shellenv, "read", return_value=project_env) as load, \
                 mock.patch.object(workers.subprocess, "run", return_value=done) as run:
-            workers._launch(["claude"], "/repo", {"PATH": "/launchd/bin", "AUTOPILOT_ROLE": "worker",
-                                                  "AUTOPILOT_DATA": "/data", "KEPT": "1"})
+            workers._launch(["claude"], "/repo", gate_env or {"PATH": "/launchd/bin", "AUTOPILOT_ROLE": "worker",
+                                                              "AUTOPILOT_DATA": "/data", "KEPT": "1"})
         load.assert_called_once_with("/repo")
         return run.call_args.kwargs["env"]
 
     def test_session_gets_the_project_environment(self):
-        env = self._launch({"PATH": "/proj/bin", "SSL_CERT_FILE": "/proj/ca.pem", "AUTOPILOT_ROLE": "x"})
+        env = self._launch(({"PATH": "/proj/bin", "SSL_CERT_FILE": "/proj/ca.pem", "AUTOPILOT_ROLE": "x"}, None))
         self.assertEqual(env["PATH"], "/proj/bin")
         self.assertEqual(env["SSL_CERT_FILE"], "/proj/ca.pem")
         self.assertEqual(env["AUTOPILOT_ROLE"], "worker")  # the role always comes from the autopilot
@@ -117,10 +133,27 @@ class LaunchUsesProjectEnvTest(unittest.TestCase):
     def test_falls_back_to_the_given_environment(self):
         err = io.StringIO()
         with redirect_stderr(err):
-            env = self._launch(None)
+            env = self._launch((None, "exit 3"))
         self.assertEqual(env["PATH"], "/launchd/bin")
         self.assertEqual(env["AUTOPILOT_ROLE"], "worker")
-        self.assertIn("could not read the shell environment of /repo", err.getvalue())
+        self.assertIn("could not read the shell environment of /repo (exit 3)", err.getvalue())
+
+    def test_unsupported_shell_is_quiet(self):
+        err = io.StringIO()
+        with redirect_stderr(err):
+            env = self._launch((None, workers.shellenv.UNSUPPORTED))
+        self.assertEqual(env["PATH"], "/launchd/bin")
+        self.assertEqual(err.getvalue(), "")
+
+    def test_shell_never_sets_who_the_session_is_or_who_pays(self):
+        env = self._launch(({"PATH": "/proj/bin", "ANTHROPIC_API_KEY": "sk-shell", "CLAUDE_CODE_USE_BEDROCK": "1",
+                             "ANTHROPIC_BASE_URL": "https://shell"}, None),
+                           gate_env={"PATH": "/launchd/bin", "AUTOPILOT_ROLE": "worker",
+                                     "ANTHROPIC_BASE_URL": "https://gate"})
+        self.assertEqual(env["PATH"], "/proj/bin")
+        self.assertNotIn("ANTHROPIC_API_KEY", env)
+        self.assertNotIn("CLAUDE_CODE_USE_BEDROCK", env)
+        self.assertEqual(env["ANTHROPIC_BASE_URL"], "https://gate")
 
     def test_switched_off_launch_is_quiet_and_unchanged(self):
         done = subprocess.CompletedProcess([], 0, stdout="backgrounded · abcd1234 · x\n", stderr="")
