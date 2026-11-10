@@ -169,6 +169,26 @@ What undo means **[decided]**:
   action** on a card: move the ticket back, close the PR, force-push the saved ref, or open a revert PR for a merge.
   The user confirms before it runs, because it changes a shared system.
 
+### 3.7 Plain words on every card **[decided]**
+
+Every card opens with an **In plain words** block, written so a high-school student could follow it: short
+sentences, everyday words, one idea each, exact numbers kept. It has three lines:
+
+1. **What this is**: the thing in everyday terms ("checkout tries a failed card payment once more, 2 seconds
+   later").
+2. **Where it stands**: what has happened so far ("11 new tests; reviews found nothing left to fix; every merge
+   check passed").
+3. **What you do**: the user's next step, or "nothing", and what happens after it.
+
+The block sits at the top of the full card and is the same on the local page and the phone page; the phone list
+shows its second line under each card's title. The writer of a card (worker, dispatcher, scan) must fill all three
+lines in every configured language, and the code that adds a card refuses one without them, as v1's
+`ap decision add` does for `explain`. v1's fuller walk-through (`terms`, `analogy`, `example`, `steps`, `why`,
+`next`) stays for decision cards, below the block.
+
+Because the card explains itself, there is no quick "ask Claude about this card" answer on the page. Questions that
+need more go to the Mac (9.4).
+
 ## 4. Concepts
 
 ### 4.1 Card
@@ -470,14 +490,32 @@ assistant's main loop. To make the split reliable:
 - A claude.ai Artifact, published by the gate.
 - Open cards always show. History is trimmed to the last N days (setting, default 3); older history stays on the Mac.
 - Which lanes to include is a setting. "Hide what people wrote" shows "Priya asked a question" instead of her words.
-- Cards expand to the draft, the plan, and the Open-in-source button. Answers and new requests go through the
-  page's chat.
+- Tapping a card opens the **full card**, drawn by the same template as on the local page: plain words, the
+  source block with its Open-in-source button, findings, plan, merge checks, children, questions and activity.
+  Only transcripts and history older than the window stay off the phone. "Hide what people wrote" also hides
+  their words in the full card.
+- New requests go through the page's chat.
 
 ### 9.3 Chat box **[decided]**
 
 The user types a request. Claude guesses the template, drafts a plan (what it will do, what it touches, how to undo
 it), and waits for confirm. Routines get a parsed schedule and next run, plus the asleep notice. Priority can be set
 and changed; any card can be cancelled. Every change saves a restore point and shows an Undo.
+
+### 9.4 Questions about a card **[decided]**
+
+Every full card, local or phone, has an **Ask about this card** box.
+
+1. The question is saved on the card (on the phone, in the page's database).
+2. The Mac picks it up: right away from the local page; from the phone with the next answer read (about a
+   minute).
+3. A **read-only** session starts in the card's folder (its worktree, or the data folder), reads what the question
+   needs (code, the thread, the ticket), and writes the answer on the card in plain words, with the files or
+   messages it used. It changes nothing.
+4. Questions and answers stay on the card and show on both pages. Each one is also an activity entry.
+
+**[proposed]** A follow-up question resumes the same read-only session, so it keeps its context; the session is
+archived with the card.
 
 ## 10. From v1 and secretary to v2
 
