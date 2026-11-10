@@ -23,7 +23,12 @@ def cmd_config(args) -> int:
     data = datadir.ensure(datadir.resolve(args.data))
     out = config.load(data).as_dict()
     out["data_dir"] = str(data)
-    print(json.dumps(out, sort_keys=True, indent=2, ensure_ascii=False))
+    text = json.dumps(out, sort_keys=True, indent=2, ensure_ascii=False)
+    try:
+        text.encode(sys.stdout.encoding or "utf-8")
+    except UnicodeEncodeError:  # e.g. a Latin-1 terminal: \uXXXX escapes are still the same JSON
+        text = json.dumps(out, sort_keys=True, indent=2, ensure_ascii=True)
+    print(text)
     return 0
 
 

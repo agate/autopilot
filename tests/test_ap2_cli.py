@@ -22,12 +22,13 @@ class Ap2CommandTest(unittest.TestCase):
         self.home.mkdir()
         self.data = self.tmp / "data"
 
-    def run_ap2(self, *args, data=None):
-        env = {k: v for k, v in os.environ.items() if k != "AP2_DATA"}
+    def run_ap2(self, *args, data=None, env_extra=None, env_drop=()):
+        env = {k: v for k, v in os.environ.items() if k != "AP2_DATA" and k not in env_drop}
         env["HOME"] = str(self.home)  # the real home folder is never reached
         env["AP2_DATA"] = str(self.data if data is None else data)
+        env.update(env_extra or {})
         return subprocess.run([sys.executable, str(AP2), *args], capture_output=True, text=True, env=env,
-                              timeout=30)
+                              errors="replace", timeout=30)
 
     def test_bin_is_executable(self):
         self.assertTrue(os.access(AP2, os.X_OK))
@@ -85,6 +86,38 @@ class Ap2CommandTest(unittest.TestCase):
         np.chmod(0)
         self.addCleanup(np.chmod, 0o755)
         r = self.run_ap2("config", "--data", str(np / "inner" / "x"))
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.stdout, "")
+        self.assertIn("ap2:", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+
+    def assert_non_ascii_data_prints_parseable_json(self, env_extra):
+        target = self.tmp / "\u52a9\u624b"
+        r = self.run_ap2("config", "--data", str(target), env_extra=env_extra,
+                         env_drop=("PYTHONUTF8", "PYTHONIOENCODING"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertEqual(json.loads(r.stdout)["data_dir"], str(target))
+
+    def test_non_ascii_data_folder_under_latin1_output_prints_parseable_json(self):
+        self.assert_non_ascii_data_prints_parseable_json({"PYTHONIOENCODING": "latin-1"})
+
+    def test_non_ascii_data_folder_under_latin1_locale_prints_parseable_json(self):
+        try:
+            names = subprocess.run(["locale", "-a"], capture_output=True, text=True, errors="replace",
+                                   timeout=30).stdout.split()
+        except OSError:
+            names = []
+        # an en_US Latin-1 locale; macOS and glibc spell its name differently, so compare letters and digits only
+        latin1 = [n for n in names
+                  if n.startswith("en_US.") and "".join(filter(str.isalnum, n)).lower().endswith("iso88591")]
+        if not latin1:
+            self.skipTest("no en_US Latin-1 locale is installed")
+        self.assert_non_ascii_data_prints_parseable_json({"LC_ALL": latin1[0]})
+
+    def test_non_ascii_error_under_latin1_output_has_no_traceback(self):
+        r = self.run_ap2("config", data=self.home / ".claude" / "\u52a9\u624b",
+                         env_extra={"PYTHONIOENCODING": "latin-1"}, env_drop=("PYTHONUTF8",))
         self.assertEqual(r.returncode, 1)
         self.assertEqual(r.stdout, "")
         self.assertIn("ap2:", r.stderr)
