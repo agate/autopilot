@@ -780,6 +780,34 @@ class NotStandardJsonTest(StoreCase):
         self.assertEqual(list((self.data / "restore").glob("r-*.json")), [])
 
 
+class NotSortableJsonTest(StoreCase):
+    """Values json.dumps cannot write with sorted keys: mixed key types and sets."""
+    BAD = ({"a": 1, 2: "b"}, {"x", "y"})
+
+    def assert_nothing_written(self):
+        self.assertEqual(list((self.data / "restore").glob("r-*.json")), [])
+        self.assertFalse((self.data / ".index.stale").exists())
+
+    def test_add_is_refused_before_any_write(self):
+        for value in self.BAD:
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(CardError, "is not JSON: "):
+                    self.store.add(card(extra=value), by="w")
+        self.assertEqual(list(self.data.glob("items/*/*.json")), [])
+        self.assert_nothing_written()
+
+    def test_update_is_refused_before_any_point(self):
+        added = self.store.add(card(), by="w")
+        path = self.store.path(added["id"])
+        before = path.read_bytes()
+        for value in self.BAD:
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(CardError, "is not JSON: "):
+                    self.store.update(added["id"], {"extra": value}, by="w")
+                self.assertEqual(path.read_bytes(), before)
+                self.assert_nothing_written()
+
+
 class AsciiIdTest(unittest.TestCase):
     CARD_IDS = ("c-\u0662\u0660\u0662\u0666\u0661\u0661\u0661\u0660-\u0661\u0664\u0663\u0660\u0660\u0665-abcdef",
                 "c-\uff12\uff10\uff12\uff16\uff11\uff11\uff11\uff10-143005-abcdef")

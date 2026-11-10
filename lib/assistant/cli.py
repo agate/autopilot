@@ -136,14 +136,20 @@ def _store(args) -> Store:
 def _read_card_file(name: str):
     if name == "-" and sys.stdin is None:
         raise CardError("cannot read -: stdin is closed")
+    # !r keeps a newline in the name from splitting the one-line error
     try:
-        text = sys.stdin.read() if name == "-" else Path(name).read_text(encoding="utf-8")
+        if name != "-":
+            text = Path(name).read_text(encoding="utf-8")
+        elif getattr(sys.stdin, "buffer", None) is not None:
+            text = sys.stdin.buffer.read().decode("utf-8")  # UTF-8 like a file, whatever the locale says
+        else:
+            text = sys.stdin.read()
     except (OSError, UnicodeDecodeError) as e:
-        raise CardError(f"cannot read {name}: {e}") from e
+        raise CardError(f"cannot read {name!r}: {e}") from e
     try:
         return json.loads(text)
     except ValueError as e:
-        raise CardError(f"{name}: not JSON: {e}") from e
+        raise CardError(f"{name!r}: not JSON: {e}") from e
 
 
 def cmd_card(args) -> int:

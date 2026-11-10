@@ -79,6 +79,35 @@ class CardCommandTest(unittest.TestCase):
         self.assertEqual(r.stderr.strip(), "ap2: cannot read -: stdin is closed")
         self.assertNotIn("Traceback", r.stderr)
 
+    def run_latin1_stdin(self, data: bytes):
+        """`ap2 card add -` with the given stdin bytes, under a locale encoding that is not UTF-8."""
+        env = {k: v for k, v in os.environ.items() if k != "AP2_DATA"}
+        env.update(HOME=str(self.home), AP2_DATA=str(self.data), PYTHONIOENCODING="latin-1")
+        return subprocess.run([sys.executable, str(AP2), "card", "add", "-"], capture_output=True, env=env,
+                              input=data, timeout=30)
+
+    def test_add_reads_stdin_as_utf8(self):
+        r = self.run_latin1_stdin(json.dumps(card(title="完成"), ensure_ascii=False).encode("utf-8"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        stored = list((self.data / "items").glob("*/*.json"))
+        self.assertEqual(len(stored), 1)
+        self.assertEqual(json.loads(stored[0].read_text(encoding="utf-8"))["title"], "完成")
+
+    def test_add_from_stdin_that_is_not_utf8_is_one_line(self):
+        r = self.run_latin1_stdin(b"\xff")
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertEqual(r.stdout, b"")
+        lines = r.stderr.decode("utf-8", "replace").splitlines()
+        self.assertEqual(len(lines), 1, r.stderr)
+        self.assertTrue(lines[0].startswith("ap2: cannot read '-': "), r.stderr)
+        self.assertFalse(list(self.data.glob("items/*/*.json")))
+
+    def test_a_file_name_with_a_newline_is_one_line(self):
+        line = self.fails("card", "add", str(self.tmp / "bad\nname.json"))
+        self.assertIn("cannot read", line)
+        (self.tmp / "bad\nnot-json.json").write_text("{not json")
+        self.assertIn("not JSON", self.fails("card", "add", str(self.tmp / "bad\nnot-json.json")))
+
     def test_list_filters_by_kind_and_parent(self):
         parent = self.ok("card", "add", str(self.card_file(kind="question")))
         child = self.ok("card", "add", str(self.card_file("child.json", parent=parent["id"])))

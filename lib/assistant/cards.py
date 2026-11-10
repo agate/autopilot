@@ -110,13 +110,16 @@ def check_shape(card) -> None:
 
 def check_unicode(value, what: str = "text") -> None:
     """Refuse text that cannot be written as UTF-8: a lone surrogate, e.g. from command-line bytes that are not
-    UTF-8 or a `\\ud800` escape in a hand-edited file. Refuse NaN and Infinity too: cards are standard JSON."""
+    UTF-8 or a `\\ud800` escape in a hand-edited file. Refuse NaN and Infinity too: cards are standard JSON. And
+    refuse what JSON cannot write with sorted keys (mixed key types, sets), as every card file is written."""
     try:
-        json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True).encode("utf-8")
     except UnicodeEncodeError as e:  # a ValueError too, so it is caught first
         raise CardError(f"{what} is not valid Unicode: {e.object[e.start:e.end]!r}") from None
     except ValueError:
         raise CardError(f"{what} is not valid JSON: NaN or Infinity") from None
+    except TypeError as e:
+        raise CardError(f"{what} is not JSON: {e}") from None
 
 
 def check_stored(card) -> None:

@@ -634,7 +634,7 @@ Calls the author made without asking (check them):
     written. Restore puts back any point it saved without re-checking enums, so an undo can always be undone.
     Text that is not valid Unicode (a lone surrogate, e.g. from command-line bytes that are not UTF-8) is refused
     on add, update, `--by`, `did` and search before anything is written; so are NaN and Infinity (cards are
-    standard JSON). `did`, when given, is checked like `by`: non-empty text.
+    standard JSON) and values JSON cannot write with sorted keys (mixed key types, sets). `did`, when given, is checked like `by`: non-empty text.
   - Restore points: one file `<data>/restore/<point id>.json` with
     `{"id", "at", "kind": "card", "card_id", "card"}`, id `r-YYYYMMDD-HHMMSS-xxxxxx` (ASCII digits only). A point
     is refused, naming its file, unless its `id` is its file name and its `card_id` is its card's `id`, and its
@@ -664,7 +664,7 @@ Calls the author made without asking (check them):
   with one error; it is never skipped, so a rebuild cannot silently drop its cards.
 - **[decided by the builder]** Card commands: `ap2 card add <file.json|-> [--by NAME]`, `ap2 card show <id>`,
   `ap2 card list [--lane L] [--kind K] [--parent ID]`, `ap2 search <text...>`, `ap2 restore <point id> [--by NAME]`,
-  each with `--data PATH`. `--by` defaults to `ap2`. Output is JSON (a card, or a list oldest first; cards made in the same second are in id order); an error is
+  each with `--data PATH`. `--by` defaults to `ap2`. `card add -` reads stdin as UTF-8, like a file, whatever the locale. Output is JSON (a card, or a list oldest first; cards made in the same second are in id order); an error is
   one line `ap2: ...` on stderr with exit 1.
 - How the local server pushes updates to an open page (polling is fine).
 - Exact limits: idle timeout, grace for missed slots, page sizes.
