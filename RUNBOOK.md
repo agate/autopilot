@@ -53,7 +53,8 @@ cloud login an autopilot declares in `health_checks`) is system access. The gate
 before each pass and keeps one `system` card per broken check at the top of the page; a later check
 that sees it working closes the card. When a step in this pass fails for lack of access, run
 `ap access fail <ap> <check> '{"error": "<the error>", "fix": "<the exact command or step>"}'` once
-(each of `error` and `fix` is one string, or `{"en": ..., "<reader_lang>": ...}`; anything else is refused)
+(each of `error` and `fix` is one string, or `{"en": ..., "<reader_lang>": ...}`; `blocks`, if given, may also be a label
+reference; anything else is refused)
 and go on without that step: it opens or updates that check's card, never an `ask` card. When you see
 that access working again in a pass, run `ap access ok <ap> <check>`. `<check>` is `gh`, `page`,
 `mcp:<server name>`, `check:<name>` (see `ap access list <ap>`), or `artifact` for the Artifact tools.

@@ -149,12 +149,21 @@ class CardsTest(Base):
         self.assertEqual(card["access"]["fix"], info["fix"])
         self.assertEqual(card["body"], {"key": "access_body", "args": {"error": info["error"]}})
 
+    def test_fail_takes_blocks_as_a_label_or_languages(self):
+        self.ap()
+        for blocks in ({"key": "blocks_gh"}, {"en": "pushing"}):
+            with redirect_stderr(io.StringIO()):
+                self.assertEqual(cli.main(["access", "fail", "alpha", "gh",
+                                           json.dumps({"error": "x", "blocks": blocks})]), 0, blocks)
+
     def test_fail_refuses_text_that_is_neither_a_string_nor_languages(self):
         self.ap()
-        for bad in ({"error": {"zh": "只有中文"}}, {"error": ["a"]}, {"fix": {"en": 3}}, {"error": {"en": ""}}):
+        bads = [{"error": {"zh": "只有中文"}}, {"error": ["a"]}, {"fix": {"en": 3}}, {"error": {"en": ""}},
+                {"blocks": ["y"]}, {"blocks": {"en": {"en": "y"}}}, {"error": {"key": "blocks_gh"}}, []]
+        for raw in [json.dumps(b) for b in bads] + ["not json"]:
             err = io.StringIO()
             with redirect_stderr(err):
-                self.assertEqual(cli.main(["access", "fail", "alpha", "gh", json.dumps(bad)]), 2, bad)
+                self.assertEqual(cli.main(["access", "fail", "alpha", "gh", raw]), 2, raw)
             self.assertIn("ap access fail", err.getvalue())
         self.assertEqual(self.system_cards(), [])
 

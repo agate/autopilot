@@ -179,10 +179,37 @@ class TextObjectsTest(unittest.TestCase):
         self.assertEqual(json.loads(node(js)),
                          ["Error: 拉取失败", "Error: 拉取失败", "run it", "Error: plain", "Error: 3", "Error: fetch fails"])
 
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_nested_labels_and_lists_as_arguments(self):
+        js = ("const S = {meta: {labels: {}}}; let lang = 'en';\n"
+              "const LABELS_EN = {outer: 'A {x} B', inner: 'in {y}'};\n"
+              + js_fn("labelsFor") + js_fn("L") + js_fn("T") + """
+        console.log(JSON.stringify([L('outer', {x: {key: 'inner', args: {y: {en: 'deep'}}}}),
+                                    L('outer', {x: ['a', {en: 'b'}]})]));
+        """)
+        self.assertEqual(json.loads(node(js)), ["A in deep B", "A a, b B"])
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
     def test_system_card_shows_the_fix_as_text(self):
-        body = PAGE[PAGE.index("function systemCard"):PAGE.index("function selfGroups")]
-        self.assertIn("T(a.fix)", body)
-        self.assertNotIn("a.fix ||", body)
+        # A tiny stand-in DOM: el() builds plain objects, so the card's text can be read back.
+        js = ("const S = {meta: {labels: {}}}; let lang = 'zh';\n"
+              "const LABELS_EN = {sys_tag: 'Access', sys_since: 'since {when}', sys_blocks: 'Blocks', "
+              "sys_fix: 'Fix', sys_checked: 'checked {when}', access_body: 'Error: {error}', t: 'GitHub'};\n"
+              "const Node = function () {}; const document = {createElement: (t) => { const n = new Node(); "
+              "n.kids = []; n.append = (k) => n.kids.push(k); n.setAttribute = () => {}; return n; }, "
+              "createTextNode: (s) => ({text: s})};\n"
+              "Node.prototype = {}; const rel = () => 'now'; const decMeta = () => 'D6';\n"
+              "function text(n) { return n.text !== undefined ? n.text : (n.kids || []).map(text).join(''); }\n"
+              + js_fn("labelsFor") + js_fn("L") + js_fn("T") + js_fn("el") + js_fn("systemCard") + """
+        const two = (en, zh) => ({en, zh});
+        const d = {id: 'D6', title: {key: 't'}, body: {key: 'access_body', args: {error: two('fails', '失败')}},
+                   access: {since: 'x', last_checked: 'y', blocks: two('pushing', '推送'), fix: two('run', '运行')}};
+        console.log(JSON.stringify(text(systemCard(d))));
+        """)
+        out = json.loads(node(js))
+        self.assertNotIn("[object Object]", out)
+        for part in ("Error: 失败", "推送", "运行"):
+            self.assertIn(part, out)
 
 
 class SelfDecisionsTest(unittest.TestCase):
