@@ -199,6 +199,30 @@ class DocsTest(unittest.TestCase):
         self.assertIn("older run directory", briefs)
         self.assertIn("`ap dir <name>`", (ROOT / "references" / "talk.md").read_text())
 
+    def test_cards_explain_themselves_and_talk_walks_through_them(self):
+        from autopilot import state
+        rb = (ROOT / "RUNBOOK.md").read_text()
+        card = rb[rb.index("## A decision card"):rb.index("## The pass")]
+        for k in state.EXPLAIN_REQ + state.EXPLAIN_OPT + ("does", "cost"):
+            self.assertIn(f"`{k}`", card, k)                      # every section the command checks is described
+        self.assertIn("refuses", card)
+        self.assertIn("(at least 1)", card)                       # the same minimums the command checks
+        self.assertIn("(at least 2)", card)
+        self.assertIn("word for word", card)                      # a drafted message is shown exactly
+        self.assertIn("read every\nline you cite", card)
+        talk = (ROOT / "references" / "talk.md").read_text()
+        walk = talk[talk.index("## Walking the user through the cards"):talk.index("## Changing things")]
+        self.assertIn("card 2 of 5", walk)                        # one card at a time, saying where we are
+        self.assertIn("still true", walk)                         # checked against the code before explaining
+        self.assertIn("`path:line`", walk)
+        self.assertIn("attention: true", walk)
+        self.assertIn("`replies`", walk)                          # a card answered on the page is not asked again
+        self.assertIn('"A decision card"', talk[talk.index("## Changing things"):])   # a card a talk session adds
+        self.assertIn("if it does, every section above", card)    # a gate's walk-through is all or nothing
+        for preset in ("jira-ticket.md", "idea.md"):
+            self.assertIn('"A decision card"', (ROOT / "presets" / preset).read_text(), preset)
+        self.assertIn("walk through them one at a time", (ROOT / "SKILL.md").read_text())
+
 
 if __name__ == "__main__":
     unittest.main()

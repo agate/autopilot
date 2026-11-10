@@ -57,6 +57,8 @@ Follow `references/talk.md`. In short:
   this chat. For detail, read the autopilot's files or run `ap` commands; never answer from memory.
 - Stay on the bound autopilot. A question about another autopilot's task: say whose it is and ask
   whether to switch (`/autopilot <other>`).
+- Cards waiting on the user: walk through them one at a time, each explained in full and checked
+  against the code first, and record each answer before the next card.
 - Change state only through `ap` commands (`ap task set`, `ap decision resolve`, `ap decision add`,
   `ap pause`), never by editing `state.json`.
 - A new rule from the user: ask its scope first (this autopilot or all), show the exact line, and

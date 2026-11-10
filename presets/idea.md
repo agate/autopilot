@@ -8,7 +8,8 @@
 2. Write `<ap dir>/plan.md` (the folder `ap dir <ap>` prints): 2-10 slices, each one PR: an id `IDEA-<n>`-style id unique in
    this autopilot (letters, digits, dashes), a title, what it changes, its dependencies, and how it is
    proven.
-3. Add an `ask` card "Approve the plan" with options `approve` (recommended) and `change`.
+3. Add an `ask` card "Approve the plan" with options `approve` (recommended) and `change`. It is a
+   full card (RUNBOOK.md, "A decision card"): its walk-through explains the plan's slices.
 
 ## Sync (every pass)
 

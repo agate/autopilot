@@ -255,5 +255,62 @@ console.log(JSON.stringify([
         self.assertIn('L("pickup_later"', js_fn("selfButtons"))
 
 
+
+class ExplainedCardTest(unittest.TestCase):
+    """A card that explains itself shows its one sentence, then each section in a fixed order."""
+
+    ORDER = ["explain_terms", "explain_analogy", "explain_example", "explain_steps", "explain_options",
+             "explain_why", "explain_related", "explain_next"]
+
+    def run_sections(self, card: str) -> list:
+        js = js_fn("explainSections") + """
+const find = (ap, id) => ({ "a:D1": { title: { en: "Earlier card" } } })[ap + ":" + id] || null;
+console.log(JSON.stringify(explainSections(""" + card + """, find)));
+"""
+        return json.loads(node(js))
+
+    FULL = """{ ap: "a", kind: "ask", body: { en: "one sentence" },
+  explain: { terms: [{ term: { en: "t" }, means: { en: "m" } }], analogy: { en: "fridge" }, example: { en: "bin/x:12" },
+    steps: [{ en: "s1" }, { en: "s2" }], why: { en: "because" }, next: { en: "pick one" },
+    related: [{ id: "D1", why: { en: "depends" } }, { id: "D9", why: { en: "gone" } }] },
+  options: [{ id: "A", label: { en: "A" }, does: { en: "d" }, cost: { en: "c" } }, { id: "B", label: { en: "B" } }] }"""
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_sections_come_in_the_fixed_order(self):
+        secs = self.run_sections(self.FULL)
+        self.assertEqual([x["label"] for x in secs], self.ORDER)
+        opts = next(x for x in secs if x["kind"] == "options")["items"]
+        self.assertEqual([o["id"] for o in opts], ["A"])  # an option with neither does nor cost is only a button
+        related = next(x for x in secs if x["kind"] == "related")["items"]
+        self.assertEqual(related, [{"id": "D1", "why": {"en": "depends"}, "title": {"en": "Earlier card"}},
+                                   {"id": "D9", "why": {"en": "gone"}}])
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_a_self_card_says_why_it_chose_and_an_old_card_shows_its_body_only(self):
+        for kind in ("self", "gate"):
+            labels = [x["label"] for x in self.run_sections(self.FULL.replace('kind: "ask"', f'kind: "{kind}"'))]
+            self.assertEqual(labels[5], f"explain_why_{kind}")
+            self.assertEqual(labels[-1], f"explain_next_{kind}")
+            self.assertNotIn("explain_why", labels)
+        self.assertEqual(self.run_sections('{ ap: "a", kind: "ask", body: { en: "b" }, options: [] }'), [])
+        part = self.run_sections('{ ap: "a", kind: "gate", body: { en: "b" }, explain: { steps: [{ en: "x" }, { en: "y" }] } }')
+        self.assertEqual([x["label"] for x in part], ["explain_steps"])
+
+    def test_every_section_label_is_defined(self):
+        for k in self.ORDER + ["opt_does", "opt_cost"]:
+            self.assertIn(k, LABELS)
+            self.assertIn(f'"{k}"', PAGE)
+        for k in ("explain_why", "explain_next"):
+            for kind in ("self", "gate"):
+                self.assertIn(f"{k}_{kind}", LABELS)
+
+    def test_every_card_view_shows_the_walk_through(self):
+        for fn, nxt in (("askCard", "function systemCard"), ("selfRow", "function selfCard"), ("selfCard", "async function keepAll")):
+            body = PAGE[PAGE.index(f"function {fn}("):PAGE.index(nxt)]
+            self.assertIn("explainBlock(d)", body, fn)
+            self.assertIn("bodyLine(d", body, fn)
+        # On an explained ask, the options section already says what each option costs.
+        self.assertIn("o.cost && !d.explain", PAGE)
+
 if __name__ == "__main__":
     unittest.main()
