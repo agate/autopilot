@@ -14,7 +14,7 @@ import re
 import subprocess
 import sys
 
-from autopilot import cli, config, events, ops, paths, state, workers
+from autopilot import cli, config, events, ops, paths, state, text, workers
 
 TIMEOUT_S = 20
 NAMES = {"gh": "GitHub (gh)", "page": "claude.ai login", "artifact": "Artifact tools",
@@ -154,6 +154,27 @@ def _texts(t, langs: set) -> dict:
     return t
 
 
+def _bad_texts(info) -> list:
+    """Errors for `ap access fail`: error and fix are a string or text in every reader language; blocks may
+    also be a label reference, as its default is."""
+    if not isinstance(info, dict):
+        return ["the argument must be a JSON object"]
+    out = []
+    for f in ("error", "fix", "blocks"):
+        v = info.get(f)
+        if v is None or isinstance(v, str):
+            continue
+        if not isinstance(v, dict):
+            out.append(f"{f}: must be a string or text in each language, got {type(v).__name__}")
+        elif "key" in v and f != "blocks":
+            out.append(f"{f}: a label reference is not accepted here")
+        else:
+            out += text.check(v, state.langs(), f)
+            if text.unfilled(v):
+                out.append(f"{f}: label {v['key']!r} needs {', '.join(text.unfilled(v))}")
+    return out
+
+
 def _info(ap: str, check: str) -> dict:
     try:
         return next((c for c in checks(ap) if c["id"] == check), {})
@@ -221,7 +242,16 @@ def _cmd(args: list) -> int:
         print(json.dumps({"ap": args[1], "check": c["id"], "ok": ok, "error": err, "fix": fix}, ensure_ascii=False))
         return 0 if ok else 1
     if args[:1] == ["fail"] and len(args) == 4:
-        info = json.loads(args[3])
+        try:
+            info = json.loads(args[3])
+        except ValueError as e:
+            info, bad = None, [f"the argument is not JSON ({e})"]
+        else:
+            bad = _bad_texts(info)
+        if bad:
+            print(f"ap access fail: {'; '.join(bad)} (each of error, fix and blocks is a string or "
+                  "{\"en\": ..., \"<lang>\": ...})", file=sys.stderr)
+            return 2
         events.append(args[1], "access_failure", dict(info, check=args[2]))
         record(args[1], args[2], False, info.get("error") or "", info.get("fix") or "", info.get("blocks"))
         return 0

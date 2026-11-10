@@ -161,6 +161,57 @@ def node(js: str) -> str:
     return out.stdout.strip()
 
 
+class TextObjectsTest(unittest.TestCase):
+    """A label argument or a field may hold {en, <lang>} text; the page shows the reader's language, never
+    "[object Object]" (seen 2026-11-10 on an access card whose error and fix the pass wrote in two languages)."""
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_label_args_and_fields_in_two_languages(self):
+        js = ("const S = {meta: {labels: {}}}; const LABELS_EN = {access_body: 'Error: {error}'}; let lang = 'zh';\n"
+              + js_fn("labelsFor") + js_fn("L") + js_fn("T") + """
+        const err = {en: 'fetch fails', zh: '拉取失败'};
+        const out = [L('access_body', {error: err}), T({key: 'access_body', args: {error: err}}),
+                     T({en: 'run it'}), L('access_body', {error: 'plain'}), L('access_body', {error: 3})];
+        lang = 'en';
+        out.push(L('access_body', {error: err}));
+        console.log(JSON.stringify(out));
+        """)
+        self.assertEqual(json.loads(node(js)),
+                         ["Error: 拉取失败", "Error: 拉取失败", "run it", "Error: plain", "Error: 3", "Error: fetch fails"])
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_nested_labels_and_lists_as_arguments(self):
+        js = ("const S = {meta: {labels: {}}}; let lang = 'en';\n"
+              "const LABELS_EN = {outer: 'A {x} B', inner: 'in {y}'};\n"
+              + js_fn("labelsFor") + js_fn("L") + js_fn("T") + """
+        console.log(JSON.stringify([L('outer', {x: {key: 'inner', args: {y: {en: 'deep'}}}}),
+                                    L('outer', {x: ['a', {en: 'b'}]})]));
+        """)
+        self.assertEqual(json.loads(node(js)), ["A in deep B", "A a, b B"])
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_system_card_shows_the_fix_as_text(self):
+        # A tiny stand-in DOM: el() builds plain objects, so the card's text can be read back.
+        js = ("const S = {meta: {labels: {}}}; let lang = 'zh';\n"
+              "const LABELS_EN = {sys_tag: 'Access', sys_since: 'since {when}', sys_blocks: 'Blocks', "
+              "sys_fix: 'Fix', sys_checked: 'checked {when}', access_body: 'Error: {error}', t: 'GitHub'};\n"
+              "const Node = function () {}; const document = {createElement: (t) => { const n = new Node(); "
+              "n.kids = []; n.append = (k) => n.kids.push(k); n.setAttribute = () => {}; return n; }, "
+              "createTextNode: (s) => ({text: s})};\n"
+              "Node.prototype = {}; const rel = () => 'now'; const decMeta = () => 'D6';\n"
+              "function text(n) { return n.text !== undefined ? n.text : (n.kids || []).map(text).join(''); }\n"
+              + js_fn("labelsFor") + js_fn("L") + js_fn("T") + js_fn("el") + js_fn("systemCard") + """
+        const two = (en, zh) => ({en, zh});
+        const d = {id: 'D6', title: {key: 't'}, body: {key: 'access_body', args: {error: two('fails', '失败')}},
+                   access: {since: 'x', last_checked: 'y', blocks: two('pushing', '推送'), fix: two('run', '运行')}};
+        console.log(JSON.stringify(text(systemCard(d))));
+        """)
+        out = json.loads(node(js))
+        self.assertNotIn("[object Object]", out)
+        for part in ("Error: 失败", "推送", "运行"):
+            self.assertIn(part, out)
+
+
 class SelfDecisionsTest(unittest.TestCase):
     """Decisions the autopilot made by itself: the few worth a look on top, the routine rest folded, the read ones
     in the history and on their task's evidence page."""
