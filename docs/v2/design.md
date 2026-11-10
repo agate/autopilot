@@ -581,7 +581,9 @@ Calls the author made without asking (check them):
   environment variable `AP2_DATA`, else `~/Documents/Assistant`. A folder inside `~/.claude` is refused (3.4),
   symlinks followed (by `resolve()`) and in any letter case (the name check ignores case, so `~/.CLAUDE` is
   refused even before `~/.claude` exists; a same-folder check catches paths `resolve()` does not fold, such as
-  macOS firmlinks like `/System/Volumes/Data/...` and bind mounts).
+  macOS firmlinks like `/System/Volumes/Data/...` and bind mounts). The refusal also checks `~/.claude` under the
+  account's home from the user database (`pwd`), so an empty or wrong `HOME` cannot hide it. With no `--data` and
+  no `AP2_DATA`, an empty or relative `HOME` is refused ("set it or pass --data") instead of guessing a folder.
   `config.yaml` lives in the folder, so it has no `data_dir` key. On first use `ap2` creates the layout from 3.4
   and writes `config.yaml` with the defaults and a comment per key; it never overwrites an existing
   `config.yaml`. The search index is left to the card store. Config keys and defaults:
@@ -592,7 +594,9 @@ Calls the author made without asking (check them):
 - **[decided by the builder]** Module layout so far, in `lib/assistant/`: `yamlish.py` (the subset reader),
   `config.py` (defaults, validation, and `require_live(cfg, what)`, which every write outside the data folder
   calls first and which refuses in shadow mode), `datadir.py` (lookup and layout), `cli.py` (the `ap2` command,
-  run by `bin/ap2`). `ap2 config [--data PATH]` prints the effective config and `data_dir` as JSON. `ap2` with
+  run by `bin/ap2`). `ap2 config [--data PATH]` prints the effective config and `data_dir` as JSON. When stdout
+  is closed, its reader goes away, or a write fails (a full disk), `ap2` exits without a traceback: 1 when the
+  output could not be written, with a one-line `ap2: cannot write the output: ...` for a write error. `ap2` with
   no arguments prints the usage, listing the commands, to stderr and exits 2, like v1's `bin/ap`.
 - The search index schema.
 - How the local server pushes updates to an open page (polling is fine).

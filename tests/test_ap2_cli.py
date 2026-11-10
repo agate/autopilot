@@ -156,6 +156,20 @@ class Ap2CommandTest(unittest.TestCase):
         self.assertNotIn("Traceback", err)
         self.assertTrue((self.data / "config.yaml").is_file())
 
+    @unittest.skipUnless(os.path.exists("/dev/full"), "needs /dev/full (Linux)")
+    def test_config_into_a_full_disk_exits_1_with_one_line(self):
+        # /dev/full fails every write with ENOSPC (no space left on device).
+        env = {k: v for k, v in os.environ.items() if k != "AP2_DATA"}
+        env.update(HOME=str(self.home), AP2_DATA=str(self.data))
+        with open("/dev/full", "wb") as full:
+            r = subprocess.run([sys.executable, str(AP2), "config"], stdin=subprocess.DEVNULL, stdout=full,
+                               stderr=subprocess.PIPE, text=True, env=env, errors="replace", timeout=30)
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("ap2: cannot write the output", r.stderr)
+        self.assertNotIn("Exception ignored", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertTrue((self.data / "config.yaml").is_file())
+
     def test_non_ascii_error_under_latin1_output_has_no_traceback(self):
         r = self.run_ap2("config", data=self.home / ".claude" / "\u52a9\u624b",
                          env_extra={"PYTHONIOENCODING": "latin-1"}, env_drop=("PYTHONUTF8",))
@@ -181,6 +195,49 @@ class ClosedStderrTest(unittest.TestCase):
 
     def test_usage_is_not_printed_to_stdout(self):
         self.assertEqual(self.run_main([]), (2, ""))
+
+
+class OutputWriteErrorTest(unittest.TestCase):
+    # In-process, so it runs where /dev/full does not exist (macOS). The fake stdout's fileno() is a file this
+    # test owns, so pointing it at devnull cannot touch the test runner's real stdout.
+    class FullStdout:
+        encoding = "utf-8"
+
+        def __init__(self, fd):
+            self.fd = fd
+
+        def write(self, _text):
+            raise OSError(28, "No space left on device")
+
+        def flush(self):
+            raise OSError(28, "No space left on device")
+
+        def fileno(self):
+            return self.fd
+
+    def test_disk_full_returns_1_with_one_line_and_points_stdout_at_devnull(self):
+        tmp = Path(tempfile.mkdtemp(prefix="ap2-cli-")).resolve()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        fd = os.open(tmp / "out", os.O_WRONLY | os.O_CREAT)
+        self.addCleanup(os.close, fd)
+        err = io.StringIO()
+        with mock.patch.object(sys, "stdout", self.FullStdout(fd)), mock.patch.object(sys, "stderr", err):
+            code = cli.main(["config", "--data", str(tmp / "data")])
+        self.assertEqual(code, 1)
+        self.assertEqual(err.getvalue(), "ap2: cannot write the output: [Errno 28] No space left on device\n")
+        self.assertEqual(os.fstat(fd).st_rdev, os.stat(os.devnull).st_rdev)
+        self.assertTrue((tmp / "data" / "config.yaml").is_file())
+
+    def test_disk_full_on_a_stream_without_a_file_descriptor_still_returns_1(self):
+        tmp = Path(tempfile.mkdtemp(prefix="ap2-cli-")).resolve()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        out = self.FullStdout(None)
+        out.fileno = mock.Mock(side_effect=io.UnsupportedOperation("fileno"))
+        err = io.StringIO()
+        with mock.patch.object(sys, "stdout", out), mock.patch.object(sys, "stderr", err):
+            code = cli.main(["config", "--data", str(tmp / "data")])
+        self.assertEqual(code, 1)
+        self.assertIn("ap2: cannot write the output", err.getvalue())
 
 
 if __name__ == "__main__":
