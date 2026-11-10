@@ -6,13 +6,13 @@ In the subset (enough for config.yaml, source files and routines):
   parent key's indent;
 - flow lists `[a, b]` and flow maps `{a: 1, b: x}`, nested, on one line;
 - plain, 'single-quoted' and "double-quoted" strings; ints, floats, true/false, null/~/empty;
-- `#` comments, full-line and trailing (a `#` starts a comment at the start of a line or after a space, never
-  inside quotes).
+- `#` comments, full-line and trailing (a `#` starts a comment at the start of a line or after a space or tab,
+  never inside quotes).
 
 Everything else raises `YamlError`, whose message starts with `line N:` and says why: tabs in indentation,
 anchors, aliases, tags, `|`/`>` multi-line scalars, `---`/`...` document markers, bad indentation, unclosed
 quotes or brackets, duplicate keys, complex `?` keys, a `- ` list item inside a flow collection, a plain value
-holding `: `, and a plain value starting with `@`, `` ` `` or `%` (quote it).
+holding `: `, and a plain value starting with `@`, `` ` ``, `%`, `]`, `}`, `,` or `? ` (quote it).
 """
 from __future__ import annotations
 
@@ -26,7 +26,9 @@ TRUE, FALSE, NULL = ("true", "True", "TRUE"), ("false", "False", "FALSE"), ("nul
 RESERVED = {"&": "anchors ('&') are not supported", "*": "aliases ('*') are not supported",
             "!": "tags ('!') are not supported", "|": "multi-line scalars ('|') are not supported",
             ">": "multi-line scalars ('>') are not supported", "%": "directives ('%') are not supported",
-            "@": "'@' cannot start a plain value; quote it", "`": "'`' cannot start a plain value; quote it"}
+            "@": "'@' cannot start a plain value; quote it", "`": "'`' cannot start a plain value; quote it",
+            "]": "']' cannot start a plain value; quote it", "}": "'}' cannot start a plain value; quote it",
+            ",": "',' cannot start a plain value; quote it"}
 ESCAPES = {"\\": "\\", '"': '"', "/": "/", "n": "\n", "t": "\t", "r": "\r", "0": "\0", " ": " ",
            "b": "\b", "f": "\f", "e": "\x1b", "a": "\a", "v": "\v"}
 HEX = {"x": 2, "u": 4, "U": 8}
@@ -111,15 +113,17 @@ def _strip_comment(s: str, no: int) -> str:
 def _value_start(before: str, depth: int, quote_end: int) -> bool:
     """True when a value or key may start after the text `before`. Outside brackets (`depth` 0): at the line's
     start, after only the leading block indicators `- ` / `? `, or after `: `. Inside a flow collection: after
-    `[`, `{`, `,` or `:`, where a `:` needs a space after it unless it directly follows a closing quote at
-    `quote_end` (JSON style `"a":"b"`)."""
+    `[`, `{`, `,`, or a `:` followed by a space or tab, or a `:` that follows the closing quote at `quote_end`
+    with only spaces or tabs between (JSON style `"a":"b"`, `"a" :"b"`)."""
     if not depth:
         return re.fullmatch(r"(?:[-?] +)*", before) is not None or re.search(r":[ \t]+\Z", before) is not None
     stripped = before.rstrip(" \t")
     last = stripped[-1:]
     if last in ("[", "{", ","):
         return True
-    return last == ":" and (stripped != before or len(stripped) - 2 == quote_end)
+    if last != ":":
+        return False
+    return stripped != before or len(stripped[:-1].rstrip(" \t")) - 1 == quote_end
 
 
 def _quote_end(s: str, i: int, no: int) -> int:
@@ -149,7 +153,7 @@ def _split_key(text: str, no: int):
     if text[0] in "\"'":
         end = _quote_end(text, 0, no)
         after = text[end + 1:]
-        if after == ":" or after.startswith(": "):
+        if re.match(r":(\s|\Z)", after):
             return _quoted(text[:end + 1], no), after[1:].strip()
         if after.lstrip().startswith(":"):
             raise YamlError(no, "a quoted key must be followed by ': '")
@@ -258,6 +262,8 @@ class _Parser:
             return _quoted(text, no)
         if _is_item(text):
             raise YamlError(no, "a list cannot start after 'key:' on the same line; put '- ' items on the next lines")
+        if text == "?" or text.startswith("? "):
+            raise YamlError(no, "complex keys ('?') are not supported")
         _check_plain(text, no)
         if re.search(r":(\s|\Z)", text):
             raise YamlError(no, "a plain value cannot contain ': '; quote the value")

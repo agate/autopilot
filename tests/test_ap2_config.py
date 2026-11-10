@@ -61,6 +61,8 @@ class DefaultsTest(unittest.TestCase):
     def test_empty_secondary_language_is_none(self):
         self.assertIsNone(config.load(write_config(self.data, "secondary_language:\n")).secondary_language)
         self.assertIsNone(config.load(write_config(self.data, "secondary_language: ~\n")).secondary_language)
+        self.assertIsNone(config.load(write_config(self.data, "secondary_language: ''\n")).secondary_language)
+        self.assertIsNone(config.load(write_config(self.data, 'secondary_language: ""\n')).secondary_language)
 
     def test_written_template_reads_back_as_defaults(self):
         self.assert_defaults(config.load(write_config(self.data, config.DEFAULT_TEXT)))
@@ -93,6 +95,7 @@ REFUSALS = [
     ("primary_language long name", "primary_language: english\n", "primary_language"),
     ("primary_language lower region", "primary_language: pt-br\n", "primary_language"),
     ("primary_language empty", "primary_language:\n", "primary_language"),
+    ("primary_language empty quotes", "primary_language: ''\n", "primary_language"),
     ("secondary_language not a code", "secondary_language: Chinese\n", "secondary_language"),
     ("secondary_language a number", "secondary_language: 12\n", "secondary_language"),
     ("secondary equals primary", "primary_language: zh\nsecondary_language: zh\n", "same as primary_language"),

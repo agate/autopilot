@@ -96,7 +96,7 @@ def parse(text: str, where: str = FILE) -> Config:
         if key not in data:
             continue
         v = data[key]
-        if v is None and key == "secondary_language":
+        if (v is None or v == "") and key == "secondary_language":
             continue
         if not (isinstance(v, str) and LANGUAGE.match(v)):
             fail(key, f"{key} must be a short language code such as en, zh or pt-BR, not {v!r}")

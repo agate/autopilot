@@ -170,9 +170,12 @@ class StructureTest(unittest.TestCase):
         self.assertEqual(load('a: {"a":"b # c"}\n'), {"a": {"a": "b # c"}})  # JSON style: ':' right after a quote
         self.assertEqual(load('a: {"a":"b"}\n'), {"a": {"a": "b"}})
         self.assertEqual(load("a: {k: 'v # w', n: [1, 'p, q']}  # c\n"), {"a": {"k": "v # w", "n": [1, "p, q"]}})
+        self.assertEqual(load("a: ['x # y', [1], 'p # q']\n"), {"a": ["x # y", [1], "p # q"]})
+        self.assertEqual(load('k: {"a" :"b # c"}\n'), {"k": {"a": "b # c"}})  # spaces before the ':' after a quote
 
     def test_quotes_after_block_list_indicators(self):
         self.assertEqual(load("a:\n  - 'x # y'\n  - - 'z # w'\n"), {"a": ["x # y", ["z # w"]]})
+        self.assertEqual(load("a:\n  - -'x # y'\n"), {"a": ["-'x"]})
 
     def test_minus_without_a_space_in_a_flow_list(self):
         self.assertEqual(load("a: [-1, -x]\n"), {"a": [-1, "-x"]})
@@ -185,6 +188,7 @@ class StructureTest(unittest.TestCase):
 
     def test_quoted_keys(self):
         self.assertEqual(load('"To Do": 1\n\'a: b\': 2\n'), {"To Do": 1, "a: b": 2})
+        self.assertEqual(load("'k':\tv\n"), {"k": "v"})  # a tab after the ':' like a plain key
 
     def test_crlf_lines(self):
         self.assertEqual(load("a: 1\r\nb: x\r\n"), {"a": 1, "b": "x"})
@@ -230,6 +234,13 @@ ERRORS = [
     ("quoted key without ': '", '"a":b\n', 1, "a quoted key must be followed by ': '"),
     ("complex key in a flow map", "a: {? b: 1}\n", 1, "complex keys"),
     ("block list item in a flow list", "a: [- x]\n", 1, "block list item"),
+    ("bare '-' in a flow list", "a: [-]\n", 1, "block list item"),
+    ("bare '?' key in a flow map", "a: {?: 1}\n", 1, "complex keys"),
+    ("plain value starting with ']'", "a: ]x\n", 1, "']' cannot start a plain value"),
+    ("plain value starting with '}'", "a: }x\n", 1, "'}' cannot start a plain value"),
+    ("plain value starting with ','", "a: ,x\n", 1, "',' cannot start a plain value"),
+    ("plain value starting with '? '", "a: ? x\n", 1, "complex keys"),
+    ("plain value that is only '?'", "a: ?\n", 1, "complex keys"),
     ("form feed is not a line break", "a: x\x0cy\nc: [\n", 2, "unclosed"),
     ("line separator is not a line break", "a: x\u2028y\nc: [\n", 2, "unclosed"),
 ]
