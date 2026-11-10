@@ -599,8 +599,15 @@ Calls the author made without asking (check them):
   opposite actions) and `index.py` (`index.sqlite`). `ap2 config [--data PATH]` prints the effective config and `data_dir` as JSON. With stdout
   closed, `ap2 config` sets up the folder, prints nothing and exits 0; when its reader goes away
   (`ap2 config | true`) it exits 1 with nothing on stderr; when a write fails (a full disk) it prints one line,
-  `ap2: cannot write the output: ...`, and exits 1. None of these prints a traceback. `ap2` with no arguments
-  prints the usage, listing the commands, to stderr and exits 2, like v1's `bin/ap`.
+  `ap2: cannot write the output: ...`, and exits 1. `ap2` with no arguments prints the usage, listing the
+  commands, to stderr and exits 2, like v1's `bin/ap`; `--help` prints to stdout and exits 0, and a bad
+  argument (`ap2 nosuch`) prints argparse's usage and error to stderr and exits 2. Help, usage and these errors
+  follow the same rules, with one difference: when their reader goes away (`ap2 --help | true`) they keep
+  their own exit code (0 or 2) instead of 1, because help text is not a result a script reads, while
+  `ap2 config`'s JSON is, and a script must see that it was cut short. A closed stream gets nothing (help is
+  never sent to stderr instead) and a failed write prints the one line and exits 1 (when stderr is the stream that failed, the line is lost
+  and ap2 still exits 1). None of these prints a
+  traceback or an `Exception ignored` line.
 - **[decided by the builder]** The card store (design 3.4, 3.6, 3.7, 4.1).
   - Card id: `c-YYYYMMDD-HHMMSS-xxxxxx`, the UTC creation time to the second and 6 random lowercase hex digits
     (a new pair is drawn if the file exists). The file is `<data>/items/<yyyy-mm>/<id>.json`, the month taken from

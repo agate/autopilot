@@ -271,5 +271,148 @@ class OutputWriteErrorTest(unittest.TestCase):
         self.assertIn("ap2: cannot write the output", err.getvalue())
 
 
+class HelpAndUsageOutputTest(unittest.TestCase):
+    """argparse's own output (help, usage, argument errors) behaves like `ap2 config`'s output when its reader
+    goes away, a write fails, or the stream is closed."""
+
+    def setUp(self):
+        tmp = Path(tempfile.mkdtemp(prefix="ap2-cli-")).resolve()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self.home = tmp / "home"
+        self.home.mkdir()
+        self.env = {k: v for k, v in os.environ.items() if k != "AP2_DATA"}
+        self.env.update(HOME=str(self.home), AP2_DATA=str(tmp / "data"))
+        # Python 3.14 argparse colors help and usage when FORCE_COLOR is set; PYTHON_COLORS=0 wins over it.
+        self.env["PYTHON_COLORS"] = "0"
+
+    def run_into_a_pipe_nobody_reads(self, stream, *args):
+        """Run ap2 with `stream` ("stdout" or "stderr") writing into a pipe whose read end is closed before ap2
+        starts, so every write hits a closed pipe (no race). Returns (exit code, the other stream's text)."""
+        r, w = os.pipe()
+        os.close(r)
+        kw = {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE, stream: w}
+        try:
+            proc = subprocess.Popen([sys.executable, str(AP2), *args], stdin=subprocess.DEVNULL, env=self.env, **kw)
+        finally:
+            os.close(w)
+        out, err = proc.communicate(timeout=30)
+        other = err if stream == "stdout" else out
+        return proc.returncode, other.decode("utf-8", "replace")
+
+    def test_help_into_a_pipe_nobody_reads_exits_0_with_nothing_on_stderr(self):
+        for args in (["--help"], ["-h"], ["config", "--help"]):
+            with self.subTest(args=args):
+                code, err = self.run_into_a_pipe_nobody_reads("stdout", *args)
+                self.assertEqual((code, err), (0, ""))
+
+    def test_usage_into_a_pipe_nobody_reads_exits_2_with_nothing_on_stdout(self):
+        # `ap2` prints the usage to stderr; stderr's reader is gone.
+        code, out = self.run_into_a_pipe_nobody_reads("stderr")
+        self.assertEqual((code, out), (2, ""))
+
+    def test_argument_errors_into_a_pipe_nobody_reads_exit_2_with_nothing_on_stdout(self):
+        for args in (["nosuch"], ["config", "--bad"]):
+            with self.subTest(args=args):
+                code, out = self.run_into_a_pipe_nobody_reads("stderr", *args)
+                self.assertEqual((code, out), (2, ""))
+
+    def test_argument_errors_keep_argparse_message_and_exit_2(self):
+        for args, says in ((["nosuch"], "invalid choice: 'nosuch'"), (["config", "--bad"], "unrecognized arguments: --bad")):
+            with self.subTest(args=args):
+                r = subprocess.run([sys.executable, str(AP2), *args], stdin=subprocess.DEVNULL, capture_output=True,
+                                   text=True, env=self.env, errors="replace", timeout=30)
+                self.assertEqual(r.returncode, 2)
+                self.assertEqual(r.stdout, "")
+                self.assertTrue(r.stderr.startswith("usage: ap2"), r.stderr)
+                self.assertIn("ap2: error: ", r.stderr)
+                self.assertIn(says, r.stderr)
+
+    def test_help_prints_to_stdout_and_exits_0(self):
+        r = subprocess.run([sys.executable, str(AP2), "config", "--help"], stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, env=self.env, errors="replace", timeout=30)
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        self.assertIn("usage: ap2 config", r.stdout)
+        self.assertIn("--data PATH", r.stdout)
+
+    @unittest.skipUnless(os.path.exists("/dev/full"), "needs /dev/full (Linux)")
+    def test_help_into_a_full_disk_exits_1_with_one_line(self):
+        for args in (["--help"], ["config", "--help"]):
+            with self.subTest(args=args), open("/dev/full", "wb") as full:
+                r = subprocess.run([sys.executable, str(AP2), *args], stdin=subprocess.DEVNULL, stdout=full,
+                                   stderr=subprocess.PIPE, text=True, env=self.env, errors="replace", timeout=30)
+                self.assertEqual(r.returncode, 1, r.stderr)
+                self.assertRegex(r.stderr, r"\Aap2: cannot write the output: .+\n\Z")
+
+    def test_help_and_usage_with_stdout_or_stderr_closed_exit_normally_without_a_traceback(self):
+        # '>&-' / '2>&-' close the stream, so Python starts with sys.stdout / sys.stderr set to None.
+        for redirect, args, code in ((">&-", "--help", 0), (">&-", "config --help", 0), ("2>&-", "", 2),
+                                     ("2>&-", "nosuch", 2)):
+            with self.subTest(redirect=redirect, args=args):
+                # The shell warns on stderr when LC_ALL names a locale that is not installed, so leave LC_ALL out.
+                r = subprocess.run(["sh", "-c", f'"$0" "$1" {args} {redirect}', sys.executable, str(AP2)],
+                                   stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace",
+                                   env={k: v for k, v in self.env.items() if k != "LC_ALL"}, timeout=30)
+                self.assertEqual(r.returncode, code, r.stderr)
+                self.assertEqual(r.stdout + r.stderr, "")
+
+
+class HelpAndUsageInProcessTest(unittest.TestCase):
+    # In-process, so they run where /dev/full does not exist (macOS). The fake stream's fileno() is a file this
+    # test owns, so pointing it at devnull cannot touch the test runner's real streams.
+    FullStream = OutputWriteErrorTest.FullStdout
+
+    def setUp(self):
+        use_temp_home(self)
+        tmp = Path(tempfile.mkdtemp(prefix="ap2-cli-")).resolve()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self.fd = os.open(tmp / "out", os.O_WRONLY | os.O_CREAT)
+        self.addCleanup(os.close, self.fd)
+
+    def assert_exits(self, argv, code):
+        with self.assertRaises(SystemExit) as cm:
+            cli.main(argv)
+        self.assertEqual(cm.exception.code, code)
+
+    def test_help_on_a_full_disk_returns_1_with_one_line_and_points_stdout_at_devnull(self):
+        for argv in (["--help"], ["config", "--help"]):
+            with self.subTest(argv=argv):
+                err = io.StringIO()
+                with mock.patch.object(sys, "stdout", self.FullStream(self.fd)), mock.patch.object(sys, "stderr", err):
+                    code = cli.main(argv)
+                self.assertEqual(code, 1)
+                self.assertEqual(err.getvalue(), "ap2: cannot write the output: [Errno 28] No space left on device\n")
+                self.assertEqual(os.fstat(self.fd).st_rdev, os.stat(os.devnull).st_rdev)
+
+    def test_usage_on_a_full_stderr_returns_1_without_raising(self):
+        for argv in ([], ["nosuch"]):
+            with self.subTest(argv=argv):
+                with mock.patch.object(sys, "stdout", io.StringIO()) as out, \
+                        mock.patch.object(sys, "stderr", self.FullStream(self.fd)):
+                    code = cli.main(argv)
+                self.assertEqual((code, out.getvalue()), (1, ""))
+                self.assertEqual(os.fstat(self.fd).st_rdev, os.stat(os.devnull).st_rdev)
+
+    def test_help_with_stdout_closed_prints_nothing_and_exits_0(self):
+        for argv in (["--help"], ["config", "--help"]):
+            with self.subTest(argv=argv):
+                err = io.StringIO()
+                with mock.patch.object(sys, "stdout", None), mock.patch.object(sys, "stderr", err):
+                    self.assert_exits(argv, 0)
+                self.assertEqual(err.getvalue(), "")
+
+    def test_usage_and_errors_with_stderr_closed_print_nothing(self):
+        out = io.StringIO()
+        with mock.patch.object(sys, "stderr", None), contextlib.redirect_stdout(out):
+            self.assertEqual(cli.main([]), 2)
+            self.assert_exits(["nosuch"], 2)
+            self.assert_exits(["config", "--bad"], 2)
+        self.assertEqual(out.getvalue(), "")
+
+    def test_help_with_both_streams_closed_exits_0(self):
+        with mock.patch.object(sys, "stdout", None), mock.patch.object(sys, "stderr", None):
+            self.assert_exits(["--help"], 0)
+            self.assert_exits(["nosuch"], 2)
+
+
 if __name__ == "__main__":
     unittest.main()
