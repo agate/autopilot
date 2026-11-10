@@ -36,6 +36,10 @@ class TempData:
         self.usage_dir = Path(tempfile.mkdtemp(prefix="ap-usage-"))
         self.old = os.environ.get("AUTOPILOT_DATA")
         os.environ["AUTOPILOT_DATA"] = str(self.dir)
+        # A session launched in a test never reads this machine's login shell (tests/test_shellenv.py does it
+        # with a stand-in shell).
+        self.old_project_env = os.environ.get("AUTOPILOT_PROJECT_ENV")
+        os.environ["AUTOPILOT_PROJECT_ENV"] = "off"
         self.old_usage = budget.DEFAULT_PATH
         budget.DEFAULT_PATH = quiet_usage(self.usage_dir / "claude.json")
         return self.dir
@@ -44,6 +48,10 @@ class TempData:
         from autopilot import budget
 
         budget.DEFAULT_PATH = self.old_usage
+        if self.old_project_env is None:
+            os.environ.pop("AUTOPILOT_PROJECT_ENV", None)
+        else:
+            os.environ["AUTOPILOT_PROJECT_ENV"] = self.old_project_env
         if self.old is None:
             os.environ.pop("AUTOPILOT_DATA", None)
         else:

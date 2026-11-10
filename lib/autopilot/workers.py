@@ -8,7 +8,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 
-from autopilot import budget, cli, config, events, paths, sessions, state
+from autopilot import budget, cli, config, events, paths, sessions, shellenv, state
 
 AGENTS = {"implement": "autopilot:implementer", "review": "autopilot:reviewer"}
 _BG = re.compile(r"backgrounded · (\w+)")  # a resumed copy prints no name after the id
@@ -66,6 +66,15 @@ def all_workers() -> list:
 
 
 def _launch(argv: list, cwd: str, env: dict) -> str:
+    # The session gets the environment of its own folder, as the user's terminal builds it (shellenv);
+    # the autopilot's own variables (its role, its data folder) always win.
+    if shellenv.enabled():
+        project = shellenv.load(cwd)
+        if project is None:
+            print(f"autopilot: could not read the shell environment of {cwd}; the session keeps the current one",
+                  file=sys.stderr)
+        else:
+            env = {**env, **project, **{k: v for k, v in env.items() if k.startswith("AUTOPILOT_")}}
     out = subprocess.run(argv, cwd=cwd, env=env, capture_output=True, text=True, timeout=120,
                          stdin=subprocess.DEVNULL)
     m = _BG.search(out.stdout + out.stderr)
