@@ -110,6 +110,6 @@ def parse(text: str, where: str = FILE) -> Config:
 
 def require_live(cfg: Config, what: str) -> None:
     """Return when `mode` is live; raise ShadowModeError naming `what` when it is shadow. Every write path
-    outside the data folder (Jira, Slack, GitHub, a published page) calls this first."""
+    outside the data folder (Jira, Slack, GitHub, a published page other than v2's own) calls this first."""
     if cfg.mode != "live":
         raise ShadowModeError(f"shadow mode: refusing to {what}. Set 'mode: live' in config.yaml to allow it.")

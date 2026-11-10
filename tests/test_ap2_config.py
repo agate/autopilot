@@ -255,6 +255,31 @@ class LookupTest(unittest.TestCase):
                 datadir.resolve("~/.Claude")
             self.assertEqual(list(home.iterdir()), [])
 
+    @unittest.skipIf(datadir.pwd is None, "no user database")
+    def test_dot_claude_of_the_accounts_home_is_refused_when_home_is_empty(self):
+        # HOME="" makes Path.home() '/', so only the account's home from the user database still finds ~/.claude.
+        with TempHome() as home:
+            (home / ".claude").mkdir()
+            os.environ["HOME"] = ""
+            with mock.patch.object(datadir.pwd, "getpwuid", return_value=mock.Mock(pw_dir=str(home))):
+                for p in (home / ".claude" / "x", home / ".CLAUDE" / "x"):
+                    with self.subTest(str(p)):
+                        with self.assertRaises(ConfigError) as ctx:
+                            datadir.resolve(str(p))
+                        self.assertIn(".claude", str(ctx.exception))
+                self.assertEqual(datadir.resolve(str(home / "other")), home / "other")
+
+    @unittest.skipUnless(os.name == "posix", "HOME decides the home folder only on POSIX")
+    def test_empty_or_relative_home_refuses_the_default(self):
+        with TempHome():
+            for value in ("", "relative/home"):
+                with self.subTest(value):
+                    os.environ["HOME"] = value
+                    with self.assertRaises(ConfigError) as ctx:
+                        datadir.resolve()
+                    self.assertIn("HOME", str(ctx.exception))
+                    self.assertIn("--data", str(ctx.exception))
+
     def test_similar_name_is_allowed(self):
         with TempHome() as home:
             self.assertEqual(datadir.resolve("~/.claude-notes"), home / ".claude-notes")

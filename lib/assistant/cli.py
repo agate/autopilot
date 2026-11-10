@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from assistant import config, datadir
@@ -36,13 +37,25 @@ COMMANDS = {"config": cmd_config}
 
 
 def main(argv: list) -> int:
+    # sys.stderr is None when stderr is closed; print(file=None) would then write to stdout, so say nothing.
     parser = _parser()
     args = parser.parse_args(argv)
     if args.command is None:
-        parser.print_help(sys.stderr)
+        if sys.stderr is not None:
+            parser.print_help(sys.stderr)
         return 2
     try:
-        return COMMANDS[args.command](args)
+        code = COMMANDS[args.command](args)
+        if sys.stdout is not None:
+            sys.stdout.flush()  # a closed pipe fails here, not in the flush at exit
     except ConfigError as e:
-        print(f"ap2: {e}", file=sys.stderr)
+        if sys.stderr is not None:
+            print(f"ap2: {e}", file=sys.stderr)
         return 1
+    except BrokenPipeError:
+        # The reader went away (`ap2 config | true`); the data folder is still set up. Point stdout at devnull so
+        # the flush at exit cannot fail again (the recipe from the Python signal module docs).
+        if sys.stdout is not None:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        return 1
+    return code

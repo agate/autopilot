@@ -134,6 +134,7 @@ class ScalarTest(unittest.TestCase):
         self.assertEqual(load("k: 1\u00a0\n"), {"k": "1\xa0"})
         self.assertEqual(load("k: x\u3000\n"), {"k": "x\u3000"})
         self.assertEqual(load("k: [a\u00a0, b]\n"), {"k": ["a\xa0", "b"]})
+        self.assertEqual(load("mode: x\u00a0#c\n"), {"mode": "x\xa0#c"})  # a no-break space does not start a comment
 
     def test_booleans_and_null(self):
         self.assertIs(self.one("true"), True)

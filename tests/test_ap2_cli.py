@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -8,8 +10,10 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests.helpers import ROOT
+from assistant import cli
 
 AP2 = ROOT / "bin" / "ap2"
 
@@ -133,6 +137,25 @@ class Ap2CommandTest(unittest.TestCase):
         self.assertNotIn("Traceback", r.stderr)
         self.assertTrue((self.data / "config.yaml").is_file())
 
+    def test_config_into_a_pipe_nobody_reads_exits_1_without_a_traceback(self):
+        # `ap2 config | true`: the reader is gone before ap2 writes. The read end is closed before ap2 starts, so
+        # every write hits a closed pipe (no race).
+        env = {k: v for k, v in os.environ.items() if k != "AP2_DATA"}
+        env.update(HOME=str(self.home), AP2_DATA=str(self.data))
+        r, w = os.pipe()
+        os.close(r)
+        try:
+            proc = subprocess.Popen([sys.executable, str(AP2), "config"], stdin=subprocess.DEVNULL, stdout=w,
+                                    stderr=subprocess.PIPE, env=env)
+        finally:
+            os.close(w)
+        _, err = proc.communicate(timeout=30)
+        err = err.decode("utf-8", "replace")
+        self.assertEqual(proc.returncode, 1, err)
+        self.assertNotIn("Exception ignored", err)
+        self.assertNotIn("Traceback", err)
+        self.assertTrue((self.data / "config.yaml").is_file())
+
     def test_non_ascii_error_under_latin1_output_has_no_traceback(self):
         r = self.run_ap2("config", data=self.home / ".claude" / "\u52a9\u624b",
                          env_extra={"PYTHONIOENCODING": "latin-1"}, env_drop=("PYTHONUTF8",))
@@ -140,6 +163,24 @@ class Ap2CommandTest(unittest.TestCase):
         self.assertEqual(r.stdout, "")
         self.assertIn("ap2:", r.stderr)
         self.assertNotIn("Traceback", r.stderr)
+
+
+class ClosedStderrTest(unittest.TestCase):
+    # With stderr closed, sys.stderr is None, and print(file=None) would write to stdout instead.
+    def run_main(self, argv):
+        out = io.StringIO()
+        with mock.patch.object(sys, "stderr", None), contextlib.redirect_stdout(out):
+            code = cli.main(argv)
+        return code, out.getvalue()
+
+    def test_error_is_not_printed_to_stdout(self):
+        data = Path(tempfile.mkdtemp(prefix="ap2-cli-")).resolve()
+        self.addCleanup(shutil.rmtree, data, True)
+        (data / "config.yaml").write_text("mode: loud\n")
+        self.assertEqual(self.run_main(["config", "--data", str(data)]), (1, ""))
+
+    def test_usage_is_not_printed_to_stdout(self):
+        self.assertEqual(self.run_main([]), (2, ""))
 
 
 if __name__ == "__main__":
