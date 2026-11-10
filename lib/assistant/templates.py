@@ -12,6 +12,7 @@ A template can combine roles and write briefs. It cannot add tools or permission
 from __future__ import annotations
 
 import re
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -336,15 +337,26 @@ def load_file(path, origin: str = "user", kinds=None) -> Template:
 
 def _files(folder: Path) -> list:
     """The `*.yaml` files in `folder`, by name; hidden files and folders are skipped. A missing folder has none.
-    A broken link is kept, so loading it fails naming it rather than falling back to the built-in template."""
+    A broken link is kept, so loading it fails naming it rather than falling back to the built-in template.
+    Each entry is stat-ed directly (Path.is_file hides errors on newer Pythons): any other error is a TemplateError."""
     try:
         entries = sorted(folder.iterdir())
-        return [p for p in entries if p.name.endswith(SUFFIX) and not p.name.startswith(".")
-                and (p.is_file() or (p.is_symlink() and not p.exists()))]
     except FileNotFoundError:
         return []
     except OSError as e:
         raise TemplateError(f"{folder}: cannot read: {e}") from e
+    out = []
+    for p in entries:
+        if not p.name.endswith(SUFFIX) or p.name.startswith("."):
+            continue
+        try:
+            if stat.S_ISREG(p.stat().st_mode):
+                out.append(p)
+        except FileNotFoundError:
+            out.append(p)
+        except OSError as e:
+            raise TemplateError(f"{folder}: cannot read: {e}") from e
+    return out
 
 
 def _user_dir(data_dir) -> Optional[Path]:
