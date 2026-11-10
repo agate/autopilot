@@ -22,7 +22,9 @@ def default() -> Path:
 
 def resolve(flag: Optional[str] = None) -> Path:
     """The data folder as an absolute path, symlinks followed. Nothing is created. Raises ConfigError."""
-    raw = flag or os.environ.get(ENV) or str(default())
+    if flag == "":
+        raise ConfigError("--data is empty; give a folder path")
+    raw = flag if flag is not None else (os.environ.get(ENV) or str(default()))
     path = Path(raw).expanduser().resolve()
     claude = (Path.home() / ".claude").resolve()
     # The name check, then a same-folder check: on a case-insensitive file system ~/.CLAUDE is ~/.claude.

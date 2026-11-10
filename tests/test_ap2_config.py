@@ -89,6 +89,7 @@ REFUSALS = [
     ("keep_transcripts bare number", "keep_transcripts: 90\n", "keep_transcripts"),
     ("keep_transcripts zero days", "keep_transcripts: 0d\n", "keep_transcripts"),
     ("keep_transcripts weeks", "keep_transcripts: 2w\n", "keep_transcripts"),
+    ("keep_transcripts trailing text", "keep_transcripts: 90days\n", "keep_transcripts"),
     ("primary_language long name", "primary_language: english\n", "primary_language"),
     ("primary_language lower region", "primary_language: pt-br\n", "primary_language"),
     ("primary_language empty", "primary_language:\n", "primary_language"),
@@ -168,13 +169,21 @@ class LookupTest(unittest.TestCase):
             os.environ["AP2_DATA"] = ""
             self.assertEqual(datadir.resolve(), home / "Documents" / "Assistant")
 
+    def test_empty_flag_is_refused(self):
+        with TempHome() as home:
+            with self.assertRaises(ConfigError) as ctx:
+                datadir.resolve("")
+            self.assertIn("--data is empty", str(ctx.exception))
+            self.assertFalse((home / "Documents").exists())
+
     def test_tilde_expands_against_home(self):
         with TempHome() as home:
             self.assertEqual(datadir.resolve("~/notes"), home / "notes")
 
     def test_inside_dot_claude_is_refused(self):
         with TempHome() as home:
-            for p in ("~/.claude", "~/.claude/assistant", str(home / ".claude" / "autopilot-data")):
+            for p in ("~/.claude", "~/.claude/assistant", str(home / ".claude" / "autopilot-data"),
+                      "~/nope/../.claude/x"):  # '..' is folded away before the check
                 with self.subTest(p):
                     with self.assertRaises(ConfigError) as ctx:
                         datadir.resolve(p)

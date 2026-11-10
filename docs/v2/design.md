@@ -564,12 +564,14 @@ Calls the author made without asking (check them):
       floats, `true`/`false`, `null`/`~`/empty, and `#` comments (full-line and trailing; a `#` starts a comment
       only at the start of a line or after a space, never inside quotes). Keys are always strings. `true`,
       `false` and `null` are read in lower, Title and UPPER case (`true`, `True`, `TRUE`); `yes`/`no` stay
-      strings (YAML 1.2). A quote starts a quoted string only at the start of a value or key (after `- `, `: `,
-      `? `, `[`, `{` or `,`), so `don't` and `well-'known` are plain text.
+      strings (YAML 1.2). A quote starts a quoted string only at the start of a value or key (the line's start,
+      after the leading `- ` / `? `, after `: `, or inside a flow collection after `[`, `{`, `,` or `:`), so
+      `don't`, `well-'known` and `Bob, 'the builder` are plain text.
     - Refused, with one error class (`YamlError`) whose message starts with `line N:` and says why: tabs in
       indentation, anchors `&`, aliases `*`, tags `!`, multi-line scalars `|`/`>` and multi-line plain values,
       document markers `---`/`...`, bad indentation, unclosed quotes or brackets (a flow collection must close on
-      its line), duplicate keys, complex `?` keys, and a plain value holding `: ` (quote it). The top level must
+      its line), duplicate keys, complex `?` keys, a `- ` list item inside a flow collection, a plain value
+      holding `: ` (quote it), and a plain value starting with `@`, `` ` `` or `%` (quote it). The top level must
       be a map. Refusing is safer than guessing: a file either reads exactly as written or names its bad line.
 - **[decided by the builder]** The data folder and its lookup. The folder is `--data <path>` if given, else the
   environment variable `AP2_DATA`, else `~/Documents/Assistant`. A folder inside `~/.claude` is refused (3.4),

@@ -96,6 +96,15 @@ class ScalarTest(unittest.TestCase):
         self.assertEqual(self.one("yes"), "yes")               # YAML 1.2: yes/no/on/off are strings
         self.assertEqual(self.one("well-'known # c"), "well-'known")  # '-' then a quote, no space: plain text
         self.assertEqual(self.one("b-'c # d'"), "b-'c")
+        self.assertEqual(self.one("rock 'n roll"), "rock 'n roll")
+        self.assertEqual(self.one("it's, 'ok' # c"), "it's, 'ok'")
+
+    def test_a_quote_mid_value_stays_plain_text(self):
+        # Outside brackets a quote opens a string only at a value's start, not after ', ', ' - ' or '? ' later on.
+        self.assertEqual(self.one("Bob, 'the builder # nick"), "Bob, 'the builder")
+        self.assertEqual(self.one("Why? 'cause it broke"), "Why? 'cause it broke")
+        self.assertEqual(self.one("x - 'a # b'"), "x - 'a")
+        self.assertEqual(self.one("x [y, 'z # w"), "x [y, 'z")  # a '[' mid-value opens no flow collection
 
     def test_quoted_strings(self):
         self.assertEqual(self.one('"a # not a comment"'), "a # not a comment")
@@ -157,6 +166,23 @@ class StructureTest(unittest.TestCase):
                          {"a": {"x": 1, "y z": [True, None], "w": {}}})
         self.assertEqual(load("a: []\nb: {}\nc: [a, b,]\n"), {"a": [], "b": {}, "c": ["a", "b"]})
 
+    def test_quotes_at_a_value_start_inside_flow_collections(self):
+        self.assertEqual(load('a: {"a":"b # c"}\n'), {"a": {"a": "b # c"}})  # JSON style: ':' right after a quote
+        self.assertEqual(load('a: {"a":"b"}\n'), {"a": {"a": "b"}})
+        self.assertEqual(load("a: {k: 'v # w', n: [1, 'p, q']}  # c\n"), {"a": {"k": "v # w", "n": [1, "p, q"]}})
+
+    def test_quotes_after_block_list_indicators(self):
+        self.assertEqual(load("a:\n  - 'x # y'\n  - - 'z # w'\n"), {"a": ["x # y", ["z # w"]]})
+
+    def test_minus_without_a_space_in_a_flow_list(self):
+        self.assertEqual(load("a: [-1, -x]\n"), {"a": [-1, "-x"]})
+
+    def test_only_cr_and_lf_end_a_line(self):
+        data, lines = yamlish.parse("a: x\x0cy\x85z\u2028w\nb: 1\n")
+        self.assertEqual(data, {"a": "x\x0cy\x85z\u2028w", "b": 1})
+        self.assertEqual(lines, {("a",): 1, ("b",): 2})
+        self.assertEqual(yamlish.parse("a: 1\rb: 2\r\nc: 3")[1], {("a",): 1, ("b",): 2, ("c",): 3})
+
     def test_quoted_keys(self):
         self.assertEqual(load('"To Do": 1\n\'a: b\': 2\n'), {"To Do": 1, "a: b": 2})
 
@@ -200,6 +226,12 @@ ERRORS = [
     ("complex key", "? a\n", 1, "key"),
     ("empty flow entry", "a: [1, , 2]\n", 1, "empty"),
     ("unknown escape", 'a: "\\q"\n', 1, "escape"),
+    ("escape past the last code point", 'a: "\\U00110000"\n', 1, "bad escape"),
+    ("quoted key without ': '", '"a":b\n', 1, "a quoted key must be followed by ': '"),
+    ("complex key in a flow map", "a: {? b: 1}\n", 1, "complex keys"),
+    ("block list item in a flow list", "a: [- x]\n", 1, "block list item"),
+    ("form feed is not a line break", "a: x\x0cy\nc: [\n", 2, "unclosed"),
+    ("line separator is not a line break", "a: x\u2028y\nc: [\n", 2, "unclosed"),
 ]
 
 

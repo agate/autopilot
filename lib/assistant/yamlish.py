@@ -11,7 +11,8 @@ In the subset (enough for config.yaml, source files and routines):
 
 Everything else raises `YamlError`, whose message starts with `line N:` and says why: tabs in indentation,
 anchors, aliases, tags, `|`/`>` multi-line scalars, `---`/`...` document markers, bad indentation, unclosed
-quotes or brackets, duplicate keys, complex `?` keys, and a plain value holding `: `.
+quotes or brackets, duplicate keys, complex `?` keys, a `- ` list item inside a flow collection, a plain value
+holding `: `, and a plain value starting with `@`, `` ` `` or `%` (quote it).
 """
 from __future__ import annotations
 
@@ -72,7 +73,8 @@ class _Line:
 
 def _lines(text: str) -> list:
     out = []
-    for no, raw in enumerate(text.lstrip("\ufeff").splitlines(), 1):
+    # Only \r\n, \r and \n end a line (str.splitlines() would also split on \f, \x85, \u2028 and others).
+    for no, raw in enumerate(text.lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n").split("\n"), 1):
         body = raw.lstrip(" ")
         indent = len(raw) - len(body)
         if not body.strip():
@@ -89,25 +91,35 @@ def _lines(text: str) -> list:
 
 
 def _strip_comment(s: str, no: int) -> str:
-    """Cut a trailing comment. A quote opens a string only where a value or key starts: the line's start, right
-    after '[', '{' or ',', or after ':', '-' or '?' and a space. So the quote in `don't`, `rock 'n roll` or
-    `well-'known` stays plain text."""
-    i, n = 0, len(s)
+    """Cut a trailing comment. A quote opens a string only where a value or key starts (see `_value_start`), so the
+    quote in `don't`, `rock 'n roll`, `well-'known` or `Bob, 'the builder` stays plain text."""
+    i, n, depth, quote_end = 0, len(s), 0, -1
     while i < n:
         c = s[i]
         if c == "#" and (i == 0 or s[i - 1] in " \t"):
             return s[:i]
-        if c in "\"'" and _opens_quote(s[:i]):
-            i = _quote_end(s, i, no)
+        if c in "\"'" and _value_start(s[:i], depth, quote_end):
+            i = quote_end = _quote_end(s, i, no)
+        elif c in "[{" and (depth or _value_start(s[:i], 0, quote_end)):
+            depth += 1
+        elif c in "]}" and depth:
+            depth -= 1
         i += 1
     return s
 
 
-def _opens_quote(before: str) -> bool:
-    """True when a quote after the text `before` starts a quoted string."""
+def _value_start(before: str, depth: int, quote_end: int) -> bool:
+    """True when a value or key may start after the text `before`. Outside brackets (`depth` 0): at the line's
+    start, after only the leading block indicators `- ` / `? `, or after `: `. Inside a flow collection: after
+    `[`, `{`, `,` or `:`, where a `:` needs a space after it unless it directly follows a closing quote at
+    `quote_end` (JSON style `"a":"b"`)."""
+    if not depth:
+        return re.fullmatch(r"(?:[-?] +)*", before) is not None or re.search(r":[ \t]+\Z", before) is not None
     stripped = before.rstrip(" \t")
     last = stripped[-1:]
-    return last in ("", "[", "{", ",") or (last in (":", "-", "?") and stripped != before)
+    if last in ("[", "{", ","):
+        return True
+    return last == ":" and (stripped != before or len(stripped) - 2 == quote_end)
 
 
 def _quote_end(s: str, i: int, no: int) -> int:
@@ -140,7 +152,7 @@ def _split_key(text: str, no: int):
         if after == ":" or after.startswith(": "):
             return _quoted(text[:end + 1], no), after[1:].strip()
         if after.lstrip().startswith(":"):
-            raise YamlError(no, "no space allowed between a quoted key and ':'")
+            raise YamlError(no, "a quoted key must be followed by ': '")
         return None
     if text[0] in "[{":
         if re.match(r"[\[{].*[\]}]\s*:(\s|\Z)", text):
@@ -284,7 +296,7 @@ def _quoted(s: str, no: int) -> str:
             i += 2
         elif e in HEX:
             digits = body[i + 2:i + 2 + HEX[e]]
-            if len(digits) != HEX[e] or not re.fullmatch(r"[0-9a-fA-F]+", digits):
+            if len(digits) != HEX[e] or not re.fullmatch(r"[0-9a-fA-F]+", digits) or int(digits, 16) > 0x10FFFF:
                 raise YamlError(no, f"bad escape '\\{e}{digits}' in a double-quoted string")
             out.append(chr(int(digits, 16)))
             i += 2 + HEX[e]
@@ -328,6 +340,10 @@ class _Flow:
         tok = self.s[start:self.i].strip()
         if not tok:
             raise YamlError(self.no, "empty entry in a flow collection")
+        if tok == "?" or tok.startswith("? "):
+            raise YamlError(self.no, "complex keys ('?') are not supported")
+        if tok == "-" or tok.startswith("- "):
+            raise YamlError(self.no, "a block list item ('- ') cannot appear inside a flow collection")
         _check_plain(tok, self.no)
         return tok if key else _plain(tok)
 
