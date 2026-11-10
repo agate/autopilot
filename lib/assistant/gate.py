@@ -176,9 +176,10 @@ def due_watches(data: Path, watches, now: datetime):
     """The watches due at `now` (`now - last_check_at >= every`), as `(names, errors)`; records `last_check_at`
     for each due one in `<data>/watches.json`. Each watch is `{name, every, last_check_at?}`; the time saved in
     watches.json wins when it is later. A given or saved time later than `now` (past the grace) means the clock went
-    back: it is reported and left out, each on its own, so the other time still counts; with neither left, the
-    watch is due now and its time written again, so it recovers on its own (a watch looked at once early is
-    harmless). The gate does not read the sources itself; the caller does."""
+    back, and it is reported. A saved time ahead makes the watch due now, so its time is written again and it
+    recovers on its own (a watch looked at once early is harmless). A given time ahead is left out, so the saved
+    time still counts: it is reported on every run the caller passes it, and the watch runs by `every`. The gate
+    does not read the sources itself; the caller does."""
     if not watches:
         return [], []
     state, damaged = _read_watch_state(data)
@@ -199,12 +200,14 @@ def due_watches(data: Path, watches, now: datetime):
         except ValueError as e:
             errors.append({"watch": name if isinstance(name, str) else None, "error": str(e)})
             continue
-        ahead = [t for t in (given, saved) if t is not None and t > now + routines.GRACE]
+        # Gaps, not `now + GRACE`, so a `now` at the end of the calendar cannot overflow.
+        ahead = [t for t in (given, saved) if t is not None and t - now > routines.GRACE]
         if ahead:  # one error per watch, quoting the latest time that is ahead
             errors.append({"watch": name, "error": f"last_check_at {cards.stamp(max(ahead))} is later than now "
                                                    f"({cards.stamp(now)}); {WENT_BACK}"})
+        saved_ahead = saved is not None and saved - now > routines.GRACE  # repaired: `now` is written over it
         last = max((t for t in (given, saved) if t is not None and t not in ahead), default=None)
-        if last is None or now - last >= every:
+        if last is None or saved_ahead or now - last >= every:
             found.append(name)
             state[name] = {"last_check_at": cards.stamp(now)}
     if found:
@@ -262,7 +265,7 @@ def _run(data: Path, now: datetime, watches, store: Optional[Store]) -> dict:
     by_key = None  # the routine cards, read once, only when a slot is due
     for r in loaded:
         try:
-            if r.last_slot is not None and routines.slot_at(r) > now + routines.GRACE:
+            if r.last_slot is not None and routines.slot_at(r) - now > routines.GRACE:
                 # The clock went back (or the file was edited ahead). Not repaired: moving last_slot back by
                 # itself could run a slot twice. The routine waits, as it would anyway, and the user is told.
                 # After a tz change, quote the file's own text and zone first, then the slot it became.

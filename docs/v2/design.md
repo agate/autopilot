@@ -810,9 +810,10 @@ Calls the author made without asking (check them):
     (2026-11-10T19:00 in America/New_York)`). The file is not changed and no card is made, so the routine keeps
     waiting: moving `last_slot` back by itself could run a slot twice. A watch whose given or saved `last_check_at`
     is more than the grace after now gets one error `{"watch", "error": "last_check_at <time> is later than now
-    (<now>); ..."}` and is repaired instead: that time is left out and the other one still counts, so with no other
-    time the watch is due now and its time is written again, since a watch looked at once early is harmless. A
-    caller that keeps passing a time ahead gets the error on every run, and the watch still runs by `every`.
+    (<now>); ..."}` and is repaired instead, since a watch looked at once early is harmless. A saved time ahead
+    makes the watch due now, so its time is written again and it recovers on its own. A given time ahead is left
+    out and the saved time still counts; a caller that keeps passing it gets the error on every run, and the watch
+    still runs by `every`. Both checks compare the gap to now, so a `now` at the end of the calendar cannot overflow.
   - A changed `tz`. Each `last_slot` write also writes `last_slot_tz`, the `tz` in the file it re-reads (the gate
     keeps the three-argument call `write_last_slot(path, slot, write)`). When a file's `last_slot_tz` is set and
     differs from `tz`, the routine reads `last_slot` as a wall time in the old zone and uses that moment as

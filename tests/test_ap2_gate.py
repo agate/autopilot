@@ -801,6 +801,36 @@ class ClockWentBackTest(GateCase):
                                  {"slack": {"last_check_at": "2026-11-10T17:01:00Z"}})
         self.assertEqual(self.gate(T + timedelta(hours=1), watches=watches)["watches_due"], ["slack"])
 
+    def test_a_saved_watch_time_ahead_is_repaired_even_when_a_given_time_counts(self):
+        T = utc(2026, 11, 10, 14, 0)
+        write_json(self.data / "watches.json", {"w": {"last_check_at": "2026-11-10T16:00:00Z"}})  # 2h ahead
+        watches = [{"name": "w", "every": "24h", "last_check_at": "2026-11-10T13:00:00Z"}]
+        out = self.gate(T, watches=watches)
+        self.assertEqual(out["watches_due"], ["w"])
+        self.assertEqual(out["errors"], [{"watch": "w", "error": "last_check_at 2026-11-10T16:00:00Z is later than "
+                                          "now (2026-11-10T14:00:00Z); the clock may have gone back"}])
+        self.assertEqual(json.loads((self.data / "watches.json").read_text()),
+                         {"w": {"last_check_at": "2026-11-10T14:00:00Z"}})
+        again = self.gate(T + timedelta(hours=1), watches=watches)
+        self.assertEqual((again["watches_due"], again["errors"]), ([], []))
+
+    def test_a_saved_and_a_given_time_both_ahead_are_one_error_quoting_the_later(self):
+        write_json(self.data / "watches.json", {"slack": {"last_check_at": "2026-11-11T14:00:00Z"}})
+        out = self.gate(utc(2026, 11, 10, 14, 0),
+                        watches=[{"name": "slack", "every": "5m", "last_check_at": "2026-11-12T00:00:00Z"}])
+        self.assertEqual(out["errors"], [{"watch": "slack", "error": "last_check_at 2026-11-12T00:00:00Z is later "
+                                          "than now (2026-11-10T14:00:00Z); the clock may have gone back"}])
+        self.assertEqual(out["watches_due"], ["slack"])
+
+    def test_a_now_at_the_end_of_the_calendar_does_not_overflow(self):
+        end = datetime(9999, 12, 31, 23, 58, tzinfo=UTC)
+        names, errors = gate.due_watches(
+            self.data, [{"name": "w", "every": "1h", "last_check_at": "9999-12-31T23:00:00Z"}], end)
+        self.assertEqual((names, errors), ([], []))  # 58 minutes is not 1h
+        self.put(last_slot="2026-11-10T09:00")
+        out = self.gate(end)
+        self.assertEqual([e for e in out["errors"] if "routine" in e], [])
+
     def test_a_refused_watch_is_logged_refused_when_another_watch_of_its_name_runs(self):
         T = utc(2026, 11, 10, 14, 0)
         out = self.gate(T, watches=[{"name": "a", "every": "5x"}, {"name": "a", "every": "1h"}])
@@ -947,6 +977,15 @@ class FatalLineTest(GateCase):
         with self.assertRaises(ConfigError):
             gate.run(missing, utc(2026, 11, 10, 9, 1))
         self.assertFalse(missing.exists())
+
+    def test_an_os_error_from_the_data_folder_writes_a_fatal_line(self):
+        (self.data / "gate.json").mkdir()  # a folder where the heartbeat should be: writing it fails
+        with self.assertRaises(ConfigError) as cm:
+            self.gate(utc(2026, 11, 10, 9, 1))
+        self.assertIsInstance(cm.exception.__cause__, OSError)
+        self.assertIn("cannot use the data folder", str(cm.exception))
+        lines = (self.data / "gate.log").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(lines[-1], f"2026-11-10T09:01:00Z fatal: {cm.exception}")
 
     def test_a_held_lock_is_not_fatal(self):
         import fcntl
