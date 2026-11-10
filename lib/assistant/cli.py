@@ -101,8 +101,10 @@ def main(argv: list) -> int:
             return 2
         code = COMMANDS[args.command](args)
     except ConfigError as e:
-        if sys.stderr is not None:
-            print(f"ap2: {e}", file=sys.stderr)
+        try:
+            _write(f"ap2: {e}\n", sys.stderr)  # a closed stderr (None) gets nothing
+        except (BrokenPipeError, _OutputError):
+            pass  # stderr's reader is gone or its write failed; the line is lost, ap2 still exits 1
         return 1
     except BrokenPipeError:
         # The reader went away (`ap2 config | true`); the data folder is still set up.

@@ -414,5 +414,108 @@ class HelpAndUsageInProcessTest(unittest.TestCase):
             self.assert_exits(["nosuch"], 2)
 
 
+class ConfigErrorLineOutputTest(unittest.TestCase):
+    """The `ap2: <message>` line for a refused config or data folder follows the output rules: when stderr's
+    reader is gone or its write fails, ap2 still exits 1, with no traceback and no `Exception ignored` line."""
+
+    run_into_a_pipe_nobody_reads = HelpAndUsageOutputTest.run_into_a_pipe_nobody_reads
+
+    def setUp(self):
+        if temp_inside_the_accounts_claude():
+            self.skipTest("the temp folder is inside the account's ~/.claude, so ap2 refuses every temp data folder")
+        tmp = Path(tempfile.mkdtemp(prefix="ap2-cli-")).resolve()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self.home = tmp / "home"
+        self.home.mkdir()
+        self.bad = tmp / "bad"  # a data folder whose config.yaml is invalid
+        self.bad.mkdir()
+        (self.bad / "config.yaml").write_text("mode: loud\n")
+        self.refused = self.home / ".claude" / "x"  # a data folder ap2 refuses
+        self.env = {k: v for k, v in os.environ.items() if k != "AP2_DATA"}
+        self.env.update(HOME=str(self.home), PYTHON_COLORS="0")
+
+    def cases(self):
+        return (("invalid config", ["config", "--data", str(self.bad)]),
+                ("refused data folder", ["config", "--data", str(self.refused)]))
+
+    def test_error_line_into_a_pipe_nobody_reads_exits_1_with_nothing_on_stdout(self):
+        for name, args in self.cases():
+            with self.subTest(name):
+                code, out = self.run_into_a_pipe_nobody_reads("stderr", *args)
+                self.assertEqual((code, out), (1, ""))
+        self.assertFalse((self.home / ".claude").exists())
+
+    @unittest.skipUnless(os.path.exists("/dev/full"), "needs /dev/full (Linux)")
+    def test_error_line_into_a_full_disk_exits_1_with_nothing_on_stdout(self):
+        for name, args in self.cases():
+            with self.subTest(name), open("/dev/full", "wb") as full:
+                r = subprocess.run([sys.executable, str(AP2), *args], stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=full, text=True, env=self.env, errors="replace",
+                                   timeout=30)
+                self.assertEqual((r.returncode, r.stdout), (1, ""))
+
+
+class ConfigErrorLineInProcessTest(unittest.TestCase):
+    # In-process, so they run where /dev/full does not exist (macOS), and an exception out of main fails the test
+    # instead of being lost in a closed pipe. The fake stream's fileno() is a file this test owns, so pointing it at
+    # devnull cannot touch the test runner's real streams.
+    FullStream = OutputWriteErrorTest.FullStdout
+
+    class GoneStream(FullStream):
+        """A stderr whose reader went away."""
+
+        def write(self, _text):
+            raise BrokenPipeError(32, "Broken pipe")
+
+        def flush(self):
+            raise BrokenPipeError(32, "Broken pipe")
+
+    def setUp(self):
+        home = TempHome()
+        self.home = home.__enter__()
+        self.addCleanup(home.__exit__)
+        tmp = Path(tempfile.mkdtemp(prefix="ap2-cli-")).resolve()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        bad = tmp / "bad"
+        bad.mkdir()
+        (bad / "config.yaml").write_text("mode: loud\n")
+        self.cases = (("invalid config", ["config", "--data", str(bad)]),
+                      ("refused data folder", ["config", "--data", str(self.home / ".claude" / "x")]))
+        self.fd = os.open(tmp / "err", os.O_WRONLY | os.O_CREAT)
+        self.addCleanup(os.close, self.fd)
+
+    def run_main(self, argv, stderr):
+        with mock.patch.object(sys, "stdout", io.StringIO()) as out, mock.patch.object(sys, "stderr", stderr):
+            code = cli.main(argv)
+        return code, out.getvalue()
+
+    def test_error_line_with_stderr_reader_gone_returns_1_without_raising(self):
+        for name, argv in self.cases:
+            with self.subTest(name):
+                self.assertEqual(self.run_main(argv, self.GoneStream(self.fd)), (1, ""))
+                self.assertEqual(os.fstat(self.fd).st_rdev, os.stat(os.devnull).st_rdev)
+
+    def test_error_line_on_a_full_stderr_returns_1_without_raising_and_points_it_at_devnull(self):
+        for name, argv in self.cases:
+            with self.subTest(name):
+                self.assertEqual(self.run_main(argv, self.FullStream(self.fd)), (1, ""))
+                self.assertEqual(os.fstat(self.fd).st_rdev, os.stat(os.devnull).st_rdev)
+
+    def test_error_line_on_a_full_stderr_without_a_file_descriptor_returns_1(self):
+        err = self.FullStream(None)
+        err.fileno = mock.Mock(side_effect=io.UnsupportedOperation("fileno"))
+        for name, argv in self.cases:
+            with self.subTest(name):
+                self.assertEqual(self.run_main(argv, err), (1, ""))
+
+    def test_error_line_on_a_working_stderr_is_one_line(self):
+        for name, argv in self.cases:
+            with self.subTest(name):
+                err = io.StringIO()
+                self.assertEqual(self.run_main(argv, err), (1, ""))
+                self.assertRegex(err.getvalue(), r"\Aap2: [^\n]+\n\Z")
+                self.assertNotIn("cannot write the output", err.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
