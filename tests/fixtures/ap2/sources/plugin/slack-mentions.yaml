@@ -1,0 +1,23 @@
+# Appendix A of docs/v2/design.md: the built-in Slack mentions source (a test copy).
+source: slack-mentions
+brings: messages
+read:
+  via: connector             # the Slack connector on claude.ai
+  tools: [slack_search_public, slack_read_thread]
+  query: "<@{me}>"
+  every: 15m
+fill: ai
+form:
+  id: Message_ts             # must appear word for word in what the tool returned
+  thread_id: thread_ts
+  author: From
+  at: Message_ts
+  text: Text
+  place: Channel
+link: "https://slack.com/archives/{place_id}/p{id_digits}?thread_ts={thread_id}&cid={place_id}"  # checkpkg: ignore
+key: "{place_id}:{thread_id}"
+sort:
+  question:  question
+  ask_to_do: errand          # code when it needs a repo
+  alert:     alert
+  fyi:       none            # goes into the daily digest

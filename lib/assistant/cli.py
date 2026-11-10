@@ -74,6 +74,7 @@ def _parser() -> argparse.ArgumentParser:
     r.add_argument("point", metavar="POINT")
     r.add_argument("--by", default="ap2", help=BY_HELP)
     r.add_argument("--data", metavar="PATH", help=DATA_HELP)
+    _source_parser(sub)
     return p
 
 
@@ -190,6 +191,69 @@ def cmd_restore(args) -> int:
 
 
 COMMANDS = {"config": cmd_config, "card": cmd_card, "search": cmd_search, "restore": cmd_restore}
+
+
+# -- ap2 source (the source engine, design 5) ---------------------------------------------------------------------
+
+def _source_parser(sub) -> None:
+    src = sub.add_parser("source", help="list, show or read sources",
+                         description="List, show or read the source files in the plugin's sources/ and the data "
+                                     "folder's sources/ (the user's file wins on the same name).")
+    src_sub = src.add_subparsers(dest="source_command", metavar="<source command>", title="source commands")
+    src_sub.required = True
+    li = src_sub.add_parser("list", help="print every source as a JSON list",
+                            description="Print every source (name, brings, via, fill, every, origin, file) as a "
+                                        "JSON list, by name.")
+    li.add_argument("--data", metavar="PATH", help=DATA_HELP)
+    sh = src_sub.add_parser("show", help="print one source, merged, as JSON",
+                            description="Print the source NAME as the engine reads it: extends merged, checked.")
+    sh.add_argument("name", metavar="NAME")
+    sh.add_argument("--data", metavar="PATH", help=DATA_HELP)
+    rd = src_sub.add_parser("read", help="read a source and make or update its cards",
+                            description="Read the source NAME and print what each item became. A via: command "
+                                        "source runs its read.run; any other source needs --raw FILE, the output "
+                                        "a scan session saved. The raw output is saved under "
+                                        "sources/.raw/NAME/ first.")
+    rd.add_argument("name", metavar="NAME")
+    rd.add_argument("--raw", metavar="FILE", help="the saved output of the read, instead of running read.run")
+    rd.add_argument("--records", metavar="FILE",
+                    help="fill: ai only: the records a scan session filled, as a JSON list")
+    rd.add_argument("--dry-run", action="store_true",
+                    help="read and show what each item would become; save nothing")
+    rd.add_argument("--data", metavar="PATH", help=DATA_HELP)
+
+
+def cmd_source(args) -> int:
+    from assistant.engine import Engine
+    from assistant.sources import Loader, SourceError
+
+    path = datadir.resolve(args.data)
+    dry_run = getattr(args, "dry_run", False)
+    if not dry_run:  # a dry run saves nothing, the data folder's layout included
+        datadir.ensure(path)
+    if args.source_command == "list":
+        out = [s.summary() for s in Loader(path).load_all()]
+    elif args.source_command == "show":
+        out = Loader(path).load(args.name).data
+    else:
+        engine = Engine(path)
+        records = None
+        if args.records is not None:
+            try:
+                records = json.loads(Path(args.records).read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, ValueError) as e:
+                raise SourceError(f"cannot read the records {args.records!r}: {e}") from e
+        if args.raw is not None:
+            out = engine.read_saved(args.name, args.raw, records=records, dry_run=dry_run)
+        elif records is not None:
+            raise SourceError("--records needs --raw FILE, the output the records were filled from")
+        else:
+            out = engine.read(args.name, dry_run=dry_run)
+    _print_json(out)
+    return 0
+
+
+COMMANDS["source"] = cmd_source
 
 
 def main(argv: list) -> int:

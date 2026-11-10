@@ -672,7 +672,9 @@ Calls the author made without asking (check them):
   calls first and which refuses in shadow mode), `datadir.py` (lookup and layout), `cli.py` (the `ap2` command,
   run by `bin/ap2`), and the card store: `cards.py` (card shape, ids and checks), `store.py` (the `Store` API:
   add, get, update, list, restore, propose_opposite, prune, search), `restore.py` (restore points and proposed
-  opposite actions) and `index.py` (`index.sqlite`). `ap2 config [--data PATH]` prints the effective config and `data_dir` as JSON. With stdout
+  opposite actions) and `index.py` (`index.sqlite`), and the source engine: `sources.py` (loading, `extends:`,
+  checks), `form.py` (the form, the path language, `{field}` patterns and derived fields) and `engine.py` (read,
+  fill, check, link and key, sort, card). `ap2 config [--data PATH]` prints the effective config and `data_dir` as JSON. With stdout
   closed, `ap2 config` sets up the folder, prints nothing and exits 0; when its reader goes away
   (`ap2 config | true`) it exits 1 with nothing on stderr; when a write fails (a full disk) it prints one line,
   `ap2: cannot write the output: ...`, and exits 1. `ap2` with no arguments prints the usage, listing the
@@ -745,6 +747,76 @@ Calls the author made without asking (check them):
   `ap2 card list [--lane L] [--kind K] [--parent ID]`, `ap2 search <text...>`, `ap2 restore <point id> [--by NAME]`,
   each with `--data PATH`. `--by` defaults to `ap2`. `card add -` reads stdin as UTF-8, like a file, whatever the locale. Output is JSON (a card, or a list oldest first; cards made in the same second are in id order); an error is
   one line `ap2: ...` on stderr with exit 1.
+- **[decided by the builder]** The source engine (design 5).
+  - Loading: `<plugin>/sources/*.yaml` (the repo's `sources/`; a missing folder means no built-in sources) and
+    `<data>/sources/*.yaml`, read with `yamlish`. A file's name without `.yaml` is its source's name: lowercase
+    letters, digits, `-` and `_`, at most 64 (it reaches a path). Files starting with `.` and other suffixes are
+    not sources. `source:` must equal the file name; a file with `extends:` may leave it out. `extends: <own name>`
+    means the built-in file of that name; `extends: <other name>` means that source as loaded (the user's when
+    there is one), and the result takes the extending file's name. Maps merge key by key; lists, scalars and null
+    replace. A missing base, a cycle, a bad name or a mismatched `source:` raise `SourceError` (a `ConfigError`,
+    so `ap2` prints it as one `ap2: ...` line) naming the file. `load(name)` reads only the files it needs;
+    `load_all()` (and `ap2 source list`) fails on the first bad file, naming it.
+  - Checks (on the merged file): top-level keys `source`, `brings` (`messages | work`), `read` (a map; `via` is
+    `command | mcp | connector | skill`; `command` needs `run`; optional `every`, text; optional `timeout`,
+    1-600 seconds, default 60; other keys are the via's own and pass), `fill` (`paths | ai`), `form`, `link`,
+    `key`, `sort`, plus `instructions` (text). `status_map`, `writes` (events `on_start`, `on_pr`, `on_merge`),
+    `never` (a list) and `plan` (text) are allowed only when `brings: work`. Any other key is refused with its
+    name and line. `form` holds only the fields of 5.2 plus `place_id`, and must name `id`, `at` and `text`, and
+    `status` when `brings: work`; with `fill: ai` each value is a non-empty hint, with `fill: paths` a path.
+    `key` is optional and defaults to `{source}:{id}`; it must name at least one field. `sort` maps each
+    category to a template name (`[a-z][a-z0-9_-]*`), `update_card` or `none`.
+  - The path language (`fill: paths`), jq-like: a path starts with `.`; `.` alone is the whole item; `.name`
+    takes a key (`."a key"` quotes one); `[]` takes every item of a list (`.[]` at the top); `[text]` keeps the
+    list items holding `text` word for word as a text value at any depth (`.fields.issuelinks[is blocked by].key`);
+    `[a.b=text]` keeps those whose `.a.b` is `text`. No indexes (`[0]` is refused). A step on the wrong type
+    gives nothing. The `id` path up to its first `[]` is the item path: every other path (and a `link` path)
+    must start with it, and each item is one record; with no `[]`, a list reply is the items and anything else
+    is one item. Only `depends_on` may fan out further (a list); other fields must be a text or an integer
+    (written as text). A record whose required field is missing, empty or of the wrong type, or whose optional
+    field has the wrong type, is dropped and listed in the read's `dropped` with the reason.
+  - Link and key: `link` is `none`, a path (`.url`, `fill: paths` only) or a `{field}` pattern; `key` is a
+    pattern. Values in a link pattern are percent-encoded; the link must start with `http://` or `https://`.
+    Patterns may name the record's fields and the derived fields, defined once in `form.derived`: `id_digits`
+    (the id without its dots, Slack's `p` link), `place_id` (the record's own when the form fills it, else
+    `place`) and `source` (the source's name). A pattern naming a value the record lacks (`{thread_id}` on a
+    top-level message, `{site}` before a setting supplies it) drops the record with the reason; so does one
+    naming an empty or blank value (`key: {thread_id} is empty`), so two different items never share a key
+    such as `C0123ABCD:`.
+  - Sort and cards: `fill: paths` with one category gives every record that category; with several it makes no
+    card (the item says why); `fill: ai` records carry their `category`, a text that must be in `sort`. A
+    `fill: ai` record's `id`, and its `thread_id` and `at` when it has them, must appear word for word in the
+    raw tool output (read as UTF-8, bad bytes replaced); one that does not is dropped with the reason
+    (`form.id '...' is not in the raw output`), so a model cannot invent an id. A new card is
+    `kind` = the template, `lane` `needs` (`brings: messages`) or `planned` (`brings: work`), `pri` P2,
+    `origin` `source`, `feed` the source's name, `title` the text's first line (80 characters), `key`, and
+    `source: {name, record, link, raw}` (the record's ids, the link, and the raw file it came from); a work
+    card also gets `status`, through `status_map`. The same `key` updates the card that has it (`plain`,
+    `title`, `source`, `status`; never `kind`, `lane`, `pri` or `ask`) with `by: source:<name>` and
+    `did: read <name>`; when only `raw` would change, nothing is written. `update_card` updates only, `none`
+    makes nothing. The cards are found by key with `Store.list()` once per read.
+  - Code-made plain words (no AI), per language, in `engine.PHRASES` (`en` and `zh`; a code like `zh-Hans`
+    uses `zh`): what, "New from <source> by <author> in <place>: <first line of the text>"; where, "It was
+    written at <at>. [Its status there is "<status>".] Nothing has been done with it yet."; do, "Read it at the
+    link and decide what it needs." (messages) or "Nothing yet; it waits in Planned until it is started."
+    (work). A configured language without phrases refuses the read before anything is saved, rather than put
+    another language's words on its page.
+  - `via: command`: `read.run` is split with `shlex` and run with `subprocess` (no shell, stdin empty, the data
+    folder as the working folder, `read.timeout`). Its stdout is saved first, as is, to
+    `<data>/sources/.raw/<source>/<YYYYMMDDTHHMMSSZ>-<6 hex>.json`, even when the command fails or the output is
+    not JSON; a read that passes `read.timeout` is stopped and its partial stdout is saved the same way (the
+    error names the file; a dry run keeps nothing); then what the engine made of it goes next to it as `<same name>.report.json` (items, dropped).
+    `mcp`, `connector` and `skill` reads are not run here: `Engine.read_saved(source, raw_path, records=None)`
+    takes a scan session's saved output (copied under `.raw/<source>/` unless it is there already) and, for
+    `fill: ai`, its records. Old raw files are not pruned yet.
+  - Shadow mode: a source's `writes` are never run. `Engine.apply_writes(source, event)` calls
+    `config.require_live` first (shadow mode raises `ShadowModeError`), and in live mode still runs nothing and
+    says so; a later slice runs the writes.
+  - Commands, each with `--data PATH`, JSON on stdout, errors as one `ap2: ...` line with exit 1:
+    `ap2 source list`, `ap2 source show <name>` (the merged file), `ap2 source read <name> [--raw FILE]
+    [--records FILE] [--dry-run]`. `--dry-run` runs the read and prints each item with `action` (`add`,
+    `update`, `unchanged`, `none`) and the card it would add (`would_add`) or the fields it would change
+    (`would_change`), and writes nothing, not even the data folder's layout.
 - How the local server pushes updates to an open page (polling is fine).
 - Exact limits: idle timeout, grace for missed slots, page sizes.
 

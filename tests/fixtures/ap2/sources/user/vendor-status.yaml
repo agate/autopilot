@@ -1,0 +1,15 @@
+# Appendix C of docs/v2/design.md: a user's own source, no code.
+source: vendor-status
+brings: messages
+read:
+  via: command
+  run: curl -s https://status.example.com/api/v2/incidents/unresolved.json
+  every: 5m
+fill: paths
+form:
+  id: .incidents[].id
+  at: .incidents[].created_at
+  text: .incidents[].name
+link: .incidents[].shortlink
+key: "{id}"
+sort: { all: alert }
