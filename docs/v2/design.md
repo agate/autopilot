@@ -280,7 +280,7 @@ Every item fills the same fields:
 
 - `link` is a pattern filled from the record (`"https://{site}/browse/{id}"`), a path to a link the tool returned
   (`.url`), or `none`. The engine builds it. No AI writes a link.
-- Slack: `https://slack.com/archives/{channel}/p{ts without the dot}`, plus `?thread_ts={thread}&cid={channel}`
+- Slack: `https://slack.com/archives/{channel}/p{ts without the dot}`, plus <!-- checkpkg: ignore --> `?thread_ts={thread}&cid={channel}`
   for a reply. This opens in the reader's own workspace, so no workspace name is needed (secretary does the same
   today).
 - The card stores the ids (channel id, ts, thread ts, author id), not only the link, so a renamed channel still
@@ -581,7 +581,7 @@ form:
   at: Message_ts
   text: Text
   place: Channel
-link: "https://slack.com/archives/{place_id}/p{id_digits}?thread_ts={thread_id}&cid={place_id}"
+link: "https://slack.com/archives/{place_id}/p{id_digits}?thread_ts={thread_id}&cid={place_id}"  # checkpkg: ignore
 key: "{place_id}:{thread_id}"
 sort:
   question:  question
@@ -634,7 +634,7 @@ source: vendor-status
 brings: messages
 read:
   via: command
-  run: curl -s https://status.example-pay.com/api/v2/incidents/unresolved.json
+  run: curl -s https://status.example.com/api/v2/incidents/unresolved.json
   every: 5m
 fill: paths
 form:

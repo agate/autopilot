@@ -1,0 +1,20 @@
+name: Tests
+
+# Runs the standard-library test suite on every push and pull request into the v2 branch,
+# so the autopilot's merge check has a green check to wait for.
+on:
+  push:
+    branches: [v2]
+  pull_request:
+    branches: [v2]
+
+permissions:
+  contents: read
+
+jobs:
+  unittest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run tests
+        run: python3 -m unittest discover -s tests -v
