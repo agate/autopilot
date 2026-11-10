@@ -282,6 +282,8 @@ class HelpAndUsageOutputTest(unittest.TestCase):
         self.home.mkdir()
         self.env = {k: v for k, v in os.environ.items() if k != "AP2_DATA"}
         self.env.update(HOME=str(self.home), AP2_DATA=str(tmp / "data"))
+        # Python 3.14 argparse colors help and usage when FORCE_COLOR is set; PYTHON_COLORS=0 wins over it.
+        self.env["PYTHON_COLORS"] = "0"
 
     def run_into_a_pipe_nobody_reads(self, stream, *args):
         """Run ap2 with `stream` ("stdout" or "stderr") writing into a pipe whose read end is closed before ap2
