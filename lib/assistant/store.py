@@ -123,6 +123,15 @@ class Store:
         cards.check_unicode(by, "by")
         return by
 
+    @staticmethod
+    def _did(did) -> Optional[str]:
+        if did is None:
+            return None
+        if not (isinstance(did, str) and did.strip()):
+            raise CardError(f"did must say what the change did, or be left out, not {did!r}")
+        cards.check_unicode(did, "did")
+        return did
+
     # -- the API -------------------------------------------------------------------------------------------------
 
     def add(self, card: dict, by: str) -> dict:
@@ -163,6 +172,7 @@ class Store:
         """Set the top-level fields in `changes` (null clears `parent`, `ask` or `title`); return the card. The
         old file is saved as a restore point first. A change that changes nothing writes nothing."""
         by = self._by(by)
+        did = self._did(did)
         cards.check_id(card_id)
         if not (isinstance(changes, dict) and changes):
             raise CardError("changes must be a non-empty object of fields to set")
@@ -200,7 +210,10 @@ class Store:
             card_id = cards.check_id(old.get("id"))
             # Only what the store needs, not the enums or plain words: a point holds whatever file was there (a
             # hand edit too), and the languages may have changed since. Any point the store saved can be put back.
-            cards.check_stored(old)
+            try:
+                cards.check_stored(old)
+            except CardError as e:
+                raise CardError(f"{restore.path(self.data, point_id)}: not a card restore point: {e}") from None
             at = self.clock()
             current = self._read(self.path(card_id)) if self.path(card_id).exists() else None
             saved = restore.save(self.data, current, at, write_json) if current is not None else None

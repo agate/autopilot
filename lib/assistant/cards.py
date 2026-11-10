@@ -22,7 +22,8 @@ OPTIONAL = ("parent", "ask", "title")
 
 # c-YYYYMMDD-HHMMSS-xxxxxx: the UTC creation time, then 6 random hex digits. The month is in the id, so a card's
 # file is found without a scan, and nothing but these characters can reach a path.
-CARD_ID = re.compile(r"c-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})-[0-9a-f]{6}\Z")
+# ASCII digits only: `\d` alone would also match other scripts' digits (Arabic-Indic, full-width).
+CARD_ID = re.compile(r"c-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})-[0-9a-f]{6}\Z", re.ASCII)
 TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 
@@ -109,11 +110,13 @@ def check_shape(card) -> None:
 
 def check_unicode(value, what: str = "text") -> None:
     """Refuse text that cannot be written as UTF-8: a lone surrogate, e.g. from command-line bytes that are not
-    UTF-8 or a `\\ud800` escape in a hand-edited file."""
+    UTF-8 or a `\\ud800` escape in a hand-edited file. Refuse NaN and Infinity too: cards are standard JSON."""
     try:
-        json.dumps(value, ensure_ascii=False).encode("utf-8")
-    except UnicodeEncodeError as e:
+        json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    except UnicodeEncodeError as e:  # a ValueError too, so it is caught first
         raise CardError(f"{what} is not valid Unicode: {e.object[e.start:e.end]!r}") from None
+    except ValueError:
+        raise CardError(f"{what} is not valid JSON: NaN or Infinity") from None
 
 
 def check_stored(card) -> None:
@@ -160,7 +163,7 @@ def check_plain(card: dict, langs: tuple) -> None:
 def validate(card, langs: tuple) -> None:
     """The full check run on every add and update. Raises CardError (PlainWordsError for the plain words)."""
     check_unicode(card)
-    if isinstance(card, dict) and "plain" not in card:
+    if isinstance(card, dict) and not isinstance(card.get("plain"), dict):
         check_plain(card, langs)  # name the missing lines and languages, not just "plain missing"
     check_shape(card)
     check_plain(card, langs)

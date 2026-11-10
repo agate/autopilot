@@ -265,6 +265,15 @@ class PlainWordsTest(StoreCase):
             for lang in ("en", "zh"):
                 self.assertIn(f"plain.{line}.{lang} missing", str(e.exception))
 
+    def test_a_plain_that_is_not_an_object_names_every_line(self):
+        for bad in (None, "x"):
+            with self.subTest(plain=bad):
+                with self.assertRaises(PlainWordsError) as e:
+                    self.store.add(card(plain=bad), by="w")
+                self.assertIn("plain.what.en missing", str(e.exception))
+                self.assertIn("plain.do.zh missing", str(e.exception))
+        self.assertEqual(list(self.data.glob("items/*/*.json")), [])
+
     def test_one_error_class(self):
         self.assertTrue(issubclass(PlainWordsError, CardError))
 
@@ -639,6 +648,64 @@ class RestoreAnyPointTest(StoreCase):
         self.assertEqual(self.store.get(added["id"])["lane"], "blocked")
 
 
+class MismatchedPointTest(StoreCase):
+    """A restore point is used only when its id is its file name and its card_id is its card's id."""
+
+    def files(self):
+        return {p: p.read_bytes() for p in sorted(self.data.glob("**/*.json"))}
+
+    def test_a_point_labelled_for_one_card_does_not_restore_another(self):
+        a = self.store.add(card(title="Card A"), by="w")
+        b = self.store.add(card(title="Card B"), by="w")
+        self.clock.tick(minutes=1)
+        point_id = self.store.update(a["id"], {"lane": "done"}, by="w")["audit"][-1]["restore"]
+        point_path = self.data / "restore" / f"{point_id}.json"
+        point = json.loads(point_path.read_text(encoding="utf-8"))
+        point["card"] = dict(b, title="Overwritten")  # labelled for card A, holds card B
+        point_path.write_text(json.dumps(point), encoding="utf-8")
+        before = self.files()
+        with self.assertRaisesRegex(CardError, f"{point_path}: not a card restore point"):
+            self.store.restore(point_id, by="user")
+        self.assertEqual(self.files(), before)
+        self.assertEqual(self.store.get(b["id"]), b)
+
+    def test_a_point_whose_id_is_not_its_file_name_is_refused(self):
+        a = self.store.add(card(), by="w")
+        self.clock.tick(minutes=1)
+        point_id = self.store.update(a["id"], {"lane": "done"}, by="w")["audit"][-1]["restore"]
+        other = "r-20261110-143105-000000" if not point_id.endswith("000000") else "r-20261110-143105-111111"
+        other_path = self.data / "restore" / f"{other}.json"
+        shutil.copyfile(self.data / "restore" / f"{point_id}.json", other_path)
+        before = self.files()
+        with self.assertRaisesRegex(CardError, f"{other_path}: not a card restore point"):
+            self.store.restore(other, by="user")
+        self.assertEqual(self.files(), before)
+
+
+class BadPointCardTest(StoreCase):
+    """A point's card is checked like a card file before anything is written, and the error names the point."""
+
+    SHAPES = {"lone surrogate": lambda c: c.update(title="x \ud800"), "plain null": lambda c: c.update(plain=None)}
+
+    def test_a_point_holding_an_unusable_card_is_refused_naming_the_point(self):
+        for name, damage in self.SHAPES.items():
+            with self.subTest(name):
+                added = self.store.add(card(), by="w")
+                self.clock.tick(minutes=1)
+                point_id = self.store.update(added["id"], {"lane": "done"}, by="w")["audit"][-1]["restore"]
+                point_path = self.data / "restore" / f"{point_id}.json"
+                point = json.loads(point_path.read_text(encoding="utf-8"))
+                damage(point["card"])
+                point_path.write_text(json.dumps(point), encoding="utf-8")  # ensure_ascii: the \\ud800 escape
+                points = sorted(p.name for p in (self.data / "restore").glob("r-*.json"))
+                card_file = self.store.path(added["id"]).read_bytes()
+                with self.assertRaises(CardError) as e:
+                    self.store.restore(point_id, by="user")
+                self.assertIn(f"{point_id}.json", str(e.exception))
+                self.assertEqual(sorted(p.name for p in (self.data / "restore").glob("r-*.json")), points)
+                self.assertEqual(self.store.path(added["id"]).read_bytes(), card_file)
+
+
 class BadUnicodeTest(StoreCase):
     def assert_nothing_written(self):
         self.assertEqual(list((self.data / "restore").glob("r-*.json")), [])
@@ -678,6 +745,61 @@ class BadUnicodeTest(StoreCase):
             with self.assertRaisesRegex(CardError, f"{path}: not a card file: .*not valid Unicode"):
                 call()
         self.assertEqual(list((self.data / "restore").glob("r-*.json")), [])
+
+
+class BadDidTest(StoreCase):
+    def test_a_bad_did_is_refused_before_any_write(self):
+        added = self.store.add(card(), by="w")
+        for did in ("x \ud800", ["update"], "", "  "):
+            with self.subTest(did=did):
+                with self.assertRaises(CardError):
+                    self.store.update(added["id"], {"lane": "running"}, by="w", did=did)
+                self.assertEqual(list((self.data / "restore").glob("r-*.json")), [])
+                self.assertFalse((self.data / ".index.stale").exists())
+                self.assertEqual(self.store.get(added["id"]), added)
+
+    def test_a_good_did_is_kept(self):
+        added = self.store.add(card(), by="w")
+        new = self.store.update(added["id"], {"lane": "running"}, by="w", did="started work")
+        self.assertEqual(new["audit"][-1]["did"], "started work")
+
+
+class NotStandardJsonTest(StoreCase):
+    def test_nan_and_infinity_are_refused(self):
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(CardError, "not valid JSON: NaN or Infinity"):
+                    self.store.add(card(n=value), by="w")
+        self.assertEqual(list(self.data.glob("items/*/*.json")), [])
+
+    def test_nan_on_update_is_refused_before_any_point(self):
+        added = self.store.add(card(), by="w")
+        with self.assertRaisesRegex(CardError, "not valid JSON"):
+            self.store.update(added["id"], {"n": float("nan")}, by="w")
+        self.assertEqual(self.store.get(added["id"]), added)
+        self.assertEqual(list((self.data / "restore").glob("r-*.json")), [])
+
+
+class AsciiIdTest(unittest.TestCase):
+    CARD_IDS = ("c-\u0662\u0660\u0662\u0666\u0661\u0661\u0661\u0660-\u0661\u0664\u0663\u0660\u0660\u0665-abcdef",
+                "c-\uff12\uff10\uff12\uff16\uff11\uff11\uff11\uff10-143005-abcdef")
+    POINT_IDS = ("r-\u0662\u0660\u0662\u0666\u0661\u0661\u0661\u0660-143005-abcdef",
+                 "r-20261110-\uff11\uff14\uff13\uff10\uff10\uff15-abcdef")
+
+    def test_card_ids_use_ascii_digits_only(self):
+        for card_id in self.CARD_IDS:
+            with self.subTest(card_id=card_id):
+                with self.assertRaisesRegex(CardError, "not a card id"):
+                    cards.check_id(card_id)
+                with self.assertRaisesRegex(CardError, "not a card id"):
+                    cards.month(card_id)
+        self.assertEqual(cards.check_id("c-20261110-143005-abcdef"), "c-20261110-143005-abcdef")
+
+    def test_point_ids_use_ascii_digits_only(self):
+        for point_id in self.POINT_IDS:
+            with self.subTest(point_id=point_id):
+                with self.assertRaisesRegex(CardError, "not a restore point id"):
+                    restore.check_point_id(point_id)
 
 
 class UnreadableFolderTest(StoreCase):

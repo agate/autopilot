@@ -18,7 +18,7 @@ from assistant.cards import CardError, new_id, parse_stamp, stamp
 
 FOLDER = "restore"
 KEEP = timedelta(days=30)
-POINT_ID = re.compile(r"r-\d{8}-\d{6}-[0-9a-f]{6}\Z")
+POINT_ID = re.compile(r"r-\d{8}-\d{6}-[0-9a-f]{6}\Z", re.ASCII)  # ASCII digits only
 # The opposite of each outside change (design 3.6): a moved ticket, an opened PR, a pushed branch, a merge.
 OPPOSITE_ACTIONS = ("move_ticket_back", "close_pr", "force_push_saved_ref", "revert_pr")
 
@@ -54,6 +54,9 @@ def load(data: Path, point_id: str) -> dict:
         raise CardError(f"{p}: cannot read the restore point: {e}") from e
     if not (isinstance(point, dict) and point.get("kind") == "card" and isinstance(point.get("card"), dict)):
         raise CardError(f"{p}: not a card restore point")
+    if point.get("id") != point_id or point.get("card_id") != point["card"].get("id"):
+        raise CardError(f"{p}: not a card restore point (its id must be its file name and its card_id its "
+                        f"card's id)")
     return point
 
 

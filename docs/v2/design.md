@@ -609,8 +609,8 @@ Calls the author made without asking (check them):
   and ap2 still exits 1). None of these prints a
   traceback or an `Exception ignored` line.
 - **[decided by the builder]** The card store (design 3.4, 3.6, 3.7, 4.1).
-  - Card id: `c-YYYYMMDD-HHMMSS-xxxxxx`, the UTC creation time to the second and 6 random lowercase hex digits
-    (a new pair is drawn if the file exists). The file is `<data>/items/<yyyy-mm>/<id>.json`, the month taken from
+  - Card id: `c-YYYYMMDD-HHMMSS-xxxxxx`, the UTC creation time to the second (ASCII digits only) and 6 random
+    lowercase hex digits (a new pair is drawn if the file exists). The file is `<data>/items/<yyyy-mm>/<id>.json`, the month taken from
     the id, so a card is found without a scan and nothing but these characters reaches a path. Times are UTC text,
     `2026-11-10T14:30:05Z`. Files are UTF-8 JSON, sorted keys, indent 2, written atomically (temp file in the same
     folder, fsync, `os.replace`). Every store call holds `<data>/.store.lock` (`flock`), so two processes never lose
@@ -632,9 +632,12 @@ Calls the author made without asking (check them):
     object or null, text valid Unicode); otherwise the call fails with one error naming the file, and nothing is
     written. Restore puts back any point it saved without re-checking enums, so an undo can always be undone.
     Text that is not valid Unicode (a lone surrogate, e.g. from command-line bytes that are not UTF-8) is refused
-    on add, update, `--by` and search before anything is written.
+    on add, update, `--by`, `did` and search before anything is written; so are NaN and Infinity (cards are
+    standard JSON). `did`, when given, is checked like `by`: non-empty text.
   - Restore points: one file `<data>/restore/<point id>.json` with
-    `{"id", "at", "kind": "card", "card_id", "card"}`, id `r-YYYYMMDD-HHMMSS-xxxxxx`. `Store.prune()` removes points
+    `{"id", "at", "kind": "card", "card_id", "card"}`, id `r-YYYYMMDD-HHMMSS-xxxxxx` (ASCII digits only). A point
+    is refused, naming its file, unless its `id` is its file name and its `card_id` is its card's `id`, and its
+    card passes the same structure check as a card file. `Store.prune()` removes points
     older than 30 days (kept at exactly 30); nothing calls it yet, the heartbeat (slice 5) will. A point whose time
     cannot be read is kept.
   - Proposed opposite action: `Store.propose_opposite(id, action, run, by)` sets the card's `ask` to
