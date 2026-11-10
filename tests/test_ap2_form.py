@@ -44,7 +44,8 @@ class PathLanguageTest(unittest.TestCase):
         cases = {"a.b": "a path starts with '.'", "": "a path starts with '.'", ".a..b": "expected a name after '.'",
                  ".a[": "unclosed '['", '."a': "unclosed quote", '.""': "empty quoted name",
                  ".a[0]": "looks like an index", ".a[ x]": "starts or ends with a space", ".a b": "unexpected ' '",
-                 ".a.": "expected a name after '.'"}
+                 ".a.": "expected a name after '.'", ".a[-1]": "looks like an index", ".a[1:]": "looks like an index",
+                 ".a[:2]": "looks like an index", ".a[-1:-2]": "looks like an index"}
         for text, reason in cases.items():
             with self.subTest(text):
                 with self.assertRaisesRegex(PathError, re.escape(reason)):
@@ -160,13 +161,26 @@ class FillPathsTest(FillCase):
             with self.subTest(reason), self.assertRaises(ValueError) as cm:
                 form.fill_item(paths, (), item)
             self.assertEqual(str(cm.exception), reason)
+        with self.assertRaises(ValueError) as cm:
+            form.fill_item({**paths, "status": parse_path(".status")}, (), {"id": 1, "at": "t", "text": "x"},
+                           required=form.REQUIRED + ("status",))
+        self.assertEqual(str(cm.exception), "form.status missing")
+        with self.assertRaises(ValueError) as cm:
+            form.check_record({"id": "1", "at": "t", "text": "x", "depends_on": ["\ud800"]})
+        self.assertEqual(str(cm.exception), "form.depends_on: an item is not valid Unicode")
         # a missing optional field is simply left out
         self.assertEqual(form.fill_item(paths, (), {"id": 1, "at": "t", "text": "x"}), {"id": "1", "at": "t", "text": "x"})
 
     def test_a_reply_that_is_one_object_is_one_item(self):
         self.assertEqual(form.items((), {"a": 1}), [{"a": 1}])
         self.assertEqual(form.items((), [1, 2]), [1, 2])
-        self.assertEqual(form.items(parse_path(".x[]"), {"y": 1}), [])
+        self.assertEqual(form.items(parse_path(".x[]"), {"x": []}), [])
+        for bad in ({"y": 1}, {"x": None}, {"x": {}}):
+            with self.subTest(bad), self.assertRaisesRegex(ValueError, r"^the reply has no list at \.x$"):
+                form.items(parse_path(".x[]"), bad)
+        with self.assertRaisesRegex(ValueError, r'^the reply has no list at \.a\."b c"$'):
+            form.items(parse_path('.a."b c"[]'), {"a": {}})
+        self.assertEqual(form.items(parse_path(".x[k].y[]"), {"x": []}), [])  # a fan-out before it: not checked
 
     def test_no_model_decides_any_field(self):
         # The same reply always fills the same records: plain code, no session, no network.

@@ -5,8 +5,9 @@
   `<data>/sources/.raw/<source>/<UTC stamp>-<6 hex>.json`.
 - `read_saved(name, raw_path, records=None)` takes output saved by someone else (a scan session for `mcp`,
   `connector` and `skill`, slice 4). For `fill: ai` the scan session's records come in `records`.
-- A record missing a required field, or a field a link or key pattern names, is dropped and listed in the
-  result's `dropped`, which is also saved next to the raw file as `<same name>.report.json`.
+- A record missing a required field (`status` too for `brings: work`), or a field a link or key pattern names, is
+  dropped and listed in the result's `dropped`, which is also saved next to the raw file as
+  `<same name without its extension>.report.json`.
 - The same key updates the card that has it; `none` makes nothing. Plain words are made by code (no AI), in every
   configured language.
 - A source's `writes` are never run here: `apply_writes` calls `config.require_live` first, and runs nothing.
@@ -20,7 +21,7 @@ import secrets
 import shlex
 import subprocess
 from datetime import timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Callable, Optional
 
 from assistant import cards, config, form, sources
@@ -183,10 +184,11 @@ class Engine:
                 raise SourceError(f"{src.name}: fill: paths fills its own records; give only the raw output")
             try:
                 reply = json.loads(raw_bytes.decode("utf-8"))
-            except (UnicodeDecodeError, ValueError) as e:
+            except (UnicodeDecodeError, ValueError, RecursionError) as e:
                 where = f" (saved as {raw})" if raw else ""
-                raise SourceError(f"{src.name}: the output is not JSON{where}: {e}") from e
-            entries, dropped = self.fill(src, reply)
+                why = "nested too deeply" if isinstance(e, RecursionError) else e
+                raise SourceError(f"{src.name}: the output is not JSON{where}: {why}") from e
+            entries, dropped = self.fill(src, reply, raw=raw)
         else:
             if records is None:
                 raise SourceError(f"{src.name}: fill: ai records are filled by a scan session; give them with the "
@@ -194,7 +196,8 @@ class Engine:
             entries, dropped = self.check_records(src, records, raw_bytes.decode("utf-8", errors="replace"))
         result = self.build(src, entries, dropped, raw, dry_run)
         if raw is not None:
-            report = self.data / (raw[:-len(".json")] + ".report.json")
+            p = PurePosixPath(raw)
+            report = self.data / p.with_name(p.stem + ".report.json")
             try:
                 write_json(report, result)
             except OSError as e:
@@ -204,12 +207,18 @@ class Engine:
     # -- fill and check -----------------------------------------------------------------------------------------
 
     @staticmethod
-    def fill(src: sources.Source, reply) -> tuple:
-        """`fill: paths`: one record per item of the reply. Returns (entries, dropped)."""
+    def fill(src: sources.Source, reply, raw: Optional[str] = None) -> tuple:
+        """`fill: paths`: one record per item of the reply. Returns (entries, dropped). A reply without the list
+        of the item path is refused (SourceError, naming `raw`, where it was saved), not read as no items."""
+        try:
+            found = form.items(src.prefix, reply)
+        except ValueError as e:
+            where = f" (saved as {raw})" if raw else ""
+            raise SourceError(f"{src.name}: {e}{where}") from None
         entries, dropped = [], []
-        for n, item in enumerate(form.items(src.prefix, reply)):
+        for n, item in enumerate(found):
             try:
-                record = form.fill_item(src.paths, src.prefix, item)
+                record = form.fill_item(src.paths, src.prefix, item, required(src))
                 link = None
                 if src.link[0] == "path":
                     value = form.evaluate(src.link[1][len(src.prefix):], item)
@@ -232,7 +241,7 @@ class Engine:
         entries, dropped = [], []
         for n, rec in enumerate(records):
             try:
-                record = form.check_record(rec)
+                record = form.check_record(rec, required(src))
                 for field in WORD_FOR_WORD:
                     if field in record and record[field] not in raw_text:
                         raise ValueError(f"form.{field} {record[field]!r} is not in the raw output")
@@ -363,6 +372,11 @@ class Engine:
             return None
         config.require_live(self.cfg, f"apply {src.name}'s writes.{event}" + (f" for {card_id}" if card_id else ""))
         raise SourceError(f"{src.name}: writes.{event} is not run by this version of ap2")
+
+
+def required(src: sources.Source) -> tuple:
+    """The fields a record of `src` must have (design 5.2): the form's, and `status` for `brings: work`."""
+    return form.REQUIRED + (("status",) if src.brings == "work" else ())
 
 
 def _same(key: str, old, new) -> bool:

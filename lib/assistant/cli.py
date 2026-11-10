@@ -241,8 +241,9 @@ def cmd_source(args) -> int:
         if args.records is not None:
             try:
                 records = json.loads(Path(args.records).read_text(encoding="utf-8"))
-            except (OSError, UnicodeDecodeError, ValueError) as e:
-                raise SourceError(f"cannot read the records {args.records!r}: {e}") from e
+            except (OSError, UnicodeDecodeError, ValueError, RecursionError) as e:
+                why = "nested too deeply" if isinstance(e, RecursionError) else e
+                raise SourceError(f"cannot read the records {args.records!r}: {why}") from e
         if args.raw is not None:
             out = engine.read_saved(args.name, args.raw, records=records, dry_run=dry_run)
         elif records is not None:

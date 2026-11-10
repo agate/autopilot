@@ -112,9 +112,9 @@ class CommandReadTest(EngineCase):
         seen = []
         real = Engine.fill
 
-        def fill(src, data):
+        def fill(src, data, **kw):
             seen.extend(p.read_bytes() for p in (self.data / "sources" / ".raw" / "vendor-status").glob("*.json"))
-            return real(src, data)
+            return real(src, data, **kw)
 
         with mock.patch.object(Engine, "fill", staticmethod(fill)):
             self.engine().read("vendor-status")
@@ -472,6 +472,139 @@ class DryRunTest(EngineCase):
         self.assertEqual(tree(self.data), before)
         self.assertEqual([(i["action"], i.get("would_change")) for i in result["items"]],
                          [("update", ["plain", "source", "title"]), ("unchanged", None)])
+
+
+class ReplyShapeTest(EngineCase):
+    def test_a_reply_without_the_list_of_the_item_path_is_refused(self):
+        bad = self.tmp / "bad.json"
+        self.status_source(bad)
+        for reply in ({"message": "API rate limit exceeded"}, {"incidents": None}, {"incidents": {}}):
+            with self.subTest(reply):
+                bad.write_text(json.dumps(reply))
+                with self.assertRaisesRegex(SourceError, r"^vendor-status: the reply has no list at \.incidents "
+                                                         r"\(saved as sources/\.raw/vendor-status/[0-9TZ]+-"
+                                                         r"[0-9a-f]{6}\.json\)$"):
+                    self.engine().read("vendor-status")
+                with self.assertRaisesRegex(SourceError, r"^vendor-status: the reply has no list at \.incidents$"):
+                    self.engine().read("vendor-status", dry_run=True)
+        self.assertEqual(self.store().list(), [])
+
+    def test_an_empty_list_is_zero_items(self):
+        empty = self.tmp / "empty.json"
+        empty.write_text('{"incidents": []}')
+        self.status_source(empty)
+        result = self.engine().read("vendor-status")
+        self.assertEqual((result["items"], result["dropped"]), ([], []))
+
+    def test_text_that_is_not_valid_unicode_drops_only_that_record(self):
+        incidents = json.loads((REPLIES / "status-incidents.json").read_text())
+        incidents["incidents"][1]["name"] = "Truncated \ud800"
+        incidents["incidents"][2]["name"] = "Third"
+        reply = self.tmp / "surrogate.json"
+        reply.write_text(json.dumps(incidents))  # ensure_ascii writes the lone surrogate as \ud800
+        self.status_source(reply)
+        result = self.engine().read("vendor-status")
+        self.assertEqual([(i["item"], i["action"]) for i in result["items"]], [(0, "add"), (2, "add")])
+        self.assertEqual(result["dropped"], [{"item": 1, "reason": "form.text is not valid Unicode"}])
+        self.assertEqual(len(self.store().list()), 2)
+        raw = self.data / result["raw"]
+        self.assertEqual(json.loads(raw.with_name(raw.stem + ".report.json").read_text()), result)
+
+    def test_fill_ai_text_that_is_not_valid_unicode_drops_only_that_record(self):
+        raw = self.tmp / "slack.txt"
+        raw.write_text(SavedReadTest.SLACK_RAW)
+        good = {"id": "1730000000.123456", "thread_id": "1729999000.000100", "at": "1730000000.123456",
+                "text": "Can you look at the retry change?", "place": "C0123ABCD", "category": "question"}
+        other = {**good, "id": "1730000002.000300", "at": "1730000002.000300", "thread_id": "1730000002.000300"}
+        records = [good, {**good, "text": "Truncated \ud800"}, other]
+        result = self.engine().read_saved("slack-mentions", raw, records=records)
+        self.assertEqual([(i["item"], i["action"]) for i in result["items"]], [(0, "add"), (2, "add")])
+        self.assertEqual(result["dropped"], [{"item": 1, "reason": "form.text is not valid Unicode"}])
+        self.assertEqual(len(self.store().list()), 2)
+
+
+class WorkStatusTest(EngineCase):
+    def test_fill_paths_drops_a_work_record_without_a_status(self):
+        reply = self.tmp / "issues.json"
+        issue = {"key": "P-1", "fields": {"updated": "t", "summary": "x", "status": {"name": "To Do"}}}
+        reply.write_text(json.dumps([issue, {**issue, "key": "P-2", "fields": {"updated": "t", "summary": "y"}},
+                                     {**issue, "key": "P-3", "fields": {**issue["fields"], "status": {"name": None}}}]))
+        self.user_source("w", ShadowTest.WORK.format(run=self.command(reply)))
+        result = self.engine().read("w", dry_run=True)
+        self.assertEqual([i["key"] for i in result["items"]], ["P-1"])
+        self.assertEqual(result["dropped"], [{"item": 1, "reason": "form.status missing"},
+                                             {"item": 2, "reason": "form.status missing"}])
+
+    def test_fill_ai_drops_a_work_record_without_a_status(self):
+        self.user_source("wa", """\
+            source: wa
+            brings: work
+            read: { via: mcp, server: tracker, tool: search }
+            fill: ai
+            form: { id: Key, at: Updated, text: Summary, status: Status }
+            link: "https://tracker.example.com/browse/{id}"
+            key: "{id}"
+            sort: { all: code }
+            """)
+        raw = self.tmp / "issues.txt"
+        raw.write_text("Key: P-1 Updated: t1\nKey: P-2 Updated: t2\nKey: P-3 Updated: t3\n")
+        records = [{"id": "P-1", "at": "t1", "text": "x", "status": "To Do", "category": "all"},
+                   {"id": "P-2", "at": "t2", "text": "y", "category": "all"},
+                   {"id": "P-3", "at": "t3", "text": "z", "status": None, "category": "all"}]
+        result = self.engine().read_saved("wa", raw, records=records, dry_run=True)
+        self.assertEqual([i["key"] for i in result["items"]], ["P-1"])
+        self.assertEqual(result["dropped"], [{"item": 1, "reason": "form.status missing"},
+                                             {"item": 2, "reason": "form.status missing"}])
+
+
+class LinkKindsTest(EngineCase):
+    def status_text(self, reply: Path, link: str) -> str:
+        text = (FIXTURES / "user" / "vendor-status.yaml").read_text()
+        return text.replace("run: curl -s https://status.example.com/api/v2/incidents/unresolved.json",
+                            f"run: '{self.command(reply)}'").replace("link: .incidents[].shortlink", link)
+
+    def test_link_none_makes_cards_without_a_link(self):
+        reply = self.reply_copy("status-incidents.json")
+        self.user_source("vendor-status", self.status_text(reply, "link: none"))
+        result = self.engine().read("vendor-status", dry_run=True)
+        self.assertEqual([i["action"] for i in result["items"]], ["add", "add"])
+        for item in result["items"]:
+            self.assertIsNone(item["link"])
+            self.assertIsNone(item["would_add"]["source"]["link"])
+            self.assertEqual(item["would_add"]["plain"]["do"]["en"], "Read it and decide what it needs.")
+
+    def test_a_link_pattern_naming_a_missing_field_drops_the_record(self):
+        reply = self.reply_copy("status-incidents.json")
+        self.user_source("vendor-status", self.status_text(reply, 'link: "https://x.example.com/{place}/{id}"'))
+        result = self.engine().read("vendor-status", dry_run=True)
+        self.assertEqual(result["items"], [])
+        self.assertEqual(result["dropped"], [{"item": 2, "reason": "form.text missing"},
+                                             {"item": 0, "reason": "link: {place} missing"},
+                                             {"item": 1, "reason": "link: {place} missing"}])
+
+
+class SavedRawTest(EngineCase):
+    def test_a_raw_file_already_in_the_source_folder_keeps_its_report_beside_it(self):
+        folder = self.data / "sources" / ".raw" / "gh-mine"
+        folder.mkdir(parents=True)
+        for name, report in (("abc", "abc.report.json"), ("r.txt", "r.report.json")):
+            with self.subTest(name):
+                saved = folder / name
+                shutil.copy(REPLIES / "gh-pr-list.json", saved)
+                result = self.engine().read_saved("gh-mine", saved)
+                self.assertEqual(result["raw"], f"sources/.raw/gh-mine/{name}")
+                self.assertEqual(json.loads((folder / report).read_text()), result)
+        self.assertFalse((self.data / "sources" / ".raw" / ".report.json").exists())
+
+    def test_a_dry_run_of_a_saved_reply_saves_nothing(self):
+        saved = self.reply_copy("gh-pr-list.json")
+        before = tree(self.data)
+        result = self.engine().read_saved("gh-mine", saved, dry_run=True)
+        self.assertEqual(tree(self.data), before)
+        self.assertTrue(result["dry_run"])
+        self.assertIsNone(result["raw"])
+        self.assertEqual([(i["action"], i["would_add"]["kind"]) for i in result["items"]],
+                         [("add", "pr_review"), ("add", "pr_review")])
 
 
 class ShadowTest(EngineCase):

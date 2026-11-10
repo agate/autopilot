@@ -769,10 +769,12 @@ Calls the author made without asking (check them):
   - The path language (`fill: paths`), jq-like: a path starts with `.`; `.` alone is the whole item; `.name`
     takes a key (`."a key"` quotes one); `[]` takes every item of a list (`.[]` at the top); `[text]` keeps the
     list items holding `text` word for word as a text value at any depth (`.fields.issuelinks[is blocked by].key`);
-    `[a.b=text]` keeps those whose `.a.b` is `text`. No indexes (`[0]` is refused). A step on the wrong type
+    `[a.b=text]` keeps those whose `.a.b` is `text`. No indexes or slices (`[0]`, `[-1]`, `[1:]` are refused). A step on the wrong type
     gives nothing. The `id` path up to its first `[]` is the item path: every other path (and a `link` path)
     must start with it, and each item is one record; with no `[]`, a list reply is the items and anything else
-    is one item. Only `depends_on` may fan out further (a list); other fields must be a text or an integer
+    is one item. When nothing fans out before the item path's `[]`, a reply with no list there (an error object such as
+    `{"message": "API rate limit exceeded"}`, `null`, or a map) fails the read with `SourceError` naming the raw
+    file, instead of reading as no items; an empty list is zero items. Only `depends_on` may fan out further (a list); other fields must be a text or an integer
     (written as text). A record whose required field is missing, empty or of the wrong type, or whose optional
     field has the wrong type, is dropped and listed in the read's `dropped` with the reason.
   - Link and key: `link` is `none`, a path (`.url`, `fill: paths` only) or a `{field}` pattern; `key` is a

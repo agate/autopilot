@@ -9,14 +9,16 @@ Path language (a small, jq-like subset; no model decides any field):
 - `[]` takes every item of a list (`.incidents[]`, or `.[]` on a list at the top).
 - `[text]` keeps the items of a list that hold `text`, word for word, as a text value at any depth
   (`.fields.issuelinks[is blocked by].key`). `[a.b=text]` keeps the items whose value at `.a.b` is `text`
-  (`[type.inward=is blocked by]`). A filter is never a number: `[0]` is refused (no indexes).
+  (`[type.inward=is blocked by]`). A filter is never an index or a slice: `[0]`, `[-1]` and `[1:]` are refused.
 - A step that meets the wrong type (a key on a list, `[]` on an object) or a missing key gives nothing; the
   field is then missing.
 
 Records: the part of the `id` path up to and including its first `[]` is the item path; every other path must
 start with it, and one record is made per item. With no `[]` in `id`, the reply is the items when it is a list,
 else it is one item. Only `depends_on` may fan out further (it is a list); every other field must give one text
-or integer (an integer is written as text).
+or integer (an integer is written as text). When nothing fans out before the item path's `[]`, the reply must
+hold a list there (an empty list is zero items); anything else, such as an error object, is refused, not read as
+no items.
 """
 from __future__ import annotations
 
@@ -31,6 +33,7 @@ DERIVED = ("id_digits", "place_id", "source")
 
 NAME = re.compile(r"[A-Za-z0-9_-]+")
 FIELD_PATH = re.compile(r"[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*\Z")
+INDEX = re.compile(r"-?\d*(:-?\d*)?")
 PATTERN_FIELD = re.compile(r"\{([a-z_][a-z0-9_]*)\}")
 MAX_DEPTH = 64
 
@@ -76,7 +79,7 @@ def parse_path(text) -> tuple:
             inner = text[i + 1:end]
             if inner == "":
                 steps.append((EACH,))
-            elif inner.strip().isdigit():
+            elif inner.strip().isdigit() or (INDEX.fullmatch(inner) and any(ch.isdigit() for ch in inner)):
                 raise PathError(f"{text!r}: [{inner}] looks like an index; indexes are not supported")
             elif inner != inner.strip():
                 raise PathError(f"{text!r}: [{inner}] starts or ends with a space")
@@ -151,9 +154,19 @@ def evaluate(steps: tuple, value):
     return current[0] if current else MISSING
 
 
+def path_text(steps: tuple) -> str:
+    """A path of key steps written back as text: (("key", "a"), ("key", "b c")) gives `.a."b c"`."""
+    return "".join(f".{s[1]}" if NAME.fullmatch(s[1]) else f'."{s[1]}"' for s in steps) or "."
+
+
 def items(prefix: tuple, reply) -> list:
-    """The items of a reply: the list at the item path, or the reply itself (a list's items, or one item)."""
+    """The items of a reply: the list at the item path, or the reply itself (a list's items, or one item).
+    Raises ValueError when the item path's list is not there (an error reply, or a reshaped one), so that is not
+    read as no items; checked only when nothing fans out before the item path's `[]`."""
     if prefix:
+        before = prefix[:-1]
+        if not fans_out(before) and not isinstance(evaluate(before, reply), list):
+            raise ValueError(f"the reply has no list at {path_text(before)}")
         return evaluate(prefix, reply)
     return list(reply) if isinstance(reply, list) else [reply]
 
@@ -162,7 +175,12 @@ def as_text(value, what: str) -> str:
     """A field value as text: a text or an integer. Raises ValueError with the reason."""
     if isinstance(value, bool) or not isinstance(value, (str, int)):
         raise ValueError(f"{what} is {_kind(value)}, not a text")
-    return str(value)
+    text = str(value)
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError(f"{what} is not valid Unicode") from None  # a lone surrogate, such as JSON's "\ud800"
+    return text
 
 
 def _kind(value) -> str:
@@ -173,9 +191,10 @@ def _kind(value) -> str:
     return {dict: "an object", list: "a list", float: "a decimal number"}.get(type(value), type(value).__name__)
 
 
-def fill_item(paths: dict, prefix: tuple, item) -> dict:
+def fill_item(paths: dict, prefix: tuple, item, required: tuple = REQUIRED) -> dict:
     """Fill one record from one item. `paths` maps each form field to its steps (full paths, item path
-    included). Raises ValueError naming the first field that is missing or has the wrong type."""
+    included); `required` names the fields that must be there (a `brings: work` source adds `status`). Raises
+    ValueError naming the first field that is missing or has the wrong type."""
     record = {}
     for field, steps in paths.items():
         value = evaluate(steps[len(prefix):], item)
@@ -185,18 +204,18 @@ def fill_item(paths: dict, prefix: tuple, item) -> dict:
                 record[field] = [as_text(v, f"form.{field}: an item") for v in values]
             continue
         if value is MISSING or value is None:
-            if field in REQUIRED:
+            if field in required:
                 raise ValueError(f"form.{field} missing")
             continue
         text = as_text(value, f"form.{field}")
-        if field in REQUIRED and not text.strip():
+        if field in required and not text.strip():
             raise ValueError(f"form.{field} is empty")
         record[field] = text
     return record
 
 
-def check_record(record) -> dict:
-    """Check a record filled elsewhere (a `fill: ai` scan session): the form's fields only, the required ones
+def check_record(record, required: tuple = REQUIRED) -> dict:
+    """Check a record filled elsewhere (a `fill: ai` scan session): the form's fields only, the `required` ones
     non-empty text. Returns the record; raises ValueError with the reason."""
     if not isinstance(record, dict):
         raise ValueError(f"a record is an object, not {_kind(record)}")
@@ -212,7 +231,7 @@ def check_record(record) -> dict:
             out[field] = [as_text(v, f"form.{field}: an item") for v in value]
         elif value is not None:
             out[field] = as_text(value, f"form.{field}")
-    for field in REQUIRED:
+    for field in required:
         if not out.get(field, "").strip():
             raise ValueError(f"form.{field} {'is empty' if field in out else 'missing'}")
     return out

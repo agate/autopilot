@@ -115,6 +115,43 @@ class SourceCommandTest(unittest.TestCase):
         line = self.fails("source", "read", "t-tracker")
         self.assertIn("read.via is mcp; only a scan session can make that read", line)
 
+    TRACKER = ("source: t-tracker\nbrings: messages\nread: { via: mcp, server: tracker, tool: search }\n"
+               "fill: paths\nform: { id: .key, at: .fields.updated, text: .fields.summary }\n"
+               'link: "https://tracker.example.com/browse/{id}"\nsort: { all: question }\n')
+
+    def test_read_raw_dry_run_saves_nothing(self):
+        (self.data / "sources" / "t-tracker.yaml").write_text(self.TRACKER)
+        before = tree(self.data)
+        out = self.ok("source", "read", "t-tracker", "--raw", str(FIXTURES / "replies" / "jira-search.json"),
+                      "--dry-run")
+        self.assertEqual(tree(self.data), before)
+        self.assertTrue(out["dry_run"])
+        self.assertIsNone(out["raw"])
+        self.assertEqual([(i["action"], i["would_add"]["kind"]) for i in out["items"]],
+                         [("add", "question"), ("add", "question")])
+
+    def test_a_reply_nested_too_deeply_is_one_line(self):
+        (self.data / "sources" / "t-tracker.yaml").write_text(self.TRACKER)
+        deep = self.tmp / "deep.json"
+        deep.write_text("[" * 200000 + "]" * 200000)
+        self.assertIn("the output is not JSON", self.fails("source", "read", "t-tracker", "--raw", str(deep)))
+        self.assertIn(f"cannot read the records {str(deep)!r}",
+                      self.fails("source", "read", "t-tracker", "--raw", str(deep), "--records", str(deep)))
+
+    def test_a_reply_without_the_list_of_the_item_path_is_one_line(self):
+        self.reply.write_text('{"message": "API rate limit exceeded"}')
+        line = self.fails("source", "read", "t-vendor-status")
+        self.assertRegex(line, r"^ap2: t-vendor-status: the reply has no list at \.incidents \(saved as "
+                               r"sources/\.raw/t-vendor-status/")
+
+    def test_data_flag_wins_over_the_environment(self):
+        other = self.tmp / "other"
+        (other / "sources").mkdir(parents=True)
+        (other / "sources" / "t-other.yaml").write_text(self.TRACKER.replace("t-tracker", "t-other"))
+        names = [s["source"] for s in self.ok("source", "list", "--data", str(other))]
+        self.assertIn("t-other", names)
+        self.assertNotIn("t-vendor-status", names)
+
     def test_read_records_with_a_bad_category_drops_the_record(self):
         text = (FIXTURES / "plugin" / "slack-mentions.yaml").read_text()
         (self.data / "sources" / "t-slack-mentions.yaml").write_text(
