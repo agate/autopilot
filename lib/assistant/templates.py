@@ -11,6 +11,7 @@ A template can combine roles and write briefs. It cannot add tools or permission
 """
 from __future__ import annotations
 
+import os
 import re
 import stat
 from dataclasses import dataclass
@@ -335,20 +336,33 @@ def load_file(path, origin: str = "user", kinds=None) -> Template:
     return Template(kind=data["kind"], data=data, path=path, origin=origin)
 
 
-def _files(folder: Path) -> list:
-    """The `*.yaml` files in `folder`, by name; hidden files and folders are skipped. A missing folder has none.
-    A broken link is kept, so loading it fails naming it rather than falling back to the built-in template.
-    Each entry is stat-ed directly (Path.is_file hides errors on newer Pythons): any other error is a TemplateError."""
+def _entries(folder: Path) -> list:
+    """The `*.yaml` entry paths in `folder`, by name; hidden ones are skipped and nothing is stat-ed. A missing
+    folder has none. A folder that is a link to a folder that does not exist, or any other error, is a
+    TemplateError, so the user's templates never silently fall back to the built-in ones."""
     try:
         entries = sorted(folder.iterdir())
-    except FileNotFoundError:
+    except FileNotFoundError as e:
+        try:
+            linked = stat.S_ISLNK(os.lstat(folder).st_mode)
+        except FileNotFoundError:
+            return []
+        except OSError as e2:
+            raise TemplateError(f"{folder}: cannot read: {e2}") from e2
+        if linked:
+            raise TemplateError(f"{folder}: cannot read: it links to a folder that does not exist") from e
         return []
     except OSError as e:
         raise TemplateError(f"{folder}: cannot read: {e}") from e
+    return [p for p in entries if p.name.endswith(SUFFIX) and not p.name.startswith(".")]
+
+
+def _files(folder: Path) -> list:
+    """The `*.yaml` files in `folder` (see `_entries`); folders are skipped.
+    A broken link is kept, so loading it fails naming it rather than falling back to the built-in template.
+    Each entry is stat-ed directly (Path.is_file hides errors on newer Pythons): any other error is a TemplateError."""
     out = []
-    for p in entries:
-        if not p.name.endswith(SUFFIX) or p.name.startswith("."):
-            continue
+    for p in _entries(folder):
         try:
             if stat.S_ISREG(p.stat().st_mode):
                 out.append(p)
@@ -357,6 +371,16 @@ def _files(folder: Path) -> list:
         except OSError as e:
             raise TemplateError(f"{folder}: cannot read: {e}") from e
     return out
+
+
+def _is_regular(p: Path) -> bool:
+    """Whether `p` is a regular file (following links); a missing one is not. Any other error is a TemplateError."""
+    try:
+        return stat.S_ISREG(p.stat().st_mode)
+    except FileNotFoundError:
+        return False
+    except OSError as e:
+        raise TemplateError(f"{p}: cannot read: {e}") from e
 
 
 def _user_dir(data_dir) -> Optional[Path]:
@@ -382,15 +406,17 @@ def catalog(data_dir=None) -> dict:
 def check(path, data_dir=None) -> dict:
     """Validate a template file without installing it (design 6: installed only after the user checks it). Says
     which template it would replace: `builtin`, `user` (one already in the data folder), or None (a new kind).
-    Other user files are not read, so a bad one elsewhere does not hide this file's result."""
+    Other user files are not read or stat-ed (their kinds come from their names), so a bad one elsewhere does not
+    hide this file's result."""
     path = Path(path)
     user_dir = _user_dir(data_dir)
-    user = _files(user_dir) if user_dir is not None else []
+    user = _entries(user_dir) if user_dir is not None else []
     kinds = {p.name[:-len(SUFFIX)] for p in _files(BUILTIN_DIR) + user}
     t = load_file(path, "user", kinds)
     installed_path = user_dir / path.name if user_dir is not None else None
-    installed = installed_path is not None and installed_path.is_file() and _same(installed_path, path)
-    if not installed and installed_path is not None and installed_path.is_file():
+    present = installed_path is not None and _is_regular(installed_path)
+    installed = present and _same(installed_path, path)
+    if present and not installed:
         replaces = "user"
     elif (BUILTIN_DIR / path.name).is_file():
         replaces = "builtin"

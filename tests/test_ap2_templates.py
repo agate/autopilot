@@ -263,6 +263,24 @@ class UserTemplatesTest(TempFolder):
         self.assertIn(str(folder), str(e.exception))
         self.assertIn("cannot read", str(e.exception))
 
+    def test_a_templates_folder_link_to_a_missing_folder_is_a_template_error(self):
+        folder = self.data / "templates"
+        folder.rmdir()
+        target = self.tmp / "mine"
+        target.mkdir()
+        shutil.copy(FIXTURES / "parcel.yaml", target / "parcel.yaml")
+        folder.symlink_to(target)
+        self.assertIn("parcel", templates.catalog(self.data))
+        target.rename(self.tmp / "moved")  # the link now points at nothing
+        outside = self.write("question.yaml", (FIXTURES / "question.yaml").read_text())
+        runs = {"catalog": lambda: templates.catalog(self.data), "check": lambda: templates.check(outside, self.data)}
+        for name, run in runs.items():
+            with self.subTest(name):
+                with self.assertRaises(TemplateError) as e:
+                    run()
+                self.assertIn(str(folder), str(e.exception))
+                self.assertIn("links to a folder that does not exist", str(e.exception))
+
     def test_a_user_child_button_may_name_a_user_kind(self):
         self.write("parcel.yaml", GOOD + "", self.data / "templates")
         self.write("errand.yaml", (templates.BUILTIN_DIR / "errand.yaml").read_text().replace(
@@ -579,6 +597,23 @@ class CheckTest(TempFolder):
         self.write("errand.yaml", "kind: errand\ncolour: red\n", self.data / "templates")
         path = self.write("parcel.yaml", GOOD)
         self.assertTrue(templates.check(path, self.data)["ok"])
+
+    def test_check_does_not_stat_other_user_entries(self):
+        folder = self.data / "templates"
+        os.symlink("other.yaml", folder / "other.yaml")  # a link to itself: stat fails with a loop error
+        path = self.write("parcel.yaml", GOOD)
+        self.assertTrue(templates.check(path, self.data)["ok"])
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root ignores folder modes")
+    def test_check_with_a_templates_folder_that_cannot_be_searched_is_a_template_error(self):
+        folder = self.data / "templates"  # empty, so only the installed-file check touches it
+        path = self.write("question.yaml", (FIXTURES / "question.yaml").read_text())
+        folder.chmod(0o444)
+        self.addCleanup(folder.chmod, 0o755)  # runs before the temp folder is removed
+        with self.assertRaises(TemplateError) as e:
+            templates.check(path, self.data)
+        self.assertIn(str(folder / "question.yaml"), str(e.exception))
+        self.assertIn("cannot read", str(e.exception))
 
     def test_check_accepts_a_child_of_its_own_or_a_user_kind(self):
         self.write("crate.yaml", "anything\n", self.data / "templates")
