@@ -170,6 +170,8 @@ def _bad_texts(info) -> list:
             out.append(f"{f}: a label reference is not accepted here")
         else:
             out += text.check(v, state.langs(), f)
+            if text.unfilled(v):
+                out.append(f"{f}: label {v['key']!r} needs {', '.join(text.unfilled(v))}")
     return out
 
 

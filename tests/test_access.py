@@ -159,7 +159,7 @@ class CardsTest(Base):
     def test_fail_refuses_text_that_is_neither_a_string_nor_languages(self):
         self.ap()
         bads = [{"error": {"zh": "只有中文"}}, {"error": ["a"]}, {"fix": {"en": 3}}, {"error": {"en": ""}},
-                {"blocks": ["y"]}, {"blocks": {"en": {"en": "y"}}}, {"error": {"key": "blocks_gh"}}, []]
+                {"blocks": ["y"]}, {"blocks": {"en": {"en": "y"}}}, {"blocks": {"key": "blocks_check"}}, {"error": {"key": "blocks_gh"}}, []]
         for raw in [json.dumps(b) for b in bads] + ["not json"]:
             err = io.StringIO()
             with redirect_stderr(err):
