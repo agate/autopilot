@@ -141,6 +141,12 @@ class RolesTest(unittest.TestCase):
                 self.assertEqual(roles.ROLES[name].floor, "worker")
                 self.assertTrue({"Edit", "Write", "Bash"} <= set(roles.ROLES[name].tools))
 
+    def test_the_worker_floor_protects_the_users_templates_and_sources(self):
+        # Design 3.6: changing a template or a source asks first, so a worker cannot rewrite one.
+        for folder in ("templates/", "sources/"):
+            with self.subTest(folder):
+                self.assertIn(folder, roles.FLOORS["worker"])
+
     def test_the_role_table_cannot_be_changed(self):
         with self.assertRaises(TypeError):
             roles.ROLES["general"] = roles.ROLES["implement"]  # type: ignore[index]
@@ -365,6 +371,22 @@ BAD_CASES = [
     ("a kind with capitals", GOOD.replace("kind: parcel", "kind: Parcel"), "line 1", "kind must be lowercase"),
     ("not the YAML subset", GOOD + "x: &a 1\n", "line 10", "anchors"),
     ("an empty file", "", "parcel.yaml: ", "missing key 'kind'"),
+    ("a kind that is not text", GOOD.replace("kind: parcel", "kind: 3"), "line 1", "kind must be"),
+    ("a view that is not a list", GOOD.replace("[plan, activity]", "3"), "line 2", "view must be a non-empty list"),
+    ("a button that is not a map", GOOD.replace("buttons:\n  - id: arrived\n    label: It arrived\n    lane: done\n",
+                                                "buttons: [3]\n"), "line 3", "buttons[0] must be a map"),
+    ("a button id that is not text", GOOD.replace("id: arrived", "id: [a]"), "line 4", "button id must be"),
+    ("a button id that breaks the pattern", GOOD.replace("id: arrived", "id: Remind Me!"), "line 4",
+     "button id must be"),
+    ("an empty label", GOOD.replace("label: It arrived", 'label: ""'), "line 5", "label must be"),
+    ("a child that is not text", GOOD.replace("lane: done", "child: [step]"), "line 6",
+     "child names no template kind"),
+    ("a role entry that is not a map", GOOD.split("roles:")[0] + "roles: [3]\n", "line 7", "roles[0] must be a map"),
+    ("a role that is not text", GOOD.replace("role: general", "role: [general]"), "line 8", "unknown role"),
+    ("a blank when", GOOD.replace("  - role: general\n", '  - role: general\n    when: "  "\n'), "line 9",
+     "when must be"),
+    ("a placeholder name with a dash", GOOD.replace("{tracking}", "{tracking-id}"), "line 9",
+     "{tracking-id} is not a card field name"),
 ]
 
 
@@ -431,6 +453,11 @@ class BriefTest(unittest.TestCase):
             templates.fill_brief("Check {tracking} for {who}.", {"who": "me"})
         self.assertIn("{tracking}", str(e.exception))
         self.assertEqual(e.exception.missing, ["tracking"])
+
+    def test_a_dotted_name_inside_text_is_missing(self):
+        with self.assertRaises(BriefError) as e:
+            templates.fill_brief("{title.a}", {"title": "a title"})
+        self.assertEqual(e.exception.missing, ["title.a"])
 
     def test_every_missing_placeholder_is_named(self):
         with self.assertRaises(BriefError) as e:

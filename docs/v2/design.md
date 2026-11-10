@@ -778,8 +778,10 @@ Calls the author made without asking (check them):
   - Roles are a fixed table in code (`roles.ROLES`, read-only), not a file, so nothing in the data folder can
     change one. Each role has its tools (the only Claude Code tools its session gets) and a permission floor:
     `worker` is v1's worker floor (`lib/autopilot/perms.py`, `generate(role="worker")`: outward MCP tools, the
-    protected data files, the plugin and `gh` comment and review commands denied, the park hook); `read-only` is
-    that floor with no file-editing tool. The worker sessions (slice 6) turn a floor into settings.
+    protected data files, the plugin and `gh` comment and review commands denied, the park hook), plus the
+    user's templates and sources (`<data>/templates/`, `<data>/sources/`) cannot be edited, because changing a
+    template or a source asks first (3.6); `read-only` is that floor with no file-editing tool. The worker
+    sessions (slice 6) turn a floor into settings, with Edit and Write deny rules for those two folders.
     - `implement` (`agents/implementer.md`), worker: Agent, Bash, Edit, Glob, Grep, NotebookEdit, Read, Skill,
       WebFetch, WebSearch, Write.
     - `review` (`agents/reviewer.md`), worker: Agent, Bash, Glob, Grep, Read, Skill, Write.
