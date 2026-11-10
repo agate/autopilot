@@ -187,5 +187,98 @@ class ExplainedCardTest(Base):
         self.assertIn("explain.steps", str(cm.exception))
 
 
+
+class ExplainExistingCardTest(Base):
+    """`ap decision explain` gives a card written before the rule the same walk-through a new card carries."""
+
+    def old_card(self, kind="self", status="open"):
+        d = card(kind)
+        d.pop("explain")
+        for o in d["options"]:
+            o.pop("does")
+            o.pop("cost")
+        st = state.empty()
+        st["decisions"] = [dict(d, id="D1", status=status, created_at="2026-01-01T00:00:00Z")]
+        (paths.ap_dir("checkout") / "state.json").write_text(json.dumps(st, ensure_ascii=False))
+        return st["decisions"][0]
+
+    def new_part(self, **kw):
+        full = card()
+        d = {"body": t("One sentence."), "explain": full["explain"],
+             "options": {o["id"]: {"does": o["does"], "cost": o["cost"]} for o in full["options"]}}
+        d.update(kw)
+        return d
+
+    def run_cli(self, did, d, *flags):
+        f = Path(tempfile.mkdtemp()) / "explain.json"
+        f.write_text(json.dumps(d, ensure_ascii=False))
+        err, out = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
+            code = cli.main(["decision", "explain", "checkout", did, str(f), *flags])
+        lines = [l for l in err.getvalue().splitlines() if l.startswith("ap decision explain:")]
+        return code, out.getvalue().strip(), "\n".join(lines)
+
+    def test_an_old_card_gets_the_walk_through_and_keeps_everything_else(self):
+        before = self.old_card()
+        code, out, err = self.run_cli("D1", self.new_part())
+        self.assertEqual((code, out, err), (0, "D1", ""))
+        after = state.load("checkout")["decisions"][0]
+        self.assertEqual(after["explain"], card()["explain"])
+        self.assertEqual(after["body"], t("One sentence."))
+        self.assertEqual(after["options"][0]["does"], t("The next build compiles."))
+        self.assertEqual(after["options"][0]["recommended"], True)
+        for k in ("id", "kind", "title", "links", "status", "created_at", "attention", "task"):
+            self.assertEqual(after.get(k), before.get(k), k)
+        evs = [json.loads(l) for l in (paths.ap_dir("checkout") / "events.jsonl").read_text().splitlines()]
+        self.assertEqual(evs[-1]["type"], "decision_explained")
+        self.assertEqual(evs[-1]["data"], {"id": "D1"})
+
+    def test_check_writes_nothing(self):
+        before = self.old_card()
+        self.assertEqual(self.run_cli("D1", self.new_part(), "--check"), (0, "ok", ""))
+        self.assertEqual(state.load("checkout")["decisions"][0], before)
+
+    def test_a_body_may_stay_and_a_read_card_may_be_explained_too(self):
+        before = self.old_card(status="answered")
+        part = self.new_part()
+        del part["body"]
+        self.assertEqual(self.run_cli("D1", part)[0], 0)
+        self.assertEqual(state.load("checkout")["decisions"][0]["body"], before["body"])
+
+    def test_an_incomplete_walk_through_is_refused_and_nothing_changes(self):
+        before = self.old_card()
+        part = self.new_part()
+        del part["explain"]["analogy"]
+        del part["options"]["B"]
+        code, _, err = self.run_cli("D1", part)
+        self.assertEqual(code, 1)
+        self.assertIn("explain: missing analogy", err)
+        self.assertIn("options[1]: missing does", err)
+        part = self.new_part(body={"en": "only English"})
+        self.assertIn("body: missing zh text", self.run_cli("D1", part)[2])
+        self.assertEqual(state.load("checkout")["decisions"][0], before)
+
+    def test_the_file_and_the_card_must_match(self):
+        self.old_card()
+        for bad, words in ((self.new_part(options={"maybe": {"does": t("x"), "cost": t("y")}}), "has no option maybe"),
+                           (self.new_part(title=t("x")), "the file holds"),
+                           (self.new_part(options={"A": {"does": t("x"), "label": t("y")}}), "the file holds"),
+                           ({"body": t("x")}, "the file holds"),
+                           (self.new_part(explain=dict(card()["explain"], related=[{"id": "D9", "why": t("x")}])), "has no card D9")):
+            code, _, err = self.run_cli("D1", bad)
+            self.assertEqual(code, 1, bad)
+            self.assertIn(words, err)
+
+    def test_only_cards_in_the_state_and_not_system_cards(self):
+        self.old_card()
+        code, _, err = self.run_cli("D7", self.new_part())
+        self.assertEqual(code, 1)
+        self.assertIn("no decision D7", err)
+        with state.mutate("checkout") as st:
+            st["decisions"][0]["kind"] = "system"
+        code, _, err = self.run_cli("D1", self.new_part())
+        self.assertEqual(code, 1)
+        self.assertIn("only ask, self and gate cards", err)
+
 if __name__ == "__main__":
     unittest.main()
