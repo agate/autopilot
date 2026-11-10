@@ -95,7 +95,9 @@ each, nothing assumed. Simpler words, never a wrong fact: keep the numbers, file
 
 `ap decision add` refuses an `ask` or `self` card without every `explain` section, every option's
 `does` and `cost`, and every text in each required language; the error names what is missing. A `gate`
-card may carry `explain`; if it does, every section above. Build the walk-through from the worker's files and from the code: read every
+card may carry `explain`; if it does, every section above. A card written before cards carried
+`explain` gets one with `ap decision explain <ap> <D-id> <file>` (`{body?, explain, options?: {<option
+id>: {does, cost}}}`, checked the same way; `--check` writes nothing). Build the walk-through from the worker's files and from the code: read every
 line you cite. Write the reader's language as plainly as the English, not as a word-for-word
 translation. Keep a section short when the thing is simple, but fill it.
 

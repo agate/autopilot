@@ -65,6 +65,7 @@ the walk-through: say how many cards are left.
 | add work inside the scope | write the task as JSON, then `ap task add <name> <file>` |
 | start now | `ap tick <name>` (queues a pass; it starts within seconds) |
 | approve an outward action shown on a card | resolve the decision, then `ap oneoff <name> <D-id>` |
+| explain an older card (one with no `explain`) on the card itself | write `{body, explain, options: {<option id>: {does, cost}}}` as for a new card, run `ap decision explain <name> <D-id> <file> --check` until it prints `ok`, then without `--check` |
 
 `ap` commands wait their turn for the autopilot's state lock, so they work while a pass runs.
 

@@ -152,6 +152,63 @@ def decision_add(ap: str, d: dict, explained: bool = False) -> str:
     return new["id"]
 
 
+EXPLAIN_FILE = 'the file holds {"body"?: text, "explain": {...}, "options"?: {"<option id>": {"does": text, "cost": text}}}'
+
+
+def _explained_copy(d: dict, new: dict) -> dict:
+    """The card as it reads with `new` (body, explain, each option's does and cost by id) in place."""
+    if not isinstance(new, dict) or "explain" not in new or set(new) - {"body", "explain", "options"}:
+        raise ValueError(EXPLAIN_FILE)
+    opts = new.get("options") or {}
+    if not isinstance(opts, dict) or not all(isinstance(v, dict) and not set(v) - {"does", "cost"} for v in opts.values()):
+        raise ValueError(EXPLAIN_FILE)
+    unknown = sorted(set(opts) - {o.get("id") for o in d.get("options") or []})
+    if unknown:
+        raise ValueError(f"options: {d['id']} has no option {', '.join(unknown)}")
+    out = json.loads(json.dumps(d))
+    if "body" in new:
+        out["body"] = new["body"]
+    out["explain"] = new["explain"]
+    for o in out.get("options") or []:
+        o.update(opts.get(o.get("id"), {}))
+    return out
+
+
+def decision_explain(ap: str, did: str, new: dict, check: bool = False) -> str:
+    """Give a card written before cards explained themselves the same walk-through a new card carries.
+    Checked like `ap decision add`; with `check` nothing is written (for trying a file first)."""
+    def apply(st):
+        d = next((x for x in st["decisions"] if x["id"] == did), None)
+        if d is None:
+            raise state.StateError(f"{ap}: no decision {did} (a card the archive took cannot be changed)")
+        if d.get("kind") not in EXPLAINED + ("gate",):
+            raise ValueError(f"{did} is a {d.get('kind')} card; only ask, self and gate cards carry a walk-through")
+        out = _explained_copy(d, new)
+        langs = state.langs()
+        errs = _explain_errors(out) + text.check(out.get("body"), langs, "body")
+        miss = text.unfilled(out.get("body"))
+        if miss:
+            errs.append(f"body: label {out['body']['key']!r} needs args {', '.join(miss)}")
+        known = {x["id"] for x in st["decisions"]} | {line.get("id") for line in _archive_lines(ap)}
+        related = out["explain"].get("related") if isinstance(out["explain"], dict) else None
+        gone = [r["id"] for r in related if isinstance(r, dict) and isinstance(r.get("id"), str)
+                and r["id"] not in known] if isinstance(related, list) else []
+        if gone:
+            errs.append(f"explain.related: {ap} has no card {', '.join(map(str, gone))}")
+        if errs:
+            raise ValueError("the card does not explain itself yet (RUNBOOK.md, \"A decision card\"): " + "; ".join(errs))
+        return d, out
+    if check:
+        apply(state.load(ap))
+        return "ok"
+    with state.mutate(ap) as st:
+        d, out = apply(st)
+        d.clear()
+        d.update(out)
+    events.append(ap, "decision_explained", {"id": did})
+    return did
+
+
 KEEP = "keep"
 
 
@@ -380,6 +437,12 @@ def _decision(args):
         except ValueError as e:
             print(f"ap decision add: {e}", file=sys.stderr)
             return 1
+    elif len(args) in (4, 5) and args[0] == "explain" and args[4:] in ([], ["--check"]):
+        try:
+            print(decision_explain(args[1], args[2], _load_arg(args[3]), check="--check" in args))
+        except (ValueError, OSError, state.StateError) as e:
+            print(f"ap decision explain: {e}", file=sys.stderr)
+            return 1
     elif len(args) >= 3 and args[0] == "resolve":
         try:
             print(decision_resolve(args[1], args[2], _flag(args, "--answer", ""), _flag(args, "--status", "answered"),
@@ -396,7 +459,7 @@ def _decision(args):
     elif len(args) == 2 and args[0] == "unread":
         print(json.dumps(self_unread(state.load(args[1]), config.load_global()["self_review"], datetime.now(timezone.utc))))
     else:
-        print("usage: ap decision add <ap> <file> | resolve <ap> <id> --answer X [--status answered|undone] [--replace] [--handling]"
+        print("usage: ap decision add <ap> <file> | explain <ap> <id> <file> [--check] | resolve <ap> <id> --answer X [--status answered|undone] [--replace] [--handling]"
               " | handled <ap> <id> | keep <ap> <id> ... | attention <ap> <id> true|false | unread <ap>",
               file=sys.stderr)
         return 2
