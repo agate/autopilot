@@ -89,6 +89,8 @@ REFUSALS = [
     ("mode not shadow or live", "mode: dry-run\n", "mode"),
     ("mode not a string", "mode: true\n", "mode"),
     ("mode with a trailing no-break space", "mode: live\u00a0\n", "mode must be shadow or live"),
+    ("key with a no-break space before ':'", "mode\u00a0: live\n", "unknown key"),
+    ("quoted key, value with a trailing no-break space", '"mode": live\u00a0\n', "mode must be shadow or live"),
     ("keep_transcripts unknown word", "keep_transcripts: sometimes\n", "keep_transcripts"),
     ("keep_transcripts bare number", "keep_transcripts: 90\n", "keep_transcripts"),
     ("keep_transcripts zero days", "keep_transcripts: 0d\n", "keep_transcripts"),
@@ -291,6 +293,18 @@ class FileSystemErrorTest(unittest.TestCase):
         with self.assertRaises(ConfigError) as ctx:
             datadir.ensure(target)
         self.assertIn(str(target), str(ctx.exception))
+
+    def test_os_error_while_resolving_is_a_config_error(self):
+        # Newer Python versions make Path.exists() return False on an OSError, so force one to test the wrapping
+        # on every version.
+        with TempHome() as home:
+            (home / ".claude").mkdir()  # so resolve() calls exists()
+            target = home / "x"
+            with mock.patch.object(datadir.Path, "exists", side_effect=PermissionError(13, "Permission denied")):
+                with self.assertRaises(ConfigError) as ctx:
+                    datadir.resolve(str(target))
+            self.assertIn(str(target), str(ctx.exception))
+            self.assertIn("Permission denied", str(ctx.exception))
 
     def test_unknown_user_in_tilde_is_refused(self):
         with TempHome():

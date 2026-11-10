@@ -220,7 +220,11 @@ class StructureTest(unittest.TestCase):
         with self.assertRaises(YamlError) as ctx:
             load(text)
         self.assertIn("nested too deeply", str(ctx.exception))
-        self.assertGreaterEqual(ctx.exception.line, 1)
+        self.assertGreater(ctx.exception.line, 1)  # the line depends on the recursion limit, but it is past line 1
+        with self.assertRaises(YamlError) as ctx:
+            load("a: 1\nk: " + "[" * 2000 + "]" * 2000 + "\n")
+        self.assertIn("nested too deeply", str(ctx.exception))
+        self.assertEqual(ctx.exception.line, 2)
 
     def test_quoted_keys(self):
         self.assertEqual(load('"To Do": 1\n\'a: b\': 2\n'), {"To Do": 1, "a: b": 2})
@@ -297,6 +301,8 @@ ERRORS = [
     ("form feed is not a line break", "a: x\x0cy\nc: [\n", 2, "unclosed"),
     ("line separator is not a line break", "a: x\u2028y\nc: [\n", 2, "unclosed"),
     ("no-break space after ':' is not white space", "mode:\u00a0live\n", 1, "key: value"),
+    ("a line holding only a no-break space", "a: 1\n\u00a0\nb: 2\n", 2, "key: value"),
+    ("no-break space after a quoted value", 'mode: "live"\u00a0\n', 1, "unexpected text after a quoted string"),
     ("hex number", "a: 0x1F\n", 1, "'0x1F' is a YAML number form this reader does not support"),
     ("octal number", "a: 1\nb: 0o17\n", 2, "number form"),
     ("infinity", "a: .inf\n", 1, "number form"),

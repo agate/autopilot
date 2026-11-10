@@ -25,7 +25,7 @@ def cmd_config(args) -> int:
     out["data_dir"] = str(data)
     text = json.dumps(out, sort_keys=True, indent=2, ensure_ascii=False)
     try:
-        text.encode(sys.stdout.encoding or "utf-8")
+        text.encode(getattr(sys.stdout, "encoding", None) or "utf-8")  # sys.stdout is None when stdout is closed
     except UnicodeEncodeError:  # e.g. a Latin-1 terminal: \uXXXX escapes are still the same JSON
         text = json.dumps(out, sort_keys=True, indent=2, ensure_ascii=True)
     print(text)

@@ -22,13 +22,13 @@ class Ap2CommandTest(unittest.TestCase):
         self.home.mkdir()
         self.data = self.tmp / "data"
 
-    def run_ap2(self, *args, data=None, env_extra=None, env_drop=()):
+    def run_ap2(self, *args, data=None, env_extra=None, env_drop=(), encoding=None):
         env = {k: v for k, v in os.environ.items() if k != "AP2_DATA" and k not in env_drop}
         env["HOME"] = str(self.home)  # the real home folder is never reached
         env["AP2_DATA"] = str(self.data if data is None else data)
         env.update(env_extra or {})
         return subprocess.run([sys.executable, str(AP2), *args], capture_output=True, text=True, env=env,
-                              errors="replace", timeout=30)
+                              encoding=encoding, errors="replace", timeout=30)
 
     def test_bin_is_executable(self):
         self.assertTrue(os.access(AP2, os.X_OK))
@@ -114,6 +114,24 @@ class Ap2CommandTest(unittest.TestCase):
         if not latin1:
             self.skipTest("no en_US Latin-1 locale is installed")
         self.assert_non_ascii_data_prints_parseable_json({"LC_ALL": latin1[0]})
+
+    def test_non_ascii_data_folder_under_utf8_output_prints_the_name_as_is(self):
+        target = self.tmp / "\u52a9\u624b"
+        r = self.run_ap2("config", "--data", str(target), env_extra={"PYTHONIOENCODING": "utf-8"}, encoding="utf-8")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("\u52a9\u624b", r.stdout)
+        self.assertNotIn("\\u52a9", r.stdout)
+        self.assertEqual(json.loads(r.stdout)["data_dir"], str(target))
+
+    def test_config_with_stdout_closed_exits_0_without_a_traceback(self):
+        env = {k: v for k, v in os.environ.items() if k != "AP2_DATA"}
+        env.update(HOME=str(self.home), AP2_DATA=str(self.data))
+        # '>&-' closes stdout, so Python starts with sys.stdout set to None
+        r = subprocess.run(["sh", "-c", '"$0" "$1" config >&-', sys.executable, str(AP2)], stdin=subprocess.DEVNULL,
+                           stderr=subprocess.PIPE, text=True, env=env, errors="replace", timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertTrue((self.data / "config.yaml").is_file())
 
     def test_non_ascii_error_under_latin1_output_has_no_traceback(self):
         r = self.run_ap2("config", data=self.home / ".claude" / "\u52a9\u624b",
