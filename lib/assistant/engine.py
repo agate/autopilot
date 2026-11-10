@@ -19,6 +19,7 @@ import os
 import re
 import secrets
 import shlex
+import sqlite3
 import subprocess
 from datetime import timezone
 from pathlib import Path, PurePosixPath
@@ -323,6 +324,8 @@ class Engine:
                     try:
                         added = store.add(new, by=f"source:{src.name}")
                     except CardError as err:
+                        if isinstance(err.__cause__, (OSError, sqlite3.Error)):
+                            raise  # the store itself failed, not this one card
                         dropped.append({"item": e["item"], "reason": f"new card with key {key}: {err}"})
                         continue
                     out["card"] = added["id"]
@@ -337,6 +340,8 @@ class Engine:
                         existing[key] = store.update(old["id"], changes, by=f"source:{src.name}",
                                                      did=f"read {src.name}")
                     except CardError as err:
+                        if isinstance(err.__cause__, (OSError, sqlite3.Error)):
+                            raise  # the store itself failed, not this one card
                         dropped.append({"item": e["item"], "reason": f"card {old['id']}: {err}"})
                         continue
                 elif not same:

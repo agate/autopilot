@@ -806,7 +806,8 @@ Calls the author made without asking (check them):
     `title`, `source`, `status`; never `kind`, `lane`, `pri` or `ask`) with `by: source:<name>` and
     `did: read <name>`; when only `raw` would change, nothing is written. `update_card` updates only, `none`
     makes nothing. The cards are found by key with `Store.list()` once per read. A card the store refuses to
-    add or update (a stored card edited by hand into a bad one) drops only that item, naming the card or key.
+    add or update (a stored card edited by hand into a bad one) drops only that item, naming the card or key;
+    a failure of the store itself (a file or index error) still stops the read with one `ap2:` line.
   - Code-made plain words (no AI), per language, in `engine.PHRASES` (`en` and `zh`; a code like `zh-Hans`
     uses `zh`): what, "New from <source> by <author> in <place>: <first line of the text>"; where, "It was
     written at <at>. [Its status there is "<status>".] Nothing has been done with it yet."; do, "Read it at the

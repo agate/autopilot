@@ -4,6 +4,7 @@ import json
 import os
 import shlex
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -458,6 +459,32 @@ class SortToCardTest(EngineCase):
                                              {"item": 1, "reason": "new card with key inc02efgh: refused"}])
         raw = self.data / result["raw"]
         self.assertTrue(raw.with_name(raw.stem + ".report.json").exists())
+
+    def test_a_card_store_that_cannot_add_at_all_stops_the_read(self):
+        self.status_source(self.reply_copy("status-incidents.json"))
+
+        def fail(*args, **kwargs):
+            raise CardError("cannot use the card store in X: boom") from OSError("boom")
+
+        with mock.patch.object(Store, "add", side_effect=fail):
+            with self.assertRaisesRegex(CardError, "^cannot use the card store in X: boom$"):
+                self.engine().read("vendor-status")
+
+    def test_a_card_store_that_cannot_update_at_all_stops_the_read(self):
+        reply = self.reply_copy("status-incidents.json")
+        self.status_source(reply)
+        self.engine().read("vendor-status")
+        incidents = json.loads(reply.read_text())
+        incidents["incidents"][0]["name"] = "Renamed"
+        reply.write_text(json.dumps(incidents))
+        self.clock.tick()
+
+        def fail(*args, **kwargs):
+            raise CardError("search index X: broken") from sqlite3.DatabaseError("broken")
+
+        with mock.patch.object(Store, "update", side_effect=fail):
+            with self.assertRaisesRegex(CardError, "^search index X: broken$"):
+                self.engine().read("vendor-status")
 
     def test_update_card_only_updates_and_none_makes_nothing(self):
         reply = self.reply_copy("status-incidents.json")
