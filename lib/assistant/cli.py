@@ -74,6 +74,7 @@ def _parser() -> argparse.ArgumentParser:
     r.add_argument("point", metavar="POINT")
     r.add_argument("--by", default="ap2", help=BY_HELP)
     r.add_argument("--data", metavar="PATH", help=DATA_HELP)
+    _gate_parser(sub)
     return p
 
 
@@ -190,6 +191,53 @@ def cmd_restore(args) -> int:
 
 
 COMMANDS = {"config": cmd_config, "card": cmd_card, "search": cmd_search, "restore": cmd_restore}
+
+
+# -- ap2 gate (slice 5) -------------------------------------------------------------------------------------------
+
+def _gate_now(text: str):
+    """--now: an ISO time with a zone (2026-11-10T09:00:00Z or ...-08:00), for trying a run at another time. It
+    may not be later than the real time (plus the slot grace): a run writes last_slot, makes cards and prunes
+    restore points, so a run in the future would hold back every real slot until then. A year before 1971 is
+    refused too (the slot and prune arithmetic would go below year 1)."""
+    from datetime import datetime, timezone
+    from assistant import cards, routines
+    try:
+        at = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not an ISO time: {text!r} (for example 2026-11-10T09:00:00Z)") from None
+    if at.tzinfo is None:
+        raise argparse.ArgumentTypeError(f"{text!r} has no time zone; add Z or an offset such as -08:00")
+    try:
+        in_utc = at.astimezone(timezone.utc)
+    except OverflowError:
+        in_utc = None
+    if in_utc is None or in_utc.year < 1971:
+        raise argparse.ArgumentTypeError(f"{text!r} is out of range (years 1971 to now)")
+    if in_utc > cards.now_utc() + routines.GRACE:
+        raise argparse.ArgumentTypeError(f"{text!r} cannot be later than the real time: a run writes last_slot, "
+                                         f"makes cards and prunes restore points")
+    return at
+
+
+def _gate_parser(sub) -> None:
+    g = sub.add_parser("gate", help="run the gate once and print what it did",
+                       description="One gate run, no AI: start the routine slots that are due (card first, then "
+                                   "last_slot), list the watches that are due, prune restore points older than 30 "
+                                   "days, and write gate.json and gate.log. Prints the run as JSON. While another "
+                                   "run holds the gate lock, prints {\"locked\": true, ...} and exits 0.")
+    g.add_argument("--now", type=_gate_now, metavar="ISO", help="run as if it were this time (default: now)")
+    g.add_argument("--data", metavar="PATH", help=DATA_HELP)
+
+
+def cmd_gate(args) -> int:
+    from assistant import cards, gate
+    data = datadir.ensure(datadir.resolve(args.data))
+    _print_json(gate.run(data, args.now or cards.now_utc()))
+    return 0
+
+
+COMMANDS["gate"] = cmd_gate
 
 
 def main(argv: list) -> int:
