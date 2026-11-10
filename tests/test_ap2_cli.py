@@ -1,0 +1,275 @@
+from __future__ import annotations
+
+import contextlib
+import io
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from tests.helpers import ROOT
+from tests.test_ap2_config import TempHome
+from assistant import cli, datadir
+
+AP2 = ROOT / "bin" / "ap2"
+
+
+def temp_inside_the_accounts_claude() -> bool:
+    """True when the temp folder is inside ~/.claude of the account's home in the user database. ap2 then refuses
+    every temp data folder, and a subprocess cannot be patched to see another account home."""
+    if datadir.pwd is None:
+        return False
+    try:
+        pw_dir = datadir.pwd.getpwuid(os.getuid()).pw_dir
+    except KeyError:
+        return False
+    if not os.path.isabs(pw_dir):
+        return False
+    parts = [p.casefold() for p in Path(tempfile.gettempdir()).resolve().parts]
+    claude = [p.casefold() for p in (Path(pw_dir) / ".claude").resolve().parts]
+    return parts[:len(claude)] == claude
+
+
+class Ap2CommandTest(unittest.TestCase):
+    def setUp(self):
+        if temp_inside_the_accounts_claude():
+            self.skipTest("the temp folder is inside the account's ~/.claude, so ap2 refuses every temp data folder")
+        self.tmp = Path(tempfile.mkdtemp(prefix="ap2-cli-")).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.home = self.tmp / "home"
+        self.home.mkdir()
+        self.data = self.tmp / "data"
+
+    def run_ap2(self, *args, data=None, env_extra=None, env_drop=(), encoding=None):
+        env = {k: v for k, v in os.environ.items() if k != "AP2_DATA" and k not in env_drop}
+        env["HOME"] = str(self.home)  # the real home folder is never reached
+        env["AP2_DATA"] = str(self.data if data is None else data)
+        env.update(env_extra or {})
+        return subprocess.run([sys.executable, str(AP2), *args], capture_output=True, text=True, env=env,
+                              encoding=encoding, errors="replace", timeout=30)
+
+    def test_bin_is_executable(self):
+        self.assertTrue(os.access(AP2, os.X_OK))
+
+    def test_config_prints_effective_config(self):
+        r = self.run_ap2("config")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = json.loads(r.stdout)
+        self.assertEqual(out, {"data_dir": str(self.data), "keep_transcripts": "always", "mode": "shadow",
+                               "primary_language": "en", "secondary_language": None})
+        self.assertEqual(list(out), sorted(out))
+        self.assertTrue((self.data / "config.yaml").is_file())
+        self.assertTrue((self.data / "items").is_dir())
+        self.assertFalse((self.home / "Documents").exists())
+
+    def test_config_reads_the_file(self):
+        self.data.mkdir()
+        (self.data / "config.yaml").write_text("secondary_language: zh\nkeep_transcripts: 90d\n")
+        out = json.loads(self.run_ap2("config").stdout)
+        self.assertEqual((out["secondary_language"], out["keep_transcripts"]), ("zh", "90d"))
+
+    def test_data_flag_wins_over_env(self):
+        other = self.tmp / "other"
+        r = self.run_ap2("config", "--data", str(other))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)["data_dir"], str(other))
+        self.assertTrue((other / "config.yaml").is_file())
+        self.assertFalse(self.data.exists())
+
+    def test_no_args_prints_usage_and_exits_2(self):
+        r = self.run_ap2()
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("usage", r.stderr.lower())
+        self.assertIn("config", r.stderr)
+
+    def test_invalid_config_exits_1_with_error_on_stderr(self):
+        self.data.mkdir()
+        (self.data / "config.yaml").write_text("mode: loud\n")
+        r = self.run_ap2("config")
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.stdout, "")
+        self.assertIn("mode", r.stderr)
+        self.assertIn("line 1:", r.stderr)
+
+    def test_data_inside_dot_claude_exits_1(self):
+        r = self.run_ap2("config", data=self.home / ".claude" / "assistant")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn(".claude", r.stderr)
+        self.assertFalse((self.home / ".claude").exists())
+
+    @unittest.skipIf(os.geteuid() == 0, "root ignores folder permissions")
+    def test_unreadable_data_folder_exits_1_without_a_traceback(self):
+        np = self.tmp / "np"
+        (np / "inner").mkdir(parents=True)
+        np.chmod(0)
+        self.addCleanup(np.chmod, 0o755)
+        r = self.run_ap2("config", "--data", str(np / "inner" / "x"))
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.stdout, "")
+        self.assertIn("ap2:", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+
+    def assert_non_ascii_data_prints_parseable_json(self, env_extra):
+        target = self.tmp / "\u52a9\u624b"
+        r = self.run_ap2("config", "--data", str(target), env_extra=env_extra,
+                         env_drop=("PYTHONUTF8", "PYTHONIOENCODING"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertEqual(json.loads(r.stdout)["data_dir"], str(target))
+
+    def test_non_ascii_data_folder_under_latin1_output_prints_parseable_json(self):
+        self.assert_non_ascii_data_prints_parseable_json({"PYTHONIOENCODING": "latin-1"})
+
+    def test_non_ascii_data_folder_under_latin1_locale_prints_parseable_json(self):
+        try:
+            names = subprocess.run(["locale", "-a"], capture_output=True, text=True, errors="replace",
+                                   timeout=30).stdout.split()
+        except OSError:
+            names = []
+        # an en_US Latin-1 locale; macOS and glibc spell its name differently, so compare letters and digits only
+        latin1 = [n for n in names
+                  if n.startswith("en_US.") and "".join(filter(str.isalnum, n)).lower().endswith("iso88591")]
+        if not latin1:
+            self.skipTest("no en_US Latin-1 locale is installed")
+        self.assert_non_ascii_data_prints_parseable_json({"LC_ALL": latin1[0]})
+
+    def test_non_ascii_data_folder_under_utf8_output_prints_the_name_as_is(self):
+        target = self.tmp / "\u52a9\u624b"
+        r = self.run_ap2("config", "--data", str(target), env_extra={"PYTHONIOENCODING": "utf-8"}, encoding="utf-8")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("\u52a9\u624b", r.stdout)
+        self.assertNotIn("\\u52a9", r.stdout)
+        self.assertEqual(json.loads(r.stdout)["data_dir"], str(target))
+
+    def test_config_with_stdout_closed_exits_0_without_a_traceback(self):
+        env = {k: v for k, v in os.environ.items() if k != "AP2_DATA"}
+        env.update(HOME=str(self.home), AP2_DATA=str(self.data))
+        # '>&-' closes stdout, so Python starts with sys.stdout set to None
+        r = subprocess.run(["sh", "-c", '"$0" "$1" config >&-', sys.executable, str(AP2)], stdin=subprocess.DEVNULL,
+                           stderr=subprocess.PIPE, text=True, env=env, errors="replace", timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertTrue((self.data / "config.yaml").is_file())
+
+    def test_config_into_a_pipe_nobody_reads_exits_1_without_a_traceback(self):
+        # `ap2 config | true`: the reader is gone before ap2 writes. The read end is closed before ap2 starts, so
+        # every write hits a closed pipe (no race).
+        env = {k: v for k, v in os.environ.items() if k != "AP2_DATA"}
+        env.update(HOME=str(self.home), AP2_DATA=str(self.data))
+        r, w = os.pipe()
+        os.close(r)
+        try:
+            proc = subprocess.Popen([sys.executable, str(AP2), "config"], stdin=subprocess.DEVNULL, stdout=w,
+                                    stderr=subprocess.PIPE, env=env)
+        finally:
+            os.close(w)
+        _, err = proc.communicate(timeout=30)
+        err = err.decode("utf-8", "replace")
+        self.assertEqual(proc.returncode, 1, err)
+        self.assertEqual(err, "")
+        self.assertTrue((self.data / "config.yaml").is_file())
+
+    @unittest.skipUnless(os.path.exists("/dev/full"), "needs /dev/full (Linux)")
+    def test_config_into_a_full_disk_exits_1_with_one_line(self):
+        # /dev/full fails every write with ENOSPC (no space left on device).
+        env = {k: v for k, v in os.environ.items() if k != "AP2_DATA"}
+        env.update(HOME=str(self.home), AP2_DATA=str(self.data))
+        with open("/dev/full", "wb") as full:
+            r = subprocess.run([sys.executable, str(AP2), "config"], stdin=subprocess.DEVNULL, stdout=full,
+                               stderr=subprocess.PIPE, text=True, env=env, errors="replace", timeout=30)
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("ap2: cannot write the output", r.stderr)
+        self.assertNotIn("Exception ignored", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertTrue((self.data / "config.yaml").is_file())
+
+    def test_non_ascii_error_under_latin1_output_has_no_traceback(self):
+        r = self.run_ap2("config", data=self.home / ".claude" / "\u52a9\u624b",
+                         env_extra={"PYTHONIOENCODING": "latin-1"}, env_drop=("PYTHONUTF8",))
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.stdout, "")
+        self.assertIn("ap2:", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+
+
+def use_temp_home(test: unittest.TestCase) -> None:
+    """Run the test under TempHome, so the real home's ~/.claude (which may hold the temp folder) is never checked."""
+    home = TempHome()
+    home.__enter__()
+    test.addCleanup(home.__exit__)
+
+
+class ClosedStderrTest(unittest.TestCase):
+    # With stderr closed, sys.stderr is None, and print(file=None) would write to stdout instead.
+    def setUp(self):
+        use_temp_home(self)
+
+    def run_main(self, argv):
+        out = io.StringIO()
+        with mock.patch.object(sys, "stderr", None), contextlib.redirect_stdout(out):
+            code = cli.main(argv)
+        return code, out.getvalue()
+
+    def test_error_is_not_printed_to_stdout(self):
+        data = Path(tempfile.mkdtemp(prefix="ap2-cli-")).resolve()
+        self.addCleanup(shutil.rmtree, data, True)
+        (data / "config.yaml").write_text("mode: loud\n")
+        self.assertEqual(self.run_main(["config", "--data", str(data)]), (1, ""))
+
+    def test_usage_is_not_printed_to_stdout(self):
+        self.assertEqual(self.run_main([]), (2, ""))
+
+
+class OutputWriteErrorTest(unittest.TestCase):
+    # In-process, so it runs where /dev/full does not exist (macOS). The fake stdout's fileno() is a file this
+    # test owns, so pointing it at devnull cannot touch the test runner's real stdout.
+    class FullStdout:
+        encoding = "utf-8"
+
+        def __init__(self, fd):
+            self.fd = fd
+
+        def write(self, _text):
+            raise OSError(28, "No space left on device")
+
+        def flush(self):
+            raise OSError(28, "No space left on device")
+
+        def fileno(self):
+            return self.fd
+
+    def setUp(self):
+        use_temp_home(self)
+
+    def test_disk_full_returns_1_with_one_line_and_points_stdout_at_devnull(self):
+        tmp = Path(tempfile.mkdtemp(prefix="ap2-cli-")).resolve()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        fd = os.open(tmp / "out", os.O_WRONLY | os.O_CREAT)
+        self.addCleanup(os.close, fd)
+        err = io.StringIO()
+        with mock.patch.object(sys, "stdout", self.FullStdout(fd)), mock.patch.object(sys, "stderr", err):
+            code = cli.main(["config", "--data", str(tmp / "data")])
+        self.assertEqual(code, 1)
+        self.assertEqual(err.getvalue(), "ap2: cannot write the output: [Errno 28] No space left on device\n")
+        self.assertEqual(os.fstat(fd).st_rdev, os.stat(os.devnull).st_rdev)
+        self.assertTrue((tmp / "data" / "config.yaml").is_file())
+
+    def test_disk_full_on_a_stream_without_a_file_descriptor_still_returns_1(self):
+        tmp = Path(tempfile.mkdtemp(prefix="ap2-cli-")).resolve()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        out = self.FullStdout(None)
+        out.fileno = mock.Mock(side_effect=io.UnsupportedOperation("fileno"))
+        err = io.StringIO()
+        with mock.patch.object(sys, "stdout", out), mock.patch.object(sys, "stderr", err):
+            code = cli.main(["config", "--data", str(tmp / "data")])
+        self.assertEqual(code, 1)
+        self.assertIn("ap2: cannot write the output", err.getvalue())
+
+
+if __name__ == "__main__":
+    unittest.main()
