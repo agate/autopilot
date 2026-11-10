@@ -1,0 +1,15 @@
+# A user's own Question: it replaces the built-in one and adds the design's "Remind me tomorrow" button (section 6).
+kind: question
+title: Question (mine)
+source: any
+view: [source_block, draft, activity]
+buttons:
+  - id: remind
+    label: Remind me tomorrow
+    lane: planned
+  - id: sent
+    label: I sent it
+    lane: done
+roles:
+  - role: investigate
+    brief: "Answer the question in {title}. Draft a short reply; never send it."

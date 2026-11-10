@@ -7,7 +7,7 @@ import os
 import sys
 from pathlib import Path
 
-from assistant import config, datadir
+from assistant import config, datadir, templates
 from assistant.cards import LANES, CardError
 from assistant.config import ConfigError, ShadowModeError
 from assistant.resources import WorkerError
@@ -75,7 +75,8 @@ def _parser() -> argparse.ArgumentParser:
     r.add_argument("point", metavar="POINT")
     r.add_argument("--by", default="ap2", help=BY_HELP)
     r.add_argument("--data", metavar="PATH", help=DATA_HELP)
-
+    _gate_parser(sub)
+    _template_parser(sub)
     _worker_parser(sub)
     return p
 
@@ -173,8 +174,8 @@ class _OutputError(Exception):
 
 def _write(text: str, stream) -> None:
     """Write `text` to `stream` and flush it now, so a write error shows up here and not in the flush at exit.
-    A closed stream (None) gets nothing. When the write fails, the stream is pointed at devnull first, so the
-    flush at exit cannot fail again."""
+    A closed stream (None) gets nothing. When the write fails, the stream is pointed at devnull first (when devnull
+    can be opened), so the flush at exit does not fail again."""
     if stream is None:
         return
     try:
@@ -194,12 +195,27 @@ def _write_out(text: str) -> None:
 
 def _to_devnull(stream) -> None:
     """Point the stream's file descriptor at devnull (the recipe from the Python signal module docs). Does
-    nothing when the stream is not a real file."""
+    nothing when the stream is not a real file. Never raises: when devnull cannot be opened or moved onto the fd
+    (e.g. EMFILE, too many open files), the stream is left as it is and the caller still raises the write's own
+    error. The devnull fd it opens is closed again, unless it landed on the stream's own fd."""
     try:
         fd = stream.fileno()
     except (AttributeError, OSError, ValueError):  # an in-memory stream (io.UnsupportedOperation)
         return
-    os.dup2(os.open(os.devnull, os.O_WRONLY), fd)
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+    except OSError:
+        return
+    try:
+        os.dup2(devnull, fd)
+    except OSError:
+        pass
+    finally:
+        if devnull != fd:  # cannot happen after a fresh os.open while fd is open, but never close the stream's fd
+            try:
+                os.close(devnull)
+            except OSError:
+                pass
 
 
 def _print_json(out) -> None:
@@ -266,6 +282,96 @@ def cmd_restore(args) -> int:
 
 COMMANDS = {"config": cmd_config, "card": cmd_card, "search": cmd_search, "restore": cmd_restore}
 COMMANDS["worker"] = cmd_worker
+
+
+# -- ap2 gate (slice 5) -------------------------------------------------------------------------------------------
+
+def _gate_now(text: str):
+    """--now: an ISO time with a zone (2026-11-10T09:00:00Z or ...-08:00), for trying a run at another time. It
+    may not be later than the real time (plus the slot grace): a run writes last_slot, makes cards and prunes
+    restore points, so a run in the future would hold back every real slot until then. A year before 1971 is
+    refused too (the slot and prune arithmetic would go below year 1)."""
+    from datetime import datetime, timezone
+    from assistant import cards, routines
+    try:
+        at = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not an ISO time: {text!r} (for example 2026-11-10T09:00:00Z)") from None
+    if at.tzinfo is None:
+        raise argparse.ArgumentTypeError(f"{text!r} has no time zone; add Z or an offset such as -08:00")
+    try:
+        in_utc = at.astimezone(timezone.utc)
+    except OverflowError:
+        in_utc = None
+    if in_utc is None or in_utc.year < 1971:
+        raise argparse.ArgumentTypeError(f"{text!r} is out of range (years 1971 to now)")
+    if in_utc > cards.now_utc() + routines.GRACE:
+        raise argparse.ArgumentTypeError(f"{text!r} cannot be later than the real time: a run writes last_slot, "
+                                         f"makes cards and prunes restore points")
+    return at
+
+
+def _gate_parser(sub) -> None:
+    g = sub.add_parser("gate", help="run the gate once and print what it did",
+                       description="One gate run, no AI: start the routine slots that are due (card first, then "
+                                   "last_slot), list the watches that are due, prune restore points older than 30 "
+                                   "days, and write gate.json and gate.log. Prints the run as JSON. While another "
+                                   "run holds the gate lock, prints {\"locked\": true, ...} and exits 0.")
+    g.add_argument("--now", type=_gate_now, metavar="ISO", help="run as if it were this time (default: now)")
+    g.add_argument("--data", metavar="PATH", help=DATA_HELP)
+
+
+def cmd_gate(args) -> int:
+    from assistant import cards, gate
+    data = datadir.ensure(datadir.resolve(args.data))
+    _print_json(gate.run(data, args.now or cards.now_utc()))
+    return 0
+
+
+COMMANDS["gate"] = cmd_gate
+
+
+# --- ap2 template (design 6) ---------------------------------------------------------------------------------
+# Read-only: none of these creates the data folder or writes a file. A bad template is a TemplateError (a
+# ConfigError), printed as one `ap2: <file>: line N: ...` line with exit 1.
+
+def _template_parser(sub) -> None:
+    t = sub.add_parser("template", help="list, show or check card templates",
+                       description="List, show or check card templates: the built-in ones and the user's own in "
+                                   "<data>/templates/, which win on the same kind.")
+    t_sub = t.add_subparsers(dest="template_command", metavar="<template command>", title="template commands")
+    t_sub.required = True
+    li = t_sub.add_parser("list", help="print every template's kind and origin as a JSON list",
+                          description="Print every template (built in, and the user's own) as a JSON list, by kind.")
+    li.add_argument("--data", metavar="PATH", help=DATA_HELP)
+    sh = t_sub.add_parser("show", help="print one template, with each role's tools",
+                          description="Print the template in use for KIND as JSON: its file, what it shows, and "
+                                      "each role with the tools and permission floor it keeps.")
+    sh.add_argument("kind", metavar="KIND")
+    sh.add_argument("--data", metavar="PATH", help=DATA_HELP)
+    ch = t_sub.add_parser("check", help="validate a template file without installing it",
+                          description="Validate the template in FILE (named <kind>.yaml) and say which template it "
+                                      "would replace. Nothing is copied or installed.")
+    ch.add_argument("file", metavar="FILE")
+    ch.add_argument("--data", metavar="PATH", help=DATA_HELP)
+
+
+def cmd_template(args) -> int:
+    data = datadir.resolve(args.data)  # refused folders are refused here too; nothing is created
+    if args.template_command == "list":
+        out = [templates.summary(t) for t in templates.catalog(data).values()]
+    elif args.template_command == "show":
+        cat = templates.catalog(data)
+        if args.kind not in cat:
+            raise templates.TemplateError(f"no template for kind {args.kind!r} (kinds: {', '.join(cat)})")
+        out = templates.describe(cat[args.kind])
+    else:
+        out = templates.check(args.file, data)
+    _print_json(out)
+    return 0
+
+
+COMMANDS["template"] = cmd_template
 
 
 def main(argv: list) -> int:
