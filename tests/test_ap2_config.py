@@ -276,12 +276,14 @@ class FileSystemErrorTest(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="ap2-data-")).resolve()
         self.addCleanup(shutil.rmtree, self.tmp, True)
 
-    def test_resolve_reports_an_unreadable_parent(self):
+    def test_unreadable_parent_is_a_config_error(self):
+        # Whether resolve() or ensure() refuses depends on the Python version (newer Path.exists() returns False on
+        # any OSError), so check what `ap2 config --data` runs: one ConfigError naming the path either way.
         with TempHome() as home:
             (home / ".claude").mkdir()  # so the same-folder check looks at the path
             target = locked_parent(self, home)
             with self.assertRaises(ConfigError) as ctx:
-                datadir.resolve(str(target))
+                datadir.ensure(datadir.resolve(str(target)))
             self.assertIn(str(target), str(ctx.exception))
 
     def test_ensure_reports_an_unreadable_parent(self):
