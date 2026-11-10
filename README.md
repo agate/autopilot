@@ -38,6 +38,15 @@ call. When you have questions, you open one (`/autopilot <name>`).
   claude.ai sign-in.
 - **GitHub CLI** (`gh`), signed in (`gh auth login`), and **git**.
 - **python3.** `bin/ap` is Python 3 with the standard library only.
+- **A shell that sets up each project.** Each background session starts with
+  the environment your login shell has after `cd` into the session's folder
+  (and that folder's direnv `.envrc`, when it has one), not launchd's. A tool
+  that needs variables from your shell, such as a nix `git` and its
+  `NIX_SSL_CERT_FILE`, works the same as in your terminal. `ANTHROPIC_*` and
+  `CLAUDE*` variables still come from the gate, so a key in your profile never
+  changes how a session signs in or bills. zsh, bash, sh and
+  ksh are read; with another shell, or `AUTOPILOT_PROJECT_ENV=off`, a session
+  keeps the gate's environment.
 - **Jira sources only:** Jira tools (an Atlassian MCP server) that load in
   Claude Code from the repo the autopilot works in.
 - **Recommended:** the Xcode command line tools (a C compiler). Installing the login item compiles a small launcher into

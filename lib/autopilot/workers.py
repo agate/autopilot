@@ -8,9 +8,10 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 
-from autopilot import budget, cli, config, events, paths, sessions, state
+from autopilot import budget, cli, config, events, paths, sessions, shellenv, state
 
 AGENTS = {"implement": "autopilot:implementer", "review": "autopilot:reviewer"}
+PROTECTED_ENV = ("AUTOPILOT_", "ANTHROPIC_", "CLAUDE")
 _BG = re.compile(r"backgrounded · (\w+)")  # a resumed copy prints no name after the id
 
 
@@ -66,6 +67,17 @@ def all_workers() -> list:
 
 
 def _launch(argv: list, cwd: str, env: dict) -> str:
+    # The session gets the environment of its own folder, as the user's terminal builds it (shellenv). What
+    # decides who the session is and who pays for it stays the gate's: the autopilot's own variables, and any
+    # Anthropic or Claude Code setting a shell profile exports for scripts (an API key would move billing).
+    if shellenv.enabled():
+        project, why = shellenv.read(cwd)
+        if project is not None:
+            keep = {k: v for k, v in env.items() if k.startswith(PROTECTED_ENV)}
+            env = {**env, **{k: v for k, v in project.items() if not k.startswith(PROTECTED_ENV)}, **keep}
+        elif why != shellenv.UNSUPPORTED:
+            print(f"autopilot: could not read the shell environment of {cwd} ({why}); "
+                  "the session keeps the current one", file=sys.stderr)
     out = subprocess.run(argv, cwd=cwd, env=env, capture_output=True, text=True, timeout=120,
                          stdin=subprocess.DEVNULL)
     m = _BG.search(out.stdout + out.stderr)
