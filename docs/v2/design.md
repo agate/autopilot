@@ -606,8 +606,9 @@ Calls the author made without asking (check them):
   their own exit code (0 or 2) instead of 1, because help text is not a result a script reads, while
   `ap2 config`'s JSON is, and a script must see that it was cut short. A closed stream gets nothing (help is
   never sent to stderr instead) and a failed write prints the one line and exits 1 (when stderr is the stream that failed, the line is lost
-  and ap2 still exits 1). None of these prints a
-  traceback or an `Exception ignored` line.
+  and ap2 still exits 1). The `ap2: <message>` line for a refused config or data folder follows the same
+  rules: when stderr's reader is gone or its write fails, the line is lost and ap2 still exits 1, with nothing
+  more. None of these prints a traceback or an `Exception ignored` line.
 - **[decided by the builder]** The card store (design 3.4, 3.6, 3.7, 4.1).
   - Card id: `c-YYYYMMDD-HHMMSS-xxxxxx`, the UTC creation time to the second (ASCII digits only) and 6 random
     lowercase hex digits (a new pair is drawn if the file exists). The file is `<data>/items/<yyyy-mm>/<id>.json`, the month taken from
