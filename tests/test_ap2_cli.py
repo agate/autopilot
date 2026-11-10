@@ -348,9 +348,10 @@ class HelpAndUsageOutputTest(unittest.TestCase):
         for redirect, args, code in ((">&-", "--help", 0), (">&-", "config --help", 0), ("2>&-", "", 2),
                                      ("2>&-", "nosuch", 2)):
             with self.subTest(redirect=redirect, args=args):
+                # The shell warns on stderr when LC_ALL names a locale that is not installed, so leave LC_ALL out.
                 r = subprocess.run(["sh", "-c", f'"$0" "$1" {args} {redirect}', sys.executable, str(AP2)],
-                                   stdin=subprocess.DEVNULL, capture_output=True, text=True, env=self.env,
-                                   errors="replace", timeout=30)
+                                   stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace",
+                                   env={k: v for k, v in self.env.items() if k != "LC_ALL"}, timeout=30)
                 self.assertEqual(r.returncode, code, r.stderr)
                 self.assertEqual(r.stdout + r.stderr, "")
 
