@@ -786,7 +786,7 @@ Calls the author made without asking (check them):
   `config.py` (defaults, validation, and `require_live(cfg, what)`, which every write outside the data folder
   calls first and which refuses in shadow mode), `datadir.py` (lookup and layout), `cli.py` (the `ap2` command,
   run by `bin/ap2`), and the card store: `cards.py` (card shape, ids and checks), `store.py` (the `Store` API:
-  add, get, update, list, restore, propose_opposite, prune, search), `restore.py` (restore points and proposed
+  add, get, update, update_checked, list, restore, propose_opposite, prune, search), `restore.py` (restore points and proposed
   opposite actions) and `index.py` (`index.sqlite`); the gate: `routines.py` (routine files and slots) and `gate.py`
   (one gate run, `ap2 gate`); templates and roles: `templates.py` (loading, the user's override, validation,
   briefs) and `roles.py` (the shipped roles and their tools); the source engine: `sources.py` (loading,
@@ -1463,7 +1463,7 @@ Calls the author made without asking (check them):
     folder by a session that never reaches a model turn. A project that lists `tools` is used as is, always first
     (`projects/**` is Edit-denied). When it lists none (or the card has no project), ap2 finds them every time it
     writes a floor (start, `--resume`, answer, in-place resume of a dead or parked worker), after the shadow-mode
-    refusal and under the worker list's lock: one `claude -p "Reply with the single word OK." --output-format
+    refusal: one `claude -p "Reply with the single word OK." --output-format
     stream-json --verbose` in the worker's folder, with the same process env as its `--bg` launch, so the folder's
     local-scope MCP servers (`claude mcp add` stores them in `~/.claude.json` under that folder's path), an
     approved `<folder>/.mcp.json` and the plugins are all seen. Its output is read line by line; at the first init
@@ -1484,6 +1484,16 @@ Calls the author made without asking (check them):
     call a tool. What it does not cover: the folder's MCP server commands and SessionStart hooks do start before
     the init event. They run only what the worker's own Bash could already run in that folder; limiting what the
     worker's Bash writes is the worker-floor task still queued.
+    **[decided by the builder]** A start (`start`, `--resume`, answer) runs the discovery before it takes
+    the worker list's lock, so no other start, end or check waits up to 180 s on it. It first checks the start on a
+    plain read of the list (another worker on the card, the slot and `needs`, the ports, the folder), so a start
+    the list already refuses runs no discovery; the discovery then runs in that folder with that env. Under the
+    lock every check is made again on the list as it is then, exactly as before; the floor is written there, after
+    those checks, so a refused start never rewrites a running worker's settings, and the floor's env carries the
+    ports picked under the lock (when another start took the planned range meanwhile, the next free one; the tools
+    found are kept, since the ports do not change which tools a folder loads). A folder that changed meanwhile (a
+    parked record that moved) refuses the start ("start it again"): its tools were found elsewhere. An in-place
+    resume of a dead or parked worker still discovers under the lock, since `check` holds it for the whole pass.
     The outward MCP tools are always denied. If they cannot be listed (no init event, claude failed, could not
     start or timed out), nothing starts: the `WorkerError` says to list them in `projects/<name>.yaml` `tools`. On a dead
     worker's resume that counts as its one resume; a parked worker is stopped as when its resume cannot start. An in-place resume first
@@ -1532,7 +1542,9 @@ Calls the author made without asking (check them):
     errors), the other workers are still acted on, and the worker list is written back. The worker list is written
     back however its locked block ends, normally or by any exception (Ctrl-C included), so every change already made
     reaches disk (an interrupted end keeps its `closing` mark or has dropped its record; an interrupted pass stops at
-    that worker), and the exception is then re-raised. A worker with a started
+    that worker), and the exception is then re-raised. **[decided by the builder]** When the block raised and
+    the write fails too, the block's own exception is the one raised, with the write error added to it as a note (Python 3.11 or later; older Python drops the write error);
+    the write error is raised only when the block itself succeeded. A worker with a started
     close (`closing`) still has that close finished when its state cannot be read: the mark says what to do. A
     result or question file that is gone between its two looks is not newer. The listing is taken
     under the worker list's lock, so a start that lands during a check is never judged against a listing from
@@ -1542,7 +1554,11 @@ Calls the author made without asking (check them):
     `sessions.<role>.state: stopped`) with the same `fix` ask (`reason: died_twice`, "could not resume after
     parking"); a shadow-mode refusal leaves it parked. A session the listing did not show yet when it started
     (`session_id` empty) gets its id from the next check's listing, on the record and the card's
-    `sessions.<role>` (`id` and `ids`), so a later stop archives it and a later resume continues it. The same for
+    `sessions.<role>` (`id` and `ids`), so a later stop archives it and a later resume continues it. **[decided by
+    the builder]** The short id `claude --bg` prints goes on the worker's record (a start's new record, or
+    an in-place resume's updated one) before the listing is asked for the session id, so a Ctrl-C or an error
+    there still leaves a record that points at the running session. An in-place resume writes the card under the
+    name `check` was given (`--by`), like every other step of the check. The same for
     an in-place resume's copy: its record takes the copy's id, or empty when the listing lags, never the old
     session's id. Each clock
     runs only
@@ -1551,7 +1567,11 @@ Calls the author made without asking (check them):
     the ask this worker raised, marked `reason: permission_prompt`; the user's own ask is kept). A new prompt after
     a break gets a new ask and a new 30 minutes. When the 30 minutes are up, the attach ask is replaced by one that
     says how to go on (`ap2 worker start <card> <role> --resume`, same `reason`), since the session to attach to
-    is stopped; any start of that role (a resume, an answer) closes it. One rule for every worker ask (any ask
+    is stopped; any start of that role (a resume, an answer) closes it. **[decided by the builder]** Every
+    worker ask is set and closed by one read-check-write under one hold of the store lock (`Store.update_checked`,
+    whose `check(card)` says no, yes, or what the audit line says), so a user's ask that lands between the worker's
+    look at the card and its write is never overwritten or closed; `answer` closes the question it answers the same
+    way, never by a plain write. One rule for every worker ask (any ask
     with `from: worker`), in one helper, `_close_worker_asks`: the worker asks of a role are the attach ask
     (`type: fix`, `reason: permission_prompt`), the pause's resume hint (the same, plus `stage: paused`) and its
     question (`type: answer`). Any new session of the role (start, `--resume`, an in-place resume of a dead or
@@ -1599,7 +1619,13 @@ Calls the author made without asking (check them):
     is older than N days, `always` keeps all). `finish` (the card is done) makes the last copy of every id and, in
     live mode only, runs `claude rm` on each. A `claude rm` that exits non-zero raises with claude's message; `finish` lists
     it under `failed`, keeps that original (the next `finish` tries again) and marks a role `removed` only when
-    every one of its originals is gone. `finish` acts only on the known roles (`implement`, `review`, `pr`) in
+    every one of its originals is gone. **[decided by the builder]** It remembers each original it removed
+    in `sessions.<role>.removed_ids`, and a later `finish` never runs `claude rm` again on those ids (a second
+    `claude rm` of a gone original can fail, and the role would then never be marked); a role marked `removed` by
+    an older `finish` that kept no `removed_ids` counts every id it lists as gone. A session of the role started
+    after a `finish` is removed by the next `finish`. The role is marked `removed` once every id of it is in
+    `removed_ids`. `finish` acts only on
+    the known roles (`implement`, `review`, `pr`) in
     the card's `sessions`; any other key, and a role with no ids, is left as it is on the card. An archive's role must be lowercase letters, else it is
     refused, so a card's keys never make a path outside the data folder.
   - Commands, each with `--data PATH` and `--by NAME`, JSON on stdout, one `ap2: ...` line and exit 1 on an error:

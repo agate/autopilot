@@ -92,7 +92,9 @@ class Registry:
     def locked(self):
         """Hold the lock and yield the records; what the block leaves in the list is written back, however the
         block ends (normally or by any exception, Ctrl-C included), so every change already made reaches disk.
-        An exception is re-raised after the write. Callers change the list only once what it records is true."""
+        An exception is re-raised after the write. Callers change the list only once what it records is true.
+        When the block raised and the write fails too, the block's own exception is the one raised (the write
+        error is noted on it); the write error is raised only when the block itself succeeded."""
         self.data.mkdir(parents=True, exist_ok=True)
         fd = os.open(str(self.data / LOCK), os.O_CREAT | os.O_RDWR, 0o644)
         try:
@@ -100,11 +102,21 @@ class Registry:
                 fcntl.flock(fd, fcntl.LOCK_EX)
             records = self._read()
             before = json.dumps(records, sort_keys=True)
-            try:
-                yield records
-            finally:
+
+            def write_back():
                 if json.dumps(records, sort_keys=True) != before:
                     write_json(self.path, {"workers": records})
+
+            try:
+                yield records
+            except BaseException as first:
+                try:
+                    write_back()
+                except Exception as second:  # noqa: BLE001 - the block's own error is the one that matters
+                    if hasattr(first, "add_note"):  # Python 3.11 and later
+                        first.add_note(f"the worker list could not be written back: {second!r}")
+                raise
+            write_back()
         finally:
             os.close(fd)
 
