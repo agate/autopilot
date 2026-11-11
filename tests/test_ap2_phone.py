@@ -384,7 +384,7 @@ class HideTest(PhoneCase):
         self.assertIn("fr", msg)
         self.assertIn("phone_hide_quotes", msg)
         self.assertEqual(len(msg.splitlines()), 1)
-        self.build(cfg=Config(primary_language="fr"))  # with hiding off, no phrases are needed
+        self.assertEqual(self.build(cfg=Config(primary_language="fr"))["primary_language"], "fr")  # with hiding off, no phrases are needed
 
     def test_a_secondary_language_with_no_phrases_is_refused(self):
         self.pr42()  # read in English: the engine itself refuses a language it has no plain words for

@@ -1,6 +1,7 @@
 """`ap2 phone build [--data PATH] [--out PATH]`, run as a subprocess against a temp data folder."""
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
@@ -10,12 +11,13 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests.helpers import ROOT
-from tests.test_ap2_cli import temp_inside_the_accounts_claude
+from tests.test_ap2_cli import temp_inside_the_accounts_claude, use_temp_home
 from tests.test_ap2_phone import FIELDS, tree
 
-from assistant import cards, datadir
+from assistant import cards, cli, datadir
 from assistant.config import Config
 from assistant.store import Store
 
@@ -156,6 +158,42 @@ class Ap2PhoneCommandTest(unittest.TestCase):
         r = self.run_ap2("phone", "build", "--publish")
         self.assertEqual(r.returncode, 2)
         self.assertIn("phone", self.run_ap2("--help").stdout.decode("utf-8"))
+
+
+class Ap2PhoneOutAtomicTest(unittest.TestCase):
+    """In-process, so the rename can be made to fail: `--out` writes a temp file next to the target and renames
+    it over the target, so a failed write leaves the old file whole and no temp file behind."""
+
+    def setUp(self):
+        use_temp_home(self)
+        self.tmp = Path(tempfile.mkdtemp(prefix="ap2-phone-cli-")).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def test_a_failed_rename_keeps_the_old_file_and_leaves_no_temp_file(self):
+        data = datadir.ensure(self.tmp / "data")  # set up first, so only the --out rename is made to fail
+        out = self.tmp / "phone.json"
+        out.write_text("old", encoding="utf-8")
+        real_replace = os.replace
+        renamed = []
+
+        def replace(src, dst, *args, **kwargs):
+            if Path(dst) == out:
+                renamed.append(Path(src))
+                raise OSError("disk full")
+            return real_replace(src, dst, *args, **kwargs)
+
+        err = io.StringIO()
+        with mock.patch("os.replace", side_effect=replace), mock.patch.object(sys, "stderr", err):
+            code = cli.main(["phone", "build", "--data", str(data), "--out", str(out)])
+        self.assertEqual(code, 1)
+        lines = err.getvalue().splitlines()
+        self.assertEqual(len(lines), 1, err.getvalue())
+        self.assertTrue(lines[0].startswith("ap2:"), lines[0])
+        self.assertIn("disk full", lines[0])
+        self.assertEqual(out.read_text(encoding="utf-8"), "old")
+        self.assertEqual(len(renamed), 1)
+        self.assertEqual(renamed[0].parent, self.tmp)  # the temp file was next to the target
+        self.assertEqual(sorted(self.tmp.glob(".phone.json.*.tmp")), [])
 
 
 if __name__ == "__main__":
