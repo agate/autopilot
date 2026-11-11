@@ -900,19 +900,23 @@ Calls the author made without asking (check them):
     message and the replies in its thread key on one card, and no model is asked to copy `id` into `thread_id`.
     `{thread_id}` keeps its slice-3 meaning. `fill: ai` records that share a key in one read (one thread) all read
     as the latest record (by `at`, then `id`, as text), with the category of the earliest record whose sort makes a
-    card (else the latest's); each keeps its item number. So a thread makes one card that shows its latest message,
-    and a re-read of the same thread is `unchanged` instead of updating the card once per message.
+    card (else the latest `update_card` one's, else the latest's, so a recovery followed by an `fyi` reply still
+    updates the alert card, in either order); each keeps its item number. So a thread makes one card that shows its
+    latest message, and a re-read of the same thread is `unchanged` instead of updating the card once per message.
   - `read.skip_channels` (appendix A's user change), a list of texts, is applied by code to `fill: ai` records: one
     whose `place` or `place_id` matches an entry, a leading `#` and letter case ignored, is dropped with
     `form.place '<value>' is in read.skip_channels`. It is never sent to the tool.
   - The word-for-word check counts a match only at token edges: the character just before and just after the value
     is not a letter or digit, and is not one of `.`, `_`, `:`, `-` with a letter or digit beyond it. So `1730000000`
     is not found inside `1730000000.123456` and `C0123` not inside `C0123ABCD`, but `1730000000.123456` is found at
-    the end of a sentence ending in `.`. `place_id` is checked too (it builds links and keys). The reason text is
-    unchanged: `form.<field> '<value>' is not in the raw output`.
+    the end of a sentence ending in `.`. `place_id` is checked too (it builds links and keys), as derived: a record
+    with no `place_id` has its `place` checked, since that stands in for it. The reason text is unchanged:
+    `form.<field> '<value>' is not in the raw output`.
   - Scan folder: `<data>/sources/.scan/<YYYYMMDDTHHMMSSZ>-<6 hex>/` holds `plan.json`, `calls.jsonl` (the hook's
-    log), `<source>.records.json` (written by the session, `fill: ai` only) and `<source>.raw.json` / `.raw.txt`
-    (built by the take). The loader skips it (a dot folder).
+    log), `records/<source>.records.json` (written by the session, `fill: ai` only) and `<source>.raw.json` /
+    `.raw.txt` (built by the take). The loader skips it (a dot folder). The plan makes `records/`, the only folder
+    the session writes in; `plan.json` and `calls.jsonl` are code's, and the launch slice must allow `Write` and
+    `Edit` only under `<scan>/records/`.
   - Plan: `ap2 scan plan [NAME...] [--data PATH]` (no name: every `mcp`, `connector` and `skill` source) writes
     `plan.json` and prints `{plan, version, made_at, folder, calls, errors, brief}`. A call is `source`, `via`,
     `fill`, `args`, `server`/`tool`/`tools`/`skill` as written, `allowed_tools` (`mcp__<server>__<tool>` when the
@@ -928,28 +932,37 @@ Calls the author made without asking (check them):
     not copy tool replies into files; for `fill: ai`, write the records file as a JSON list with the form's fields,
     `id`, `thread_id`, `at` and `place_id` copied exactly as the tool returned them and `category` from the listed
     ones; follow a call's `instructions`; post, send, create, edit or comment nowhere and write no other file. Then
-    one numbered block per call (its tools, its arguments as JSON, its records file, form and categories).
+    one numbered block per call (its tools, its arguments as JSON, its records file, form and categories). It does
+    not name `plan.json`: the session does not need it.
   - Hook: `ap2 scan save-raw --plan FILE` is the PostToolUse hook command. It reads one payload (`tool_name`,
     `tool_input`, `tool_response`) from stdin, at most `engine.MAX_OUTPUT` bytes, and appends one JSON line
     `{tool_name, tool_input, text}` to the scan folder's `calls.jsonl`, under an `flock` of that file. `text` is the
     response as is when it is text, the texts of a list of `{"type": "text"}` blocks joined by a newline, else its
     JSON text. It keeps a call only when the tool name ends in `__<tool>` for a tool in the plan; when the plan runs
-    a skill, every tool but the session's own `Write`, `Edit` and `NotebookEdit`. Past `MAX_OUTPUT` in total (or a
-    larger payload) the log gets one `{"cut_short": true}` line and nothing more. A bad payload is one `ap2:` line,
-    exit 1, the log unchanged. The plan must be a `plan.json` inside a `.scan/<scan>/` folder; the hook writes only
-    there.
+    a skill, every tool but the session's own `Write`, `Edit`, `MultiEdit`, `NotebookEdit` and `TodoWrite`. A call
+    whose `tool_input` names the scan folder (its `<stamp>-<hex>` name in any text, at any depth) is never kept, so
+    the session reading back its own records file adds nothing to the raw output. A skill's raw output is what its
+    tools printed, so its ids are only as trustworthy as the tools the launch slice allows for a skill scan. Past
+    `MAX_OUTPUT` in total (or a larger payload) the log gets one `{"cut_short": true}` line and nothing more. A bad
+    payload is one `ap2:` line, exit 1, the log unchanged. The plan must be a `plan.json` inside a `.scan/<scan>/`
+    folder; the hook writes only there, and a `calls.jsonl` that is a symbolic link is refused (one `ap2:` line).
   - Take: `ap2 scan take PLAN [--dry-run] [--data PATH]` (`scan.take`) builds each call's raw file in the scan
     folder: for `fill: paths`, the text of the first logged call of its tool whose `tool_input` holds every planned
     argument with the same value; for `fill: ai`, every logged text of its tools (a skill's: every logged text), in
-    order, joined by a blank line, with no header added, so nothing code wrote can match an id. Then it calls
-    `Engine.read_saved`, which copies the raw under `.raw/<source>/`, writes the report, checks word for word and
-    makes the cards. A call with no matching logged call, a `fill: ai` call of a cut-short log, and a missing or bad
-    records file go in `errors` while the others still read, and the exit code is 0. A second take of the same scan
-    is `unchanged`; `--dry-run` builds the raw files in a temp folder and writes nothing in the data folder. The
-    plan must be in this data folder's `.scan/`.
+    order, joined by a blank line, with no header added, so nothing code wrote can match an id. Each raw file is
+    written to a temp file and renamed into place, so a symbolic link left at its path is replaced, never followed.
+    Then it calls `Engine.read_saved`, which copies the raw under `.raw/<source>/`, writes the report, checks word
+    for word and makes the cards. Take first plans each call again from its source as it loads now and refuses one that differs
+    from the plan's (`<name>: the plan's call does not match the source as it loads now`), since the session could
+    reach `plan.json`; so a `via: command` source is never taken, and a source edited after the plan needs a new
+    plan. Such a call, a call with no matching logged call, a `fill: ai` call of a cut-short log, and a missing, bad
+    or symbolic-link records file go in `errors` while the others still read, and the exit code is 0. A second take
+    of the same scan is `unchanged`; `--dry-run` builds the raw files in a temp folder and writes nothing in the
+    data folder. The plan must be in this data folder's `.scan/`.
   - Write actions: each `writes.<event>` maps actions to text; an action is `transition`, `assign` or
     `remote_link`, and one listed in `never` is refused with its line (a user `extends` that adds
-    `on_pr: {comment: ...}`). `on_<event>: null` turns a write off. `Engine.apply_writes` still refuses in shadow
+    `on_pr: {comment: ...}`). `on_<event>: null` turns a write off, and `<action>: null` turns one action off
+    (`on_start: { assign: null }` keeps the built-in `transition`). `Engine.apply_writes` still refuses in shadow
     mode before anything and runs nothing in live mode.
   - Not yet (later slices): starting the scan session itself (`claude` with a small model, its tool allow-list, the
     hook settings that call `ap2 scan save-raw`); the gate turning a source's `every:` into due watches and plans;

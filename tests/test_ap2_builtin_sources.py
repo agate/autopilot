@@ -365,10 +365,45 @@ class SlackThreadTest(BuiltinCase):
         [card] = self.store().list()
         self.assertEqual((card["kind"], card["title"]), ("alert", "recovered"))
 
+    def test_a_recovery_then_an_fyi_reply_still_updates_the_alert_card_in_either_order(self):
+        raw = self.tmp / "alerts.txt"
+        raw.write_text("Channel: #alerts (C0444ALRT)\nMessage_ts: 1730000500.000100\nText: checkout errors high\n"
+                       "Message_ts: 1730000900.000200 thread_ts: 1730000500.000100\nText: recovered\n"
+                       "Message_ts: 1730000950.000300 thread_ts: 1730000500.000100\nText: thanks all\n")
+        alert = {"id": "1730000500.000100", "at": "1730000500.000100", "text": "checkout errors high",
+                 "place_id": "C0444ALRT", "category": "alert"}
+        recovered = {"id": "1730000900.000200", "thread_id": "1730000500.000100", "at": "1730000900.000200",
+                     "text": "recovered", "place_id": "C0444ALRT", "category": "recovered"}
+        fyi = {"id": "1730000950.000300", "thread_id": "1730000500.000100", "at": "1730000950.000300",
+               "text": "thanks all", "place_id": "C0444ALRT", "category": "fyi"}
+        for n, records in enumerate(([recovered, fyi], [fyi, recovered])):
+            with self.subTest([r["category"] for r in records]):
+                self.data = datadir.ensure(self.tmp / f"data-{n}")  # a fresh store for each order
+                self.user("slack-alerts", "extends: slack-alerts\nsettings: { alert_channel: C0444ALRT }\n")
+                self.engine().read_saved("slack-alerts", raw, records=[alert])
+                self.clock.tick()
+                result = self.engine().read_saved("slack-alerts", raw, records=records)
+                self.assertEqual([(i["category"], i["becomes"], i["action"]) for i in result["items"]],
+                                 [("recovered", "update_card", "update"), ("recovered", "update_card", "unchanged")])
+                [card] = self.store().list()
+                self.assertEqual((card["kind"], card["title"]), ("alert", "thanks all"))  # the latest's words
+
 
 class WordForWordTest(BuiltinCase):
     def test_place_id_is_checked_word_for_word(self):
         self.assertIn("place_id", engine.WORD_FOR_WORD)
+
+    def test_a_place_that_stands_in_for_place_id_is_checked_word_for_word(self):
+        self.user("slack-mentions", "extends: slack-mentions\nsettings: { me: U0EXAMPLE1 }\n")
+        record = {k: v for k, v in json.loads((SCAN / "slack-mentions.records.json").read_text())[0].items()
+                  if k != "place_id"}
+        made_up = dict(record, place="C0NOTINRAW")
+        result = self.engine().read_saved("slack-mentions", self.copy("slack-search.txt"),
+                                          records=[made_up, record], dry_run=True)
+        self.assertEqual(result["dropped"], [{"item": 0, "reason": "form.place_id 'C0NOTINRAW' is not in the raw "
+                                                                   "output"}])
+        self.assertEqual([(i["item"], i["key"]) for i in result["items"]],
+                         [(1, "payments:1730000000.123456")])  # "#payments" is in the raw: kept
 
     def test_the_token_edge_table(self):
         cases = [
@@ -451,6 +486,9 @@ class JiraWritesTest(BuiltinCase):
     def test_a_write_can_be_turned_off_and_values_must_be_text(self):
         self.user("jira-epic", "extends: jira-epic\nwrites: { on_pr: null }\n")
         self.assertIsNone(Loader(self.data).load("jira-epic").data["writes"]["on_pr"])
+        self.user("jira-epic", "extends: jira-epic\nwrites: { on_start: { assign: null } }\n")
+        on_start = Loader(self.data).load("jira-epic").data["writes"]["on_start"]
+        self.assertEqual(on_start, {"transition": "In Progress", "assign": None})  # one action off, the rest kept
         self.user("jira-epic", "extends: jira-epic\nwrites: { on_pr: { transition: [a] } }\n")
         with self.assertRaisesRegex(SourceError, "writes.on_pr.transition must be a text"):
             Loader(self.data).load("jira-epic")

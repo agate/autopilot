@@ -355,6 +355,8 @@ def validate(src: Source, lines: Optional[dict] = None) -> Source:
                 fail(f"writes.{event} must map an action ({', '.join(WRITE_ACTIONS)}) to its value, not "
                      f"{actions!r}", ("writes", event))
             for action, value in actions.items():
+                if value is None:  # a user's `assign: null` turns that one action off
+                    continue
                 at = ("writes", event, action) if ("writes", event, action) in lines else ("writes", event)
                 if action in never:
                     fail(f"writes.{event}.{action}: '{action}' is listed in never, so no write may do it", at)

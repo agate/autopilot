@@ -8,19 +8,24 @@ scan into cards. The session only reads; it decides nothing about work.
   starts no process. No `writes` or `never` text reaches a plan.
 - `save_raw(plan_file, payload)` is the PostToolUse hook: it appends one line `{tool_name, tool_input, text}` to the
   scan folder's `calls.jsonl` for a tool the plan names. The raw output is saved by code, not by the model.
-- `take(data, plan_file)` builds each call's raw file from that log and hands it to `Engine.read_saved`, which
-  copies it under `<data>/sources/.raw/<source>/`, checks the records word for word and makes the cards.
+- `take(data, plan_file)` plans each call again from its source as it loads now (a call that differs is refused),
+  builds its raw file from that log and hands it to `Engine.read_saved`, which copies it under
+  `<data>/sources/.raw/<source>/`, checks the records word for word and makes the cards.
+
+The session writes only its records files, under `<scan>/records/`; plan.json and calls.jsonl are code's.
 
 Not here yet (design 12): starting the session itself, the gate turning `every:` into due scans, and measuring
 what a scan costs.
 """
 from __future__ import annotations
 
+import errno
 import fcntl
 import json
 import os
 import secrets
 import shutil
+import stat
 import tempfile
 from datetime import timezone
 from pathlib import Path
@@ -34,10 +39,11 @@ from assistant.store import write_json
 SCAN = Path(sources.FOLDER) / ".scan"
 PLAN = "plan.json"
 LOG = "calls.jsonl"
+RECORDS = "records"  # the only folder the session writes in
 STAMP = "%Y%m%dT%H%M%SZ"
 VIAS = ("mcp", "connector", "skill")
 # The session's own file writes: never a tool's reply, so a skill scan does not log them.
-OWN_WRITES = ("Write", "Edit", "NotebookEdit")
+OWN_WRITES = ("Write", "Edit", "MultiEdit", "NotebookEdit", "TodoWrite")
 # The line that marks a log cut short (past engine.MAX_OUTPUT in total).
 CUT = {"cut_short": True}
 VERSION = 1
@@ -114,6 +120,7 @@ def _new_folder(data: Path, clock: Callable) -> Path:
                 folder.mkdir()
             except FileExistsError:
                 continue
+            (folder / RECORDS).mkdir()
             return folder
     except OSError as e:
         raise ScanError(f"cannot make a scan folder in {base}: {e}") from e
@@ -176,12 +183,12 @@ def allowed_tools(call: dict) -> list:
 
 
 def records_path(folder: Path, name: str) -> Path:
-    return Path(folder) / f"{name}.records.json"
+    return Path(folder) / RECORDS / f"{name}.records.json"
 
 
 def brief(p: dict) -> str:
     """The fixed English prompt for the session, built by code from the plan's calls."""
-    lines = [BRIEF_HEAD, f"Plan: {Path(p['folder']) / PLAN}", ""]
+    lines = [BRIEF_HEAD]
     if not p["calls"]:
         lines.append("There is nothing to call. End now.")
         return "\n".join(lines) + "\n"
@@ -244,12 +251,32 @@ def response_text(response) -> str:
     return json.dumps(response, sort_keys=True, ensure_ascii=False)
 
 
-def keeps(p: dict, tool_name: str) -> bool:
+def keeps(p: dict, tool_name: str, tool_input=None, folder: Optional[Path] = None) -> bool:
     """Whether the hook logs a call of `tool_name`: a name ending in `__<tool>` for a tool in the plan, or, when
-    the plan runs a skill, any tool but the session's own file writes."""
+    the plan runs a skill, any tool but the session's own file writes. A call whose `tool_input` names the scan
+    folder (its `<stamp>-<hex>` name in any text, at any depth) is never kept: the session reading back its own
+    records file must not put its own ids in the raw output."""
+    if folder is not None and _names(tool_input, Path(folder).name):
+        return False
     if any(tool_name.endswith(f"__{t}") for call in p["calls"] for t in call_tools(call)):
         return True
     return any(call["via"] == "skill" for call in p["calls"]) and tool_name not in OWN_WRITES
+
+
+def _names(value, word: str) -> bool:
+    """Whether a text in `value` (texts, lists and maps, keys too) holds `word`."""
+    stack = [value]
+    while stack:
+        v = stack.pop()
+        if isinstance(v, str):
+            if word in v:
+                return True
+        elif isinstance(v, dict):
+            stack.extend(v.keys())
+            stack.extend(v.values())
+        elif isinstance(v, list):
+            stack.extend(v)
+    return False
 
 
 def save_raw(plan_file, payload: bytes) -> dict:
@@ -275,7 +302,7 @@ def save_raw(plan_file, payload: bytes) -> dict:
         raise ScanError("the hook payload's tool_input must be a JSON object")
     if "tool_response" not in hook:
         raise ScanError("the hook payload has no tool_response")
-    if not keeps(p, name):
+    if not keeps(p, name, tool_input, folder):
         return {"kept": False, "tool_name": name}
     line = {"tool_name": name, "tool_input": tool_input, "text": response_text(hook["tool_response"])}
     kept = _append(folder, line, cap)
@@ -284,15 +311,23 @@ def save_raw(plan_file, payload: bytes) -> dict:
 
 def _append(folder: Path, line: Optional[dict], cap: int) -> bool:
     """Append `line` to the log under its lock; when it would take the log past `cap` (or `line` is None), append
-    the cut-short mark instead, once. Returns whether `line` was added."""
+    the cut-short mark instead, once. Returns whether `line` was added. A log that is a symbolic link is refused, so
+    the hook never writes outside the scan folder."""
     path = folder / LOG
     data = None if line is None else (json.dumps(line, sort_keys=True, ensure_ascii=True) + "\n").encode("ascii")
     cut = (json.dumps(CUT) + "\n").encode("ascii")
     try:
-        with open(path, "ab") as f:
+        try:
+            fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        except OSError as e:
+            if e.errno == errno.ELOOP:
+                raise ScanError(f"the scan log {path} is a symbolic link; the hook writes only in the scan folder") \
+                    from None
+            raise
+        with os.fdopen(fd, "ab") as f:
             fcntl.flock(f.fileno(), fcntl.LOCK_EX)
             size = os.fstat(f.fileno()).st_size
-            if size and _is_cut(path):
+            if size and _is_cut(f.fileno(), size):
                 return False
             if data is not None and size + len(data) <= cap:
                 f.write(data)
@@ -307,11 +342,9 @@ def _append(folder: Path, line: Optional[dict], cap: int) -> bool:
         raise ScanError(f"cannot write the scan log {path}: {e}") from e
 
 
-def _is_cut(path: Path) -> bool:
-    with open(path, "rb") as f:
-        f.seek(0, os.SEEK_END)
-        f.seek(max(0, f.tell() - 64))
-        return f.read().endswith((json.dumps(CUT) + "\n").encode("ascii"))
+def _is_cut(fd: int, size: int) -> bool:
+    """Whether the open log ends with the cut-short mark (read through `fd`, not the path)."""
+    return os.pread(fd, 64, max(0, size - 64)).endswith((json.dumps(CUT) + "\n").encode("ascii"))
 
 
 def read_log(folder: Path) -> tuple:
@@ -365,6 +398,15 @@ def raw_for(call: dict, logged: list) -> Optional[str]:
 
 def _records(path: Path):
     cap = engine_module.MAX_OUTPUT
+    for p in (path.parent, path):
+        try:
+            if stat.S_ISLNK(os.lstat(p).st_mode):
+                raise SourceError(f"the records {'folder' if p == path.parent else 'file'} {p} is a symbolic link; "
+                                  f"the session writes its records only in the scan folder")
+        except FileNotFoundError:
+            break  # read_capped below says so
+        except OSError as e:
+            raise SourceError(f"cannot read the records {path}: {e}") from e
     try:
         held = sources.read_capped(path, cap, f"the records file {path} is larger than {cap} bytes")
         records = json.loads(held.decode("utf-8"))
@@ -378,11 +420,43 @@ def _records(path: Path):
     return records
 
 
+def _replan(loader: sources.Loader, call: dict, folder: Path) -> dict:
+    """The call planned again from its source as it loads now, when it is the plan's call (its `records` path aside:
+    take reads the records only from `records_path`). Raises SourceError when it is not, or cannot be planned:
+    plan.json sits where the session could reach it, so take never trusts its calls."""
+    name = call["source"]
+    why = ""
+    try:
+        now = _call(loader.load(name), folder)
+    except SourceError as e:
+        now, why = None, f" ({e})"
+    if now is None or {k: v for k, v in now.items() if k != "records"} != \
+            {k: v for k, v in call.items() if k != "records"}:
+        raise SourceError(f"{name}: the plan's call does not match the source as it loads now{why}")
+    return now
+
+
+def _write_raw(raw: Path, text: str) -> None:
+    """Write the raw output to a temp file next to `raw`, then rename it into place, so a symbolic link left at
+    `raw` is replaced, never followed."""
+    fd, tmp = tempfile.mkstemp(dir=raw.parent, prefix=f".{raw.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(text.encode("utf-8", errors="replace"))
+        os.replace(tmp, raw)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def take(data, plan_file, dry_run: bool = False, cfg: Optional[config.Config] = None,
          plugin_dir: Optional[Path] = None, clock: Callable = cards.now_utc) -> dict:
-    """Read every planned call of a finished scan through `Engine.read_saved`. A call with no matching logged call,
-    a cut-short log or a missing or bad records file is listed in `errors`; the other calls still read. With
-    `dry_run`, nothing is written anywhere in the data folder."""
+    """Read every planned call of a finished scan through `Engine.read_saved`. A call that is not the source's call
+    as it loads now, a call with no matching logged call, a cut-short log or a missing or bad records file is listed
+    in `errors`; the other calls still read. With `dry_run`, nothing is written anywhere in the data folder."""
     data = Path(data)
     p, folder = load_plan(plan_file)
     here = (data / SCAN).resolve()
@@ -396,6 +470,7 @@ def take(data, plan_file, dry_run: bool = False, cfg: Optional[config.Config] = 
         for call in p["calls"]:
             name = call["source"]
             try:
+                call = _replan(eng.loader, call, folder)
                 if cut and call["fill"] == "ai":
                     raise SourceError(f"the scan log {folder / LOG} was cut short, so the raw output may be "
                                       f"missing replies")
@@ -408,7 +483,7 @@ def take(data, plan_file, dry_run: bool = False, cfg: Optional[config.Config] = 
                 ext = "json" if call["fill"] == "paths" else "txt"
                 raw = (scratch or folder) / f"{name}.raw.{ext}"
                 try:
-                    raw.write_bytes(text.encode("utf-8", errors="replace"))
+                    _write_raw(raw, text)
                 except OSError as e:
                     raise SourceError(f"cannot write the raw output {raw}: {e}") from e
                 reads.append(eng.read_saved(name, raw, records=records, dry_run=dry_run))

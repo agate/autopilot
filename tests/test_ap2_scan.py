@@ -36,6 +36,10 @@ def payload(name: str) -> bytes:
     return (SCAN / name).read_bytes()
 
 
+def records(plan: dict, name: str = "slack-mentions") -> Path:
+    return scan.records_path(Path(plan["folder"]), name)
+
+
 class ScanCase(unittest.TestCase):
     cfg = Config()
 
@@ -87,6 +91,15 @@ class PlanTest(ScanCase):
         self.assertEqual(out["errors"], [])
         self.assertEqual([c["source"] for c in out["calls"]],
                          ["jira-epic", "jira-ticket", "slack-alerts", "slack-mentions"])
+
+    def test_records_files_go_in_the_records_folder_and_the_brief_names_no_plan(self):
+        self.settings("slack-mentions")
+        out = self.plan("slack-mentions")
+        folder = Path(out["folder"])
+        self.assertTrue((folder / "records").is_dir())  # made by code, the only folder the session writes in
+        self.assertEqual(out["calls"][0]["records"], str(folder / "records" / "slack-mentions.records.json"))
+        self.assertNotIn("plan.json", out["brief"])
+        self.assertNotIn("Plan:", out["brief"])
 
     def test_the_brief_says_what_the_session_may_do(self):
         self.settings()
@@ -217,16 +230,50 @@ class SaveRawTest(ScanCase):
                 self.assertFalse(out["kept"])
         self.assertFalse(self.log.exists())
 
+    def test_a_lookalike_tool_name_is_not_kept(self):
+        for name in ("mcp__claude_ai_Slack__slack_search_public_v2", "mcp__x__myslack_read_thread"):
+            with self.subTest(name):
+                hook = dict(json.loads(payload("hook-slack-search.json")), tool_name=name)
+                self.assertFalse(scan.save_raw(self.p["plan"], json.dumps(hook).encode())["kept"])
+        self.assertFalse(self.log.exists())
+
+    def test_a_symlinked_log_is_refused_and_its_target_is_unchanged(self):
+        target = self.tmp / "elsewhere.txt"
+        target.write_text("keep me\n")
+        self.log.symlink_to(target)
+        with self.assertRaisesRegex(ScanError, r"\Athe scan log .*calls\.jsonl is a symbolic link; the hook writes "
+                                               r"only in the scan folder\Z"):
+            scan.save_raw(self.p["plan"], payload("hook-slack-search.json"))
+        self.assertEqual(target.read_text(), "keep me\n")
+        self.assertTrue(self.log.is_symlink())
+
     def test_a_skill_plan_keeps_every_tool_but_the_sessions_own_writes(self):
         self.user("standup", "source: standup\nbrings: messages\nread: { via: skill, skill: team-standup }\n"
                              "fill: ai\nform: { id: x, at: x, text: x }\nlink: none\nsort: { all: question }\n")
         p = self.plan("standup")
-        self.assertTrue(scan.save_raw(p["plan"], payload("hook-not-planned.json"))["kept"])
-        for own in ("Write", "Edit", "NotebookEdit"):
+        self.assertTrue(scan.save_raw(p["plan"], payload("hook-not-planned.json"))["kept"])  # an ordinary tool
+        for own in ("Write", "Edit", "MultiEdit", "NotebookEdit", "TodoWrite"):
             hook = json.loads(payload("hook-write.json"))
             hook["tool_name"] = own
             self.assertFalse(scan.save_raw(p["plan"], json.dumps(hook).encode())["kept"])
         self.assertEqual(len(scan.read_log(Path(p["folder"]))[0]), 1)
+
+    def test_a_skill_plan_never_keeps_a_call_that_names_the_scan_folder(self):
+        self.user("standup", "source: standup\nbrings: messages\nread: { via: skill, skill: team-standup }\n"
+                             "fill: ai\nform: { id: x, at: x, text: x }\nlink: none\nsort: { all: question }\n")
+        p = self.plan("standup")
+        own = str(records(p, "standup"))
+        reads = ({"file_path": own},  # the session reading back its own records file
+                 {"command": f"cat {Path(own).relative_to(self.data)}"},
+                 {"nested": [{"paths": [own]}]})
+        for tool_input in reads:
+            with self.subTest(tool_input):
+                hook = {"tool_name": "Read", "tool_input": tool_input,
+                        "tool_response": '[{"id": "1730000999.000001"}]'}
+                self.assertFalse(scan.save_raw(p["plan"], json.dumps(hook).encode())["kept"])
+        hook = {"tool_name": "Read", "tool_input": {"file_path": str(self.tmp / "notes.md")}, "tool_response": "x"}
+        self.assertTrue(scan.save_raw(p["plan"], json.dumps(hook).encode())["kept"])  # an ordinary read still is
+        self.assertEqual([c["text"] for c in scan.read_log(Path(p["folder"]))[0]], ["x"])
 
     def test_the_cap_marks_the_log_cut_short(self):
         size = len(payload("hook-slack-search.json"))
@@ -291,7 +338,7 @@ class TakeTest(ScanCase):
         for name in ("hook-slack-search.json", "hook-jira-other-epic.json", "hook-slack-thread.json",
                      "hook-write.json", "hook-jira-search.json"):
             scan.save_raw(self.p["plan"], payload(name))
-        shutil.copy(SCAN / "slack-mentions.records.json", Path(self.p["folder"]) / "slack-mentions.records.json")
+        shutil.copy(SCAN / "slack-mentions.records.json", records(self.p))
 
     def test_a_take_makes_the_cards_and_drops_the_forged_record(self):
         out = self.take(self.p)
@@ -332,7 +379,7 @@ class TakeTest(ScanCase):
         self.assertEqual(tree(self.data), before)
 
     def test_errors_are_listed_and_the_other_sources_still_read(self):
-        (Path(self.p["folder"]) / "slack-mentions.records.json").unlink()
+        records(self.p).unlink()
         self.settings("slack-alerts")
         p = self.plan("slack-mentions", "jira-epic", "slack-alerts")
         for name in ("hook-slack-search.json", "hook-jira-search.json"):
@@ -345,11 +392,11 @@ class TakeTest(ScanCase):
                                                  "planned arguments")
         self.assertEqual([r["source"] for r in out["reads"]], ["jira-epic"])
         # a bad records file
-        (Path(p["folder"]) / "slack-mentions.records.json").write_text('{"id": 1}')
+        records(p).write_text('{"id": 1}')
         out = self.take(p)
         self.assertIn("slack-mentions: the records file", {e["source"]: e["error"] for e in out["errors"]}
                       ["slack-mentions"])
-        (Path(p["folder"]) / "slack-mentions.records.json").write_text("[{")
+        records(p).write_text("[{")
         out = self.take(p)
         self.assertIn("cannot read the records", {e["source"]: e["error"] for e in out["errors"]}["slack-mentions"])
 
@@ -372,6 +419,73 @@ class TakeTest(ScanCase):
         other = datadir.ensure(self.tmp / "other")
         with self.assertRaisesRegex(ScanError, "the plan is not in this data folder"):
             scan.take(other, self.p["plan"], cfg=self.cfg)
+
+    def test_a_lookalike_line_in_the_log_is_not_in_the_raw(self):
+        line = {"tool_name": "mcp__claude_ai_Slack__slack_search_public_v2", "tool_input": {"query": "x"},
+                "text": "Message_ts: 1730000999.000001"}
+        with open(Path(self.p["folder"]) / "calls.jsonl", "a") as f:
+            f.write(json.dumps(line) + "\n")
+        out = self.take(self.p)
+        slack = {r["source"]: r for r in out["reads"]}["slack-mentions"]
+        self.assertEqual((self.data / slack["raw"]).read_text(), (SCAN / "slack-search.txt").read_text() + "\n\n"
+                         + json.loads(payload("hook-slack-thread.json"))["tool_response"])
+
+    def test_a_paths_call_reads_the_first_matching_reply(self):
+        hook = json.loads(payload("hook-jira-search.json"))
+        reply = json.loads(hook["tool_response"][0]["text"])
+        reply["issues"] = reply["issues"][:1]
+        hook["tool_response"][0]["text"] = json.dumps(reply)
+        scan.save_raw(self.p["plan"], json.dumps(hook).encode())  # a second, later search with one issue
+        jira = {r["source"]: r for r in self.take(self.p)["reads"]}["jira-epic"]
+        self.assertEqual([i["key"] for i in jira["items"]], ["PROJ-123", "PROJ-124", "PROJ-125"])
+
+    def tamper(self, change) -> None:
+        path = Path(self.p["plan"])
+        p = json.loads(path.read_text())
+        change(p)
+        path.write_text(json.dumps(p))
+
+    def test_a_plan_call_the_session_added_or_changed_is_refused(self):
+        forged = {"source": "github-review-requests", "via": "skill", "fill": "paths", "args": {}}
+        self.tamper(lambda p: p["calls"].append(forged))
+        with open(Path(self.p["folder"]) / "calls.jsonl", "a") as f:
+            f.write(json.dumps({"tool_name": "Bash", "tool_input": {},
+                                "text": '[{"number": 1, "url": "https://evil.example.com/"}]'}) + "\n")
+        out = self.take(self.p)
+        self.assertEqual([e["source"] for e in out["errors"]], ["github-review-requests"])
+        self.assertTrue(out["errors"][0]["error"].startswith(
+            "github-review-requests: the plan's call does not match the source as it loads now ("))
+        self.assertEqual(sorted(r["source"] for r in out["reads"]), ["jira-epic", "slack-mentions"])
+        self.assertNotIn("evil.example.com", json.dumps(self.store().list()))
+
+        def changed_args(p):
+            jira = next(c for c in p["calls"] if c["source"] == "jira-epic")
+            jira["args"]["jql"] = "parent = PROJ-9"
+        self.tamper(changed_args)
+        out = self.take(self.p)
+        self.assertIn({"source": "jira-epic", "error": "jira-epic: the plan's call does not match the source as it "
+                                                       "loads now"}, out["errors"])
+        self.assertIn("slack-mentions", [r["source"] for r in out["reads"]])
+
+    def test_a_symlinked_raw_path_is_replaced_and_its_target_is_unchanged(self):
+        target = self.tmp / "dotfile"
+        target.write_text("keep me\n")
+        link = Path(self.p["folder"]) / "slack-mentions.raw.txt"
+        link.symlink_to(target)
+        out = self.take(self.p)
+        self.assertEqual(out["errors"], [])
+        self.assertEqual(target.read_text(), "keep me\n")
+        self.assertFalse(link.is_symlink())
+        self.assertTrue(link.read_text().startswith((SCAN / "slack-search.txt").read_text()))
+
+    def test_a_symlinked_records_file_is_an_error(self):
+        target = self.tmp / "records.json"
+        shutil.move(records(self.p), target)
+        records(self.p).symlink_to(target)
+        out = self.take(self.p)
+        self.assertEqual([e["source"] for e in out["errors"]], ["slack-mentions"])
+        self.assertRegex(out["errors"][0]["error"], r"^slack-mentions: the records file .* is a symbolic link")
+        self.assertEqual([r["source"] for r in out["reads"]], ["jira-epic"])
 
 
 class ScanCommandTest(ScanCase):
@@ -407,6 +521,28 @@ class ScanCommandTest(ScanCase):
         took = json.loads(out)
         self.assertEqual(took["errors"], [])
         self.assertEqual(len(self.store().list()), 4)
+
+    def test_take_exits_0_when_a_call_is_in_errors(self):
+        self.settings("slack-alerts")
+        p = self.plan("slack-mentions", "jira-epic", "slack-alerts")
+        for name in ("hook-slack-search.json", "hook-slack-thread.json", "hook-jira-search.json"):
+            scan.save_raw(p["plan"], payload(name))
+        shutil.copy(SCAN / "slack-mentions.records.json", records(p))
+        code, out, err = self.run_ap2("scan", "take", p["plan"])
+        self.assertEqual((code, err), (0, ""))
+        took = json.loads(out)
+        self.assertEqual([e["source"] for e in took["errors"]], ["slack-alerts"])  # no reply was logged for it
+        self.assertEqual(sorted(r["source"] for r in took["reads"]), ["jira-epic", "slack-mentions"])
+
+    def test_a_symlinked_log_is_one_line_and_exit_1(self):
+        p = self.plan("slack-mentions")
+        target = self.tmp / "elsewhere.txt"
+        target.write_text("keep me\n")
+        (Path(p["folder"]) / "calls.jsonl").symlink_to(target)
+        code, out, err = self.run_ap2("scan", "save-raw", "--plan", p["plan"], stdin=payload("hook-slack-search.json"))
+        self.assertEqual((code, out), (1, ""))
+        self.assertRegex(err, r"\Aap2: the scan log [^\n]* is a symbolic link; [^\n]*\n\Z")
+        self.assertEqual(target.read_text(), "keep me\n")
 
     def test_a_bad_payload_is_one_line_and_exit_1_with_the_log_unchanged(self):
         p = self.plan("slack-mentions")

@@ -330,8 +330,9 @@ class Engine:
     @staticmethod
     def check_records(src: sources.Source, records, raw_text: str, raw: Optional[str] = None) -> tuple:
         """`fill: ai`: check the records a scan session filled (design 5.3). Each record's `id`, and its `thread_id`,
-        `at` and `place_id` when present, must appear word for word in `raw_text`, the tool's raw output, as a
-        whole token (`word_for_word`), so a model cannot invent them. A record whose `place` or `place_id` is in
+        `at` and `place_id` when present (the derived `place_id`, so also a `place` that stands in for it), must
+        appear word for word in `raw_text`, the tool's raw output, as a whole token (`word_for_word`), so a model
+        cannot invent them. A record whose `place` or `place_id` is in
         `read.skip_channels` (a leading `#` ignored) is dropped. Each record carries its `category`, one of
         `sort`'s. Too many records is refused (SourceError, naming `raw`, where the raw output was saved)."""
         if not isinstance(records, list):
@@ -344,9 +345,10 @@ class Engine:
                 skipped = _skipped(src, record)
                 if skipped:
                     raise ValueError(skipped)
+                values = form.derived(record, src.name)  # a `place_id` made from `place` is checked too
                 for field in WORD_FOR_WORD:
-                    if field in record and not word_for_word(record[field], raw_text):
-                        raise ValueError(f"form.{field} {record[field]!r} is not in the raw output")
+                    if field in values and not word_for_word(values[field], raw_text):
+                        raise ValueError(f"form.{field} {values[field]!r} is not in the raw output")
                 category = rec.get("category")
                 if not isinstance(category, str) or category not in src.sort:
                     raise ValueError(f"category {category!r} is not one of sort's ({', '.join(src.sort)})")
@@ -620,9 +622,10 @@ def _one_per_key(src: sources.Source, entries: list) -> list:
     """`fill: ai` entries that share a key (the messages of one Slack thread) all read as one record, so a read makes
     one card and a re-read of the same thread is `unchanged`, instead of updating the card once per message on every
     read. The latest record (by `at`, then `id`, as text) gives every entry of the key its record; the earliest
-    record whose category makes a card (a template, not `update_card` or `none`) gives the category, else the
-    latest's. Each entry keeps its `item`, so the report still lists every record. An entry whose key cannot be made
-    is kept as it is, for `build` to drop with the reason."""
+    record whose category makes a card (a template, not `update_card` or `none`) gives the category, else the latest
+    `update_card` one's, else the latest's, so a recovery and a later `fyi` reply still update the card in either
+    order. Each entry keeps its `item`, so the report still lists every record. An entry whose key cannot be made is
+    kept as it is, for `build` to drop with the reason."""
     groups, order = {}, []
     for e in entries:
         try:
@@ -638,7 +641,8 @@ def _one_per_key(src: sources.Source, entries: list) -> list:
     for group in order:
         by_time = sorted(group, key=lambda e: (e["record"]["at"], e["record"]["id"]))
         making = [e["category"] for e in by_time if src.sort[e["category"]] not in sources.SORT_SPECIAL]
-        category = making[0] if making else by_time[-1]["category"]
+        updating = [e["category"] for e in by_time if src.sort[e["category"]] == "update_card"]
+        category = making[0] if making else (updating[-1] if updating else by_time[-1]["category"])
         out.extend({**e, "record": by_time[-1]["record"], "category": category} for e in group)
     return sorted(out, key=lambda e: e["item"])
 
