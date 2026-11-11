@@ -360,6 +360,11 @@ class ProjectSetupTest(WorkerCase):
             self.assertIn(f"Edit(/{self.data}/{name})", deny)
         self.assertIn("Bash(gh pr comment:*)", deny)
         self.assertEqual(settings["permissions"]["allow"], [f"Bash({ROOT / 'bin' / 'ap2'} worker park:*)"])
+        # The park hook runs before every tool call of the worker and its subagents (v1's `perms.park_hook` shape).
+        hooks = {"PreToolUse": [{"matcher": "*", "hooks": [
+            {"type": "command", "command": f"\"{ROOT / 'bin' / 'ap2'}\" hook-park", "timeout": 5}]}]}
+        self.assertEqual(settings["hooks"], hooks)
+        self.assertEqual(workers_mod.floor("implement", {}, self.data, {})["hooks"], hooks)
         self.assertEqual(settings["env"], {k: v for k, v in env.items() if k.startswith("AP2_")})
         self.assertIn("Hosts you may reach besides the usual ones: api.example.com, cdn.example.com.", argv[-1])
         # The per-card instructions: the run directory, the result file and the park command the allow rule names.

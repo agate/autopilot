@@ -5,6 +5,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 
+if sys.argv[1:2] == ["hook-park"]:  # runs before every worker tool call: skip cli's imports
+    from assistant import parkhook  # noqa: E402
+    sys.exit(parkhook.main(sys.argv[2:], sys.stdin))
+
 from assistant import cli  # noqa: E402
 
 sys.exit(cli.main(sys.argv[1:]))
