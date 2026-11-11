@@ -1,0 +1,29 @@
+# A Slack alert channel: the channel's recent messages, read by a scan session through the Slack connector. A
+# model sorts each one as a new alert, a recovery of an earlier one, or nothing to do.
+# Set `alert_channel` (the channel id, such as C0123ABCD) in <data>/sources/slack-alerts.yaml:
+#   extends: slack-alerts
+#   settings: { alert_channel: C0123ABCD }
+source: slack-alerts
+brings: messages
+settings:
+  alert_channel: ""
+read:
+  via: connector             # the Slack connector on claude.ai
+  tools: [slack_read_channel]
+  channel_id: "{alert_channel}"
+  every: 5m
+fill: ai
+form:
+  id: Message_ts             # must appear word for word in what the tool returned
+  thread_id: thread_ts
+  author: From
+  at: Message_ts
+  text: Text
+  place: Channel
+  place_id: Channel id (C...)
+link: "https://slack.com/archives/{place_id}/p{id_digits}?thread_ts={thread_or_id}&cid={place_id}"  # checkpkg: ignore
+key: "{place_id}:{thread_or_id}"
+sort:
+  alert:     alert
+  recovered: update_card     # a recovery in the alert's thread updates its card
+  fyi:       none

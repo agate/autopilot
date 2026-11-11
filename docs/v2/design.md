@@ -689,7 +689,8 @@ Calls the author made without asking (check them):
   (one gate run, `ap2 gate`); templates and roles: `templates.py` (loading, the user's override, validation,
   briefs) and `roles.py` (the shipped roles and their tools); and the source engine: `sources.py` (loading,
   `extends:`, checks), `form.py` (the form, the path language, `{field}` patterns and derived fields) and
-  `engine.py` (read, fill, check, link and key, sort, card). `ap2 config [--data PATH]` prints the effective config
+  `engine.py` (read, fill, check, link and key, sort, card); and scan sessions: `scan.py` (the plan, the brief, the
+  save-raw hook and the take). `ap2 config [--data PATH]` prints the effective config
   and `data_dir` as JSON. With stdout
   closed, `ap2 config` sets up the folder, prints nothing and exits 0; when its reader goes away
   (`ap2 config | true`) it exits 1 with nothing on stderr; when a write fails (a full disk) it prints one line,
@@ -807,14 +808,14 @@ Calls the author made without asking (check them):
     pattern. Values in a link pattern are percent-encoded; the link must start with `http://` or `https://`.
     Patterns may name the record's fields and the derived fields, defined once in `form.derived`: `id_digits`
     (the id without its dots, Slack's `p` link), `place_id` (the record's own when the form fills it, else
-    `place`) and `source` (the source's name). A pattern naming a value the record lacks (`{thread_id}` on a
-    top-level message, `{site}` before a setting supplies it) drops the record with the reason; so does one
-    naming an empty or blank value (`key: {thread_id} is empty`), so two different items never share a key
+    `place`), `source` (the source's name) and `thread_or_id` (slice 4, below). A pattern naming a value the record lacks (`{thread_id}` on a
+    top-level message) drops the record with the reason (a declared but empty setting refuses the read instead, slice 4,
+    below); so does one naming an empty or blank value (`key: {thread_id} is empty`), so two different items never share a key
     such as `C0123ABCD:`.
   - Sort and cards: `fill: paths` with one category gives every record that category; with several it makes no
     card (the item says why); `fill: ai` records carry their `category`, a text that must be in `sort`. A
-    `fill: ai` record's `id`, and its `thread_id` and `at` when it has them, must appear word for word in the
-    raw tool output (read as UTF-8, bad bytes replaced); one that does not is dropped with the reason
+    `fill: ai` record's `id`, and its `thread_id`, `at` and `place_id` when it has them, must appear word for
+    word (as whole tokens, slice 4 below) in the raw tool output (read as UTF-8, bad bytes replaced); one that does not is dropped with the reason
     (`form.id '...' is not in the raw output`), so a model cannot invent an id. A new card is
     `kind` = the template, `lane` `needs` (`brings: messages`) or `planned` (`brings: work`), `pri` P2,
     `origin` `source`, `feed` the source's name, `title` the text's first line (80 characters), `key`, and
@@ -906,6 +907,141 @@ Calls the author made without asking (check them):
     (`would_change`), and writes nothing, not even the data folder's layout. `--records` without `--raw` is
     refused first, before any file is read or the data folder is set up, so `--records /dev/stdin` does not
     wait for input.
+- **[decided by the builder]** Built-in sources and scan sessions (slice 4, design 4.2, 5.3 to 5.7, 6.2, 8.0).
+  Module: `lib/assistant/scan.py`; the six files live in the repo's `sources/` (`sources.PLUGIN_DIR`), which holds
+  nothing else.
+  - The built-in files. `slack-mentions` is appendix A with two changes: the form adds a `place_id` hint (the channel
+    id), and link and key use `{thread_or_id}` (`{place_id}:{thread_or_id}`, the link's `thread_ts={thread_or_id}`).
+    `slack-alerts` reads `slack_read_channel` with `channel_id: "{alert_channel}"`, `fill: ai`, the same link and key,
+    and sorts `alert: alert`, `recovered: update_card`, `fyi: none`. `github-review-requests` and `github-my-prs` run
+    `gh search prs --review-requested=@me` / `--author=@me` `--state=open --json
+    number,title,url,author,createdAt,repository` (`via: command`, so the gate runs them and no scan session does),
+    `fill: paths` with `id: .number`, `at: .createdAt`, `text: .title`, `author: .author.login`,
+    `place: .repository.nameWithOwner`, `link: .url`, `key: "{place}#{id}"` and `sort: { all: pr-review }`.
+    `jira-epic` is appendix B written for a `{"issues": [...]}` reply (every path on `.issues[]`, so an error reply
+    fails the read), with three changes: `at: .issues[].fields.updated` (the engine needs `at`), `depends_on` reads
+    the inward "is blocked by" links (`.issues[].fields.issuelinks[type.inward=is blocked by].inwardIssue.key`), and
+    `sort: { all: code }` (appendix B's two categories make no card under `fill: paths`). `jira-ticket` is one
+    issue: `via: mcp`, `tool: get_issue`, `issue: "{ticket}"`, paths with no `[]` (the reply is one item),
+    `plan: split_here`, and the epic's `status_map`, `writes`, `never` and sort. Both Jira files map `To Do: todo`,
+    `In Progress: in_progress`, `In Review: in_review`, `Done: done`; a status not in the map is kept as written, and
+    a re-read changes `status`, never `lane`.
+  - `settings:` (a new top-level key, a map of name to text) instead of new `config.yaml` keys, so one source's
+    values stay in its file and two epics are two files that both `extends: jira-epic`, each with its own
+    `settings` (merged key by key, like every map). Built-in files declare the names they need, empty:
+    `slack-mentions` `me`, `slack-alerts` `alert_channel`, `jira-epic` `site` and `epic`, `jira-ticket` `site` and
+    `ticket`. A name is lowercase letters, digits and `_`; one that is a form or derived field is refused at load
+    with its line. `link`, `key` and the read's arguments may name a setting. A read (`ap2 source read`, a take) or
+    a plan whose patterns name a declared setting that is empty is refused before anything is run, copied or saved:
+    `jira-epic: settings.site is not set; add it in <data>/sources/jira-epic.yaml (extends: jira-epic)` (the user's
+    own file is named instead when the source is one). A setting goes into a link as written (it is the user's own
+    text, `site: jira.example.com:8443`); the record's values are still percent-encoded. A pattern name that is
+    neither a field nor a setting still drops the record; in a read argument it is a plan error. The unknown-key
+    message still lists the keys of slice 3 (a test pins its text); `settings` is accepted all the same.
+    `{setting}` in `read.run` is not filled yet.
+  - `thread_or_id`, a derived field made by code: `thread_id` when it is not blank, else `id`. So a top-level Slack
+    message and the replies in its thread key on one card, and no model is asked to copy `id` into `thread_id`.
+    `{thread_id}` keeps its slice-3 meaning. `fill: ai` records that share a key in one read (one thread) all read
+    as the latest record (by `at`, then `id`, as text), with the category of the earliest record whose sort makes a
+    card (else the latest `update_card` one's, else the latest's, so a recovery followed by an `fyi` reply still
+    updates the alert card, in either order); each keeps its item number. So a thread makes one card that shows its
+    latest message, and a re-read of the same thread is `unchanged` instead of updating the card once per message.
+  - `read.skip_channels` (appendix A's user change), a list of texts, is applied by code to `fill: ai` records: one
+    whose `place` or `place_id` matches an entry, a leading `#` and letter case ignored, is dropped with
+    `form.place '<value>' is in read.skip_channels`. It is never sent to the tool.
+  - The word-for-word check counts a match only at token edges: the character just before and just after the value
+    is not a letter or digit, and is not one of `.`, `_`, `:`, `-` with a letter or digit beyond it. So `1730000000`
+    is not found inside `1730000000.123456` and `C0123` not inside `C0123ABCD`, but `1730000000.123456` is found at
+    the end of a sentence ending in `.`. `place_id` is checked too (it builds links and keys), as derived: a record
+    with no `place_id` has its `place` checked, since that stands in for it. The reason text is unchanged:
+    `form.<field> '<value>' is not in the raw output`, naming `place` when the value came from a `place` that
+    stands in for `place_id`.
+  - Scan folder: `<data>/sources/.scan/<YYYYMMDDTHHMMSSZ>-<6 hex>/` holds `plan.json`, `calls.jsonl` (the hook's
+    log), `records/<source>.records.json` (written by the session, `fill: ai` only) and `<source>.raw.json` /
+    `.raw.txt` (built by the take). The loader skips it (a dot folder). The plan makes `records/`, the only folder
+    the session writes in; `plan.json` and `calls.jsonl` are code's, and the launch slice must allow `Write` and
+    `Edit` only under `<scan>/records/`, and must deny `Read`, `Grep` and `Glob` everywhere in the data folder but
+    `<scan>/records/`. Those permission rules are the guard; the hook's path check below is a second line, since a
+    relative path from a working folder above the data folder names neither the data folder nor the scan folder.
+  - Plan: `ap2 scan plan [NAME...] [--data PATH]` (no name: every `mcp`, `connector` and `skill` source) writes
+    `plan.json` and prints `{plan, version, made_at, folder, calls, errors, brief}`. A call is `source`, `via`,
+    `fill`, `args`, `server`/`tool`/`tools`/`skill` as written, `allowed_tools` (`mcp__<server>__<tool>` when the
+    source names its server, else `mcp__*__<tool>`, since a claude.ai connector's server name is known only inside
+    the session; `Skill` for a skill), `instructions` when the file has them, and for `fill: ai` its `records` path,
+    its `form` hints and its `categories`. `args` are the `read` keys other than the engine's own (`via`, `every`,
+    `timeout`, `run`, `server`, `tool`, `tools`, `skill`, `skip_channels`), with each `{setting}` filled into their
+    text values. `errors` (`{source, error}`), while the others are still planned: a `via: command` source (the gate
+    runs it with `ap2 source read`), a source with an unset setting, a `fill: paths` source that is not exactly one
+    `read.tool`, a `via: skill` source with `fill: paths`, a `read.server`, `read.tool` or `read.tools` entry that
+    is not a name as Claude Code's tool names spell it (`[A-Za-z0-9_-]+`, such as `claude_ai_Atlassian`, not
+    `claude.ai Atlassian` or `*`), a file that does not load, a name with no source. No
+    `writes`, `never` or `status_map` text reaches a plan, and the command starts no process.
+  - Brief: a fixed English prompt built by code: call only the listed tools, with exactly the given arguments; do
+    not copy tool replies into files; for `fill: ai`, write the records file as a JSON list with the form's fields,
+    `id`, `thread_id`, `at` and `place_id` (or `place` when there is no `place_id`) copied exactly as the tool
+    returned them and `category` from the listed ones; follow a call's `instructions`; post, send, create, edit or
+    comment nowhere and write no other file. Then one numbered block per call (its tools, its arguments as JSON, its
+    records file, form and categories). It does not name `plan.json`: the session does not need it.
+  - Hook: `ap2 scan save-raw --plan FILE` is the PostToolUse hook command. It reads one payload (`tool_name`,
+    `tool_input`, `tool_response`) from stdin, at most `engine.MAX_OUTPUT` bytes, and appends one JSON line
+    `{tool_name, tool_input, text}` to the scan folder's `calls.jsonl`, under an `flock` of that file. `text` is the
+    response as is when it is text, the texts of a list of `{"type": "text"}` blocks joined by a newline, else its
+    JSON text. It keeps a call only when the tool name is a planned call's tool: exactly `mcp__<server>__<tool>`
+    when the source names its server (so `mcp__other__get_issue` is not `jira-ticket`'s), else a name ending in
+    `__<tool>`; when the plan runs a skill, every tool but the session's own `Write`, `Edit`, `MultiEdit`,
+    `NotebookEdit` and `TodoWrite`. A call whose `tool_input` names the data folder as a path (as given, resolved,
+    or `~/...` under the home folder,
+    followed by a `/`, the end of the text or a character such as a quote, a space or `:`, so `<data>-backup` is
+    another folder) or the scan folder's `<stamp>-<hex>` name, in any text at any depth and in any letter case (APFS
+    is case-insensitive), is never kept; a call kept only because the plan runs a skill is also refused when its
+    `tool_response` names either (a Read's `filePath`, a Grep's matching lines), whatever its input spelled, while
+    a planned tool's reply is kept whatever it says. The records files, the report, the `.raw` copies and the cards
+    all hold text that came from the session, so reading any of them back adds nothing to the raw output; a word
+    such as `deps.scanner` is kept. The launch slice must not start the session with its working folder inside the
+    data folder, since a Grep with no path there would name neither. A skill's raw output is what its
+    tools printed, so its ids are only as trustworthy as the tools the launch slice allows for a skill scan. Past
+    `MAX_OUTPUT` in total (or a larger payload) the log gets one `{"cut_short": true}` line and nothing more. A bad
+    payload is one `ap2:` line, exit 1, the log unchanged. The plan must be a `plan.json` inside a `.scan/<scan>/`
+    folder; the hook writes only there, and a `calls.jsonl` that is a symbolic link is refused (one `ap2:` line).
+  - Take: `ap2 scan take PLAN [--dry-run] [--data PATH]` (`scan.take`) builds each call's raw file in the scan
+    folder: a logged call is a call's when its tool name matches as the hook's does (exactly
+    `mcp__<server>__<tool>` when the source names its server, else ending in `__<tool>`); for `fill: paths`, the
+    text of the first logged call of its tool whose `tool_input` holds every planned argument with the same value;
+    for `fill: ai`, every logged text of its tools (a skill's: every logged text), in order, joined by a blank line,
+    with no header added, so nothing code wrote can match an id; a logged call whose `tool_input` holds a planned
+    argument with another value is left out (a tool with none of the planned argument names still counts). Such a
+    tool (`slack_read_thread` for `slack-mentions`) is not pinned, so it can read a thread of any channel the
+    session names, private groups and IMs included; the word-for-word check only proves the ids came from a real
+    reply. Tying such a follow-up read to a thread the planned read returned is left to the launch slice (its
+    allow-list and brief; see "Not yet"). Each raw file is written to a temp file and renamed into place, so a symbolic link left at its path is replaced,
+    never followed.
+    Then it calls `Engine.read_saved`, which copies the raw under `.raw/<source>/`, writes the report, checks word
+    for word and makes the cards. Take first plans each call again from its source as it loads now and refuses one that differs
+    from the plan's (`<name>: the plan's call does not match the source as it loads now`), since the session could
+    reach `plan.json`; so a `via: command` source is never taken, and a source edited after the plan needs a new
+    plan. Such a call, a call with no matching logged call, a `fill: ai` call of a cut-short log, and a missing, bad
+    or symbolic-link records file go in `errors` while the others still read, and the exit code is 0. A second take
+    of the same scan is `unchanged`; `--dry-run` builds the raw files in a temp folder and writes nothing in the
+    data folder. The plan must be in this data folder's `.scan/`.
+  - Write actions: each `writes.<event>` maps actions to text; an action is `transition`, `assign` or
+    `remote_link`, and one listed in `never` is refused with its line (a user `extends` that adds
+    `on_pr: {comment: ...}`). `on_<event>: null` turns a write off, and `<action>: null` turns one action off
+    (`on_start: { assign: null }` keeps the built-in `transition`). `Engine.apply_writes` still refuses in shadow
+    mode before anything and runs nothing in live mode.
+  - Not yet (later slices): starting the scan session itself (`claude` with a small model, its tool allow-list, the
+    hook settings that call `ap2 scan save-raw`); the gate turning a source's `every:` into due watches and plans;
+    measuring a scan's token cost; running `writes` in live mode; `plan: split_here`; one card for a Slack ask
+    about a PR and the GitHub request for the same PR; `{setting}` patterns in `read.run`; pruning the scan
+    folders under `.scan` (the gate prunes only `.raw`); tying a `fill: ai` source's follow-up reads (such as
+    `slack_read_thread`) to the threads its planned read returned. Before the
+    built-ins are relied on, the scan-session launch must confirm three things: the real Atlassian MCP server and
+    tool names and arguments (the built-ins follow appendix B, server `atlassian` with tools `search_issues` and
+    `get_issue`; the remote Atlassian MCP may name them differently and need a cloud id); the Slack tools' real
+    argument names (`slack_search_public` takes `keywords` and `filters`, not appendix A's `query`, so
+    `slack-mentions`' `read.query` must be renamed to what the connector takes; until then a search the session
+    makes carries none of the planned argument names, so the take's planned-argument rule does not pin it); and
+    that the Slack connector's reply text shows the channel id, since `place_id` is checked word for word and
+    every `slack-mentions` and `slack-alerts` record drops without it.
 - **[decided by the builder]** The gate and routines (slice 5, design 4.3 and 7.1 to 7.4). Modules:
   `lib/assistant/routines.py` (routine files, slots, missed runs) and `lib/assistant/gate.py` (one run).
   - Routine files are JSON, `<data>/routines/<name>.json`, not YAML: the gate writes `last_slot` back, and a JSON

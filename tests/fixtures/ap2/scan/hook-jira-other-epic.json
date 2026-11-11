@@ -1,0 +1,14 @@
+{
+  "session_id": "s-example",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "mcp__atlassian__search_issues",
+  "tool_input": {
+    "jql": "parent = PROJ-2 AND (assignee = currentUser() OR assignee is EMPTY)"
+  },
+  "tool_response": [
+    {
+      "type": "text",
+      "text": "{\"issues\": []}"
+    }
+  ]
+}

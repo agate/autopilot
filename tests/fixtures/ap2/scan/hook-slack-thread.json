@@ -1,0 +1,10 @@
+{
+  "session_id": "s-example",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "mcp__claude_ai_Slack__slack_read_thread",
+  "tool_input": {
+    "channel_id": "C0123ABCD",
+    "message_ts": "1730000000.123456"
+  },
+  "tool_response": "Thread in #payments (C0123ABCD), started 1730000000.123456\n\nFrom: U0EXAMPLE2\nMessage_ts: 1730000000.123456\nText: <@U0EXAMPLE1> can you look at the retry change?\n\nFrom: U0EXAMPLE3\nMessage_ts: 1730000100.000200\nthread_ts: 1730000000.123456\nText: <@U0EXAMPLE1> the retry test also fails on main.\n"
+}

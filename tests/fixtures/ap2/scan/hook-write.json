@@ -1,0 +1,13 @@
+{
+  "session_id": "s-example",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Write",
+  "tool_input": {
+    "file_path": "/tmp/example.json",
+    "content": "[]"
+  },
+  "tool_response": {
+    "type": "create",
+    "filePath": "/tmp/example.json"
+  }
+}
