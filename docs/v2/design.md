@@ -941,12 +941,15 @@ Calls the author made without asking (check them):
     response as is when it is text, the texts of a list of `{"type": "text"}` blocks joined by a newline, else its
     JSON text. It keeps a call only when the tool name ends in `__<tool>` for a tool in the plan; when the plan runs
     a skill, every tool but the session's own `Write`, `Edit`, `MultiEdit`, `NotebookEdit` and `TodoWrite`. A call
-    whose `tool_input` names the scan folder (its `<stamp>-<hex>` name) or `.scan`, in any text at any depth and in
-    any letter case (APFS is case-insensitive), is never kept, so the session reading back its own records file
-    adds nothing to the raw output; a call kept only because the plan runs a skill is also refused when its
+    whose `tool_input` names the data folder as a path (as given, resolved, or `~/...` under the home folder,
+    followed by a `/`, the end of the text or a character such as a quote, a space or `:`, so `<data>-backup` is
+    another folder) or the scan folder's `<stamp>-<hex>` name, in any text at any depth and in any letter case (APFS
+    is case-insensitive), is never kept; a call kept only because the plan runs a skill is also refused when its
     `tool_response` names either (a Read's `filePath`, a Grep's matching lines), whatever its input spelled, while
-    a planned tool's reply is kept whatever it says. The launch slice must not start the session with its working
-    folder inside `.scan`, since a Grep with no path there would name neither. A skill's raw output is what its
+    a planned tool's reply is kept whatever it says. The records files, the report, the `.raw` copies and the cards
+    all hold text that came from the session, so reading any of them back adds nothing to the raw output; a word
+    such as `deps.scanner` is kept. The launch slice must not start the session with its working folder inside the
+    data folder, since a Grep with no path there would name neither. A skill's raw output is what its
     tools printed, so its ids are only as trustworthy as the tools the launch slice allows for a skill scan. Past
     `MAX_OUTPUT` in total (or a larger payload) the log gets one `{"cut_short": true}` line and nothing more. A bad
     payload is one `ap2:` line, exit 1, the log unchanged. The plan must be a `plan.json` inside a `.scan/<scan>/`

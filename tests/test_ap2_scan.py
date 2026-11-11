@@ -310,7 +310,11 @@ class SaveRawTest(ScanCase):
         for what, hook in self.read_backs(p).items():
             with self.subTest(what):
                 self.assertFalse(scan.save_raw(p["plan"], json.dumps(hook).encode())["kept"])
-        for tool_input in ({"command": "ls sources/.SCAN"}, {"path": "x/.Scan/y"}):
+        name = Path(p["folder"]).name
+        for tool_input in ({"command": f"cat {name}/records/standup.records.json"},  # the folder's name alone
+                           {"command": f"cat {name.lower()}/records/standup.records.json"},
+                           {"command": f"ls {str(self.data).upper()}/sources/.raw"},  # the data folder, any case
+                           {"path": f"{str(self.data).swapcase()}/items"}):
             with self.subTest(tool_input):
                 hook = {"tool_name": "Bash", "tool_input": tool_input, "tool_response": "x"}
                 self.assertFalse(scan.save_raw(p["plan"], json.dumps(hook).encode())["kept"])
@@ -323,8 +327,94 @@ class SaveRawTest(ScanCase):
         self.user("standup", self.STANDUP)
         p = self.plan("standup", "slack-mentions")
         hook = json.loads(payload("hook-slack-search.json"))
-        hook["tool_response"] = [{"type": "text", "text": "Message_ts: 1730000000.123456\nText: see sources/.scan/"}]
+        hook["tool_response"] = [{"type": "text", "text": f"Message_ts: 1730000000.123456\nText: see sources/.scan/ "
+                                                          f"and {self.data}/items/"}]
         self.assertTrue(scan.save_raw(p["plan"], json.dumps(hook).encode())["kept"])  # the source's own text
+        hook["tool_input"] = {"query": str(records(p, "standup"))}
+        self.assertFalse(scan.save_raw(p["plan"], json.dumps(hook).encode())["kept"])  # but not its input
+        self.assertEqual(len(scan.read_log(Path(p["folder"]))[0]), 1)
+
+    def test_a_skill_plan_never_keeps_a_read_of_the_report_or_the_cards(self):
+        self.user("standup", self.STANDUP)
+        p = self.plan("standup")
+        link = self.tmp / "link"
+        link.symlink_to(self.data)
+        linked = link / Path(p["plan"]).relative_to(self.data)  # the plan as the launch slice may spell it
+        report = Path("sources") / ".raw" / "standup" / "x.report.json"
+        drop = '"reason": "form.id \'PROJ-4242\' is not in the raw output"'
+        reads = {"absolute": str(link / report), "resolved": str(self.data / report)}
+        for what, path in reads.items():
+            with self.subTest(what):
+                hook = {"tool_name": "Read", "tool_input": {"file_path": path},
+                        "tool_response": {"type": "text", "file": {"filePath": path, "content": drop}}}
+                self.assertFalse(scan.save_raw(linked, json.dumps(hook).encode())["kept"])
+        with self.subTest("home"), mock.patch.dict(os.environ, {"HOME": str(self.tmp)}):
+            hook = {"tool_name": "Read", "tool_input": {"file_path": f"~/data/{report}"}, "tool_response": drop}
+            self.assertFalse(scan.save_raw(p["plan"], json.dumps(hook).encode())["kept"])
+        card = f'{self.data}/items/standup/PROJ-4242.json:  "text": "PROJ-4242 is done"'
+        greps = {"on the cards": {"pattern": "PROJ-", "path": f"{self.data}/items", "output_mode": "content"},
+                 "with no path": {"pattern": "PROJ-", "output_mode": "content"}}  # only its reply names the data
+        for what, tool_input in greps.items():
+            with self.subTest(what):
+                hook = {"tool_name": "Grep", "tool_input": tool_input,
+                        "tool_response": {"mode": "content", "content": card, "numLines": 1}}
+                self.assertFalse(scan.save_raw(p["plan"], json.dumps(hook).encode())["kept"])
+        self.assertEqual(scan.read_log(Path(p["folder"]))[0], [])
+
+    def test_a_skill_plan_keeps_another_folder_and_a_word_like_deps_scanner(self):
+        self.user("standup", self.STANDUP)
+        p = self.plan("standup")
+        kept = ({"tool_name": "Read", "tool_input": {"file_path": f"{self.data}-backup/items/x.json"},
+                 "tool_response": f"{self.data}-backup/items/x.json: PROJ-5"},
+                {"tool_name": "Read", "tool_input": {"file_path": f"{self.data}2/items/x.json"}, "tool_response": "x"},
+                {"tool_name": "Bash", "tool_input": {"command": "standup-report --repo acme/image.scanner"},
+                 "tool_response": {"stdout": "PROJ-5 is done; bumped deps.scanner to 2.1", "stderr": ""}})
+        for hook in kept:
+            with self.subTest(hook["tool_input"]):
+                self.assertTrue(scan.save_raw(p["plan"], json.dumps(hook).encode())["kept"])
+        self.assertEqual(len(scan.read_log(Path(p["folder"]))[0]), 3)
+
+    def test_a_planned_argument_like_deps_scanner_is_kept_and_taken(self):
+        self.user("slack-mentions", 'extends: slack-mentions\nsettings: { me: U0EXAMPLE1 }\n'
+                                    'read: { query: "<@{me}> in:#deps.scanner" }\n')
+        p = self.plan("slack-mentions")
+        [call] = p["calls"]
+        self.assertEqual(call["args"], {"query": "<@U0EXAMPLE1> in:#deps.scanner"})
+        hook = json.loads(payload("hook-slack-search.json"))
+        hook["tool_input"] = {"query": "<@U0EXAMPLE1> in:#deps.scanner"}
+        self.assertTrue(scan.save_raw(p["plan"], json.dumps(hook).encode())["kept"])
+        shutil.copy(SCAN / "slack-mentions.records.json", records(p))
+        out = self.take(p)
+        self.assertEqual(out["errors"], [])
+        self.assertTrue(out["reads"][0]["items"])
+
+    def test_a_second_scan_reading_the_report_back_makes_no_card_from_an_invented_id(self):
+        self.user("standup", self.STANDUP)
+        real = {"tool_name": "Bash", "tool_input": {"command": "standup-report"},
+                "tool_response": "id PROJ-5 at 2026-11-10T08:00:00Z: PROJ-5 is done"}
+        forged = [{"id": "PROJ-4242", "at": "2026-11-10T09:00:00Z", "text": "PROJ-4242", "category": "all"},
+                  {"id": "PROJ-5", "at": "2026-11-10T08:00:00Z", "text": "PROJ-5 is done", "category": "all"}]
+        first = self.plan("standup")
+        scan.save_raw(first["plan"], json.dumps(real).encode())
+        records(first, "standup").write_text(json.dumps(forged))
+        [read] = self.take(first)["reads"]
+        self.assertEqual(read["dropped"], [{"item": 0, "reason": "form.id 'PROJ-4242' is not in the raw output"}])
+        [report] = (self.data / "sources" / ".raw" / "standup").glob("*.report.json")
+        self.assertIn("PROJ-4242", report.read_text())
+        second = self.plan("standup")
+        back = {"tool_name": "Read", "tool_input": {"file_path": str(report)},
+                "tool_response": {"type": "text", "file": {"filePath": str(report), "content": report.read_text()}}}
+        grep = {"tool_name": "Grep", "tool_input": {"pattern": "PROJ-", "path": str(self.data / "items"),
+                                                    "output_mode": "content"},
+                "tool_response": {"mode": "content", "content": f"{report}: PROJ-4242", "numLines": 1}}
+        for hook in (back, grep, real):
+            scan.save_raw(second["plan"], json.dumps(hook).encode())
+        records(second, "standup").write_text(json.dumps(forged))
+        out = self.take(second)
+        self.assertEqual(out["errors"], [])
+        self.assertEqual(out["reads"][0]["dropped"],
+                         [{"item": 0, "reason": "form.id 'PROJ-4242' is not in the raw output"}])
+        self.assertEqual([c["key"] for c in self.store().list()], ["standup:PROJ-5"])
 
     def test_a_read_back_makes_no_card_from_an_invented_id(self):
         self.user("standup", self.STANDUP)

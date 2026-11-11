@@ -251,31 +251,64 @@ def response_text(response) -> str:
     return json.dumps(response, sort_keys=True, ensure_ascii=False)
 
 
-def keeps(p: dict, tool_name: str, tool_input=None, folder: Optional[Path] = None, tool_response=None) -> bool:
+def keeps(p: dict, tool_name: str, tool_input=None, folder: Optional[Path] = None, tool_response=None,
+          data: Optional[Path] = None) -> bool:
     """Whether the hook logs a call of `tool_name`: a name ending in `__<tool>` for a tool in the plan, or, when
     the plan runs a skill, any tool but the session's own file writes. A call whose `tool_input` names the scan
-    folder (its `<stamp>-<hex>` name) or `.scan`, in any text at any depth and in any letter case, is never kept;
-    nor is a call kept only for a skill whose `tool_response` names either (a Read's file path, a Grep's matching
-    lines). So the session reading back its own records file does not put its own ids in the raw output."""
-    words = (SCAN.name,) if folder is None else (Path(folder).name, SCAN.name)
-    if _names(tool_input, *words):
+    folder (its `<stamp>-<hex>` name) or the data folder as a path (as given, resolved, or `~/...` under the home
+    folder), in any text at any depth and in any letter case, is never kept; nor is a call kept only for a skill
+    whose `tool_response` names either (a Read's file path, a Grep's matching lines). So the session reading back
+    its own records file, the report or the cards does not put its own ids in the raw output. `data` defaults to
+    the scan folder's `<data>` (`<data>/sources/.scan/<scan>`)."""
+    if data is None and folder is not None:
+        data = Path(folder).parent.parent.parent
+    words = () if folder is None else (Path(folder).name.casefold(),)
+    paths = () if data is None else _spellings(Path(data))
+    if _names(tool_input, words, paths):
         return False
     if any(tool_name.endswith(f"__{t}") for call in p["calls"] for t in call_tools(call)):
         return True  # a planned tool's reply is the source's own text, whatever it says
     if not any(call["via"] == "skill" for call in p["calls"]) or tool_name in OWN_WRITES:
         return False
-    return not _names(tool_response, *words)
+    return not _names(tool_response, words, paths)
 
 
-def _names(value, *words: str) -> bool:
-    """Whether a text in `value` (texts, lists and maps, keys too) holds one of `words`, letter case ignored."""
-    words = tuple(w.casefold() for w in words)
+def _spellings(data: Path) -> tuple:
+    """The data folder as the session may spell it: as given (made absolute), resolved, and each as `~/...` when
+    it is under the home folder; letter case folded."""
+    found = {os.path.abspath(data), str(data.resolve())}
+    try:
+        home = {os.path.abspath(Path.home()), str(Path.home().resolve())}
+    except (KeyError, RuntimeError, OSError):
+        home = set()
+    for d in list(found):
+        for h in home:
+            if h != os.sep and d.startswith(h + os.sep):
+                found.add("~" + d[len(h):])
+    return tuple(sorted({d.casefold() for d in found}))
+
+
+def _names_path(text: str, path: str) -> bool:
+    """Whether `text` holds `path` as a path: followed by a path separator, the end of the text, or a character a
+    file name would not go on with (a quote, a space, `:`), so `<data>-backup` or `<data>2` is another folder."""
+    at = text.find(path)
+    while at != -1:
+        nxt = text[at + len(path):at + len(path) + 1]
+        if not nxt or nxt == os.sep or not (nxt.isalnum() or nxt in "._-"):
+            return True
+        at = text.find(path, at + 1)
+    return False
+
+
+def _names(value, words: tuple, paths: tuple) -> bool:
+    """Whether a text in `value` (texts, lists and maps, keys too) holds one of `words` or names one of `paths` as
+    a path, letter case ignored (`words` and `paths` come case-folded)."""
     stack = [value]
     while stack:
         v = stack.pop()
         if isinstance(v, str):
             text = v.casefold()
-            if any(w in text for w in words):
+            if any(w in text for w in words) or any(_names_path(text, d) for d in paths):
                 return True
         elif isinstance(v, dict):
             stack.extend(v.keys())
@@ -308,7 +341,8 @@ def save_raw(plan_file, payload: bytes) -> dict:
         raise ScanError("the hook payload's tool_input must be a JSON object")
     if "tool_response" not in hook:
         raise ScanError("the hook payload has no tool_response")
-    if not keeps(p, name, tool_input, folder, hook["tool_response"]):
+    data = Path(os.path.abspath(plan_file)).parent.parent.parent.parent  # <data>/sources/.scan/<scan>/plan.json
+    if not keeps(p, name, tool_input, folder, hook["tool_response"], data):
         return {"kept": False, "tool_name": name}
     line = {"tool_name": name, "tool_input": tool_input, "text": response_text(hook["tool_response"])}
     kept = _append(folder, line, cap)
