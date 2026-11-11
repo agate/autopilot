@@ -438,6 +438,10 @@ class ListTest(ServerCase):
             with self.subTest(title=title):
                 self.assertIsNone(server.row({"title": title}, langs)["title"])
         self.assertIsNone(server.row({}, langs)["title"])
+        for title in ("", "   "):
+            with self.subTest(title=title):
+                self.assertIsNone(server.row({"title": title}, langs)["title"])
+        self.assertEqual(server.row({"title": {"ja": "J"}}, ("ja", "en"))["title"], {"ja": "J", "en": "J"})
 
     def test_state_projects_have_the_title_in_every_language(self):
         zh = Config(secondary_language="zh")
@@ -1118,6 +1122,8 @@ const out = [
 ];
 S.lang = 'en';
 out.push(titleIn({en: 'Retry payments', zh: '重试付款'}), titleIn({zh: '只有中文'}));
+S.state = {primary_language: 'ja', languages: ['ja', 'en']};
+out.push(titleIn({ja: 'J'}));
 console.log(JSON.stringify(out));
 """
         out = subprocess.run(["node", "-e", js], capture_output=True, text=True, timeout=30)
@@ -1125,7 +1131,7 @@ console.log(JSON.stringify(out));
         self.assertEqual(json.loads(out.stdout), [
             "重试付款", "English only", "English only", "One text from an older reply",
             "[card.untitled]", "[card.untitled]", "[card.untitled]", "[card.untitled]", "[card.untitled]",
-            "[card.untitled]", "c-id", "E", "Retry payments", "[card.untitled]"])
+            "[card.untitled]", "c-id", "E", "Retry payments", "[card.untitled]", "J"])
 
     def test_the_pages_search_caps_match_the_servers(self):
         text = PAGE.read_text(encoding="utf-8")

@@ -1338,6 +1338,17 @@ class SortToCardTest(EngineCase):
         self.assertEqual([(i["action"], i.get("would_change")) for i in dry["items"]],
                          [("unchanged", None), ("unchanged", None)])
 
+    def test_a_dry_run_on_an_old_text_title_card_does_not_name_the_title(self):
+        cfg = Config(secondary_language="zh")
+        reply, _, _ = self.old_text_title_card(cfg)
+        changed = json.loads(reply.read_text())
+        changed["incidents"][0]["created_at"] = "2026-11-10T13:45:00.000Z"
+        reply.write_text(json.dumps(changed))
+        self.clock.tick()
+        dry = self.engine(cfg).read("vendor-status", dry_run=True)
+        self.assertEqual([(i["action"], i.get("would_change")) for i in dry["items"]],
+                         [("update", ["plain", "source"]), ("unchanged", None)])
+
     def test_a_renamed_record_writes_the_object_over_an_old_text_title(self):
         cfg = Config(secondary_language="zh")
         reply, store, old = self.old_text_title_card(cfg)

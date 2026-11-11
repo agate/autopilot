@@ -116,7 +116,7 @@ def order(found: list) -> list:
 def titles(card: dict, langs: tuple) -> Optional[dict]:
     """The card's title in each language (`langs[0]`, the primary, fills a gap), or None when it has none."""
     out = {lang: cards.title_for(card, lang, langs[0]) for lang in langs}
-    return out if any(t is not None for t in out.values()) else None
+    return out if any(isinstance(t, str) and t.strip() for t in out.values()) else None
 
 
 def row(card: dict, langs: tuple) -> dict:
