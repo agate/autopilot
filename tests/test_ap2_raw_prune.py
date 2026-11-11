@@ -120,14 +120,17 @@ class WhatIsOldTest(RawCase):
             f"{old[:-1]}-a1b2c3.json",                 # no Z
             "２０２５0101T000000Z-a1b2c3.json",          # digits that are not ASCII
             name(NOW + timedelta(days=3)),             # a stamp later than now
+            name(NOW + timedelta(days=45), "f45f45"),  # later than now by more than 30 days: still not old
         ]
         for n in kept:
             (folder / n).write_text("{}", encoding="utf-8")
-        future_report = folder / name(NOW + timedelta(days=3), report=True)
-        future_report.write_text("{}", encoding="utf-8")
+        future_reports = [name(NOW + timedelta(days=3), report=True),
+                          name(NOW + timedelta(days=45), "f45f45", report=True)]
+        for n in future_reports:
+            (folder / n).write_text("{}", encoding="utf-8")
         out = self.prune()
         self.assertEqual(out["removed"], [])
-        self.assertEqual(sorted(p.name for p in folder.iterdir()), sorted(kept + [future_report.name]))
+        self.assertEqual(sorted(p.name for p in folder.iterdir()), sorted(kept + future_reports))
 
     def test_no_raw_folder_is_nothing_to_do(self):
         self.assertEqual(self.prune(), {"removed": [], "errors": [], "link": None})
@@ -431,6 +434,17 @@ class GateRunTest(RawCase):
                 mock.patch.object(gate, "write_json", write):
             self.gate()
         self.assertEqual(order, ["store", ("raw", NOW), "heartbeat"])
+
+    def test_a_raw_prune_error_that_is_not_utf8_reaches_gate_json_escaped(self):
+        where = "sources/.raw/\udcff"  # a folder name that is not UTF-8, as os.fsdecode gives it
+        found = {"removed": [], "errors": [{"prune_raw": where, "error": f"{where}: cannot list the raw files: x"}],
+                 "link": None}
+        with mock.patch.object(engine, "prune_raw", lambda data, now, linked: found):
+            out = self.gate()
+        escaped = [{"prune_raw": "sources/.raw/\\udcff",
+                    "error": "sources/.raw/\\udcff: cannot list the raw files: x"}]
+        self.assertEqual(out["errors"], escaped)
+        self.assertEqual(json.loads((self.data / "gate.json").read_text(encoding="utf-8"))["errors"], escaped)
 
     def test_a_file_that_cannot_be_removed_is_one_error_and_the_rest_still_go(self):
         stuck = self.put("chat", NOW - timedelta(days=40), "aaaaaa", report=False)
