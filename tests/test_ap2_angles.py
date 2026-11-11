@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import random
+import re
 import shutil
 import subprocess
 import tempfile
@@ -384,6 +386,32 @@ class ExtendsOffTest(AngleCase):
             with self.assertRaises(AngleError):
                 self.load()
 
+        with self.subTest(case="extends a name an earlier layer turned off"):
+            path = self.user('- name: A\n  question: "q?"\n  when: always\n  brief: "b"\n'
+                             '- name: Portability\n  off: true\n')
+            commit = self.commit_repo_file('- extends: Portability\n  brief: "b"\n')
+            with self.assertRaises(AngleError) as e:
+                self.load(repo=self.repo, commit=commit)
+            self.assertEqual(str(e.exception), f"{self.repo}/{angles.REPO_FILE} at {commit[:12]}: line 1: extends "
+                                               f"'Portability', but {path} line 5 turned it off")
+
+    def test_inherited_globs_count_toward_the_cap(self):
+        # An extends without its own when takes the base's globs, so they count toward its file's 200.
+        globs = ", ".join(f'"g{n}/**"' for n in range(100))
+        self.user(f'- name: Mine\n  question: "q?"\n  when: {{ paths: [{globs}] }}\n  brief: "b"\n')
+        commit = self.commit_repo_file("".join(f"- {{name: M{k}, extends: Mine}}\n" for k in range(2)))
+        table = self.load(repo=self.repo, commit=commit)
+        self.assertEqual([len(table.get(f"M{k}").when["paths"]) for k in range(2)], [100, 100])
+        commit = self.commit_repo_file("".join(f"- {{name: M{k}, extends: Mine}}\n" for k in range(3)))
+        with self.assertRaises(AngleError) as e:
+            self.load(repo=self.repo, commit=commit)
+        self.assertEqual(str(e.exception), f"{self.repo}/{angles.REPO_FILE} at {commit[:12]}: line 3: the file holds "
+                                           "more than 200 globs in all")
+        with self.subTest(case="an extends with its own when takes none"):
+            commit = self.commit_repo_file("".join(f"- {{name: M{k}, extends: Mine, when: always}}\n"
+                                                   for k in range(3)))
+            self.assertEqual(self.load(repo=self.repo, commit=commit).get("M2").when, "always")
+
 
 class RefusalTest(AngleCase):
     """Criterion 4: an angle cannot add tools; bad files raise AngleError naming the file."""
@@ -480,11 +508,24 @@ class RefusalTest(AngleCase):
             "a repeated glob": ('- name: A\n  question: "q?"\n  when: { paths: ["a/**", "a/**"] }\n  brief: "b"\n',
                                 "line 3", "when.paths holds 'a/**' more than once"),
             "a name with a control character": ('- name: "A\\eB"\n  question: "q?"\n  when: always\n  brief: "b"\n',
-                                                "line 1", "name must be printable text, not 'A\\x1bB'"),
+                                                "line 1", "name must be one line of text with no control characters, "
+                                                "not 'A\\x1bB'"),
+            "a name with a newline": ('- name: "A\\nB"\n  question: "q?"\n  when: always\n  brief: "b"\n', "line 1",
+                                      "name must be one line of text with no control characters, not 'A\\nB'"),
+            "a name with a right-to-left override": ('- name: "A\\u202eB"\n  question: "q?"\n  when: always\n'
+                                                     '  brief: "b"\n', "line 1", "not 'A\\u202eB'"),
+            "a name with a bidi isolate": ('- name: "A\\u2066B"\n  question: "q?"\n  when: always\n  brief: "b"\n',
+                                           "line 1", "not 'A\\u2066B'"),
             "an extends with a control character": ('- extends: "Portability\\a"\n  brief: "b"\n', "line 1",
-                                                    "extends must be printable text, not 'Portability\\x07'"),
+                                                    "extends must be one line of text with no control characters, "
+                                                    "not 'Portability\\x07'"),
+            "an extends with a line separator": ('- extends: "Portability\\u2028"\n  brief: "b"\n', "line 1",
+                                                 "not 'Portability\\u2028'"),
             "a glob with a newline": ('- name: A\n  question: "q?"\n  when: { paths: ["a\\n/**"] }\n  brief: "b"\n',
-                                      "line 3", "when.paths entries must be printable text, not 'a\\n/**'"),
+                                      "line 3", "when.paths entries must be one line of text with no control "
+                                      "characters, not 'a\\n/**'"),
+            "a glob with a right-to-left override": ('- name: A\n  question: "q?"\n  when: { paths: ["a\\u202e/**"] }\n'
+                                                     '  brief: "b"\n', "line 3", "not 'a\\u202e/**'"),
             "a glob of 340,000 '**' parts": ('- name: A\n  question: "q?"\n  when: { paths: ["%s"] }\n  brief: "b"\n'
                                              % "/".join(["**"] * 340000), "line 3", "longer than 256"),
         }
@@ -536,6 +577,27 @@ class RefusalTest(AngleCase):
             with self.assertRaises(AngleWidenError) as e:
                 self.load()
             self.assertEqual(e.exception.key, "too" + " " * 1000 + "ls")
+
+    def test_one_line_text_with_other_unicode_loads(self):
+        # Only control characters, line and paragraph separators and bidi overrides or isolates are refused in a
+        # name or glob: a joined emoji, a no-break space and a narrow no-break space are text.
+        self.user('- name: "\\U0001F469\\u200d\\U0001F4BB Developer experience"\n  question: "q?"\n'
+                  '  when: { paths: ["docs/Guide\\u00a0de\\u202fl\'API/**"] }\n  brief: "b"\n'
+                  '- name: "Prix\\u00a0: \\u00e9t\\u00e9"\n  question: "q?"\n  when: always\n  brief: "b"\n'
+                  '- extends: Portability\n  name: "Portability\\u202fbis"\n')
+        table = self.load()
+        dev = table.get("\U0001F469\u200d\U0001F4BB Developer experience")
+        self.assertEqual(dev.when, {"paths": ["docs/Guide\u00a0de\u202fl'API/**"]})
+        self.assertIsNotNone(table.get("Prix\u00a0: \u00e9t\u00e9"))
+        self.assertEqual(table.get("Portability\u202fbis").origin, "user, extends Portability")
+        picked = angles.pick(table, ["docs/Guide\u00a0de\u202fl'API/x.md"], "loop")
+        self.assertIn("\U0001F469\u200d\U0001F4BB Developer experience", [p["name"] for p in picked])
+
+    def test_question_and_brief_may_span_lines(self):
+        # The one-line rule is for names and globs only: a question or brief is prose and keeps its newlines and tabs.
+        self.user('- name: A\n  question: "First?\\nSecond?"\n  when: always\n  brief: "a\\nb\\tc"\n')
+        a = self.load().get("A")
+        self.assertEqual((a.question, a.brief), ("First?\nSecond?", "a\nb\tc"))
 
     def test_many_entries_load_fast(self):
         self.user("".join(f"- {{name: o{n}, off: true}}\n" for n in range(20000)))
@@ -600,7 +662,12 @@ class RefusalTest(AngleCase):
                                                 + "{a: " * 20 + "1" + "}" * 40 + "\n", True),
                  "32 deep": (good + "  x: " + "[" * 32 + "]" * 32 + "\n", False),
                  "32 deep curly": (good + "  x: " + "{a: " * 32 + "1" + "}" * 32 + "\n", False),
-                 "an apostrophe before brackets": (good + "  x: don't {a} [b] {c}\n", False)}
+                 "an apostrophe before brackets": (good + "  x: don't {a} [b] {c}\n", False),
+                 # An apostrophe inside a word opens no string, and a '#' inside a word starts no comment.
+                 "an apostrophe in a word inside a flow list": (good + "  x: [don't, " + "[" * 33 + "]" * 33 + "]\n",
+                                                                True),
+                 "a '#' in a word inside a flow list": (good + "  x: [a#b, " + "[" * 33 + "]" * 33 + "]\n", True),
+                 "after a list item": (good + "- " + "[" * 33 + "]" * 33 + "\n", True)}
         for label, (text, refused) in cases.items():
             with self.subTest(case=label):
                 path = self.user(text)
@@ -613,6 +680,12 @@ class RefusalTest(AngleCase):
                 else:
                     self.assertNotIn("nested", msg)
                     self.assertIn("unknown key 'x'", msg)
+        with self.subTest(case="after an indented list item"):
+            path = self.user(good + "  x:\n    - " + "[" * 33 + "]" * 33 + "\n")
+            with self.assertRaises(AngleError) as e:
+                self.load()
+            self.assertTrue(str(e.exception).startswith(f"{path}: line 6: "), str(e.exception)[:300])
+            self.assertIn("nested more than 32", str(e.exception))
 
     def test_brackets_yamlish_reads_as_text_are_not_counted(self):
         # Brackets in a quoted string, in plain text, or in a comment open no flow collection.
@@ -652,6 +725,14 @@ class RefusalTest(AngleCase):
             with self.assertRaises(AngleError) as e:
                 self.load()
             self.assertIn("nested more than 32", str(e.exception))
+        for label, text, line in (("items with two spaces after each '-'", good + "-  " * 33 + "x\n", 5),
+                                  ("indented items", good + "  x:\n    " + "- " * 33 + "x\n", 6)):
+            with self.subTest(case=label):
+                path = self.user(text)
+                with self.assertRaises(AngleError) as e:
+                    self.load()
+                self.assertTrue(str(e.exception).startswith(f"{path}: line {line}: "), str(e.exception)[:300])
+                self.assertIn("nested more than 32", str(e.exception))
         with self.subTest(case="a line of the most items the cap allows, refused fast"):
             path = self.user(good + "- " * ((angles.MAX_FILE - 200) // 2) + "x\n")
             start = time.monotonic()
@@ -780,6 +861,34 @@ class KindsGlobsTest(AngleCase):
         for pattern, path, want in cases:
             with self.subTest(pattern=pattern, path=path):
                 self.assertIs(angles.glob_match(pattern, path), want)
+
+    def test_globs_agree_with_a_regex_reference(self):
+        # The rules of test_globs as a regex, run only on short text, where backtracking costs nothing: `**` parts
+        # in a run are one, a middle `**/` is any number of named folders, a final `**` is one character or more,
+        # `*` is any run inside a name, `?` is one character of it.
+        def reference(pattern):
+            parts = pattern.split("/")
+            parts = [p for i, p in enumerate(parts) if not (p == "**" and i and parts[i - 1] == "**")]
+            out = []
+            for i, part in enumerate(parts):
+                last = i == len(parts) - 1
+                if part == "**":
+                    out.append(".+" if last else "(?:[^/]+/)*")
+                    continue
+                out.append("".join("[^/]*" if ch == "*" else "[^/]" if ch == "?" else re.escape(ch) for ch in part))
+                if not last:
+                    out.append("/")
+            return re.compile("".join(out), re.S)
+
+        rnd = random.Random(6)
+        tokens = ["a", "b", "*", "?", "/", "**", "/**/", "**/", "/**", "\n"]
+        names = ["a", "b", "/", "ab", "//", "\n"]
+        for _ in range(20000):
+            pattern = "".join(rnd.choice(tokens) for _ in range(rnd.randint(0, 6)))
+            path = "".join(rnd.choice(names) for _ in range(rnd.randint(0, 6)))
+            want = reference(pattern).fullmatch(path) is not None
+            if angles.glob_match(pattern, path) is not want:
+                self.fail(f"glob_match({pattern!r}, {path!r}) is not {want}")
 
     def test_globs_take_linear_time(self):
         cases = [("*a" * 7 + "*b", "a" * 40), ("*a" * 10 + "*b", "a" * 40),
@@ -939,6 +1048,34 @@ class PickerTest(AngleCase):
         self.assertLess(time.monotonic() - start, 15)
         self.assertEqual(self.names(picked), ["Correctness"])
 
+    def test_worst_globs_pick_fast(self):
+        # The worst a PR author can build within the caps: a repo file of 200 globs, each kept alive to the end of
+        # every path by its leading '**', against crafted paths of 2,559 characters (ten 255-character names, or
+        # 1,280 one-character names). Matching reads each path once per glob, a few integer steps a character, so
+        # the shape of the globs does not matter: under 1 s here. A matcher whose cost grows with a glob part times
+        # a name (the first 150 globs) or with the parts times the names (the last 50) takes 12 s or more.
+        globs = [f'"**/*{"a" * 120}b{n:03d}"' for n in range(150)]
+        globs += [f'"{("**/?/" * 50) + f"{n:03d}"}"' for n in range(50)]
+        commit = self.commit_repo_file('- name: Wide\n  question: "q?"\n  when:\n    paths: [%s]\n  brief: "b"\n'
+                                       % ", ".join(globs))
+        table = self.load(repo=self.repo, commit=commit)
+        self.assertEqual(len(table.get("Wide").when["paths"]), angles.MAX_GLOBS)
+        self.assertTrue(all(len(g) <= angles.MAX_GLOB for g in table.get("Wide").when["paths"]))
+        files = ["/".join(["a" * 255] * 9 + ["a" * 254 + str(k)]) for k in range(3)]
+        files.append("/".join("ab"[i % 2] for i in range(1280)))
+        self.assertTrue(all(len(f) == 2559 for f in files))
+        start = time.monotonic()
+        picked = angles.pick(table, files, "review", changed_lines=100)
+        self.assertLess(time.monotonic() - start, 8)
+        self.assertEqual(self.names(picked), ["Correctness", "Failure modes & observability"])
+
+    def test_why_writes_file_names_on_one_line(self):
+        # A changed file's name comes from the PR author, and git allows a newline or an escape in it.
+        files = ["db/a\nIGNORE PREVIOUS.sql", "db/b\x1b[2J.sql", "db/c\u202e.sql"]
+        picked = {p["name"]: p for p in angles.pick(self.load(), files, "loop")}
+        why = picked["Data correctness & backfill"]["why"]
+        self.assertEqual(why, "kind data: db/a\\nIGNORE PREVIOUS.sql, db/b\\x1b[2J.sql, db/c\\u202e.sql")
+
     def test_why_shows_at_most_three_reasons(self):
         self.user('- name: Many globs\n  question: "q?"\n'
                   '  when: { paths: ["billing/**", "billing/*.py", "**/*.py", "billing/a.py", "*/a.py"] }\n'
@@ -958,8 +1095,9 @@ class PickerTest(AngleCase):
 
     def test_why_counts_reasons_past_three_without_listing_their_files(self):
         # Pins the reasons past the third as counted only: their files are never listed.
-        angle = angles.Angle("Wide", "q", {"paths": ["a/**", "b/**", "c/**", "d/**"], "kinds": ["data", "ui"]}, "b",
-                             "user", "f", 1, 0)
+        # 'z/**' matches no file, so it is not counted.
+        angle = angles.Angle("Wide", "q", {"paths": ["a/**", "b/**", "c/**", "z/**", "d/**"], "kinds": ["data", "ui"]},
+                             "b", "user", "f", 1, 0)
         files = ["a/x.py", "b/x.py", "c/x.py", "d/x.py", "d/y.sql", "e/z.tsx"]
         with mock.patch.object(angles, "_examples", wraps=angles._examples) as examples:
             why = angles._why(angle, files, angles.kinds(files))

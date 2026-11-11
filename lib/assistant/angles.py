@@ -17,10 +17,12 @@ An angle is one reviewer's point of view: a `name`, the one `question` it answer
 from __future__ import annotations
 
 import copy
+import functools
 import os
 import re
 import stat
 import subprocess
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -33,9 +35,9 @@ USER_FILE = Path("review") / "angles.yaml"          # in the data folder
 REPO_FILE = ".autopilot/review.yaml"                 # in the reviewed commit
 MAX_FILE = sources.MAX_SOURCE
 GIT_TIMEOUT = 30
-# A repo's file comes from a PR author, so its cost is capped: at most this many globs in the file in all, at most
-# this many characters in one glob, and '[' / '{' (or '- ' items) nested at most this deep on a line (a real angle
-# needs ~5).
+# A repo's file comes from a PR author, so its cost is capped: at most this many globs in the file in all (an extends
+# without its own `when` counts the globs it takes), at most this many characters in one glob, and '[' / '{' (or
+# '- ' items) nested at most this deep on a line (a real angle needs ~5).
 MAX_GLOBS = 200
 MAX_GLOB = 256
 MAX_NESTING = 32
@@ -71,6 +73,9 @@ KINDS = tuple(k for k, _ in CODE_KINDS) + ("tests", "docs")
 _COMMIT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/~^@{}-]{0,254}\Z")
 _WRAP = "angles:\n"   # yamlish reads only a top-level map, so a file is read as the list under this key
 _NOT_A_LIST = "an angle file must be a list of angles ('- name: ...')"
+_ONE_LINE = "must be one line of text with no control characters"
+# Bidi overrides and isolates: they make text read in another order than it is (U+202A-U+202E, U+2066-U+2069).
+_BIDI = frozenset(map(chr, list(range(0x202A, 0x202F)) + list(range(0x2066, 0x206A))))
 
 
 class AngleError(ConfigError):
@@ -236,9 +241,9 @@ class _Checker:
         v = entry[key]
         if not isinstance(v, str) or not v.strip():
             self.fail(path + (key,), f"{key} must be non-empty text, not {_show(v)}")
-        # A name is printed on one line (pick's name and why, unknown_off), so it holds no control character.
-        if key in ("name", "extends") and not v.isprintable():
-            self.fail(path + (key,), f"{key} must be printable text, not {_show(v)}")
+        # A name is printed on one line (pick's name and why, unknown_off).
+        if key in ("name", "extends") and not _one_line(v):
+            self.fail(path + (key,), f"{key} {_ONE_LINE}, not {_show(v)}")
 
     def when(self, v, path: tuple) -> None:
         at = path + ("when",)
@@ -266,8 +271,8 @@ class _Checker:
                 if x in seen:
                     self.fail(at + (k,), f"when.{k} holds {_show(x)} more than once")
                 seen.add(x)
-                if k == "paths" and not x.isprintable():
-                    self.fail(at + (k,), f"when.paths entries must be printable text, not {_show(x)}")
+                if k == "paths" and not _one_line(x):
+                    self.fail(at + (k,), f"when.paths entries {_ONE_LINE}, not {_show(x)}")
                 if k == "paths" and len(x) > MAX_GLOB:
                     self.fail(at + (k,), f"glob {_show(x)} is longer than {MAX_GLOB} characters")
                 if k == "kinds" and x not in KINDS:
@@ -275,6 +280,16 @@ class _Checker:
                 if k == "paths" and x.startswith("/"):
                     self.fail(at + (k,), f"glob {_show(x)} starts with '/'; globs match repo-relative paths, "
                                          "so drop it")
+
+
+def _unsafe(ch: str) -> bool:
+    """Whether `ch` breaks a line or hides what a line says: a control character, a line or paragraph separator,
+    or a bidi override or isolate. Every other character, a joined emoji or a no-break space included, is text."""
+    return unicodedata.category(ch) in ("Cc", "Zl", "Zp") or ch in _BIDI
+
+
+def _one_line(s: str) -> bool:
+    return not any(map(_unsafe, s))
 
 
 def _show(v) -> str:
@@ -414,8 +429,10 @@ def _entry(c: _Checker, i: int, entry) -> dict:
     return entry
 
 
-def _apply(table: Table, layer: int, text: Optional[str], where: str) -> None:
-    """Apply one layer's file to `table` in place."""
+def _apply(table: Table, layer: int, text: Optional[str], where: str, gone: Optional[dict] = None) -> None:
+    """Apply one layer's file to `table` in place. `gone` maps each name an earlier layer of this load turned off to
+    (file, line), and gets this layer's."""
+    gone = {} if gone is None else gone
     if text is None:
         return
     entries, c = _parse(text, where)
@@ -436,15 +453,25 @@ def _apply(table: Table, layer: int, text: Optional[str], where: str) -> None:
                 c.fail((i, "off"), f"{CORRECTNESS} cannot be turned off; extend or replace it instead")
             if name in earlier:
                 del current[name]
+                gone[name] = (where, c.line((i,)))
             else:
                 table.unknown_off.append({"name": name, "file": where, "line": c.line((i,))})
             continue
         if "extends" in entry:
             base = earlier.get(entry["extends"])
+            if base is None and entry["extends"] in gone:
+                off_file, off_line = gone[entry["extends"]]
+                c.fail((i, "extends"), f"extends {_show(entry['extends'])}, but {off_file} line {off_line} turned it "
+                                       "off")
             if base is None:
                 where_from = ", ".join(LAYERS[:layer]) or "no earlier layer"
                 c.fail((i, "extends"), f"extends {_show(entry['extends'])}, but no earlier layer has an angle of that "
                                        f"name (looked in: {where_from})")
+            if "when" not in entry and isinstance(base.when, dict):
+                # The base's globs come along, so they count toward this file's cap as its own do.
+                c.globs += len(base.when.get("paths", []))
+                if c.globs > MAX_GLOBS:
+                    c.fail((i, "extends"), f"the file holds more than {MAX_GLOBS} globs in all")
             fields = {k: copy.deepcopy(getattr(base, k)) for k in FIELDS}
             fields.update({k: copy.deepcopy(entry[k]) for k in FIELDS if k in entry})
             origin = f"{LAYERS[layer]}, extends {entry['extends']}"
@@ -463,19 +490,19 @@ def load(data_dir=None, repo=None, commit=None, plugin_file=None) -> Table:
         raise AngleError(f"{REPO_FILE}: the repo layer needs both the repo and the commit "
                          f"(got repo={repo!r}, commit={commit!r})")
     plugin = Path(plugin_file) if plugin_file is not None else PLUGIN_FILE
-    table = Table([])
+    table, gone = Table([]), {}
     text = _read_file(plugin)
     if text is None:
         raise AngleError(f"{plugin}: the built-in angle file is missing")
-    _apply(table, 0, text, str(plugin))
+    _apply(table, 0, text, str(plugin), gone)
     if table.get(CORRECTNESS) is None:
         raise AngleError(f"{plugin}: the built-in angles must include {CORRECTNESS}")
     if data_dir is not None:
         path = Path(data_dir) / USER_FILE
-        _apply(table, 1, _read_file(path), str(path))
+        _apply(table, 1, _read_file(path), str(path), gone)
     if repo is not None:
         text, where = _read_repo(repo, commit)
-        _apply(table, 2, text, where)
+        _apply(table, 2, text, where, gone)
     return table
 
 
@@ -493,56 +520,88 @@ def kinds(files: list) -> dict:
     return {k: found[k] for k in KINDS if k in found}
 
 
-def _segment_match(pattern: str, text: str) -> bool:
-    """Whether one path segment `text` matches one glob segment: `*` is any run of characters, `?` is one, every
-    other character is itself. Two pointers, going back only to the last `*`: at most len * len steps."""
-    p = t = 0
-    star, mark = -1, 0
-    while t < len(text):
-        if p < len(pattern) and pattern[p] == "*":
-            star, mark = p, t
-            p += 1
-        elif p < len(pattern) and (pattern[p] == "?" or pattern[p] == text[t]):
-            p += 1
-            t += 1
-        elif star >= 0:
-            p, mark = star + 1, mark + 1
-            t = mark
-        else:
-            return False
-    return all(ch == "*" for ch in pattern[p:])
+def _bits(positions: list, size: int) -> int:
+    """An integer with the bits at `positions` set, built in one step (OR-ing bit by bit costs size squared)."""
+    digits = bytearray(b"0" * (size + 1))
+    for p in positions:
+        digits[size - p] = 49    # "1"
+    return int(digits, 2)
+
+
+@functools.lru_cache(maxsize=1024)
+def _compile(pattern: str) -> tuple:
+    """`pattern` as a bit-parallel automaton: one bit per character the glob matches with (bit 0 is the start), so
+    a whole set of states is one integer and one path character moves them all in a few integer steps. A literal
+    character, `?` and each '/' between parts take one character; `*` (a run of them is one) takes any run inside a
+    segment; a middle `**/` is two bits, a folder name (any run of one or more) and its '/', looped; a final `**`
+    takes one character or more, '/' included. Cached, so a pick compiles each glob once."""
+    parts = pattern.split("/")
+    # A run of '**' parts matches what one does.
+    parts = [part for i, part in enumerate(parts) if not (part == "**" and i and parts[i - 1] == "**")]
+    lit, other, slash, loop, back, skip2, skip1 = {}, [], [], [], [], [], []
+    pos, last = 0, len(parts) - 1
+    for i, part in enumerate(parts):
+        if part == "**" and i == last:
+            pos += 1
+            for bits in (other, slash, loop):
+                bits.append(pos)
+            break
+        if part == "**":
+            skip2.append(pos)                       # zero folders: skip both bits
+            other.append(pos + 1)                   # a folder name, one character or more
+            loop.append(pos + 1)
+            slash.append(pos + 2)                   # its '/', then back to the next folder's name
+            back.append(pos + 2)
+            pos += 2
+            continue
+        prev = ""
+        for ch in part:
+            if ch == "*" and prev == "*":
+                continue
+            prev = ch
+            pos += 1
+            if ch == "*":
+                skip1.append(pos - 1)               # an empty run: skip the bit
+                other.append(pos)
+                loop.append(pos)
+            else:
+                (other if ch == "?" else lit.setdefault(ch, [])).append(pos)
+        if i != last:
+            pos += 1
+            lit.setdefault("/", []).append(pos)
+    other_bits = _bits(other, pos)
+    # What one path character lets through: its own literal bits, plus `?`, `*` and folder-name bits for every
+    # character but '/', or the bits that take a '/'.
+    takes = {ch: _bits(ps, pos) | other_bits for ch, ps in lit.items() if ch != "/"}
+    takes["/"] = _bits(lit.get("/", []), pos) | _bits(slash, pos)
+    return (takes, other_bits, _bits(loop, pos), _bits(back, pos), _bits(skip2, pos), _bits(skip1, pos),
+            1 << pos)
 
 
 def glob_match(pattern: str, path: str) -> bool:
-    """Whether the repo-relative `path` matches `pattern` as a whole: `**` is any number of folders (a final `**`
-    is everything under its folder), `*` and `?` stay inside one path segment, every other character is itself.
-    Linear in the segments (no backtracking), since a glob comes from a file a PR author can write."""
-    parts, segs = pattern.split("/"), path.split("/")
-    # A run of '**' parts matches what one does.
-    parts = [part for i, part in enumerate(parts) if not (part == "**" and i and parts[i - 1] == "**")]
-    n = len(segs)
-    at = [True] + [False] * n          # at[j]: the glob so far matches the path's first j segments
-    for i, part in enumerate(parts):
-        if part == "**" and i == len(parts) - 1:
-            # Everything under its folder: one character or more after the last '/' matched so far.
-            return any(at[j] and (j < n - 1 or segs[j] != "") for j in range(n))
-        nxt = [False] * (n + 1)
-        if part == "**":
-            # Zero or more whole folders, each with a name.
-            for j in range(n + 1):
-                nxt[j] = at[j] or (j > 0 and nxt[j - 1] and segs[j - 1] != "")
-        else:
-            for j in range(n):
-                if at[j] and _segment_match(part, segs[j]):
-                    nxt[j + 1] = True
-        at = nxt
-        if not any(at):
+    """Whether the repo-relative `path` matches `pattern` as a whole: `**` is any number of folders, each with a
+    name (a final `**` is everything under its folder), `*` and `?` stay inside one path segment, every other
+    character is itself. A glob comes from a file a PR author can write, so there is no backtracking: the path is
+    read once, a fixed few integer steps a character on an integer of about the glob's length in bits."""
+    takes, other, loop, back, skip2, skip1, accept = _compile(pattern)
+    get = takes.get
+    states = 1
+    states |= (states & skip2) << 2
+    states |= (states & skip1) << 1
+    for ch in path:
+        # Each state steps to the next bit, stays on a looping bit, or goes from a folder's '/' back to its name.
+        states = ((states << 1) | (states & loop) | ((states & back) >> 1)) & get(ch, other)
+        if not states:
             return False
-    return at[n]
+        # Then the empty matches: zero folders for a middle `**/` (which only a `*` can follow), an empty `*`.
+        states |= (states & skip2) << 2
+        states |= (states & skip1) << 1
+    return bool(states & accept)
 
 
 def _examples(files: list) -> str:
-    shown = ", ".join(files[:3])
+    # A file's name comes from the PR author and may hold a newline: escaped, so the why stays one line.
+    shown = ", ".join("".join(repr(ch)[1:-1] if _unsafe(ch) else ch for ch in f) for f in files[:3])
     return shown + (" (+%d more)" % (len(files) - 3) if len(files) > 3 else "")
 
 

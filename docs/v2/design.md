@@ -400,20 +400,28 @@ How it is built (`lib/assistant/angles.py`, the table in `review/angles.yaml`):
   than 32 deep, or that starts with more than 32 `- ` list items (`MAX_NESTING`; a real angle needs a few), is
   refused, naming the line, before the file is parsed, since each nested level costs the parser memory (a key path
   per nested key, a copy of the rest of the line per item); at most 200 globs in the whole file, across every
-  `when.paths` (`MAX_GLOBS`); at most 256 characters in one glob (`MAX_GLOB`); no glob or kind twice in one `when`.
-  With these a repo file's own globs cost the picker at most 200 x 256 characters per changed file, and a `why`
-  writes out at most three reasons and only counts the rest. Brackets are counted as `yamlish` reads them (its
-  comment scan: a comment ends the line, a quote opens a string only where a value starts, a bracket opens a
-  collection only where a value starts or inside an open one), so brackets it reads as text are not counted, and
-  the count is never below its real depth.
+  `when.paths`, an `extends` without its own `when` counting the globs it takes from its base (`MAX_GLOBS`, refused
+  at the entry that passes it); at most 256 characters in one glob (`MAX_GLOB`); no glob or kind twice in one
+  `when`. The picker's cost is then linear in the changed paths, whatever the globs: it reads each path once per
+  glob, a few integer steps per character, so a repo file adds at most 200 such reads per changed file. Measured
+  with 200 globs each kept alive to the end of every path (the worst case for this matcher): about 50 to 65
+  microseconds per character of changed paths, so 0.5 s for four crafted files of 2,559 characters, 3 s for twenty,
+  and 13 s for one path of 256,000 characters. Changed paths are the caller's data and are not capped; their total
+  length sets the cost. A `why` writes out at most three reasons and only counts the rest. Brackets are counted as
+  `yamlish` reads them (its comment scan: a comment ends the line, a quote opens a string only where a value starts,
+  a bracket opens a collection only where a value starts or inside an open one), so brackets it reads as text are
+  not counted, and the count is never below its real depth.
 - **[decided by the builder]** An angle's keys: `name` (non-empty text, unique in its file, compared as written),
-  `question` and `brief` (non-empty text), `when`, plus `extends` and `off`. A `name`, an `extends` target and a
-  glob must be printable (no control characters), since each is shown on one line. Any other key is refused,
-  naming the file, line and key. Text from the file in an error (a key, name, kind or glob) is shown as its repr,
-  control characters escaped, cut to 80 characters. A key in `templates.WIDEN` (compared with `templates._norm`, so
-  `allowedTools`, `allowed-tools` and `allowed_tools` are one key), at any depth, is refused first with an
-  `AngleWidenError`: an angle cannot add tools or permissions. `AngleError` and `AngleWidenError` are
-  `ConfigError`s; a broken angle file stops the load with a clear error, like a broken template (D19).
+  `question` and `brief` (non-empty text, which may span lines), `when`, plus `extends` and `off`. A `name`, an
+  `extends` target and a glob must be one line of text, since each is shown on one line: a control character
+  (Unicode category Cc, such as a newline, a tab or an escape), a line or paragraph separator (Zl, Zp) or a bidi
+  override or isolate (U+202A to U+202E, U+2066 to U+2069, which make text read in another order) is refused; any
+  other character is text (a joined emoji, a no-break space). Any other key is refused, naming the file, line and
+  key. Text from the file in an error (a key, name, kind or glob) is shown as its repr, control characters escaped,
+  cut to 80 characters. A key in `templates.WIDEN` (compared with `templates._norm`, so `allowedTools`,
+  `allowed-tools` and `allowed_tools` are one key), at any depth, is refused first with an `AngleWidenError`: an
+  angle cannot add tools or permissions. `AngleError` and `AngleWidenError` are `ConfigError`s; a broken angle file
+  stops the load with a clear error, like a broken template (D19).
 - **[decided by the builder]** `when` is `always`, or a map with `paths` (a non-empty list of globs) and/or `kinds`
   (a non-empty list of `data`, `infra`, `api`, `ci`, `ui`, `tests`, `docs`), neither holding an entry twice. Kinds
   come from file paths with secretary's patterns (`AREAS`, `TESTS`, `DOCS`), copied into `angles.py`; as in
@@ -421,19 +429,20 @@ How it is built (`lib/assistant/angles.py`, the table in `review/angles.yaml`):
   `tests`, not `api`). A glob matches the whole repo-relative path: `**` is any number of folders (a final `**` is
   everything under its folder), `*` and `?` stay inside one path segment, and every other character is itself (`[`
   included). A glob starting with `/` is refused, since it could never match. A glob comes from a file a PR author
-  can write, so the matcher works segment by segment, never with a backtracking regex, in time bounded by the
-  glob's and the path's lengths. An angle matches when any changed file matches one of its globs, or the PR has one
-  of its kinds.
+  can write, so the matcher never backtracks: each glob is compiled once per pick into a bit-parallel automaton
+  (one bit per glob character, all its states in one integer), and a path is read once, character by character, a
+  few integer steps each. An angle matches when any changed file matches one of its globs, or the PR has one of its
+  kinds.
 - **[decided by the builder]** Layers: built in, then the user's, then the repo's; the later one wins on the same
   name. An entry with neither `extends` nor `off` is a whole angle (all of `name`, `question`, `when`, `brief`) and
   adds or replaces; a replaced angle keeps its place in the table and a new one goes last. `extends: <name>` merges
   the entry's fields over the angle of that name as the earlier layers left it (fields replaced, never merged
-  deeper); the result takes the entry's `name`, which may be left out and then is the `extends` name (so
-  `- extends: Portability` with one `brief:` line is enough). Extending a name no earlier layer has is refused,
-  naming the file and line (an angle added earlier in the same file does not count). `off: true`, with only `name`
-  beside it, removes that angle; an `off` naming no earlier angle is not an error (a repo file can outlive a
-  rename) and lands in the table's `unknown_off` with its file and line. Correctness can be extended or replaced,
-  never turned off; the built-in file must hold it.
+  deeper); the result takes the entry's `name`, which may be left out and then is the `extends` name (so `- extends:
+  Portability` with one `brief:` line is enough). Extending a name no earlier layer has is refused, naming the file
+  and line (an angle added earlier in the same file does not count), and extending a name an earlier layer turned
+  off says which file and line turned it off. `off: true`, with only `name` beside it, removes that angle; an `off`
+  naming no earlier angle is not an error (a repo file can outlive a rename) and lands in the table's `unknown_off`
+  with its file and line. Correctness can be extended or replaced, never turned off; the built-in file must hold it.
 - **[decided by the builder]** Origin: every loaded angle says where it came from, `built-in`, `user`, `repo`,
   `user, extends <name>` or `repo, extends <name>`, and the file that set it (the repo's as `<repo root>/.autopilot/
   review.yaml at <commit>`).
@@ -446,7 +455,7 @@ How it is built (`lib/assistant/angles.py`, the table in `review/angles.yaml`):
   Failure modes & observability, then Test value (secretary's `CODE_ROLES`), whichever is loaded and not off, as
   loaded. Each picked angle carries `name`, `question`, `brief`, `origin`, `file` and a one-line `why`: the globs
   or kinds that matched with up to three of their files (at most three such reasons, then `(+N more)`), `always`,
-  or `fallback`.
+  or `fallback`. A file's name in it has the characters a name may not hold escaped (`\n`), so it stays one line.
 - **[decided by the builder]** The built-in table merges v1's and secretary's, one angle per point of view, with
   secretary's question for each and a short brief from both: Correctness (always); Data correctness & backfill,
   Performance & locking (data); Blast radius & rollback, Security & least privilege (infra); API contract & backward
