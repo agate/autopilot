@@ -527,26 +527,27 @@ def _serve_parser(sub) -> None:
     s.add_argument("--data", metavar="PATH", help=DATA_HELP)
 
 
-class _ServeStop(Exception):
-    """SIGTERM while serving."""
-
-
 def cmd_serve(args) -> int:
     import signal
+    import threading
     from assistant import server
     data = datadir.ensure(datadir.resolve(args.data))
     cfg = config.load(data)  # a bad config.yaml is refused before listening
     srv = server.make_server(data, port=args.port)
 
     def stop(signum, frame):
-        raise _ServeStop
+        # Ask the loop to stop instead of raising here: an exception raised in a signal handler can land inside
+        # the server's request handling, which logs and swallows it, and the server would keep running.
+        # shutdown() waits for serve_forever() to return, so it runs in its own thread, not on this one (the
+        # thread running serve_forever()). A second SIGTERM just asks again.
+        threading.Thread(target=srv.shutdown, daemon=True).start()
 
     old = signal.signal(signal.SIGTERM, stop)
     try:
         _write_out(json.dumps({"url": srv.url, "data_dir": str(data), "mode": cfg.mode}, sort_keys=True,
                               ensure_ascii=False))
-        srv.serve_forever()
-    except (KeyboardInterrupt, _ServeStop):
+        srv.serve_forever()  # returns within its poll interval after a SIGTERM
+    except KeyboardInterrupt:
         pass
     finally:
         signal.signal(signal.SIGTERM, old)

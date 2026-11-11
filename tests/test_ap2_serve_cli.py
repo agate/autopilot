@@ -21,6 +21,20 @@ from tests.test_ap2_cli import temp_inside_the_accounts_claude
 AP2 = ROOT / "bin" / "ap2"
 # No proxy: an http_proxy in the environment would otherwise route requests for 127.0.0.1 elsewhere.
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+# Runs `ap2 serve --port 0` with a slow ThreadingMixIn.process_request: it sleeps after starting the handler
+# thread, so the reply is sent while the main thread is still inside the server's request handling. A SIGTERM
+# sent right after the reply lands there.
+SLOW_PROCESS_REQUEST = """
+import socketserver, sys, time
+sys.path.insert(0, sys.argv[1])
+real = socketserver.ThreadingMixIn.process_request
+def slow(self, request, client_address):
+    real(self, request, client_address)
+    time.sleep(0.5)
+socketserver.ThreadingMixIn.process_request = slow
+from assistant import cli
+sys.exit(cli.main(["serve", "--port", "0"]))
+"""
 
 
 class Ap2ServeCommandTest(unittest.TestCase):
@@ -44,8 +58,8 @@ class Ap2ServeCommandTest(unittest.TestCase):
         return subprocess.run([sys.executable, str(AP2), *args], capture_output=True, text=True, env=self.env(),
                               errors="replace", timeout=30)
 
-    def start(self, *args) -> subprocess.Popen:
-        proc = subprocess.Popen([sys.executable, str(AP2), "serve", *args], stdout=subprocess.PIPE,
+    def start(self, *args, cmd=None) -> subprocess.Popen:
+        proc = subprocess.Popen(cmd or [sys.executable, str(AP2), "serve", *args], stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, text=True, env=self.env(), errors="replace")
 
         def stop():
@@ -54,6 +68,16 @@ class Ap2ServeCommandTest(unittest.TestCase):
             proc.communicate(timeout=30)
         self.addCleanup(stop)
         return proc
+
+    def wait(self, proc, timeout=30):
+        """`proc.communicate()`, but a process still running after `timeout` seconds is killed and the test
+        fails with what it wrote to stderr."""
+        try:
+            return proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        _, stderr = proc.communicate(timeout=30)
+        self.fail(f"ap2 serve was still running {timeout} seconds after the signal; stderr: {stderr!r}")
 
     def first_line(self, proc) -> dict:
         # readline() has no timeout of its own: read in a thread and give up after 30 seconds.
@@ -83,17 +107,28 @@ class Ap2ServeCommandTest(unittest.TestCase):
         with OPENER.open(out["url"], timeout=10) as r:
             self.assertEqual(r.headers["Content-Type"], "text/html; charset=utf-8")
         proc.send_signal(signal.SIGTERM)
-        stdout, stderr = proc.communicate(timeout=30)
+        stdout, stderr = self.wait(proc)
         self.assertEqual(proc.returncode, 0, stderr)
         self.assertEqual(stdout, "")
         self.assertEqual(stderr, "")  # 2xx replies are not logged
+
+    def test_sigterm_while_a_request_is_being_handed_off_still_stops(self):
+        proc = self.start(cmd=[sys.executable, "-c", SLOW_PROCESS_REQUEST, str(ROOT / "lib")])
+        out = self.first_line(proc)
+        with OPENER.open(out["url"] + "api/state", timeout=10) as r:
+            json.loads(r.read())
+        proc.send_signal(signal.SIGTERM)  # the main thread is still in the 0.5 second sleep
+        stdout, stderr = self.wait(proc, timeout=10)
+        self.assertEqual(proc.returncode, 0, stderr)
+        self.assertEqual(stdout, "")
+        self.assertNotIn("error:", stderr)
 
     def test_ctrl_c_exits_0(self):
         proc = self.start("--port", "0", "--data", str(self.tmp / "other"))
         out = self.first_line(proc)
         self.assertEqual(out["data_dir"], str(self.tmp / "other"))
         proc.send_signal(signal.SIGINT)
-        _, stderr = proc.communicate(timeout=30)
+        _, stderr = self.wait(proc)
         self.assertEqual(proc.returncode, 0, stderr)
         self.assertNotIn("Traceback", stderr)
 
@@ -105,8 +140,8 @@ class Ap2ServeCommandTest(unittest.TestCase):
         self.assertEqual(cm.exception.code, 404)
         cm.exception.close()
         proc.send_signal(signal.SIGTERM)
-        _, stderr = proc.communicate(timeout=30)
-        self.assertEqual(proc.returncode, 0)
+        _, stderr = self.wait(proc)
+        self.assertEqual(proc.returncode, 0, stderr)
         lines = stderr.splitlines()
         self.assertEqual(len(lines), 1, stderr)
         self.assertRegex(lines[0], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ 127\.0\.0\.1 \"GET /api/nope HTTP/1\.1\" 404$")
