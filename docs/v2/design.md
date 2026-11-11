@@ -1354,6 +1354,19 @@ Calls the author made without asking (check them):
     unchanged.
   - **[decided by the builder]** Once titles have one slot per language, a hidden card's full-card `title` holds
     the phrase per language, so one screen never shows both languages.
+  - Local paths: three texts can name a file on this Mac, `full[id].template_error` (a bad user template's
+    file), `heartbeat.error` (`<data>/gate.json`) and `full[id].card.ask.text` (a worker's ask, such as a parked
+    worker's worktree). In the phone's copy of each, the data folder's path (as given and resolved) becomes
+    `<data>`, then the home folder's (`Path.home()`, as given and resolved) becomes `~`, so
+    `/Users/x/worktrees/a` reads `~/worktrees/a`; the file's name and the reason stay. The store and the local
+    page (`GET /api/cards/<id>`, `/api/state`) keep the full paths.
+    - **[decided by the builder]** A path outside the data and home folders (`/private/var/...`, `/tmp/...`)
+      stays as it is: it names neither the user nor the data folder's place. Easy to add later.
+    - **[decided by the builder]** A folder's path is replaced only as a whole path name: home `/Users/x` does
+      not change `/Users/xy/...`; a home of `/` (or none found) changes nothing. The data folder goes first, so
+      a data folder under home reads `<data>`, not `~/...`.
+    - **[decided by the builder]** Only these three texts are scrubbed; a card's own words (its title, plain
+      words, questions) are what a person or a source wrote and stay as they are.
   - Read-only, in shadow and live mode alike: building writes nothing in the data folder (it reads the store
     without its lock file, as the local page's GETs do, and never builds `index.sqlite`), starts no process and
     opens no connection. The command writes only to stdout or `--out` (inside the data folder is allowed, since

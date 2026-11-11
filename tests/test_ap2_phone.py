@@ -288,13 +288,98 @@ class FullCardTest(PhoneCase):
         other = self.add(kind="errand")
         data = self.build()
         self.assertIn("template_error", data["full"][card["id"]])
-        self.assertEqual(as_json(data["full"][card["id"]]), self.server_reply(card["id"]))
-        self.assertEqual(as_json(data["full"][other["id"]]), self.server_reply(other["id"]))
+        # The phone's copy names the data folder as `<data>` (the scrub below); the rest is the server's reply.
+        for c in (card, other):
+            expect = self.server_reply(c["id"])
+            expect["template_error"] = expect["template_error"].replace(str(self.data), "<data>")
+            self.assertEqual(as_json(data["full"][c["id"]]), expect)
 
     def test_the_store_is_not_changed_by_the_mac_only_fields_leaving(self):
         card = self.pr42()
         self.build()
         self.assertIn("raw", Store(self.data, cfg=self.cfg).get(card["id"])["source"])
+
+
+# --- local paths: the data folder becomes `<data>`, the home folder `~` ---------------------------------------
+
+class ScrubTest(PhoneCase):
+    def bad_template_and_gate(self) -> dict:
+        """A bad user template, a damaged gate.json and a card of the bad template's kind."""
+        (self.data / "templates" / "parcel.yaml").write_text("kind: parcel\n", encoding="utf-8")
+        (self.data / "gate.json").write_text("{not json", encoding="utf-8")
+        return self.add(kind="parcel")
+
+    def ask(self, text: str, **over) -> dict:
+        return self.add(ask={"type": "fix", "text": text, "role": "implement", "reason": "died"}, **over)
+
+    def test_the_data_folder_becomes_data_as_given_and_resolved(self):
+        link = self.tmp / "data-link"
+        link.symlink_to(self.data, target_is_directory=True)
+        card = self.bad_template_and_gate()
+        asked = self.ask(f"{self.data}/workers.json: cannot read; see '{link}/logs/x.log'")
+        data = phone.build(link, cfg=self.cfg, now=NOW, plugin_dir=self.plugin)
+        text = json.dumps(data, ensure_ascii=False)
+        for path in (str(link), str(self.data), str(self.tmp)):
+            self.assertNotIn(path, text)
+        self.assertIn("<data>/", text)
+        self.assertEqual(data["full"][card["id"]]["template_error"], "<data>/templates/parcel.yaml: missing key 'view'")
+        self.assertRegex(data["heartbeat"]["error"], r"^<data>/gate\.json: not JSON: ")
+        self.assertEqual(data["full"][asked["id"]]["card"]["ask"]["text"],
+                         "<data>/workers.json: cannot read; see '<data>/logs/x.log'")
+
+    def test_the_home_folder_becomes_a_tilde_as_given_and_resolved(self):
+        real = self.tmp / "Users" / "x"
+        real.mkdir(parents=True)
+        home = self.tmp / "home-link"
+        home.symlink_to(real, target_is_directory=True)
+        asked = self.ask(f"could not resume after parking (no worktree at {home}/worktrees/a); look at its "
+                         f"worktree, then start it again")
+        other = self.ask(f"see {real}/worktrees/b/log.txt, and {real}")
+        sibling = self.ask(f"{real}y/worktrees/c is not under home")
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            full = self.build()["full"]
+        self.assertEqual(full[asked["id"]]["card"]["ask"]["text"],
+                         "could not resume after parking (no worktree at ~/worktrees/a); look at its worktree, "
+                         "then start it again")
+        self.assertEqual(full[other["id"]]["card"]["ask"]["text"], "see ~/worktrees/b/log.txt, and ~")
+        self.assertEqual(full[sibling["id"]]["card"]["ask"]["text"], f"{real}y/worktrees/c is not under home")
+
+    def test_a_data_folder_under_home_is_data_not_a_tilde_path(self):
+        card = self.bad_template_and_gate()
+        asked = self.ask(f"{self.data}/cards and {self.tmp}/worktrees/a")
+        with mock.patch.dict(os.environ, {"HOME": str(self.tmp)}):
+            data = self.build()
+        self.assertEqual(data["full"][card["id"]]["template_error"], "<data>/templates/parcel.yaml: missing key 'view'")
+        self.assertRegex(data["heartbeat"]["error"], r"^<data>/gate\.json: ")
+        self.assertEqual(data["full"][asked["id"]]["card"]["ask"]["text"], "<data>/cards and ~/worktrees/a")
+        self.assertNotIn(str(self.tmp), json.dumps(data, ensure_ascii=False))
+
+    def test_a_home_at_the_root_changes_nothing(self):
+        asked = self.ask("/tmp/worktrees/a is gone")
+        with mock.patch.dict(os.environ, {"HOME": "/"}):
+            full = self.build()["full"]
+        self.assertEqual(full[asked["id"]]["card"]["ask"]["text"], "/tmp/worktrees/a is gone")
+
+    def test_an_ask_without_text_and_other_fields_are_kept(self):
+        asked = self.add(ask={"type": "answer", "text": None, "role": "implement"},
+                         title=f"Look at {self.data}/cards")
+        full = self.build()["full"][asked["id"]]
+        self.assertIsNone(full["card"]["ask"]["text"])
+        self.assertEqual(full["card"]["title"], f"Look at {self.data}/cards")  # only the three texts are scrubbed
+
+    def test_the_store_and_the_local_page_keep_the_full_paths(self):
+        card = self.bad_template_and_gate()
+        text = f"no worktree at {self.data}/worktrees/a"
+        asked = self.ask(text)
+        self.build()
+        self.assertEqual(Store(self.data, cfg=self.cfg).get(asked["id"])["ask"]["text"], text)
+        self.assertEqual(self.server_reply(asked["id"])["card"]["ask"]["text"], text)
+        self.assertIn(str(self.data / "templates" / "parcel.yaml"), self.server_reply(card["id"])["template_error"])
+        found = Store(self.data, cfg=self.cfg).list()
+        reply = server.full_card(Store(self.data, cfg=self.cfg), self.data,
+                                 next(c for c in found if c["id"] == card["id"]), ("en",))
+        self.assertTrue(reply["template_error"].startswith(str(self.data / "templates" / "parcel.yaml")))
+        self.assertTrue(server.heartbeat(self.data, NOW)["error"].startswith(str(self.data / "gate.json")))
 
 
 # --- criterion 4: hide what people wrote -----------------------------------------------------------------------
