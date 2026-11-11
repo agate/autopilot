@@ -670,6 +670,9 @@ class OversizedPayloadTest(ScanCase):
             "only inside tool_input": (('{"tool_input": {"tool_name": "Read"}, "tool_response": "'
                                         + "x" * 10_000 + '", "tool_name": "Read"}').encode(), None),
             "a bad key": (('{"session_id" "s", "tool_name": "Read"' + tail).encode(), None),
+            "no colon": (('{"session_id"; "s", "tool_name": "Read"' + tail).encode(), None),
+            "no comma": (('{"session_id": "s"; "tool_name": "Read"' + tail).encode(), None),
+            "not an object": (('x"tool_name": "Read"' + tail).encode(), None),
             "bad UTF-8 before the name": (b'{"session_id": "\xff", "tool_name": "Read"' + tail.encode(), None),
             "the name cut off": (('{"session_id": "s", "tool_name": "Re' + "a" * 10_000 + '"}').encode(), None),
         }
@@ -683,6 +686,14 @@ class OversizedPayloadTest(ScanCase):
                                    rf"cut short\Z"):
                     self.save(p["plan"], data)
                 self.assertEqual(scan.read_log(Path(p["folder"])), ([], True))
+
+    def test_a_value_nested_too_deeply_before_the_name_marks_the_log_cut_short(self):
+        self.CAP = 200_000  # save() keeps CAP + 1 bytes: enough nesting to hit the recursion limit
+        with self.assertRaisesRegex(
+                ScanError, rf"\Athe hook payload is larger than {self.CAP} bytes; the scan log .* is marked "
+                           rf"cut short\Z"):
+            self.save(self.p["plan"], b'{"session_id": ' + b"[" * self.CAP)
+        self.assertEqual(scan.read_log(Path(self.p["folder"])), ([], True))
 
     def test_a_cut_multibyte_character_at_the_look_ahead_is_not_an_error(self):
         data = ('{"session_id": "s", "tool_name": "Read", "tool_response": "' + "é" * 5_000 + '"}').encode()
