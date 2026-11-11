@@ -226,6 +226,7 @@ def _source_parser(sub) -> None:
 
 
 def cmd_source(args) -> int:
+    from assistant import engine as engine_module
     from assistant.engine import Engine
     from assistant.sources import Loader, SourceError
 
@@ -242,6 +243,10 @@ def cmd_source(args) -> int:
         records = None
         if args.records is not None:
             try:
+                # Checked before it is read, as a --raw file is: json.loads of a huge file takes many times its size.
+                if Path(args.records).stat().st_size > engine_module.MAX_OUTPUT:
+                    raise SourceError(f"the records file {args.records!r} is larger than {engine_module.MAX_OUTPUT} "
+                                      "bytes")
                 records = json.loads(Path(args.records).read_text(encoding="utf-8"))
             except (OSError, UnicodeDecodeError, ValueError, RecursionError) as e:
                 why = "nested too deeply" if isinstance(e, RecursionError) else e

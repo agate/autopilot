@@ -138,6 +138,17 @@ class SourceCommandTest(unittest.TestCase):
         self.assertIn(f"cannot read the records {str(deep)!r}",
                       self.fails("source", "read", "t-tracker", "--raw", str(deep), "--records", str(deep)))
 
+    def test_a_records_file_past_the_output_cap_is_refused_before_it_is_read(self):
+        from assistant.engine import MAX_OUTPUT
+        (self.data / "sources" / "t-tracker.yaml").write_text(self.TRACKER)
+        records = self.tmp / "records.json"
+        with open(records, "wb") as f:
+            f.truncate(MAX_OUTPUT + 1)  # sparse: instant and takes no disk
+        line = self.fails("source", "read", "t-tracker", "--raw", str(FIXTURES / "replies" / "jira-search.json"),
+                          "--records", str(records))
+        self.assertEqual(line, f"ap2: the records file {str(records)!r} is larger than {MAX_OUTPUT} bytes")
+        self.assertFalse((self.data / "sources" / ".raw").exists())
+
     def test_a_reply_without_the_list_of_the_item_path_is_one_line(self):
         self.reply.write_text('{"message": "API rate limit exceeded"}')
         line = self.fails("source", "read", "t-vendor-status")

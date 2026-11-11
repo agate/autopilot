@@ -841,8 +841,8 @@ Calls the author made without asking (check them):
     `mcp`, `connector` and `skill` reads are not run here: `Engine.read_saved(source, raw_path, records=None)`
     takes a scan session's saved output (copied under `.raw/<source>/` unless it is there already) and, for
     `fill: ai`, its records. Records with `fill: paths`, or none with `fill: ai`, are refused before anything
-    is run or saved. A saved file larger than `engine.MAX_OUTPUT` (64 MiB) is refused before it is read or
-    copied, as a command's output past it would be. Old raw files are not pruned yet.
+    is run or saved. Every file a read takes (the `--raw` output and the `--records` file) is refused before it
+    is read or copied when it is larger than `engine.MAX_OUTPUT` (64 MiB), as a command's output past it would be. Old raw files are not pruned yet.
   - A read handles at most `engine.MAX_ITEMS` (10,000) items: a reply with more items, or a scan session with
     more `fill: ai` records, fails the read, and the error names the raw file it was saved as (a dry run saves
     none). No card is made or changed. This is the simplest limit to raise later; it keeps one read's time,
