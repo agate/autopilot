@@ -409,11 +409,21 @@ def run(data: Path, source: Optional[str] = None, names: Optional[list] = None, 
     projects = root / "projects"
     try:
         real = projects.resolve() if os.path.lexists(projects) else None
+        overlap = real is not None and (datadir._inside(data, real) or datadir._inside(real, data))
     except (OSError, RuntimeError) as e:
         raise V1ImportError(f"cannot use the v1 projects folder {projects}: {e}") from e
-    if real is not None and (datadir._inside(data, real) or datadir._inside(real, data)):
+    if overlap:
         raise V1ImportError(f"data folder {data} and the v1 projects folder {real} overlap (one is inside the "
                             f"other); the import never writes under --from")
+    # A projects folder that cannot be looked into (a link into a locked folder) is one line too, also where exists()
+    # above says False instead of raising. A dangling link passes: its name was compared above.
+    try:
+        if real is not None:
+            os.stat(real)
+    except (FileNotFoundError, NotADirectoryError):
+        pass
+    except OSError as e:
+        raise V1ImportError(f"cannot use the v1 projects folder {projects}: {e}") from e
     cfg = config.load(data)
     langs = cards.languages(cfg)
     missing = [lang for lang in langs if phrases(lang) is None]
@@ -426,9 +436,12 @@ def run(data: Path, source: Optional[str] = None, names: Optional[list] = None, 
     for name, folder in found.items():
         try:
             real = folder.resolve()
-        except (OSError, RuntimeError) as e:
-            raise V1ImportError(f"cannot use the v1 project folder {folder}: {e}") from e
-        if datadir._inside(data, real) or datadir._inside(real, data):
+            overlap = datadir._inside(data, real) or datadir._inside(real, data)
+        except (OSError, RuntimeError):
+            # Safe to skip: the data folder cannot be made or written inside a folder the import cannot look into,
+            # and the store never writes a locked folder inside the data folder; read_project refuses it alone.
+            continue
+        if overlap:
             raise V1ImportError(f"data folder {data} and the v1 project {name}'s folder {real} overlap (one is "
                                 f"inside the other); the import never writes under a v1 project")
     if names:

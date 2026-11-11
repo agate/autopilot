@@ -718,6 +718,59 @@ class ImportV1Test(unittest.TestCase):
         self.assertIn("projects folder", line)
         self.assertFalse(self.data.exists())
 
+    def test_a_symlinked_project_folder_inside_an_unreadable_folder_is_refused_and_the_others_still_import(self):
+        if not hasattr(os, "symlink"):
+            self.skipTest("no symlinks here")
+        if os.geteuid() == 0:
+            self.skipTest("root reads a folder whatever its mode")
+        locked = self.tmp / "locked"
+        locked.mkdir()
+        shutil.move(str(self.v1 / "projects" / "shop"), str(locked / "shop"))
+        try:
+            (self.v1 / "projects" / "shop").symlink_to(locked / "shop", target_is_directory=True)
+        except (OSError, NotImplementedError) as e:
+            self.skipTest(f"cannot make a symlink: {e}")
+        os.chmod(locked, 0)
+        self.addCleanup(os.chmod, locked, 0o755)
+        code, out, err = self.run_cli()
+        self.assertEqual(code, 1, err)
+        report = json.loads(out)
+        self.assertEqual([r["name"] for r in report["refused"]], ["shop"])
+        self.assertIn("config.json", report["refused"][0]["reason"])
+        self.assertEqual([p["name"] for p in report["projects"]], ["notes"])
+        self.assertIn("v1:notes", self.by_key())
+
+    def test_a_symlinked_projects_folder_inside_an_unreadable_folder_is_one_line(self):
+        if not hasattr(os, "symlink"):
+            self.skipTest("no symlinks here")
+        if os.geteuid() == 0:
+            self.skipTest("root reads a folder whatever its mode")
+        locked = self.tmp / "locked"
+        locked.mkdir()
+        shutil.move(str(self.v1 / "projects"), str(locked / "projects"))
+        try:
+            (self.v1 / "projects").symlink_to(locked / "projects", target_is_directory=True)
+        except (OSError, NotImplementedError) as e:
+            self.skipTest(f"cannot make a symlink: {e}")
+        os.chmod(locked, 0)
+        self.addCleanup(os.chmod, locked, 0o755)
+        line = self.fails()
+        self.assertIn("projects folder", line)
+        self.assertFalse(self.data.exists())
+        # A Python whose exists() and is_dir() say False for such a path, instead of raising, gets the same line.
+        def quiet(check):
+            def wrapped(path, *args, **kw):
+                try:
+                    return check(path, *args, **kw)
+                except OSError:
+                    return False
+            return wrapped
+        with mock.patch.object(Path, "exists", quiet(Path.exists)), \
+                mock.patch.object(Path, "is_dir", quiet(Path.is_dir)):
+            line = self.fails()
+        self.assertIn("projects folder", line)
+        self.assertFalse(self.data.exists())
+
     def test_a_symlinked_projects_folder_whose_real_location_is_inside_the_data_folder_is_refused(self):
         if not hasattr(os, "symlink"):
             self.skipTest("no symlinks here")
