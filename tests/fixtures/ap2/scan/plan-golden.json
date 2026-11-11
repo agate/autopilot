@@ -1,0 +1,97 @@
+{
+  "brief": "You are an ap2 scan session. You only read sources; you decide nothing about work.\n\nRules:\n1. Call only the tools listed below, with exactly the arguments given.\n2. Do not copy tool replies into files. ap2 saves every reply itself.\n3. For a call with a records file, write that file as a JSON list with one object per item. Use only the form's\n   fields and category. Copy id, thread_id, at and place_id exactly as the tool returned them, character for\n   character. Take category from the call's categories. Leave out a field the reply does not have; never make one\n   up.\n4. Follow a call's instructions when it has some.\n5. Post, send, create, edit or comment nowhere. Write no file other than the records files.\n\nPlan: <scan>/plan.json\n\nCalls:\n1. jira-epic (mcp): call the tool search_issues on the atlassian server.\n   Arguments: {\"jql\": \"parent = PROJ-1 AND (assignee = currentUser() OR assignee is EMPTY)\"}\n   Code fills the records from the reply; write no records file for this call.\n2. jira-ticket (mcp): call the tool get_issue on the atlassian server.\n   Arguments: {\"issue\": \"PROJ-7\"}\n   Code fills the records from the reply; write no records file for this call.\n3. slack-alerts (connector): call the tool slack_read_channel.\n   Arguments: {\"channel_id\": \"C0444ALRT\"}\n   Records file: <scan>/slack-alerts.records.json\n   Form: id = Message_ts; thread_id = thread_ts; author = From; at = Message_ts; text = Text; place = Channel; place_id = Channel id (C...)\n   Categories: alert, recovered, fyi\n4. slack-mentions (connector): call the tools slack_search_public, slack_read_thread.\n   Arguments: {\"query\": \"<@U0EXAMPLE1>\"}\n   Records file: <scan>/slack-mentions.records.json\n   Form: id = Message_ts; thread_id = thread_ts; author = From; at = Message_ts; text = Text; place = Channel; place_id = Channel id (C...)\n   Categories: question, ask_to_do, alert, fyi\n",
+  "calls": [
+    {
+      "allowed_tools": [
+        "mcp__atlassian__search_issues"
+      ],
+      "args": {
+        "jql": "parent = PROJ-1 AND (assignee = currentUser() OR assignee is EMPTY)"
+      },
+      "fill": "paths",
+      "server": "atlassian",
+      "source": "jira-epic",
+      "tool": "search_issues",
+      "via": "mcp"
+    },
+    {
+      "allowed_tools": [
+        "mcp__atlassian__get_issue"
+      ],
+      "args": {
+        "issue": "PROJ-7"
+      },
+      "fill": "paths",
+      "server": "atlassian",
+      "source": "jira-ticket",
+      "tool": "get_issue",
+      "via": "mcp"
+    },
+    {
+      "allowed_tools": [
+        "mcp__*__slack_read_channel"
+      ],
+      "args": {
+        "channel_id": "C0444ALRT"
+      },
+      "categories": [
+        "alert",
+        "recovered",
+        "fyi"
+      ],
+      "fill": "ai",
+      "form": {
+        "at": "Message_ts",
+        "author": "From",
+        "id": "Message_ts",
+        "place": "Channel",
+        "place_id": "Channel id (C...)",
+        "text": "Text",
+        "thread_id": "thread_ts"
+      },
+      "records": "<scan>/slack-alerts.records.json",
+      "source": "slack-alerts",
+      "tools": [
+        "slack_read_channel"
+      ],
+      "via": "connector"
+    },
+    {
+      "allowed_tools": [
+        "mcp__*__slack_search_public",
+        "mcp__*__slack_read_thread"
+      ],
+      "args": {
+        "query": "<@U0EXAMPLE1>"
+      },
+      "categories": [
+        "question",
+        "ask_to_do",
+        "alert",
+        "fyi"
+      ],
+      "fill": "ai",
+      "form": {
+        "at": "Message_ts",
+        "author": "From",
+        "id": "Message_ts",
+        "place": "Channel",
+        "place_id": "Channel id (C...)",
+        "text": "Text",
+        "thread_id": "thread_ts"
+      },
+      "records": "<scan>/slack-mentions.records.json",
+      "source": "slack-mentions",
+      "tools": [
+        "slack_search_public",
+        "slack_read_thread"
+      ],
+      "via": "connector"
+    }
+  ],
+  "errors": [],
+  "folder": "<scan>",
+  "made_at": "2026-11-10T14:30:05Z",
+  "plan": "<scan>/plan.json",
+  "version": 1
+}

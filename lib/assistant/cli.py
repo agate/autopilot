@@ -75,6 +75,7 @@ def _parser() -> argparse.ArgumentParser:
     r.add_argument("--by", default="ap2", help=BY_HELP)
     r.add_argument("--data", metavar="PATH", help=DATA_HELP)
     _source_parser(sub)
+    _scan_parser(sub)
     _gate_parser(sub)
     _template_parser(sub)
     return p
@@ -353,6 +354,63 @@ def cmd_template(args) -> int:
 
 
 COMMANDS["template"] = cmd_template
+
+
+# --- ap2 scan (scan sessions, design 5.3) ------------------------------------------------------------------------
+# Starting the session itself is a later slice; these are its plan, its PostToolUse hook and its take.
+
+def _scan_parser(sub) -> None:
+    sc = sub.add_parser("scan", help="plan a scan session, save its replies, take its cards",
+                        description="The scan-session contract for via: mcp, connector and skill sources: plan "
+                                    "what the session calls, save each tool reply (the hook), and turn the finished "
+                                    "scan into cards.")
+    sc_sub = sc.add_subparsers(dest="scan_command", metavar="<scan command>", title="scan commands")
+    sc_sub.required = True
+    pl = sc_sub.add_parser("plan", help="write a scan plan and print it with its brief",
+                           description="Write sources/.scan/<stamp>/plan.json for the sources NAME (none: every "
+                                       "mcp, connector and skill source) and print it: the calls, the errors and "
+                                       "the brief. Starts no process.")
+    pl.add_argument("names", nargs="*", metavar="NAME")
+    pl.add_argument("--data", metavar="PATH", help=DATA_HELP)
+    sv = sc_sub.add_parser("save-raw", help="the PostToolUse hook: log one tool reply of a scan",
+                           description="Read one PostToolUse hook payload (tool_name, tool_input, tool_response) "
+                                       "from stdin and append it to the scan folder's calls.jsonl when the plan "
+                                       "names its tool.")
+    sv.add_argument("--plan", required=True, metavar="FILE", help="the scan's plan.json")
+    tk = sc_sub.add_parser("take", help="turn a finished scan into cards",
+                           description="Build each planned call's raw output from the scan log and read it "
+                                       "(ap2 source read --raw), printing each read and the errors.")
+    tk.add_argument("plan", metavar="PLAN", help="the scan's plan.json")
+    tk.add_argument("--dry-run", action="store_true", help="show what each item would become; save nothing")
+    tk.add_argument("--data", metavar="PATH", help=DATA_HELP)
+
+
+def cmd_scan(args) -> int:
+    from assistant import engine as engine_module, scan
+
+    if args.scan_command == "save-raw":
+        if sys.stdin is None:
+            raise scan.ScanError("cannot read the hook payload: stdin is closed")
+        stream = getattr(sys.stdin, "buffer", sys.stdin)
+        try:
+            payload = stream.read(engine_module.MAX_OUTPUT + 1)
+        except OSError as e:
+            raise scan.ScanError(f"cannot read the hook payload: {e}") from e
+        if isinstance(payload, str):
+            payload = payload.encode("utf-8", errors="surrogateescape")
+        _print_json(scan.save_raw(args.plan, payload))
+        return 0
+    path = datadir.resolve(args.data)
+    if args.scan_command == "plan":
+        _print_json(scan.plan(datadir.ensure(path), args.names))
+        return 0
+    if not args.dry_run:
+        datadir.ensure(path)
+    _print_json(scan.take(path, args.plan, dry_run=args.dry_run))
+    return 0
+
+
+COMMANDS["scan"] = cmd_scan
 
 
 def main(argv: list) -> int:

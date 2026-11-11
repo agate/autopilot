@@ -1,0 +1,33 @@
+# One Jira ticket, read by a scan session through the Atlassian MCP server, filled by code from its one-issue
+# reply. A big ticket is split locally into PR-sized tasks once you approve the plan (plan: split_here).
+# Set `site` and `ticket` in <data>/sources/jira-ticket.yaml:
+#   extends: jira-ticket
+#   settings: { site: jira.example.com, ticket: PROJ-7 }
+source: jira-ticket
+brings: work
+settings:
+  site: ""
+  ticket: ""
+read:
+  via: mcp
+  server: atlassian
+  tool: get_issue
+  issue: "{ticket}"
+  every: each pass
+fill: paths
+form:
+  id: .key
+  at: .fields.updated
+  text: .fields.summary
+  status: .fields.status.name
+  depends_on: .fields.issuelinks[type.inward=is blocked by].inwardIssue.key
+link: "https://{site}/browse/{id}"
+key: "{id}"
+plan: split_here
+status_map: { "To Do": todo, "In Progress": in_progress, "In Review": in_review, "Done": done }
+sort: { all: code }
+writes:
+  on_start: { transition: "In Progress", assign: me }
+  on_pr:    { transition: "In Review", remote_link: pr }
+  on_merge: { transition: "Done" }
+never: [create_ticket, comment]

@@ -5,6 +5,8 @@
 - A file that has `extends: <name>` is merged over that source: maps key by key, lists and scalars replaced.
   `extends:` its own name means the built-in file of that name; another name means that source as loaded (the
   user's when there is one). The result takes the extending file's name.
+- `settings:` maps a name to the user's text (built-in files declare theirs empty). `link`, `key` and the read's
+  arguments may name one as `{name}`; one that is empty refuses the read or the scan plan before anything runs.
 - Every problem raises `SourceError`, whose message starts with the file it is about.
 """
 from __future__ import annotations
@@ -28,10 +30,15 @@ BRINGS = ("messages", "work")
 VIAS = ("command", "mcp", "connector", "skill")
 FILLS = ("paths", "ai")
 KEYS = ("source", "brings", "read", "fill", "form", "link", "key", "sort")
+# `settings:` maps a name to the user's text, for {name} in link, key and the read's arguments. Kept out of KEYS
+# only so the unknown-key message (pinned by tests/test_ap2_sources.py) reads as before.
+SETTINGS = ("settings",)
+SETTING = re.compile(r"[a-z_][a-z0-9_]*\Z")
 REQUIRED = ("source", "brings", "read", "fill", "form", "link", "sort")
 PROSE = ("instructions",)
 WORK_KEYS = ("status_map", "writes", "never", "plan")
 WRITE_EVENTS = ("on_start", "on_pr", "on_merge")
+WRITE_ACTIONS = ("transition", "assign", "remote_link")
 SORT_SPECIAL = ("update_card", "none")
 TEMPLATE = re.compile(r"[a-z][a-z0-9_-]*\Z")
 DEFAULT_KEY = "{source}:{id}"
@@ -221,7 +228,7 @@ def validate(src: Source, lines: Optional[dict] = None) -> Source:
         raise SourceError(f"{what}: {where}{reason}")
 
     for key in d:
-        if key not in KEYS + PROSE + WORK_KEYS:
+        if key not in KEYS + PROSE + WORK_KEYS + SETTINGS:
             fail(f"unknown key '{key}' (known keys: {', '.join(KEYS + PROSE + WORK_KEYS)})", (key,))
     for key in REQUIRED:
         if key not in d:
@@ -242,6 +249,10 @@ def validate(src: Source, lines: Optional[dict] = None) -> Source:
         fail(f"read.via must be one of {', '.join(VIAS)}, not {read.get('via')!r}", ("read", "via"))
     if read["via"] == "command" and not _text(read.get("run")):
         fail("read.run must be the command to run (via: command)", ("read", "run"))
+    if "skip_channels" in read and not (isinstance(read["skip_channels"], list)
+                                        and all(_text(x) for x in read["skip_channels"])):
+        fail("read.skip_channels must be a list of channel names or ids, such as [\"#random\"]",
+             ("read", "skip_channels"))
     if "every" in read and not (_text(read["every"]) or (isinstance(read["every"], int)
                                                           and not isinstance(read["every"], bool))):
         fail(f"read.every must be a text such as 15m, not {read['every']!r}", ("read", "every"))
@@ -328,18 +339,107 @@ def validate(src: Source, lines: Optional[dict] = None) -> Source:
         if not isinstance(sm, dict) or not all(isinstance(v, (str, int)) and not isinstance(v, bool)
                                                for v in sm.values()):
             fail("status_map must map each status there to a card status", ("status_map",))
+    if "never" in d and not (isinstance(d["never"], list) and all(_text(x) for x in d["never"])):
+        fail("never must be a list of what the engine must not do", ("never",))
     if "writes" in d:
         w = d["writes"]
         if not isinstance(w, dict):
             fail(f"writes must map {', '.join(WRITE_EVENTS)} to what to change, not {w!r}", ("writes",))
-        for event in w:
+        never = d.get("never") or []
+        for event, actions in w.items():
             if event not in WRITE_EVENTS:
                 fail(f"writes: unknown event '{event}' (events: {', '.join(WRITE_EVENTS)})", ("writes", event))
-    if "never" in d and not (isinstance(d["never"], list) and all(_text(x) for x in d["never"])):
-        fail("never must be a list of what the engine must not do", ("never",))
+            if actions is None:  # a user's `on_pr: null` turns that write off
+                continue
+            if not (isinstance(actions, dict) and actions):
+                fail(f"writes.{event} must map an action ({', '.join(WRITE_ACTIONS)}) to its value, not "
+                     f"{actions!r}", ("writes", event))
+            for action, value in actions.items():
+                at = ("writes", event, action) if ("writes", event, action) in lines else ("writes", event)
+                if action in never:
+                    fail(f"writes.{event}.{action}: '{action}' is listed in never, so no write may do it", at)
+                if action not in WRITE_ACTIONS:
+                    fail(f"writes.{event}: unknown action '{action}' (actions: {', '.join(WRITE_ACTIONS)})", at)
+                if not _text(value):
+                    fail(f"writes.{event}.{action} must be a text, not {value!r}", at)
     if "plan" in d and not _text(d["plan"]):
         fail("plan must be a text such as split_here", ("plan",))
+    if "settings" in d:
+        st = d["settings"]
+        if not isinstance(st, dict):
+            fail(f"settings must map each name to its text, not {st!r}", ("settings",))
+        for name, value in st.items():
+            if not SETTING.match(name):
+                fail(f"settings: '{name}' must be lowercase letters, digits and '_', so a {{pattern}} can name it",
+                     ("settings", name))
+            if name in form.FIELDS or name in form.DERIVED:
+                fail(f"settings.{name}: '{name}' is a form or derived field, so a pattern naming it would be "
+                     f"ambiguous; pick another name", ("settings", name))
+            if value is not None and (isinstance(value, bool) or not isinstance(value, (str, int))):
+                fail(f"settings.{name} must be a text, not {value!r}", ("settings", name))
     return src
+
+
+def settings(src: Source) -> dict:
+    """The source's settings, name -> text ("" for one that is declared but not set)."""
+    return {k: "" if v is None else str(v) for k, v in (src.data.get("settings") or {}).items()}
+
+
+# The read keys the engine itself uses; every other key is an argument of the scan session's call.
+READ_OWN = ("via", "every", "timeout", "run", "server", "tool", "tools", "skill", "skip_channels")
+
+
+def read_args(src: Source) -> dict:
+    """The read's arguments as written: the `read` keys other than the engine's own."""
+    return {k: copy.deepcopy(v) for k, v in src.data["read"].items() if k not in READ_OWN}
+
+
+def _pattern_names(value) -> list:
+    """Every {name} in the text values of `value` (texts, lists and maps), in order."""
+    if isinstance(value, str):
+        return form.PATTERN_FIELD.findall(value)
+    if isinstance(value, dict):
+        return [n for v in value.values() for n in _pattern_names(v)]
+    if isinstance(value, list):
+        return [n for v in value for n in _pattern_names(v)]
+    return []
+
+
+def unset_settings(src: Source) -> None:
+    """Refuse a source whose link, key or read arguments name a declared setting that is empty, before anything is
+    run, copied or saved. Raises SourceError saying where to set it."""
+    st = settings(src)
+    named = [n for kind, n in src.key if kind == "field"]
+    if src.link[0] == "pattern":
+        named += [n for kind, n in src.link[1] if kind == "field"]
+    named += _pattern_names(read_args(src))
+    for name in dict.fromkeys(named):
+        if name in st and not st[name].strip():
+            where = (f"<data>/sources/{src.name}.yaml (extends: {src.name})" if src.origin == "built-in"
+                     else str(src.file))
+            raise SourceError(f"{src.name}: settings.{name} is not set; add it in {where}")
+
+
+def fill_args(src: Source) -> dict:
+    """The read's arguments with each {setting} filled into its text values. Raises SourceError for a {name} that
+    is not a setting, or a setting that is empty."""
+    st = settings(src)
+    unset_settings(src)
+
+    def fill(value, where):
+        if isinstance(value, str):
+            def one(m):
+                if m.group(1) not in st:
+                    raise SourceError(f"{src.name}: read.{where} names {{{m.group(1)}}}, which is not in settings")
+                return st[m.group(1)]
+            return form.PATTERN_FIELD.sub(one, value)
+        if isinstance(value, dict):
+            return {k: fill(v, f"{where}.{k}") for k, v in value.items()}
+        if isinstance(value, list):
+            return [fill(v, where) for v in value]
+        return value
+
+    return {k: fill(v, k) for k, v in read_args(src).items()}
 
 
 def _prefix_len(path: str) -> int:

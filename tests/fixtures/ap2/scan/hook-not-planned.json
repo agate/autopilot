@@ -1,0 +1,15 @@
+{
+  "session_id": "s-example",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "mcp__claude_ai_Slack__slack_send_message",
+  "tool_input": {
+    "channel_id": "C0123ABCD",
+    "message": "hi"
+  },
+  "tool_response": [
+    {
+      "type": "text",
+      "text": "sent 1730000300.000400"
+    }
+  ]
+}
