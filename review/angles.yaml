@@ -1,0 +1,98 @@
+# Built-in review angles (design 6.1): v1's PR loop table and secretary's PR review table, merged.
+#
+# Each angle is one reviewer's point of view: the one question it answers, when it applies, and a short brief.
+# Correctness always runs first. The rest are ordered riskiest first (data, infra, api, ci, ui, then tests and
+# docs); when more angles match a PR than fit, the earlier one here wins among the built-in ones.
+#
+# Change these in your own <data>/review/angles.yaml, or in a repo's .autopilot/review.yaml: add an angle, replace
+# one by name, change some fields with `extends: <name>`, or turn one off with `off: true`. Plugin updates never
+# touch those files. An angle is prose for a reviewer; it cannot add tools or permissions.
+
+- name: "Correctness"
+  question: "Where does this change compute, return or show the wrong thing? Check every changed condition, default, error and empty path, and every caller of a changed symbol, against the requirement."
+  when: always
+  brief: "Read the requirement first (the ticket or the PR body), then the code around each change and every caller of a changed symbol. Walk the edge cases: empty input, an error from a dependency, the default branch."
+
+# --- data: SQL and migrations ---
+
+- name: "Data correctness & backfill"
+  question: "Which existing rows end up wrong, lost or duplicated, and does the migration or backfill match what the code reads afterwards?"
+  when: { kinds: [data] }
+  brief: "Compare the migration with the code that reads and writes the table after it lands. Check the backfill on rows that already exist, nulls and old values included, and what happens if it runs twice or stops halfway."
+
+- name: "Performance & locking"
+  question: "Does any statement lock or scan a large table, hold a long transaction, or block reads and writes while it deploys?"
+  when: { kinds: [data] }
+  brief: "For each statement, say which locks it takes and how many rows it touches on a large table. Look for a missing index behind a new query and a backfill that is not done in batches."
+
+# --- infra: Terraform, Kubernetes, deploy files ---
+
+- name: "Blast radius & rollback"
+  question: "Who else runs or depends on what this changes, what changes for them, and how is it rolled back when it goes wrong?"
+  when: { kinds: [infra] }
+  brief: "List who and what uses the changed resource, tool or harness, including other teams, and what each of them sees after the change. Then say how the change is undone, and whether undoing it is safe once it has run."
+
+- name: "Security & least privilege"
+  question: "Does any role, policy, network rule or credential now allow more than this change needs?"
+  when: { kinds: [infra] }
+  brief: "Read every changed role, policy, security group and service account. Name each permission or open port that is wider than the change needs, and who could use it."
+
+# --- api: servers, handlers, protos ---
+
+- name: "API contract & backward compatibility"
+  question: "Which existing caller, client or stored message breaks with the new request, response or schema shape, including old clients while the rollout is half done?"
+  when: { kinds: [api] }
+  brief: "Diff the request, response and schema shapes field by field. For each change, name a caller or stored message that still uses the old shape, and say what it gets while old and new versions run side by side."
+
+- name: "Failure modes & observability"
+  question: "What happens when a dependency is slow, down, or returns an error or an empty result, and will anyone see it in the logs or metrics?"
+  when: { kinds: [api] }
+  brief: "For each call to a dependency, trace a timeout, an error and an empty result through the changed code: retries, fallbacks, what the user sees. Then say which log line, metric or alert would show it."
+
+# --- ci: workflows, scripts, tooling ---
+
+- name: "Portability"
+  question: "Where does this break on another shell, OS or runner image (bash 3.2 and 5, BSD and GNU tools, a missing binary or path)?"
+  when: { kinds: [ci] }
+  brief: "Run each changed command in your head on macOS and Linux, on bash 3.2 and 5, and on a runner without the tools you have locally. Flag GNU-only flags, unquoted paths with spaces and binaries the image may not have."
+
+- name: "Security of secrets & permissions"
+  question: "Can a secret, token or write permission leak into logs, forks or untrusted input, or does the job get more access than it needs?"
+  when: { kinds: [ci] }
+  brief: "Follow every secret and token from where it is set to where it is used and printed. Check what a pull request from a fork can run, and whether the job's permissions are wider than its steps need."
+
+# --- ui: React, React Native, CSS ---
+
+- name: "Cross-platform parity"
+  question: "Where does this change look or behave differently across the platforms, browsers and screen sizes it ships to (web and native, narrow and wide)?"
+  when: { kinds: [ui] }
+  brief: "Compare web and native, narrow and wide screens, for every changed component. Look for a platform-only API, a style one platform ignores, and a layout that breaks at a size nobody tried."
+
+- name: "Accessibility & UX"
+  question: "What can a keyboard-only, screen-reader or zoomed-in user no longer reach, read or operate after this change?"
+  when: { kinds: [ui] }
+  brief: "Use the changed screens with the keyboard only, with a screen reader and at 200% zoom. Check labels, focus order, contrast and touch targets, and say what a user can no longer do."
+
+# --- tests ---
+
+- name: "Test value"
+  question: "Would these tests fail if the code they cover broke? Name a plausible bug they would let through."
+  when: { kinds: [tests] }
+  brief: "For each new or changed test, break the code it covers in one plausible way and say whether the test fails. Flag tests that only check the path that already worked, or mock away the thing they claim to test."
+
+- name: "Flakiness & isolation"
+  question: "Where do these tests depend on timing, order, shared state, the network or the clock, so they pass or fail at random?"
+  when: { kinds: [tests] }
+  brief: "Look for sleeps, wall-clock time, test order, shared files or globals, real network calls and random data. A test or harness other teams run counts double: say who would see it fail."
+
+# --- docs ---
+
+- name: "Accuracy"
+  question: "Which statement in these docs is false against the code, config or behavior it describes at the head commit?"
+  when: { kinds: [docs] }
+  brief: "Check each command, path, flag, default and claim in the changed docs against the code at the head commit. Run the commands in your head; a doc that was true last month and is false now counts."
+
+- name: "Reader clarity"
+  question: "Where would a new reader misread these docs or fail to follow them step by step?"
+  when: { kinds: [docs] }
+  brief: "Read the docs as a newcomer would, top to bottom, without the code open. Mark each step that skips something, each term used before it is explained, and each sentence with two meanings."

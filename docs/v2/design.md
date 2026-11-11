@@ -353,7 +353,7 @@ A user template, or one Claude drafts, can combine roles and write briefs. It ca
 role keeps the tools and permission floor it ships with. Which folder a role runs in comes from the card (its repo
 worktree, or the data folder).
 
-### 6.1 Review angles **[proposed]**
+### 6.1 Review angles **[decided]**
 
 What a code review checks lives in one place, and the user can extend it without code. Today it lives in two
 tables that do not know about each other: v1's PR loop (`commands/pr-loop.md`, "Roles to add beside Correctness")
@@ -382,6 +382,61 @@ the PR loop on the user's own PRs and the PR review of other people's PRs.
 - name: Accessibility & UX
   off: true            # this repo has no UI
 ```
+
+How it is built (`lib/assistant/angles.py`, the table in `review/angles.yaml`):
+
+- **[decided by the builder]** Files. Built in: `<plugin>/review/angles.yaml` (the repo root's `review/`, next to
+  `sources/`). The user's: `<data>/review/angles.yaml`. The repo's: `.autopilot/review.yaml` read from the reviewed
+  commit, never the working tree, read-only (`git rev-parse` to pin the commit, `git ls-tree` to find the file and
+  its size, `git cat-file blob`). The path missing at that commit is no layer; any other git failure (no such repo
+  or commit, a commit name starting with `-`, a folder or link at the path) is an `AngleError`. A missing user file
+  is no layer; an empty file holds no angles. Each file is a YAML list of maps of at most `sources.MAX_SOURCE`
+  bytes, read with `yamlish` (as the list under one wrapper key, so line numbers stay the file's own).
+- **[decided by the builder]** An angle's keys: `name` (non-empty text, unique in its file, compared as written),
+  `question` and `brief` (non-empty text), `when`, plus `extends` and `off`. Any other key is refused, naming the
+  file, line and key. A key in `templates.WIDEN` (compared with `templates._norm`, so `allowedTools`,
+  `allowed-tools` and `allowed_tools` are one key), at any depth, is refused first with an `AngleWidenError`: an
+  angle cannot add tools or permissions. `AngleError` and `AngleWidenError` are `ConfigError`s; a broken angle file
+  stops the load with a clear error, like a broken template (D19).
+- **[decided by the builder]** `when` is `always`, or a map with `paths` (a non-empty list of globs) and/or `kinds`
+  (a non-empty list of `data`, `infra`, `api`, `ci`, `ui`, `tests`, `docs`). Kinds come from file paths with
+  secretary's patterns (`AREAS`, `TESTS`, `DOCS`), copied into `angles.py`; as in secretary, the five code kinds
+  are read only from files that are neither tests nor docs (`api/test_x.py` is `tests`, not `api`). A glob matches
+  the whole repo-relative path: `**` is any number of folders (a final `**` is everything under its folder), `*` and
+  `?` stay inside one path segment, and every other character is itself (`[` included). A glob starting with `/`
+  is refused, since it could never match. An angle matches when any changed file matches one of its globs, or the
+  PR has one of its kinds.
+- **[decided by the builder]** Layers: built in, then the user's, then the repo's; the later one wins on the same
+  name. An entry with neither `extends` nor `off` is a whole angle (all of `name`, `question`, `when`, `brief`) and
+  adds or replaces; a replaced angle keeps its place in the table and a new one goes last. `extends: <name>` merges
+  the entry's fields over the angle of that name as the earlier layers left it (fields replaced, never merged
+  deeper); the result takes the entry's `name`, which may be left out and then is the `extends` name (so
+  `- extends: Portability` with one `brief:` line is enough). Extending a name no earlier layer has is refused,
+  naming the file and line (an angle added earlier in the same file does not count). `off: true`, with only `name`
+  beside it, removes that angle; an `off` naming no earlier angle is not an error (a repo file can outlive a
+  rename) and lands in the table's `unknown_off` with its file and line. Correctness can be extended or replaced,
+  never turned off; the built-in file must hold it.
+- **[decided by the builder]** Origin: every loaded angle says where it came from, `built-in`, `user`, `repo`,
+  `user, extends <name>` or `repo, extends <name>`, and the file that set it (the repo's as `<repo>/.autopilot/
+  review.yaml at <commit>`).
+- **[decided by the builder]** The picker, `pick(table, files, mode, changed_lines)`, with `mode` `loop` or
+  `review`. Correctness always first, whatever its `when`. Then the matching angles: the repo's, then the user's,
+  then built in; inside one layer, file order (the built-in file is ordered riskiest first: data, infra, api, ci,
+  ui, tests, docs, as secretary's `AREAS`, then `TESTS`, `DOCS`). Count: the PR loop takes 2 to 4 reviewers in all
+  (Correctness plus up to 3); a PR review takes 3, or 2 when every file is docs or it changes fewer than 30 lines
+  (`SMALL_LINES`, secretary's `review_small_lines`). When only Correctness is picked, the fallback angles fill to 2:
+  Failure modes & observability, then Test value (secretary's `CODE_ROLES`), whichever is loaded and not off, as
+  loaded. Each picked angle carries `name`, `question`, `brief`, `origin`, `file` and a one-line `why`: the globs
+  or kinds that matched with up to three of their files, `always`, or `fallback`.
+- **[decided by the builder]** The built-in table merges v1's and secretary's, one angle per point of view, with
+  secretary's question for each and a short brief from both: Correctness (always); Data correctness & backfill,
+  Performance & locking (data); Blast radius & rollback, Security & least privilege (infra); API contract & backward
+  compatibility, Failure modes & observability (api); Portability, Security of secrets & permissions (ci);
+  Cross-platform parity, Accessibility & UX (ui); Test value, Flakiness & isolation (tests); Accuracy, Reader
+  clarity (docs). v1's "A tool or harness other teams use" row folds into Blast radius & rollback (its question
+  asks who else runs it) and Flakiness & isolation (its brief: a harness other teams run counts double).
+- Not built here: running the angles (the PR loop and the `pr-review` role, 6.2 and 6.3) and showing on the page
+  that a built-in angle the user changed was updated.
 
 ### 6.2 PR review cards **[proposed]**
 
@@ -702,9 +757,10 @@ Calls the author made without asking (check them):
   briefs) and `roles.py` (the shipped roles and their tools); the source engine: `sources.py` (loading,
   `extends:`, checks), `form.py` (the form, the path language, `{field}` patterns and derived fields) and
   `engine.py` (read, fill, check, link and key, sort, card); scan sessions: `scan.py` (the plan, the brief, the
-  save-raw hook and the take); and for workers, `workers.py`, `resources.py`, `transcripts.py` and `projects.py`
-  (see the workers entry below). `ap2 config [--data PATH]` prints the effective config and `data_dir` as JSON.
-  With stdout
+  save-raw hook and the take); review angles: `angles.py` (the three layers, kinds, globs and the picker,
+  design 6.1) with the built-in table in `review/angles.yaml` at the plugin root; and for workers, `workers.py`,
+  `resources.py`, `transcripts.py` and `projects.py` (see the workers entry below). `ap2 config [--data PATH]`
+  prints the effective config and `data_dir` as JSON. With stdout
   closed, `ap2 config` sets up the folder, prints nothing and exits 0; when its reader goes away
   (`ap2 config | true`) it exits 1 with nothing on stderr; when a write fails (a full disk) it prints one line,
   `ap2: cannot write the output: ...`, and exits 1. `ap2` with no arguments prints the usage, listing the
