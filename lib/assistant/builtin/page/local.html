@@ -1,0 +1,998 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Assistant</title>
+<!-- The local page (design 9.1). Served by lib/assistant/server.py with a Content-Security-Policy that allows only
+     this file's own script and style and requests to this server. Card text is set as text only (textContent),
+     never as HTML, and nothing is loaded from another host. -->
+<style>
+:root{
+  --bg:#f3f4f7; --panel:#ffffff; --sunk:#eaecf0; --ink:#14171c; --ink-2:#394049; --muted:#646d7b;
+  --line:#dde1e7; --line-2:#cbd0d8;
+  --accent:#2949d6; --accent-ink:#ffffff; --accent-soft:#e7ebfd;
+  --need:#b4530a; --need-soft:#fcefe2; --run:#0b7884; --run-soft:#ddf2f3;
+  --plan:#6149c4; --plan-soft:#eeebfb; --done:#5d6674; --done-soft:#edeff2;
+  --bad:#bb3127; --bad-soft:#fbe6e3; --good:#2c7a37;
+  --f-ui:-apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial,"PingFang SC","Hiragino Sans GB","Noto Sans SC",sans-serif;
+  --f-mono:ui-monospace,Menlo,Consolas,monospace;
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#0e1014; --panel:#161920; --sunk:#1e222a; --ink:#e8eaee; --ink-2:#c3c8d1; --muted:#939bab;
+    --line:#262b34; --line-2:#353b47;
+    --accent:#8198ff; --accent-ink:#0d1020; --accent-soft:#1e2646;
+    --need:#f0994b; --need-soft:#33230f; --run:#41c1cb; --run-soft:#0f2a2d;
+    --plan:#a998ff; --plan-soft:#231e3c; --done:#8e97a5; --done-soft:#1d2128;
+    --bad:#ff7d71; --bad-soft:#3b1815; --good:#72cd7e;
+    color-scheme:dark;
+  }
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--ink);font-family:var(--f-ui);font-size:14px;line-height:1.45;display:flex;flex-direction:column}
+button,input{font:inherit;color:inherit}
+button{cursor:pointer}
+a{color:var(--accent)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+[hidden]{display:none!important}
+.mono{font-family:var(--f-mono);font-size:12px}
+.muted{color:var(--muted)}
+.pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:0}
+
+.top{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:10px 16px;background:var(--panel);border-bottom:1px solid var(--line);flex:none}
+.brand{display:flex;align-items:center;gap:8px;font-weight:700;font-size:16px}
+.brand small{font-family:var(--f-mono);font-size:10.5px;font-weight:500;color:var(--muted);padding:2px 6px;border:1px solid var(--line-2);border-radius:4px}
+.quick{flex:1 1 240px;min-width:0;display:flex}
+.quick input{width:100%;border:1px solid var(--line-2);background:var(--bg);border-radius:8px;padding:7px 12px}
+.status{display:flex;gap:14px;font-size:12px;color:var(--muted);flex-wrap:wrap;align-items:center}
+.beat{display:inline-flex;align-items:center;gap:6px}
+.beat::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--good)}
+.beat.late{color:var(--bad);font-weight:600}
+.beat.late::before{background:var(--bad)}
+.seg{display:inline-flex;background:var(--sunk);border-radius:8px;padding:3px;gap:2px}
+.seg button{border:0;background:transparent;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:600;color:var(--muted)}
+.seg button[aria-pressed="true"]{background:var(--panel);color:var(--ink);box-shadow:0 1px 2px rgb(0 0 0 / .1)}
+.banner{margin:8px 16px 0;padding:8px 12px;border-radius:8px;background:var(--bad-soft);color:var(--bad);font-size:13px;overflow-wrap:anywhere}
+
+.local{flex:1;min-height:0;display:grid;grid-template-columns:210px minmax(290px,380px) minmax(0,1fr);gap:12px;padding:12px 16px}
+.rail{display:flex;flex-direction:column;gap:2px;overflow:auto;min-height:0}
+.rail h6{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:14px 8px 6px;font-weight:650}
+.rail h6:first-child{margin-top:4px}
+.nav{display:flex;align-items:center;gap:9px;padding:7px 8px;border-radius:6px;color:var(--ink-2);font-weight:500;text-decoration:none;min-width:0}
+.nav:hover{background:var(--sunk)}
+.nav[aria-current="true"]{background:var(--panel);color:var(--ink);box-shadow:0 0 0 1px var(--line)}
+.nav .n{margin-left:auto;font-family:var(--f-mono);font-size:11px;color:var(--muted)}
+.nav .n.hot{color:var(--need);font-weight:600}
+.nav-t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rail .empty{padding:4px 8px;font-size:12px;color:var(--muted)}
+
+.pane{background:var(--panel);border:1px solid var(--line);border-radius:10px;min-height:0;display:flex;flex-direction:column;overflow:hidden;min-width:0}
+.pane.wide{grid-column:2 / -1}
+.pane-h{padding:14px 16px 12px;border-bottom:1px solid var(--line);display:flex;flex-direction:column;gap:5px;flex:none}
+.pane-h h2{margin:0;font-size:15px;font-weight:650;display:flex;align-items:center;gap:8px}
+.pane-h p{margin:0;color:var(--muted);font-size:12.5px;max-width:70ch}
+.count{font-family:var(--f-mono);font-size:12px;color:var(--muted);font-weight:500}
+.pane-b{overflow:auto;min-height:0;flex:1}
+.note{padding:28px 16px;color:var(--muted);text-align:center}
+
+.dot{width:8px;height:8px;border-radius:50%;flex:none;display:inline-block}
+.dot.needs{background:var(--need)}
+.dot.running{background:var(--run);box-shadow:0 0 0 3px var(--run-soft)}
+.dot.planned{border:2px solid var(--plan)}
+.dot.done{background:var(--done);opacity:.65}
+.chip{display:inline-flex;align-items:center;font-size:11px;font-weight:600;padding:1px 7px;border-radius:4px;background:var(--sunk);color:var(--ink-2);white-space:nowrap;line-height:1.6}
+.chip.needs{background:var(--need-soft);color:var(--need)}
+.chip.running{background:var(--run-soft);color:var(--run)}
+.chip.planned{background:var(--plan-soft);color:var(--plan)}
+.chip.done{background:var(--done-soft);color:var(--done)}
+.chip.found{background:transparent;border:1px dashed var(--line-2);color:var(--muted)}
+.pri{font-family:var(--f-mono);font-size:11px;color:var(--muted);border:1px solid var(--line-2);border-radius:4px;padding:0 5px;line-height:1.6}
+.pri.P0{color:var(--bad);border-color:var(--bad)} .pri.P1{color:var(--need);border-color:var(--need)}
+
+.row{display:flex;gap:10px;align-items:flex-start;padding:11px 14px;border-bottom:1px solid var(--line);color:inherit;text-decoration:none}
+.row:hover{background:var(--sunk)}
+.row[aria-selected="true"]{background:var(--accent-soft)}
+.row > .dot{margin-top:6px}
+.row-main{flex:1;min-width:0}
+.row-title{font-weight:560;line-height:1.3;overflow-wrap:anywhere}
+.row-sub{font-size:12.5px;color:var(--ink-2);margin-top:3px;overflow-wrap:anywhere}
+.row-meta{display:flex;gap:4px 8px;flex-wrap:wrap;align-items:center;margin-top:5px;font-size:12px;color:var(--muted)}
+.row-meta .ask{color:var(--need);font-weight:600}
+
+.det{padding:20px 24px 48px;display:flex;flex-direction:column;gap:20px;max-width:820px}
+.det h1{font-size:21px;line-height:1.25;margin:0;font-weight:650;overflow-wrap:anywhere}
+.chips{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.plain{border:1px solid var(--line);border-left:3px solid var(--run);border-radius:10px;padding:12px 16px}
+.plain dl{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;margin:8px 0 0}
+.plain dt{color:var(--muted);font-size:12.5px;font-weight:600;padding-top:2px;white-space:nowrap}
+.plain dd{margin:0;line-height:1.55;overflow-wrap:anywhere}
+.sec h3,.plain h3{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:0 0 9px;font-weight:650}
+.kv{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:7px 18px;margin:0}
+.kv dt{color:var(--muted)} .kv dd{margin:0;min-width:0;overflow-wrap:anywhere}
+blockquote{margin:8px 0 0;padding:10px 14px;border-left:3px solid var(--line-2);background:var(--bg);border-radius:0 8px 8px 0;white-space:pre-wrap;overflow-wrap:anywhere}
+.btn{border:1px solid var(--line-2);background:var(--panel);padding:6px 12px;border-radius:7px;font-weight:560;font-size:13px;white-space:nowrap;text-decoration:none;color:inherit;display:inline-flex;align-items:center}
+.btn:hover{border-color:var(--ink-2)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.warn{color:var(--bad);font-size:13px}
+.log{list-style:none;margin:0;padding:0}
+.log li{display:grid;grid-template-columns:150px minmax(0,1fr);gap:10px;padding:7px 0;border-top:1px solid var(--line);font-size:13px}
+.log time{font-family:var(--f-mono);font-size:11.5px;color:var(--muted);padding-top:1px}
+.log .who{font-weight:600;margin-right:6px}
+.qa{list-style:none;margin:0 0 8px;padding:0;display:flex;flex-direction:column;gap:8px}
+.qa-q{background:var(--sunk);border-radius:10px;padding:8px 12px;white-space:pre-wrap;overflow-wrap:anywhere}
+.qa-a{border-left:2px solid var(--line-2);padding:4px 10px;margin-top:4px;font-size:13.5px;white-space:pre-wrap}
+.qa-a.wait{color:var(--muted);font-style:italic}
+.qa-form{display:flex;gap:8px;margin-top:6px}
+.qa-form input{flex:1;min-width:0;border:1px solid var(--line-2);border-radius:7px;padding:7px 10px;background:var(--bg)}
+.plainv ul{margin:0;padding-left:18px}
+.plainv dl{margin:0}
+
+table.grid{width:100%;border-collapse:collapse;font-size:13px}
+table.grid th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:650;padding:8px 12px;border-bottom:1px solid var(--line)}
+table.grid td{padding:8px 12px;border-bottom:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere}
+table.grid td.num{text-align:right;font-family:var(--f-mono);font-size:12px}
+table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
+.wf{border:1px solid var(--line);border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:6px;max-width:440px;background:var(--bg)}
+.wf-block{border:1px dashed var(--line-2);border-radius:6px;padding:8px 10px;font-size:12.5px;color:var(--ink-2);background:var(--panel);display:flex;justify-content:space-between;gap:8px}
+.wf-block.first{border-style:solid;border-left:3px solid var(--run)}
+.wf-btns{display:flex;flex-direction:column;gap:6px}
+.wf-btns div{font-size:12.5px}
+.wf-btns span.b{font-size:11.5px;padding:2px 8px;border-radius:5px;border:1px solid var(--line-2);background:var(--panel);margin-right:8px}
+.role{border-top:1px solid var(--line);padding:10px 0;display:flex;flex-direction:column;gap:4px}
+.json{font-family:var(--f-mono);font-size:11.5px;background:var(--sunk);padding:12px;border-radius:8px;overflow-x:auto;margin:0;max-height:480px}
+.sets{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr));gap:14px;padding:16px}
+.set{border:1px solid var(--line);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:12px;min-width:0}
+.set h3{font-size:13px;margin:0;font-weight:650}
+
+@media (max-width:980px){
+  body{display:block;height:auto}
+  .local{display:flex;flex-direction:column}
+  .rail{flex-direction:row;flex-wrap:wrap;overflow:visible}
+  .rail h6{width:100%;margin:6px 8px 2px}
+  .pane,.pane-b{overflow:visible}
+  .det{padding:18px 16px 40px}
+  .log li{grid-template-columns:110px minmax(0,1fr)}
+}
+</style>
+</head>
+<body>
+<header id="top" class="top">
+  <div class="brand"><span data-l="app.name">Assistant</span> <small id="mode-tag"></small></div>
+  <div class="quick"><input id="search" type="search" autocomplete="off" data-l-placeholder="search.placeholder" data-l-aria="search.placeholder"></div>
+  <div class="status">
+    <span id="heartbeat" class="beat late" role="status"></span>
+    <span id="running"></span>
+    <div id="lang-switch" class="seg" role="group" data-l-aria="lang.switch" hidden></div>
+  </div>
+</header>
+<div id="banner" class="banner" role="alert" hidden></div>
+<div class="local">
+  <nav id="rail" class="rail">
+    <h6 data-l="rail.lanes">Lanes</h6>
+    <div id="rail-lanes"></div>
+    <h6 data-l="rail.projects">Projects</h6>
+    <div id="rail-projects"></div>
+    <h6 data-l="rail.manage">Manage</h6>
+    <div id="rail-manage"></div>
+  </nav>
+
+  <section id="list" class="pane">
+    <div class="pane-h"><h2><span id="list-title"></span> <span id="list-count" class="count"></span></h2><p id="list-hint"></p></div>
+    <div id="list-body" class="pane-b"></div>
+  </section>
+  <section id="card" class="pane">
+    <div id="card-body" class="pane-b"></div>
+  </section>
+
+  <section id="sources" class="pane" hidden>
+    <div class="pane-h"><h2 data-l="manage.sources">Sources</h2><p data-l="sources.hint"></p></div>
+    <div id="sources-body" class="pane-b"></div>
+  </section>
+  <section id="source" class="pane" hidden>
+    <div id="source-body" class="pane-b"></div>
+  </section>
+
+  <section id="templates" class="pane" hidden>
+    <div class="pane-h"><h2 data-l="manage.templates">Templates</h2><p data-l="templates.hint"></p></div>
+    <div id="templates-body" class="pane-b"></div>
+  </section>
+  <section id="template" class="pane" hidden>
+    <div id="template-body" class="pane-b"></div>
+  </section>
+
+  <section id="settings" class="pane wide" hidden>
+    <div class="pane-h"><h2 data-l="manage.settings">Settings</h2><p data-l="settings.hint"></p></div>
+    <div id="settings-body" class="pane-b"></div>
+  </section>
+</div>
+
+<script type="application/json" id="labels">
+{
+  "en": {
+    "app.name": "Assistant",
+    "mode.shadow": "shadow mode",
+    "mode.live": "live",
+    "search.placeholder": "Search every card",
+    "beat.last": "Last check: {ago}",
+    "beat.never": "No check yet",
+    "beat.error": "Last check: unknown",
+    "beat.late": "No check for 3 minutes or more",
+    "running.count": "Running: {n}",
+    "lang.switch": "Page language",
+    "time.just": "just now",
+    "time.s": "{n}s ago",
+    "time.m": "{n}m ago",
+    "time.h": "{n}h ago",
+    "time.d": "{n}d ago",
+    "time.future": "in the future",
+    "rail.lanes": "Lanes",
+    "rail.projects": "Projects",
+    "rail.manage": "Manage",
+    "rail.none": "None yet",
+    "lane.needs": "Needs you",
+    "lane.running": "Running",
+    "lane.planned": "Planned",
+    "lane.done": "History",
+    "hint.needs": "Waiting on your decision, answer or confirm. Nothing here moves until you act.",
+    "hint.running": "Working in the background right now.",
+    "hint.planned": "Confirmed and waiting for a free slot or a set time.",
+    "hint.done": "Done, answered and cancelled. This page keeps all of it.",
+    "manage.sources": "Sources",
+    "manage.templates": "Templates",
+    "manage.settings": "Settings",
+    "list.search": "Search: {q}",
+    "list.search_hint": "Cards whose plain words, title, kind or source hold every word.",
+    "list.project": "Project: {title}",
+    "list.project_hint": "The child cards of this project.",
+    "list.count": "{shown} of {total}",
+    "list.empty": "No cards here.",
+    "card.empty": "Pick a card to see it here.",
+    "card.none": "No such card.",
+    "card.untitled": "Untitled card",
+    "card.template_error": "Its template could not be loaded, so the card is drawn without it:",
+    "chip.from": "from {feed}",
+    "chip.found": "found while working",
+    "ask.confirm": "Confirm a plan",
+    "ask.approve": "Approve",
+    "ask.answer": "Answer",
+    "ask.fix": "Fix",
+    "plain.title": "In plain words",
+    "plain.what": "What this is",
+    "plain.where": "Where it stands",
+    "plain.do": "What you do",
+    "plain.missing": "Not written in this language yet.",
+    "block.source_block": "Source",
+    "block.plan": "Plan",
+    "block.draft": "Draft",
+    "block.findings": "Findings",
+    "block.verdict": "Verdict",
+    "block.analysis": "Analysis",
+    "block.report": "Report",
+    "block.pr": "Pull request",
+    "block.merge_checks": "Merge checks",
+    "block.children": "Child cards",
+    "block.links": "Linked cards",
+    "block.schedule": "Schedule",
+    "block.runs": "Runs",
+    "block.fix_steps": "How to fix it",
+    "block.questions": "Ask about this card",
+    "block.activity": "Activity",
+    "src.name": "Source",
+    "src.by": "By",
+    "src.where": "Where",
+    "src.when": "When",
+    "src.open": "Open in source",
+    "src.refused": "Its link is not shown: this page opens only http and https links.",
+    "none": "None.",
+    "links.missing": "missing",
+    "q.placeholder": "Ask about this card",
+    "q.send": "Ask",
+    "q.pending": "Saved. Your Mac answers it when question answering is turned on.",
+    "q.none": "No questions yet.",
+    "q.failed": "Not saved:",
+    "act.restore": "restore point {id}",
+    "sources.hint": "Where cards come from: the built-in files, and your own in the data folder's sources/.",
+    "sources.pick": "Pick a source to see it here.",
+    "sources.data": "As the engine reads it",
+    "templates.hint": "What each kind of card shows, its buttons, and who works on it.",
+    "templates.pick": "Pick a template to see it here.",
+    "col.name": "Name",
+    "col.kind": "Kind",
+    "col.title": "Title",
+    "col.brings": "Brings",
+    "col.via": "Read with",
+    "col.every": "Every",
+    "col.fill": "Filled by",
+    "col.origin": "From",
+    "col.cards": "Cards",
+    "col.file": "File",
+    "col.files": "Files",
+    "col.size": "Size",
+    "template.view": "What the card shows",
+    "template.buttons": "Buttons",
+    "template.buttons_later": "Buttons are not drawn on cards yet.",
+    "template.roles": "Who works on it",
+    "template.tools": "Tools",
+    "template.floor": "Permission floor",
+    "template.when": "When",
+    "template.cards": "Cards of this kind: {n}",
+    "template.replaces": "Replaces the built-in template",
+    "btn.lane": "moves the card to {lane}",
+    "btn.restore": "puts the card back as it was before its last change",
+    "btn.child": "adds a child card of kind {kind}",
+    "origin.builtin": "Built in",
+    "origin.user": "Yours",
+    "settings.hint": "Read-only here. To change them, edit config.yaml in the data folder.",
+    "settings.config": "Config",
+    "settings.mode": "Mode",
+    "settings.primary": "Primary language",
+    "settings.secondary": "Second language",
+    "settings.keep": "Keep conversations",
+    "settings.data_dir": "Data folder",
+    "settings.url": "This page",
+    "settings.disk": "Disk use",
+    "settings.total": "Total",
+    "settings.unset": "not set",
+    "error.load": "Could not load:"
+  },
+  "zh": {
+    "app.name": "助理",
+    "mode.shadow": "影子模式",
+    "mode.live": "正式模式",
+    "search.placeholder": "搜索所有卡片",
+    "beat.last": "上次检查：{ago}",
+    "beat.never": "还没检查过",
+    "beat.error": "上次检查：未知",
+    "beat.late": "已经 3 分钟或更久没有检查",
+    "running.count": "运行中：{n}",
+    "lang.switch": "页面语言",
+    "time.just": "刚刚",
+    "time.s": "{n} 秒前",
+    "time.m": "{n} 分钟前",
+    "time.h": "{n} 小时前",
+    "time.d": "{n} 天前",
+    "time.future": "在未来",
+    "rail.lanes": "分组",
+    "rail.projects": "项目",
+    "rail.manage": "管理",
+    "rail.none": "还没有",
+    "lane.needs": "待你处理",
+    "lane.running": "进行中",
+    "lane.planned": "计划中",
+    "lane.done": "历史",
+    "hint.needs": "在等你做决定、回答或确认。你不动手，这里的卡片就不会动。",
+    "hint.running": "正在后台进行。",
+    "hint.planned": "已确认，在等空闲位置或约定的时间。",
+    "hint.done": "做完的、回答过的和取消的。这个页面全部保留。",
+    "manage.sources": "来源",
+    "manage.templates": "模板",
+    "manage.settings": "设置",
+    "list.search": "搜索：{q}",
+    "list.search_hint": "大白话、标题、类型或来源里包含每个词的卡片。",
+    "list.project": "项目：{title}",
+    "list.project_hint": "这个项目的子卡片。",
+    "list.count": "{total} 张中的 {shown} 张",
+    "list.empty": "这里没有卡片。",
+    "card.empty": "选一张卡片，在这里查看。",
+    "card.none": "没有这张卡片。",
+    "card.untitled": "无标题卡片",
+    "card.template_error": "它的模板加载失败，所以不按模板显示：",
+    "chip.from": "来自 {feed}",
+    "chip.found": "工作中发现的",
+    "ask.confirm": "确认计划",
+    "ask.approve": "批准",
+    "ask.answer": "回复",
+    "ask.fix": "修复",
+    "plain.title": "用大白话说",
+    "plain.what": "这是什么",
+    "plain.where": "进展到哪了",
+    "plain.do": "你要做什么",
+    "plain.missing": "还没有这种语言的版本。",
+    "block.source_block": "来源",
+    "block.plan": "计划",
+    "block.draft": "草稿",
+    "block.findings": "发现",
+    "block.verdict": "结论",
+    "block.analysis": "分析",
+    "block.report": "报告",
+    "block.pr": "拉取请求",
+    "block.merge_checks": "合并检查",
+    "block.children": "子卡片",
+    "block.links": "关联卡片",
+    "block.schedule": "时间安排",
+    "block.runs": "运行记录",
+    "block.fix_steps": "怎么修",
+    "block.questions": "关于这张卡片提问",
+    "block.activity": "活动记录",
+    "src.name": "来源",
+    "src.by": "作者",
+    "src.where": "位置",
+    "src.when": "时间",
+    "src.open": "在原处打开",
+    "src.refused": "没有显示它的链接：这个页面只打开 http 和 https 链接。",
+    "none": "没有。",
+    "links.missing": "找不到",
+    "q.placeholder": "问一个关于这张卡片的问题",
+    "q.send": "提问",
+    "q.pending": "已保存。开启问题回答后，你的 Mac 会回答它。",
+    "q.none": "还没有提问。",
+    "q.failed": "没有保存：",
+    "act.restore": "恢复点 {id}",
+    "sources.hint": "卡片从哪里来：内置的文件，以及数据文件夹 sources/ 里你自己的文件。",
+    "sources.pick": "选一个来源，在这里查看。",
+    "sources.data": "引擎读到的内容",
+    "templates.hint": "每种卡片显示什么、有哪些按钮、由谁来做。",
+    "templates.pick": "选一个模板，在这里查看。",
+    "col.name": "名称",
+    "col.kind": "类型",
+    "col.title": "标题",
+    "col.brings": "带来",
+    "col.via": "读取方式",
+    "col.every": "频率",
+    "col.fill": "填写方式",
+    "col.origin": "出处",
+    "col.cards": "卡片数",
+    "col.file": "文件",
+    "col.files": "文件",
+    "col.size": "大小",
+    "template.view": "卡片显示什么",
+    "template.buttons": "按钮",
+    "template.buttons_later": "按钮暂时还不会画到卡片上。",
+    "template.roles": "谁来做",
+    "template.tools": "工具",
+    "template.floor": "权限底线",
+    "template.when": "时机",
+    "template.cards": "这种卡片：{n} 张",
+    "template.replaces": "替换了内置模板",
+    "btn.lane": "把卡片移到「{lane}」",
+    "btn.restore": "把卡片恢复成上一次改动之前的样子",
+    "btn.child": "添加一张 {kind} 类型的子卡片",
+    "origin.builtin": "内置",
+    "origin.user": "你的",
+    "settings.hint": "这里只能查看。要修改，请编辑数据文件夹里的 config.yaml。",
+    "settings.config": "配置",
+    "settings.mode": "模式",
+    "settings.primary": "主要语言",
+    "settings.secondary": "第二语言",
+    "settings.keep": "保留对话记录",
+    "settings.data_dir": "数据文件夹",
+    "settings.url": "本页地址",
+    "settings.disk": "磁盘占用",
+    "settings.total": "合计",
+    "settings.unset": "未设置",
+    "error.load": "加载失败："
+  }
+}
+</script>
+
+<script>
+'use strict';
+(function () {
+  const LABELS = JSON.parse(document.getElementById('labels').textContent);
+  const LANES = ['needs', 'running', 'planned', 'done'];
+  const POLL_MS = 10000;       // design 12: the page polls /api/state every 10 seconds
+  const LATE_SECONDS = 180;    // design 7.4: red after 3 minutes without a gate run
+  const QUESTION_MAX = 2000;
+  const PANES = ['list', 'card', 'sources', 'source', 'templates', 'template', 'settings'];
+  const S = {state: null, fetchedAt: 0, lang: null, route: {name: 'lane', arg: 'needs'}, list: {name: 'lane', arg: 'needs'},
+             listData: null, cardId: null};
+
+  const $ = id => document.getElementById(id);
+
+  // --- labels: one table per language; a code like zh-Hans uses zh; others fall back to en ----------------------
+  function table(lang) { return LABELS[lang] || LABELS[String(lang).split('-')[0]] || LABELS.en; }
+  function L(key, vars) {
+    let s = table(S.lang)[key];
+    if (s === undefined) s = LABELS.en[key];
+    if (s === undefined) s = key;
+    if (vars) s = s.replace(/\{(\w+)\}/g, (m, k) => (vars[k] === undefined ? m : String(vars[k])));
+    return s;
+  }
+
+  // --- elements: built with createElement and textContent only --------------------------------------------------
+  function h(tag, attrs, ...kids) {
+    const el = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs || {})) {
+      if (v === null || v === undefined || v === false) continue;
+      if (k === 'class') el.className = v;
+      else if (k === 'text') el.textContent = String(v);
+      else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+      else el.setAttribute(k, v === true ? '' : String(v));
+    }
+    for (const kid of kids.flat(Infinity)) {
+      if (kid === null || kid === undefined || kid === false) continue;
+      el.append(kid instanceof Node ? kid : String(kid));
+    }
+    return el;
+  }
+  function webLink(url) { return typeof url === 'string' && /^https?:\/\//i.test(url) ? url : null; }
+  function route(...parts) { return '#/' + parts.map(p => encodeURIComponent(p)).join('/'); }
+  function text(v) { return v === null || v === undefined ? '' : String(v); }
+
+  // --- time -----------------------------------------------------------------------------------------------------
+  function parseStamp(s) { const t = typeof s === 'string' ? Date.parse(s) : NaN; return isNaN(t) ? null : t; }
+  function ago(seconds) {
+    if (seconds === null || seconds === undefined || isNaN(seconds)) return '';
+    if (seconds < 0) return L('time.future');
+    if (seconds < 5) return L('time.just');
+    if (seconds < 60) return L('time.s', {n: Math.floor(seconds)});
+    if (seconds < 3600) return L('time.m', {n: Math.floor(seconds / 60)});
+    if (seconds < 86400) return L('time.h', {n: Math.floor(seconds / 3600)});
+    return L('time.d', {n: Math.floor(seconds / 86400)});
+  }
+  function when(stamp) {
+    const t = parseStamp(stamp);
+    if (t === null) return text(stamp);
+    const d = new Date(t), p = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+  function timeEl(stamp) {
+    const t = parseStamp(stamp);
+    return h('time', {datetime: text(stamp), title: text(stamp), text: t === null ? text(stamp) : when(stamp)});
+  }
+
+  // --- data -----------------------------------------------------------------------------------------------------
+  async function api(path, opts) {
+    const r = await fetch(path, Object.assign({cache: 'no-store', credentials: 'same-origin'}, opts || {}));
+    let body = null;
+    try { body = await r.json(); } catch (e) { body = null; }
+    if (!r.ok) {
+      const err = new Error((body && body.error) || (r.status + ' ' + r.statusText));
+      err.status = r.status;
+      throw err;
+    }
+    return body;
+  }
+  function showError(e) {
+    const b = $('banner');
+    if (!e) { b.hidden = true; b.replaceChildren(); return; }
+    b.replaceChildren(L('error.load') + ' ' + (e && e.message ? e.message : String(e)));
+    b.hidden = false;
+  }
+  function languages() { return (S.state && S.state.languages) || ['en']; }
+  function inLang(obj) {
+    // Plain words and other per-language text: the chosen language only, never another one on the same screen.
+    if (obj && typeof obj === 'object' && typeof obj[S.lang] === 'string') return obj[S.lang];
+    return null;
+  }
+
+  // --- language -------------------------------------------------------------------------------------------------
+  function pickLang() {
+    const langs = languages();
+    let saved = null;
+    try { saved = localStorage.getItem('ap2-local-lang'); } catch (e) { saved = null; }
+    // The choice made with the switch is kept in this browser; a language no longer configured falls back.
+    if (S.lang === null || !langs.includes(S.lang)) S.lang = langs.includes(saved) ? saved : langs[0];
+  }
+  function setLang(lang) {
+    S.lang = lang;
+    try { localStorage.setItem('ap2-local-lang', lang); } catch (e) { /* a private window */ }
+    drawAll();
+    show();
+  }
+  function drawStatic() {
+    document.documentElement.lang = S.lang || 'en';
+    document.title = L('app.name');
+    for (const el of document.querySelectorAll('[data-l]')) el.textContent = L(el.getAttribute('data-l'));
+    for (const el of document.querySelectorAll('[data-l-placeholder]')) el.setAttribute('placeholder', L(el.getAttribute('data-l-placeholder')));
+    for (const el of document.querySelectorAll('[data-l-aria]')) el.setAttribute('aria-label', L(el.getAttribute('data-l-aria')));
+  }
+
+  // --- top bar and rail -----------------------------------------------------------------------------------------
+  function drawTop() {
+    const st = S.state;
+    if (!st) return;
+    $('mode-tag').textContent = L('mode.' + (st.mode === 'live' ? 'live' : 'shadow'));
+    drawBeat();
+    $('running').textContent = L('running.count', {n: st.running});
+    const sw = $('lang-switch');
+    sw.replaceChildren();
+    sw.hidden = !st.secondary_language;
+    if (st.secondary_language) {
+      for (const lang of st.languages) {
+        sw.append(h('button', {type: 'button', 'aria-pressed': String(lang === S.lang), text: lang.toUpperCase(),
+                              onclick: () => setLang(lang)}));
+      }
+    }
+  }
+  function drawBeat() {
+    const st = S.state, el = $('heartbeat');
+    if (!st) return;
+    const hb = st.heartbeat || {};
+    let age = hb.age_seconds, late = !!hb.late;
+    if (typeof age === 'number' && !hb.error) {
+      age += Math.floor((Date.now() - S.fetchedAt) / 1000);
+      late = late || age >= LATE_SECONDS;
+    }
+    if (hb.error) el.textContent = L('beat.error');
+    else if (hb.last_run_at === null || hb.last_run_at === undefined) el.textContent = L('beat.never');
+    else el.textContent = L('beat.last', {ago: ago(age)});
+    el.classList.toggle('late', late);
+    el.title = hb.error ? hb.error : late ? L('beat.late') : text(hb.last_run_at);
+  }
+  function navLink(href, label, count, current, hot) {
+    return h('a', {class: 'nav', href, 'aria-current': current ? 'true' : null},
+      h('span', {class: 'nav-t', text: label}),
+      count === null ? null : h('span', {class: 'n' + (hot ? ' hot' : ''), text: count}));
+  }
+  function drawRail() {
+    const st = S.state, r = S.route;
+    const lanes = $('rail-lanes');
+    lanes.replaceChildren();
+    for (const lane of LANES) {
+      const n = st ? st.lanes[lane] : '';
+      const cur = (r.name === 'lane' && r.arg === lane) || (r.name === 'card' && S.list.name === 'lane' && S.list.arg === lane);
+      lanes.append(navLink(route('lane', lane), L('lane.' + lane), n, cur, lane === 'needs' && n > 0));
+    }
+    const projects = $('rail-projects');
+    projects.replaceChildren();
+    const list = (st && st.projects) || [];
+    if (!list.length) projects.append(h('div', {class: 'empty', text: L('rail.none')}));
+    for (const p of list) {
+      const cur = (r.name === 'project' && r.arg === p.id);
+      projects.append(navLink(route('project', p.id), p.title || p.id, `${p.done}/${p.total}`, cur, false));
+    }
+    const manage = $('rail-manage');
+    manage.replaceChildren(
+      navLink('#/sources', L('manage.sources'), null, r.name === 'sources'),
+      navLink('#/templates', L('manage.templates'), null, r.name === 'templates'),
+      navLink('#/settings', L('manage.settings'), null, r.name === 'settings'));
+  }
+
+  // --- the list -------------------------------------------------------------------------------------------------
+  function listQuery(l) {
+    if (l.name === 'search') return '/api/cards?q=' + encodeURIComponent(l.arg);
+    if (l.name === 'project') return '/api/cards?parent=' + encodeURIComponent(l.arg);
+    return '/api/cards?lane=' + encodeURIComponent(l.arg);
+  }
+  function rowEl(r) {
+    if (r.missing) {
+      return h('div', {class: 'row'}, h('span', {class: 'dot done'}),
+        h('div', {class: 'row-main'}, h('div', {class: 'row-title mono', text: text(r.id)}),
+          h('div', {class: 'row-meta', text: L('links.missing')})));
+    }
+    const lane = LANES.includes(r.lane) ? r.lane : 'done';
+    const where = inLang(r.plain_where);
+    return h('a', {class: 'row', href: route('card', r.id), 'aria-selected': r.id === S.cardId ? 'true' : null},
+      h('span', {class: 'dot ' + lane}),
+      h('div', {class: 'row-main'},
+        h('div', {class: 'row-title', text: r.title || L('card.untitled')}),
+        where ? h('div', {class: 'row-sub', text: where}) : null,
+        h('div', {class: 'row-meta'},
+          h('span', {class: 'pri ' + text(r.pri), text: text(r.pri)}),
+          h('span', {class: 'mono', text: text(r.kind)}),
+          r.feed ? h('span', {text: L('chip.from', {feed: r.feed})}) : null,
+          r.ask_type ? h('span', {class: 'ask', text: L('ask.' + r.ask_type)}) : null,
+          h('span', {title: text(r.updated_at), text: ago((Date.now() - (parseStamp(r.updated_at) || Date.now())) / 1000)}))));
+  }
+  function drawList() {
+    const l = S.list, d = S.listData;
+    let title, hint = '';
+    if (l.name === 'search') { title = L('list.search', {q: l.arg}); hint = L('list.search_hint'); }
+    else if (l.name === 'project') {
+      const p = ((S.state && S.state.projects) || []).find(x => x.id === l.arg);
+      title = L('list.project', {title: (p && p.title) || l.arg}); hint = L('list.project_hint');
+    } else { title = L('lane.' + l.arg); hint = L('hint.' + l.arg); }
+    $('list-title').textContent = title;
+    $('list-hint').textContent = hint;
+    $('list-count').textContent = d ? L('list.count', {shown: d.cards.length, total: d.total}) : '';
+    const body = $('list-body');
+    body.replaceChildren();
+    if (!d) return;
+    if (!d.cards.length) body.append(h('div', {class: 'note', text: L('list.empty')}));
+    for (const r of d.cards) body.append(rowEl(r));
+  }
+  async function loadList() {
+    try {
+      S.listData = await api(listQuery(S.list));
+      showError(null);
+    } catch (e) { S.listData = null; showError(e); }
+    drawList();
+  }
+
+  // --- the full card --------------------------------------------------------------------------------------------
+  function section(block, ...kids) {
+    return h('section', {class: 'sec', 'data-block': block}, h('h3', {text: L('block.' + block)}), kids);
+  }
+  function plainValue(v, depth) {
+    // Any other block, drawn plainly from the card field of the same name.
+    depth = depth || 0;
+    if (v === null || v === undefined) return h('span', {class: 'muted', text: '—'});
+    if (typeof v === 'string') return h('p', {class: 'pre', text: v});
+    if (typeof v !== 'object') return h('span', {text: String(v)});
+    if (depth > 5) return h('pre', {class: 'json', text: JSON.stringify(v, null, 2)});
+    if (Array.isArray(v)) return h('ul', {}, v.map(x => h('li', {}, plainValue(x, depth + 1))));
+    const keys = Object.keys(v);
+    const langs = languages();
+    if (keys.length && keys.every(k => langs.includes(k) || /^[a-z]{2,3}(-[A-Za-z0-9]+)*$/.test(k)) && keys.some(k => langs.includes(k))) {
+      const t = inLang(v);
+      return t === null ? h('p', {class: 'muted', text: L('plain.missing')}) : h('p', {class: 'pre', text: t});
+    }
+    return h('dl', {class: 'kv'}, keys.map(k => [h('dt', {text: k}), h('dd', {}, plainValue(v[k], depth + 1))]));
+  }
+  function sourceSection(sb) {
+    const facts = [];
+    const add = (label, value) => { if (value !== null && value !== undefined && value !== '') facts.push(h('dt', {text: label}), h('dd', {text: text(value)})); };
+    add(L('src.name'), sb.name);
+    add(L('src.by'), sb.author);
+    add(L('src.where'), sb.place);
+    if (sb.at) facts.push(h('dt', {text: L('src.when')}), h('dd', {}, timeEl(sb.at)));
+    const link = webLink(sb.link);
+    return section('source_block',
+      h('dl', {class: 'kv'}, facts),
+      sb.text ? h('blockquote', {text: text(sb.text)}) : null,
+      link ? h('p', {}, h('a', {class: 'btn', href: link, target: '_blank', rel: 'noopener noreferrer', text: L('src.open')})) : null,
+      sb.link_refused ? h('p', {class: 'warn', text: L('src.refused')}) : null);
+  }
+  function questionsSection(card) {
+    const qs = Array.isArray(card.questions) ? card.questions : [];
+    const list = h('ul', {class: 'qa'});
+    if (!qs.length) list.append(h('li', {class: 'muted', text: L('q.none')}));
+    for (const q of qs) {
+      if (!q || typeof q !== 'object') continue;
+      let answer;
+      if (q.status === 'pending' || q.answer === null || q.answer === undefined) {
+        answer = h('div', {class: 'qa-a wait', text: L('q.pending')});
+      } else {
+        const t = typeof q.answer === 'string' ? q.answer : inLang(q.answer);
+        answer = h('div', {class: 'qa-a', text: t === null ? L('plain.missing') : t});
+      }
+      list.append(h('li', {}, h('div', {class: 'qa-q', text: text(q.text)}),
+        h('div', {class: 'muted mono'}, timeEl(q.at)), answer));
+    }
+    const input = h('input', {type: 'text', maxlength: QUESTION_MAX, placeholder: L('q.placeholder'), 'aria-label': L('q.placeholder')});
+    const status = h('p', {class: 'warn', role: 'status', hidden: true});
+    const send = async () => {
+      const value = input.value;
+      if (!value.trim()) return;
+      button.disabled = true;
+      try {
+        await api('/api/cards/' + encodeURIComponent(card.id) + '/questions',
+                  {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({text: value})});
+        input.value = '';
+        await loadCard(card.id);
+      } catch (e) {
+        status.textContent = L('q.failed') + ' ' + e.message;
+        status.hidden = false;
+      } finally { button.disabled = false; }
+    };
+    const button = h('button', {class: 'btn primary', type: 'button', text: L('q.send'), onclick: send});
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); send(); } });
+    return section('questions', list, h('div', {class: 'qa-form'}, input, button), status);
+  }
+  function activitySection(audit) {
+    const items = Array.isArray(audit) ? audit : [];
+    return section('activity', h('ul', {class: 'log'}, items.map(a => h('li', {},
+      timeEl(a && a.at),
+      h('div', {}, h('span', {class: 'who', text: text(a && a.by)}), h('span', {text: text(a && a.did)}),
+        a && a.restore ? h('span', {class: 'muted mono', text: '  · ' + L('act.restore', {id: a.restore})}) : null)))));
+  }
+  function rowsSection(block, rows) {
+    return section(block, rows && rows.length ? rows.map(rowEl) : h('p', {class: 'muted', text: L('none')}));
+  }
+  function drawCard(d) {
+    const box = $('card-body');
+    box.replaceChildren();
+    if (!d) { box.append(h('div', {class: 'note', text: L('card.empty')})); return; }
+    const c = d.card;
+    const lane = LANES.includes(c.lane) ? c.lane : 'done';
+    const det = h('article', {class: 'det'});
+    det.append(h('div', {class: 'chips'},
+      h('span', {class: 'chip ' + lane, text: L('lane.' + lane)}),
+      h('span', {class: 'chip mono', text: text(c.kind)}),
+      h('span', {class: 'pri ' + text(c.pri), text: text(c.pri)}),
+      c.feed ? h('span', {class: 'chip', text: L('chip.from', {feed: c.feed})}) : null,
+      c.origin === 'found' ? h('span', {class: 'chip found', text: L('chip.found')}) : null,
+      c.ask && c.ask.type ? h('span', {class: 'chip needs', text: L('ask.' + c.ask.type)}) : null));
+    det.append(h('h1', {text: c.title || L('card.untitled')}));
+    const plain = c.plain || {};
+    det.append(h('section', {class: 'plain'}, h('h3', {text: L('plain.title')}),
+      h('dl', {}, ['what', 'where', 'do'].map(line => {
+        const t = inLang(plain[line]);
+        return [h('dt', {text: L('plain.' + line)}), h('dd', {class: t === null ? 'muted' : null, text: t === null ? L('plain.missing') : t})];
+      }))));
+    if (d.template_error) det.append(h('div', {class: 'warn'}, h('p', {text: L('card.template_error')}), h('p', {class: 'mono', text: d.template_error})));
+    for (const block of d.view) {
+      if (block === 'source_block') { if (d.source_block) det.append(sourceSection(d.source_block)); }
+      else if (block === 'children') det.append(rowsSection('children', d.children));
+      else if (block === 'links') det.append(rowsSection('links', d.links));
+      else if (block === 'questions') det.append(questionsSection(c));
+      else if (block === 'activity') det.append(activitySection(d.activity));
+      else if (Object.prototype.hasOwnProperty.call(c, block) && c[block] !== null && c[block] !== undefined) {
+        det.append(section(block, h('div', {class: 'plainv'}, plainValue(c[block]))));
+      }
+    }
+    box.append(det);
+  }
+  async function loadCard(id) {
+    S.cardId = id;
+    try {
+      const d = await api('/api/cards/' + encodeURIComponent(id));
+      if (S.cardId !== id) return;
+      showError(null);
+      drawCard(d);
+    } catch (e) {
+      if (S.cardId !== id) return;
+      $('card-body').replaceChildren(h('div', {class: 'note', text: e.status === 404 ? L('card.none') : L('error.load') + ' ' + e.message}));
+    }
+    drawList();
+  }
+
+  // --- Sources, Templates, Settings -----------------------------------------------------------------------------
+  function grid(heads, rows) {
+    return h('table', {class: 'grid'}, h('thead', {}, h('tr', {}, heads.map(x => h('th', {text: x})))),
+      h('tbody', {}, rows));
+  }
+  function originLabel(origin) {
+    if (origin === 'builtin' || origin === 'built-in') return L('origin.builtin');
+    if (origin === 'user') return L('origin.user');
+    return text(origin);
+  }
+  async function drawSources(name) {
+    const body = $('sources-body'), detail = $('source-body');
+    let list;
+    try { list = await api('/api/sources'); showError(null); } catch (e) { showError(e); list = []; }
+    body.replaceChildren(grid([L('col.name'), L('col.brings'), L('col.via'), L('col.every'), L('col.cards')],
+      list.map(s => h('tr', {'aria-selected': s.source === name ? 'true' : null},
+        h('td', {}, h('a', {href: route('sources', s.source), text: s.source})),
+        h('td', {class: 'mono', text: text(s.brings)}), h('td', {class: 'mono', text: text(s.via)}),
+        h('td', {class: 'mono', text: text(s.every)}), h('td', {class: 'num', text: text(s.cards)})))));
+    detail.replaceChildren();
+    if (!name) { detail.append(h('div', {class: 'note', text: L('sources.pick')})); return; }
+    try {
+      const s = await api('/api/sources/' + encodeURIComponent(name));
+      detail.append(h('div', {class: 'det'}, h('h1', {class: 'mono', text: s.source}),
+        h('dl', {class: 'kv'},
+          h('dt', {text: L('col.brings')}), h('dd', {class: 'mono', text: text(s.brings)}),
+          h('dt', {text: L('col.via')}), h('dd', {class: 'mono', text: text(s.via)}),
+          h('dt', {text: L('col.fill')}), h('dd', {class: 'mono', text: text(s.fill)}),
+          h('dt', {text: L('col.every')}), h('dd', {class: 'mono', text: text(s.every)}),
+          h('dt', {text: L('col.origin')}), h('dd', {text: originLabel(s.origin)}),
+          h('dt', {text: L('col.cards')}), h('dd', {text: text(s.cards)}),
+          h('dt', {text: L('col.files')}), h('dd', {}, (s.files || []).map(f => h('div', {class: 'mono', text: f})))),
+        h('section', {class: 'sec'}, h('h3', {text: L('sources.data')}), h('pre', {class: 'json', text: JSON.stringify(s.data, null, 2)}))));
+    } catch (e) { detail.append(h('div', {class: 'note', text: L('error.load') + ' ' + e.message})); }
+  }
+  function buttonText(b) {
+    if (b.lane) return L('btn.lane', {lane: L('lane.' + b.lane)});
+    if (b.restore) return L('btn.restore');
+    if (b.child) return L('btn.child', {kind: b.child});
+    return '';
+  }
+  async function drawTemplates(kind) {
+    const body = $('templates-body'), detail = $('template-body');
+    let list;
+    try { list = await api('/api/templates'); showError(null); } catch (e) { showError(e); list = []; }
+    body.replaceChildren(grid([L('col.kind'), L('col.title'), L('col.origin')],
+      list.map(t => h('tr', {'aria-selected': t.kind === kind ? 'true' : null},
+        h('td', {}, h('a', {class: 'mono', href: route('templates', t.kind), text: t.kind})),
+        h('td', {text: text(t.title)}), h('td', {text: originLabel(t.origin)})))));
+    detail.replaceChildren();
+    if (!kind) { detail.append(h('div', {class: 'note', text: L('templates.pick')})); return; }
+    try {
+      const t = await api('/api/templates/' + encodeURIComponent(kind));
+      const data = t.template || {};
+      const view = Array.isArray(data.view) ? data.view : [];
+      const buttons = Array.isArray(data.buttons) ? data.buttons : [];
+      detail.append(h('div', {class: 'det'},
+        h('h1', {}, h('span', {class: 'mono', text: t.kind}), data.title ? ' · ' + data.title : ''),
+        data.description ? h('p', {class: 'pre', text: data.description}) : null,
+        h('dl', {class: 'kv'},
+          h('dt', {text: L('col.origin')}), h('dd', {}, originLabel(t.origin), t.replaces_builtin ? ' · ' + L('template.replaces') : ''),
+          h('dt', {text: L('col.file')}), h('dd', {class: 'mono', text: text(t.file)}),
+          h('dt', {text: L('col.cards')}), h('dd', {text: L('template.cards', {n: t.cards})})),
+        h('section', {class: 'sec'}, h('h3', {text: L('template.view')}),
+          h('div', {class: 'wf'}, h('div', {class: 'wf-block first'}, h('span', {text: L('plain.title')})),
+            view.map(b => h('div', {class: 'wf-block'}, h('span', {text: L('block.' + b)}), h('span', {class: 'mono muted', text: b}))))),
+        h('section', {class: 'sec'}, h('h3', {text: L('template.buttons')}),
+          h('div', {class: 'wf-btns'}, buttons.length ? buttons.map(b => h('div', {}, h('span', {class: 'b', text: text(b.label)}), h('span', {class: 'muted', text: buttonText(b)})))
+            : h('p', {class: 'muted', text: L('none')})),
+          h('p', {class: 'muted', text: L('template.buttons_later')})),
+        h('section', {class: 'sec'}, h('h3', {text: L('template.roles')}),
+          (t.roles || []).map(r => h('div', {class: 'role'},
+            h('div', {}, h('strong', {class: 'mono', text: text(r.role)}), h('span', {class: 'muted', text: '  · ' + L('template.floor') + ': ' + text(r.floor)})),
+            r.when ? h('div', {class: 'muted', text: L('template.when') + ': ' + r.when}) : null,
+            h('div', {class: 'mono', text: L('template.tools') + ': ' + (r.tools || []).join(', ')}),
+            h('p', {class: 'pre', text: text(r.brief)}))))));
+    } catch (e) { detail.append(h('div', {class: 'note', text: L('error.load') + ' ' + e.message})); }
+  }
+  function size(n) {
+    if (typeof n !== 'number') return '';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let i = 0;
+    while (n >= 1024 && i < units.length - 1) { n /= 1024; i += 1; }
+    return (i === 0 ? String(n) : n.toFixed(1)) + ' ' + units[i];
+  }
+  async function drawSettings() {
+    const body = $('settings-body');
+    let s;
+    try { s = await api('/api/settings'); showError(null); } catch (e) { showError(e); body.replaceChildren(); return; }
+    const cfg = s.config || {};
+    const disk = s.disk || {};
+    const total = Object.values(disk).reduce((a, b) => a + (typeof b === 'number' ? b : 0), 0);
+    const unset = v => (v === null || v === undefined || v === '' ? L('settings.unset') : String(v));
+    body.replaceChildren(h('div', {class: 'sets'},
+      h('div', {class: 'set'}, h('h3', {text: L('settings.config')}),
+        h('dl', {class: 'kv'},
+          h('dt', {text: L('settings.mode')}), h('dd', {class: 'mono', text: unset(cfg.mode)}),
+          h('dt', {text: L('settings.primary')}), h('dd', {class: 'mono', text: unset(cfg.primary_language)}),
+          h('dt', {text: L('settings.secondary')}), h('dd', {class: 'mono', text: unset(cfg.secondary_language)}),
+          h('dt', {text: L('settings.keep')}), h('dd', {class: 'mono', text: unset(cfg.keep_transcripts)}),
+          h('dt', {text: L('settings.data_dir')}), h('dd', {class: 'mono', text: text(s.data_dir)}),
+          h('dt', {text: L('settings.url')}), h('dd', {class: 'mono', text: text(s.url)}))),
+      h('div', {class: 'set'}, h('h3', {text: L('settings.disk')}),
+        grid([L('col.name'), L('col.size')],
+          Object.keys(disk).map(k => h('tr', {}, h('td', {class: 'mono', text: k}), h('td', {class: 'num', text: size(disk[k])})))
+            .concat([h('tr', {}, h('td', {}, h('strong', {text: L('settings.total')})), h('td', {class: 'num', text: size(total)}))])))));
+  }
+
+  // --- routing: #/lane/<lane>, #/search/<q>, #/project/<id>, #/card/<id>, #/sources[/<name>],
+  //     #/templates[/<kind>], #/settings ------------------------------------------------------------------------
+  function parseRoute() {
+    const raw = location.hash.replace(/^#\/?/, '');
+    const parts = raw.split('/').map(p => { try { return decodeURIComponent(p); } catch (e) { return p; } });
+    const name = parts[0], arg = parts.slice(1).join('/');
+    if (name === 'lane' && LANES.includes(arg)) return {name, arg};
+    if ((name === 'search' || name === 'project' || name === 'card') && arg) return {name, arg};
+    if (name === 'sources' || name === 'templates') return {name, arg: arg || null};
+    if (name === 'settings') return {name, arg: null};
+    return {name: 'lane', arg: 'needs'};
+  }
+  function panes(...visible) { for (const id of PANES) $(id).hidden = !visible.includes(id); }
+  function drawAll() { drawStatic(); drawTop(); drawRail(); drawList(); }
+  async function show() {
+    const r = S.route = parseRoute();
+    drawRail();
+    if (r.name === 'lane' || r.name === 'search' || r.name === 'project' || r.name === 'card') {
+      panes('list', 'card');
+      if (r.name !== 'card') {
+        S.list = r;
+        S.cardId = null;
+        drawCard(null);
+        if (r.name === 'search') $('search').value = r.arg;
+      }
+      await loadList();
+      if (r.name === 'card') await loadCard(r.arg);
+    } else if (r.name === 'sources') { panes('sources', 'source'); await drawSources(r.arg); }
+    else if (r.name === 'templates') { panes('templates', 'template'); await drawTemplates(r.arg); }
+    else { panes('settings'); await drawSettings(); }
+  }
+
+  async function poll() {
+    try {
+      S.state = await api('/api/state');
+      S.fetchedAt = Date.now();
+      pickLang();
+      showError(null);
+    } catch (e) { showError(e); }
+    drawStatic();
+    drawTop();
+    drawRail();
+  }
+  async function tick() {
+    // Every 10 seconds: the heartbeat, the counts and the open list, without a reload.
+    await poll();
+    const r = S.route;
+    if (r.name === 'lane' || r.name === 'search' || r.name === 'project' || r.name === 'card') await loadList();
+  }
+
+  $('search').addEventListener('keydown', e => {
+    if (e.key !== 'Enter') return;
+    const q = $('search').value.trim();
+    location.hash = q ? route('search', q) : route('lane', 'needs');
+  });
+  window.addEventListener('hashchange', show);
+  (async () => {
+    await poll();
+    await show();
+    setInterval(tick, POLL_MS);
+    setInterval(drawBeat, 1000);
+  })();
+})();
+</script>
+</body>
+</html>

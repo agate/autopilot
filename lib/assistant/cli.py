@@ -77,6 +77,7 @@ def _parser() -> argparse.ArgumentParser:
     _source_parser(sub)
     _gate_parser(sub)
     _template_parser(sub)
+    _serve_parser(sub)
     return p
 
 
@@ -353,6 +354,58 @@ def cmd_template(args) -> int:
 
 
 COMMANDS["template"] = cmd_template
+
+
+# --- ap2 serve (the local page, design 9.1) --------------------------------------------------------------------
+# Serves the page and its JSON on 127.0.0.1 only, until Ctrl-C or SIGTERM (exit 0). A port that cannot be used is
+# a ConfigError: one `ap2: cannot listen on 127.0.0.1:<port>: ...` line, exit 1.
+
+def _serve_port(text: str) -> int:
+    import re
+    if not re.fullmatch(r"[0-9]{1,5}", text, re.ASCII) or int(text) > 65535:
+        raise argparse.ArgumentTypeError(f"not a port from 0 to 65535: {text!r}")
+    return int(text)
+
+
+def _serve_parser(sub) -> None:
+    from assistant import server
+    s = sub.add_parser("serve", help="serve the local page on 127.0.0.1",
+                       description="Serve the local page and its JSON on 127.0.0.1 (this Mac only), until Ctrl-C or "
+                                   "SIGTERM. Prints one JSON line first: url, data_dir and mode. Read-only, but for "
+                                   "saving a question on a card. Sets up the data folder's layout on first use.")
+    s.add_argument("--port", type=_serve_port, default=server.PORT, metavar="N",
+                   help=f"the port (default: {server.PORT}; 0 takes a free one)")
+    s.add_argument("--data", metavar="PATH", help=DATA_HELP)
+
+
+class _ServeStop(Exception):
+    """SIGTERM while serving."""
+
+
+def cmd_serve(args) -> int:
+    import signal
+    from assistant import server
+    data = datadir.ensure(datadir.resolve(args.data))
+    cfg = config.load(data)  # a bad config.yaml is refused before listening
+    srv = server.make_server(data, port=args.port)
+
+    def stop(signum, frame):
+        raise _ServeStop
+
+    old = signal.signal(signal.SIGTERM, stop)
+    try:
+        _write_out(json.dumps({"url": srv.url, "data_dir": str(data), "mode": cfg.mode}, sort_keys=True,
+                              ensure_ascii=False))
+        srv.serve_forever()
+    except (KeyboardInterrupt, _ServeStop):
+        pass
+    finally:
+        signal.signal(signal.SIGTERM, old)
+        srv.server_close()
+    return 0
+
+
+COMMANDS["serve"] = cmd_serve
 
 
 def main(argv: list) -> int:
