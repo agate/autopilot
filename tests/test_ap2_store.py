@@ -454,6 +454,66 @@ class OppositeActionTest(StoreCase):
         self.assertEqual(self.store.get(added["id"]), added)
 
 
+class CheckedUpdateTest(StoreCase):
+    """`update_checked` reads the card, asks `check(card)` and writes, all under one hold of the store lock, so no
+    other writer can land between the look and the change."""
+
+    def test_a_check_that_says_yes_writes_the_change(self):
+        added = self.store.add(card(), by="w")
+        new = self.store.update_checked(added["id"], {"lane": "running"}, by="w", check=lambda c: True,
+                                        did="move it")
+        self.assertEqual(new["lane"], "running")
+        self.assertEqual(self.store.get(added["id"]), new)
+        self.assertEqual((new["audit"][-1]["by"], new["audit"][-1]["did"]), ("w", "move it"))
+        self.assertIsNotNone(new["audit"][-1]["restore"])
+
+    def test_a_check_that_says_no_writes_nothing(self):
+        added = self.store.add(card(), by="w")
+        before = sorted((self.data / "restore").glob("*")) if (self.data / "restore").exists() else []
+        self.assertIsNone(self.store.update_checked(added["id"], {"lane": "running"}, by="w",
+                                                    check=lambda c: False))
+        self.assertEqual(self.store.get(added["id"]), added)
+        after = sorted((self.data / "restore").glob("*")) if (self.data / "restore").exists() else []
+        self.assertEqual(after, before)  # no restore point either
+
+    def test_the_check_sees_the_card_on_disk_with_the_store_lock_held(self):
+        import fcntl
+        added = self.store.add(card(), by="w")
+        self.store.update(added["id"], {"ask": {"type": "answer", "text": "which repo?"}}, by="user")
+        seen = []
+
+        def check(c):
+            fd = os.open(str(self.data / ".store.lock"), os.O_RDWR)
+            try:
+                with self.assertRaises(BlockingIOError):  # held by this very update
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                os.close(fd)
+            seen.append(c["ask"])
+            return c["ask"] is None
+
+        self.assertIsNone(self.store.update_checked(added["id"], {"ask": {"type": "fix", "text": "x"}}, by="w",
+                                                    check=check))
+        self.assertEqual(seen, [{"type": "answer", "text": "which repo?"}])
+        self.assertEqual(self.store.get(added["id"])["ask"], {"type": "answer", "text": "which repo?"})
+
+    def test_a_check_may_say_what_the_change_did(self):
+        added = self.store.add(card(), by="w")
+        new = self.store.update_checked(added["id"], {"lane": "running"}, by="w", did="planned",
+                                        check=lambda c: f"moved from {c['lane']}")
+        self.assertEqual(new["audit"][-1]["did"], f"moved from {added['lane']}")
+
+    def test_it_refuses_what_update_refuses(self):
+        added = self.store.add(card(), by="w")
+        with self.assertRaisesRegex(CardError, "changes must be a non-empty object"):
+            self.store.update_checked(added["id"], {}, by="w", check=lambda c: True)
+        with self.assertRaisesRegex(CardError, "cannot be changed; the store sets it"):
+            self.store.update_checked(added["id"], {"audit": []}, by="w", check=lambda c: True)
+        with self.assertRaisesRegex(CardError, "no card"):
+            self.store.update_checked("c-20260101-000000-abcdef", {"lane": "running"}, by="w", check=lambda c: True)
+        self.assertEqual(self.store.get(added["id"]), added)
+
+
 class SearchIndexTest(StoreCase):
     def test_search_finds_a_new_card(self):
         added = self.store.add(card(plain=plain(what="the nightly export to the vendor bucket")), by="w")

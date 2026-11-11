@@ -31,6 +31,10 @@ ITEMS = "items"
 LOCK = ".store.lock"
 
 
+class _Refused(Exception):
+    """`update_checked`'s check said no: nothing is written."""
+
+
 def write_json(path: Path, obj) -> None:
     """Write `obj` as UTF-8 JSON with sorted keys, atomically: a reader sees the old file or the new one."""
     path = Path(path)
@@ -222,6 +226,32 @@ class Store:
     def update(self, card_id: str, changes: dict, by: str, did: Optional[str] = None) -> dict:
         """Set the top-level fields in `changes` (null clears `parent`, `ask` or `title`); return the card. The
         old file is saved as a restore point first. A change that changes nothing writes nothing."""
+        by, did = self._check_update(card_id, changes, by, did)
+        with self._guard():
+            return self._update(card_id, changes, by, did)
+
+    def update_checked(self, card_id: str, changes: dict, by: str, check: Callable[[dict], object],
+                       did: Optional[str] = None) -> Optional[dict]:
+        """`update`, but only when `check(card)` says yes: the card is read, checked and written under one hold of
+        the store lock, so no other writer lands between the look and the change. `check` returns False to refuse,
+        True to go on, or a text that says what the change did (it replaces `did`, for a line that depends on
+        what the check saw). Return the card, or None (and write nothing) when `check` refuses."""
+        by, did = self._check_update(card_id, changes, by, did)
+
+        def refuse(card):
+            ok = check(card)
+            if not ok:
+                raise _Refused
+            return self._did(ok) if isinstance(ok, str) else None
+
+        with self._guard():
+            try:
+                return self._update(card_id, changes, by, did, check=refuse)
+            except _Refused:
+                return None
+
+    def _check_update(self, card_id: str, changes: dict, by: str, did: Optional[str]) -> tuple:
+        """What `update` and `update_checked` refuse before the lock; return the checked (by, did)."""
         by = self._by(by)
         did = self._did(did)
         cards.check_id(card_id)
@@ -231,14 +261,15 @@ class Store:
         if given:
             pronoun = "it" if len(given) == 1 else "them"
             raise CardError(f"{', '.join(given)} cannot be changed; the store sets {pronoun}")
-        with self._guard():
-            return self._update(card_id, changes, by, did)
+        return by, did
 
     def _update(self, card_id: str, changes: dict, by: str, did: Optional[str], check=None) -> dict:
-        """The update itself; the caller holds the lock. `check(old)` may refuse the change first."""
+        """The update itself; the caller holds the lock. `check(old)` may refuse the change first (it raises), or
+        return a text that replaces `did`."""
         old = self._load(card_id)
-        if check is not None:
-            check(old)
+        said = check(old) if check is not None else None
+        if isinstance(said, str):
+            did = said
         check_writable(changes, "changes are")
         new = copy.deepcopy(old)
         new.update(copy.deepcopy(changes))
