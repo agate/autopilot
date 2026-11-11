@@ -405,9 +405,10 @@ def run(data: Path, source: Optional[str] = None, names: Optional[list] = None, 
         raise V1ImportError(f"data folder {data} and the v1 data folder {root} overlap (one is inside the other); "
                             f"the import never writes under --from")
     # The projects folder may be a symlink to a folder outside --from: the data folder must not overlap that either.
+    # A dangling link counts too (lexists, not exists): its target may be the data folder ensure is about to create.
     projects = root / "projects"
     try:
-        real = projects.resolve() if projects.exists() else None
+        real = projects.resolve() if os.path.lexists(projects) else None
     except (OSError, RuntimeError) as e:
         raise V1ImportError(f"cannot use the v1 projects folder {projects}: {e}") from e
     if real is not None and (datadir._inside(data, real) or datadir._inside(real, data)):

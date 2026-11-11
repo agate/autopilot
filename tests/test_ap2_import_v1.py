@@ -704,6 +704,36 @@ class ImportV1Test(unittest.TestCase):
         self.assertIn("projects folder", line)
         self.assertFalse(self.data.exists())
 
+    def test_a_dangling_symlinked_projects_folder_that_points_at_the_data_folder_is_refused(self):
+        if not hasattr(os, "symlink"):
+            self.skipTest("no symlinks here")
+        shutil.move(str(self.v1 / "projects" / "shop"), str(self.v1 / "shop"))  # keep shop as a legacy project
+        shutil.rmtree(self.v1 / "projects")
+        self.assertFalse(self.data.exists())
+        try:
+            (self.v1 / "projects").symlink_to(self.data, target_is_directory=True)
+        except (OSError, NotImplementedError) as e:
+            self.skipTest(f"cannot make a symlink: {e}")
+        line = self.fails()
+        self.assertIn("projects folder", line)
+        self.assertFalse(self.data.exists())
+
+    def test_a_symlinked_projects_folder_whose_real_location_is_inside_the_data_folder_is_refused(self):
+        if not hasattr(os, "symlink"):
+            self.skipTest("no symlinks here")
+        shutil.move(str(self.v1 / "projects" / "shop"), str(self.v1 / "shop"))  # keep shop as a legacy project
+        self.ok("--project", "notes")
+        self.assertTrue((self.data / "items").is_dir())
+        shutil.rmtree(self.v1 / "projects")
+        try:
+            (self.v1 / "projects").symlink_to(self.data / "items", target_is_directory=True)
+        except (OSError, NotImplementedError) as e:
+            self.skipTest(f"cannot make a symlink: {e}")
+        before = snapshot(self.data)
+        line = self.fails()
+        self.assertIn("projects folder", line)
+        self.assertEqual(snapshot(self.data), before)
+
     def test_a_v1_folder_inside_the_data_folder_is_refused(self):
         self.data = self.tmp / "d"
         self.v1 = self.data / "v1"
