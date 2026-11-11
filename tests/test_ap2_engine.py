@@ -252,14 +252,26 @@ class CommandReadTest(EngineCase):
             time.sleep(0.05)
 
     def test_an_interrupted_read_stops_the_command(self):
+        child_file = self.tmp / "sleeper-child.pid"
         script = self.tmp / "sleeper.py"
-        script.write_text("import time; time.sleep(30)\n")
-        started = []
+        script.write_text(textwrap.dedent("""\
+            import os, subprocess, sys, time
+            child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+            with open(sys.argv[1] + ".tmp", "w") as f:
+                f.write(str(child.pid))
+            os.replace(sys.argv[1] + ".tmp", sys.argv[1])
+            time.sleep(30)
+            """))
+        started, raised = [], []
         real = subprocess.Popen.communicate
 
         def interrupt(proc, *args, **kwargs):
             if not started:
                 started.append(proc.pid)
+                deadline = time.monotonic() + 5
+                while not child_file.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                raised.append(time.monotonic())
                 raise KeyboardInterrupt
             return real(proc, *args, **kwargs)
 
@@ -269,12 +281,16 @@ class CommandReadTest(EngineCase):
                     os.killpg(pid, signal.SIGKILL)
                 except OSError:
                     pass
+            try:
+                os.kill(int(child_file.read_text()), signal.SIGKILL)
+            except (OSError, ValueError):
+                pass
 
         self.addCleanup(kill_left_over)
         self.user_source("sleeper", f"""\
             source: sleeper
             brings: messages
-            read: {{ via: command, run: '{sys.executable} {script}', timeout: 20 }}
+            read: {{ via: command, run: '{sys.executable} {script} {child_file}', timeout: 20 }}
             fill: paths
             form: {{ id: .id, at: .at, text: .text }}
             link: none
@@ -283,28 +299,96 @@ class CommandReadTest(EngineCase):
         with mock.patch.object(subprocess.Popen, "communicate", autospec=True, side_effect=interrupt):
             with self.assertRaises(KeyboardInterrupt):
                 self.engine().read("sleeper")
+            self.assertLess(time.monotonic() - raised[0], 5)  # stopped, not waited out
         [pid] = started
-        deadline = time.monotonic() + 2
+        self.assertTrue(child_file.exists(), "the command never started its child")
+        for what, p in (("command", pid), ("command's child", int(child_file.read_text()))):
+            self.assertGone(p, f"the {what} {p} is still running after the interrupt")
+
+    def assertGone(self, pid: int, message: str, within: float = 2) -> None:
+        deadline = time.monotonic() + within
         while True:
             try:
                 os.kill(pid, 0)
             except ProcessLookupError:
-                break  # gone
+                return
             if time.monotonic() > deadline:
-                self.fail(f"the command {pid} is still running after the interrupt")
+                self.fail(message)
             time.sleep(0.05)
+
+    def test_a_read_stopped_by_sigterm_or_sighup_stops_the_command(self):
+        driver = self.tmp / "driver.py"
+        driver.write_text(textwrap.dedent(f"""\
+            import sys
+            from pathlib import Path
+            sys.path.insert(0, {str(ROOT / "lib")!r})
+            from assistant.config import Config
+            from assistant.engine import Engine
+            Engine(Path(sys.argv[1]), cfg=Config(), plugin_dir=Path(sys.argv[2])).read(sys.argv[3])
+            """))
+        script = self.tmp / "waiter.py"
+        script.write_text(textwrap.dedent("""\
+            import os, sys, time
+            with open(sys.argv[1] + ".tmp", "w") as f:
+                f.write(str(os.getpid()))
+            os.replace(sys.argv[1] + ".tmp", sys.argv[1])
+            time.sleep(30)
+            """))
+        for signum in (signal.SIGTERM, signal.SIGHUP):
+            with self.subTest(signal=signum.name):
+                name = f"waiter-{signum.name.lower()}"
+                pid_file = self.tmp / f"{name}.pid"
+                self.user_source(name, f"""\
+                    source: {name}
+                    brings: messages
+                    read: {{ via: command, run: '{sys.executable} {script} {pid_file}', timeout: 20 }}
+                    fill: paths
+                    form: {{ id: .id, at: .at, text: .text }}
+                    link: none
+                    sort: {{ all: alert }}
+                    """)
+                # Its own group, so the signal goes to the driver's group and never to the test runner.
+                proc = subprocess.Popen([sys.executable, str(driver), str(self.data), str(self.plugin), name],
+                                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                        stderr=subprocess.DEVNULL, start_new_session=True)
+
+                def kill_left_over(proc=proc, pid_file=pid_file):
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except OSError:
+                        pass
+                    proc.wait()
+                    try:
+                        os.kill(int(pid_file.read_text()), signal.SIGKILL)
+                    except (OSError, ValueError):
+                        pass
+
+                self.addCleanup(kill_left_over)
+                deadline = time.monotonic() + 10
+                while not pid_file.exists():
+                    if proc.poll() is not None or time.monotonic() > deadline:
+                        self.fail(f"the command never started (driver exit {proc.poll()})")
+                    time.sleep(0.02)
+                os.killpg(proc.pid, signum)
+                code = proc.wait(timeout=10)
+                pid = int(pid_file.read_text())
+                self.assertGone(pid, f"the command {pid} is still running after {signum.name}")
+                self.assertEqual(code, 128 + signum)
 
     def test_a_helper_that_keeps_the_output_open_does_not_hold_the_read_past_the_drain_limit(self):
         pid_file = self.tmp / "helper.pid"
         script = self.tmp / "forker.py"
         script.write_text(textwrap.dedent("""\
             import os, sys, time
+            began = time.monotonic()
             sys.stdout.write("[1"); sys.stdout.flush()
             if os.fork() == 0:
                 os.setsid()  # leaves the command's group, so the timeout kill does not reach it
                 with open(sys.argv[1] + ".tmp", "w") as f:
                     f.write(str(os.getpid()))
                 os.rename(sys.argv[1] + ".tmp", sys.argv[1])
+                time.sleep(max(0, 1.5 - (time.monotonic() - began)))  # half way into the drain wait
+                sys.stdout.write(",2"); sys.stdout.flush()
                 time.sleep(15)
                 os._exit(0)
             time.sleep(15)
@@ -327,12 +411,52 @@ class CommandReadTest(EngineCase):
             sort: {{ all: alert }}
             """)
         started = time.monotonic()
-        with mock.patch("assistant.engine.DRAIN", 1):
+        with mock.patch("assistant.engine.DRAIN", 2):
             with self.assertRaisesRegex(SourceError, r"^forker: read.run took longer than 1 seconds; stopped "
                                                      r"\(partial output saved as "):
                 self.engine().read("forker")
-        self.assertLess(time.monotonic() - started, 1 + 1 + 3)
+        self.assertLess(time.monotonic() - started, 1 + 2 + 3)
         [raw] = (self.data / "sources" / ".raw" / "forker").glob("*.json")
+        self.assertEqual(raw.read_text(), "[1,2")  # what came during the drain wait is kept too
+
+    def test_a_command_that_exited_but_left_its_output_held_open_says_so(self):
+        pid_file = self.tmp / "quick-helper.pid"
+        script = self.tmp / "quick.py"
+        script.write_text(textwrap.dedent("""\
+            import os, sys, time
+            sys.stdout.write("[1"); sys.stdout.flush()
+            if os.fork() == 0:
+                os.setsid()  # leaves the command's group, so the kill does not reach it
+                with open(sys.argv[1] + ".tmp", "w") as f:
+                    f.write(str(os.getpid()))
+                os.rename(sys.argv[1] + ".tmp", sys.argv[1])
+                time.sleep(15)
+                os._exit(0)
+            """))
+
+        def kill_left_over():
+            try:
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+            except (OSError, ValueError):
+                pass
+
+        self.addCleanup(kill_left_over)
+        self.user_source("quick", f"""\
+            source: quick
+            brings: messages
+            read: {{ via: command, run: '{sys.executable} {script} {pid_file}', timeout: 1 }}
+            fill: paths
+            form: {{ id: .id, at: .at, text: .text }}
+            link: none
+            sort: {{ all: alert }}
+            """)
+        with mock.patch("assistant.engine.DRAIN", 0.5):
+            with self.assertRaisesRegex(SourceError, r"^quick: read.run exited with 0, but something it started "
+                                                     r"still held its output open after 1 seconds; stopped "
+                                                     r"\(output saved as sources/\.raw/quick/[0-9TZ]+-[0-9a-f]{6}"
+                                                     r"\.json\)$"):
+                self.engine().read("quick")
+        [raw] = (self.data / "sources" / ".raw" / "quick").glob("*.json")
         self.assertEqual(raw.read_text(), "[1")
 
     def test_values_in_a_link_pattern_are_percent_encoded(self):

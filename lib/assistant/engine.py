@@ -22,6 +22,7 @@ import shlex
 import signal
 import sqlite3
 import subprocess
+import threading
 from datetime import timezone
 from pathlib import Path, PurePosixPath
 from typing import Callable, Optional
@@ -163,25 +164,41 @@ class Engine:
                                     stderr=subprocess.PIPE, shell=False, start_new_session=True)
         except OSError as e:
             raise SourceError(f"{src.name}: cannot run {argv[0]!r}: {e.strerror or e}") from e
+        previous = {}
         try:
-            out, err = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired as first:
-            _stop(proc)
             try:
-                out, _ = proc.communicate(timeout=DRAIN)
-            except subprocess.TimeoutExpired as late:
-                # Something outside the group still holds the output open: keep what came so far.
-                out = max(first.stdout or b"", late.stdout or b"", key=len)
-                proc.stdout.close()
-                proc.stderr.close()
+                # SIGTERM and SIGHUP to ap2's group do not reach the command's group either, and by default they
+                # end ap2 with no exception: turn them into SystemExit so the branch below stops the command.
+                if threading.current_thread() is threading.main_thread():
+                    for signum in (signal.SIGTERM, signal.SIGHUP):
+                        previous[signum] = signal.signal(signum, _exit_on_signal)
+                out, err = proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired as first:
+                code = proc.poll()
+                _stop(proc)
+                try:
+                    out, _ = proc.communicate(timeout=DRAIN)
+                except subprocess.TimeoutExpired as late:
+                    # Something outside the group still holds the output open: keep what came so far.
+                    out = max(first.stdout or b"", late.stdout or b"", key=len)
+                    proc.stdout.close()
+                    proc.stderr.close()
+                    proc.wait()
+                if code is not None:
+                    saved = "" if dry_run else f" (output saved as {self._save_raw(src, out or b'')})"
+                    raise SourceError(f"{src.name}: read.run exited with {code}, but something it started still "
+                                      f"held its output open after {timeout} seconds; stopped{saved}") from None
+                saved = "" if dry_run else f" (partial output saved as {self._save_raw(src, out or b'')})"
+                raise SourceError(f"{src.name}: read.run took longer than {timeout} seconds; stopped{saved}") from None
+            except BaseException:
+                # Ctrl-C does not reach the command's own group, so an interrupted read stops it here.
+                _stop(proc)
                 proc.wait()
-            saved = "" if dry_run else f" (partial output saved as {self._save_raw(src, out or b'')})"
-            raise SourceError(f"{src.name}: read.run took longer than {timeout} seconds; stopped{saved}") from None
-        except BaseException:
-            # Ctrl-C does not reach the command's own group, so an interrupted read stops it here.
-            _stop(proc)
-            proc.wait()
-            raise
+                raise
+        finally:
+            for signum, handler in previous.items():
+                if handler is not None:  # None: set outside Python, so it cannot be put back from here
+                    signal.signal(signum, handler)
         return subprocess.CompletedProcess(argv, proc.returncode, stdout=out, stderr=err)
 
     def _save_raw(self, src: sources.Source, raw: bytes) -> str:
@@ -411,6 +428,10 @@ class Engine:
             return None
         config.require_live(self.cfg, f"apply {src.name}'s writes.{event}" + (f" for {card_id}" if card_id else ""))
         raise SourceError(f"{src.name}: writes.{event} is not run by this version of ap2")
+
+
+def _exit_on_signal(signum, frame) -> None:
+    raise SystemExit(128 + signum)
 
 
 def _stop(proc: subprocess.Popen) -> None:
