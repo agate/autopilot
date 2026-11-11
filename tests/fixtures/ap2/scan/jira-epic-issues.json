@@ -1,0 +1,68 @@
+{
+  "issues": [
+    {
+      "key": "PROJ-123",
+      "fields": {
+        "summary": "Retry failed card payments",
+        "status": {
+          "name": "In Progress"
+        },
+        "updated": "2026-11-10T10:00:00.000+0000",
+        "issuelinks": [
+          {
+            "type": {
+              "name": "Blocks",
+              "inward": "is blocked by",
+              "outward": "blocks"
+            },
+            "inwardIssue": {
+              "key": "PROJ-120"
+            }
+          },
+          {
+            "type": {
+              "name": "Blocks",
+              "inward": "is blocked by",
+              "outward": "blocks"
+            },
+            "outwardIssue": {
+              "key": "PROJ-129"
+            }
+          },
+          {
+            "type": {
+              "name": "Blocks",
+              "inward": "is blocked by",
+              "outward": "blocks"
+            },
+            "inwardIssue": {
+              "key": "PROJ-121"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "key": "PROJ-124",
+      "fields": {
+        "summary": "Show the retry in the order history",
+        "status": {
+          "name": "To Do"
+        },
+        "updated": "2026-11-10T11:00:00.000+0000",
+        "issuelinks": []
+      }
+    },
+    {
+      "key": "PROJ-125",
+      "fields": {
+        "summary": "Write the retry runbook",
+        "status": {
+          "name": "Blocked by vendor"
+        },
+        "updated": "2026-11-10T12:00:00.000+0000"
+      }
+    }
+  ],
+  "total": 3
+}

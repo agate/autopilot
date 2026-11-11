@@ -29,7 +29,7 @@ FIELDS = ("id", "thread_id", "author", "at", "text", "place", "place_id", "statu
 REQUIRED = ("id", "at", "text")
 LIST_FIELDS = ("depends_on",)
 # Fields a pattern may name besides the form's: one place, so link and key patterns agree everywhere.
-DERIVED = ("id_digits", "place_id", "source")
+DERIVED = ("id_digits", "place_id", "source", "thread_or_id")
 
 NAME = re.compile(r"[A-Za-z0-9_-]+")
 FIELD_PATH = re.compile(r"[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*\Z")
@@ -241,11 +241,15 @@ def check_record(record, required: tuple = REQUIRED) -> dict:
 def derived(record: dict, source: str) -> dict:
     """The values a pattern may name: the record's fields, plus
     `id_digits` (the id without its dots: Slack's `1730000000.123456` gives `1730000000123456`),
-    `place_id` (the record's own `place_id` when it has one, else `place`), and
-    `source` (the source's name)."""
+    `place_id` (the record's own `place_id` when it has one, else `place`),
+    `source` (the source's name), and
+    `thread_or_id` (`thread_id` when it is not blank, else `id`: a top-level Slack message and the replies in its
+    thread give the same value, so they key on one card, and no model is asked to copy `id` into `thread_id`)."""
     values = {k: v for k, v in record.items() if k not in LIST_FIELDS}
     if "id" in record:
         values["id_digits"] = record["id"].replace(".", "")
+        thread = record.get("thread_id")
+        values["thread_or_id"] = thread if isinstance(thread, str) and thread.strip() else record["id"]
     if "place_id" not in values and "place" in record:
         values["place_id"] = record["place"]
     values["source"] = source

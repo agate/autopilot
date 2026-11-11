@@ -1,0 +1,15 @@
+{
+  "session_id": "s-example",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "mcp__atlassian__search_issues",
+  "tool_input": {
+    "jql": "parent = PROJ-1 AND (assignee = currentUser() OR assignee is EMPTY)",
+    "maxResults": 50
+  },
+  "tool_response": [
+    {
+      "type": "text",
+      "text": "{\n  \"issues\": [\n    {\n      \"key\": \"PROJ-123\",\n      \"fields\": {\n        \"summary\": \"Retry failed card payments\",\n        \"status\": {\n          \"name\": \"In Progress\"\n        },\n        \"updated\": \"2026-11-10T10:00:00.000+0000\",\n        \"issuelinks\": [\n          {\n            \"type\": {\n              \"name\": \"Blocks\",\n              \"inward\": \"is blocked by\",\n              \"outward\": \"blocks\"\n            },\n            \"inwardIssue\": {\n              \"key\": \"PROJ-120\"\n            }\n          },\n          {\n            \"type\": {\n              \"name\": \"Blocks\",\n              \"inward\": \"is blocked by\",\n              \"outward\": \"blocks\"\n            },\n            \"outwardIssue\": {\n              \"key\": \"PROJ-129\"\n            }\n          },\n          {\n            \"type\": {\n              \"name\": \"Blocks\",\n              \"inward\": \"is blocked by\",\n              \"outward\": \"blocks\"\n            },\n            \"inwardIssue\": {\n              \"key\": \"PROJ-121\"\n            }\n          }\n        ]\n      }\n    },\n    {\n      \"key\": \"PROJ-124\",\n      \"fields\": {\n        \"summary\": \"Show the retry in the order history\",\n        \"status\": {\n          \"name\": \"To Do\"\n        },\n        \"updated\": \"2026-11-10T11:00:00.000+0000\",\n        \"issuelinks\": []\n      }\n    },\n    {\n      \"key\": \"PROJ-125\",\n      \"fields\": {\n        \"summary\": \"Write the retry runbook\",\n        \"status\": {\n          \"name\": \"Blocked by vendor\"\n        },\n        \"updated\": \"2026-11-10T12:00:00.000+0000\"\n      }\n    }\n  ],\n  \"total\": 3\n}"
+    }
+  ]
+}

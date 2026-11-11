@@ -1,0 +1,32 @@
+# Slack mentions (design appendix A): every message that mentions you, read by a scan session through the Slack
+# connector. A model fills the form; code checks that id, thread_id, at and place_id appear word for word in what
+# the tool returned, and drops a record that does not.
+# Set `me` (your Slack member id, such as U0EXAMPLE1) in <data>/sources/slack-mentions.yaml:
+#   extends: slack-mentions
+#   settings: { me: U0EXAMPLE1 }
+#   read: { skip_channels: ["#random"] }      # optional: channels whose messages make no card
+source: slack-mentions
+brings: messages
+settings:
+  me: ""
+read:
+  via: connector             # the Slack connector on claude.ai
+  tools: [slack_search_public, slack_read_thread]
+  query: "<@{me}>"
+  every: 15m
+fill: ai
+form:
+  id: Message_ts             # must appear word for word in what the tool returned
+  thread_id: thread_ts
+  author: From
+  at: Message_ts
+  text: Text
+  place: Channel
+  place_id: Channel id (C...)
+link: "https://slack.com/archives/{place_id}/p{id_digits}?thread_ts={thread_or_id}&cid={place_id}"  # checkpkg: ignore
+key: "{place_id}:{thread_or_id}"
+sort:
+  question:  question
+  ask_to_do: errand          # code when it needs a repo
+  alert:     alert
+  fyi:       none            # goes into the daily digest

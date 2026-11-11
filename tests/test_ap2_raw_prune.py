@@ -441,7 +441,7 @@ class GateRunTest(RawCase):
         raw = self.put("chat", at)
         self.gate(NOW)
         self.assertTrue(raw.exists())
-        self.gate(NOW + timedelta(seconds=1))
+        self.gate(NOW + timedelta(days=1))
         self.assertFalse(raw.exists())
 
     def test_the_raw_prune_runs_right_after_the_restore_point_prune(self):

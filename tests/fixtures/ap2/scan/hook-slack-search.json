@@ -1,0 +1,14 @@
+{
+  "session_id": "s-example",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "mcp__claude_ai_Slack__slack_search_public",
+  "tool_input": {
+    "query": "<@U0EXAMPLE1>"
+  },
+  "tool_response": [
+    {
+      "type": "text",
+      "text": "# Search results for \"<@U0EXAMPLE1>\"\n\n## Channel: #payments (C0123ABCD)\nFrom: U0EXAMPLE2\nMessage_ts: 1730000000.123456\nText: <@U0EXAMPLE1> can you look at the retry change?\n\n## Channel: #payments (C0123ABCD)\nFrom: U0EXAMPLE3\nMessage_ts: 1730000100.000200\nthread_ts: 1730000000.123456\nText: <@U0EXAMPLE1> the retry test also fails on main.\n\n## Channel: #random (C0999RAND)\nFrom: U0EXAMPLE2\nMessage_ts: 1730000200.000300\nText: <@U0EXAMPLE1> lunch?\n"
+    }
+  ]
+}

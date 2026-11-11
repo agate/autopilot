@@ -244,6 +244,44 @@ class SourceCommandTest(unittest.TestCase):
         self.assertFalse(marker.exists())
         self.assertFalse((self.data / "sources" / ".raw").exists())
 
+    NEEDS_RAW = "ap2: --records needs --raw FILE, the output the records were filled from"
+
+    def marker_source(self) -> Path:
+        marker = self.tmp / "ran"
+        script = self.tmp / "mark.py"
+        script.write_text("import sys\nopen(sys.argv[1], 'w').write('ran')\nprint('[]')\n")
+        run = " ".join(shlex.quote(str(a)) for a in (sys.executable, script, marker))
+        (self.data / "sources" / "t-marker.yaml").write_text(
+            f"source: t-marker\nbrings: messages\nread:\n  via: command\n  run: '{run}'\nfill: paths\n"
+            "form: { id: .id, at: .at, text: .text }\nlink: none\nsort: { all: alert }\n")
+        return marker
+
+    def test_records_without_raw_is_refused_before_a_missing_records_file_is_read(self):
+        marker = self.marker_source()
+        missing = self.tmp / "missing.json"
+        self.assertEqual(self.fails("source", "read", "t-marker", "--records", str(missing)), self.NEEDS_RAW)
+        self.assertFalse(marker.exists())
+        self.assertFalse(missing.exists())
+        self.assertFalse((self.data / "sources" / ".raw").exists())
+
+    def test_records_without_raw_is_refused_before_stdin_is_read(self):
+        marker = self.marker_source()
+        proc = subprocess.Popen([sys.executable, str(AP2), "source", "read", "t-marker", "--records", "/dev/stdin"],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env(),
+                                text=True, encoding="utf-8", errors="replace")
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        self.addCleanup(proc.stdin.close)
+        # stdin is held open and never written, so a read of it would wait until the timeout. Not communicate():
+        # with no input it closes stdin first, and ap2 would then read an empty file instead of waiting.
+        proc.wait(timeout=20)  # one short line on each pipe, so nothing blocks on a full pipe
+        out, err = proc.stdout.read(), proc.stderr.read()
+        proc.stdout.close()
+        proc.stderr.close()
+        self.assertEqual((proc.returncode, out, err), (1, "", self.NEEDS_RAW + "\n"))
+        self.assertFalse(marker.exists())
+        self.assertFalse((self.data / "sources" / ".raw").exists())
+
     def test_a_reply_without_the_list_of_the_item_path_is_one_line(self):
         self.reply.write_text('{"message": "API rate limit exceeded"}')
         line = self.fails("source", "read", "t-vendor-status")
