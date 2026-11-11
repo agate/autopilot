@@ -166,6 +166,9 @@ class GuardTest(ServerCase):
         with self.assertRaisesRegex(ConfigError, rf"^cannot listen on 127\.0\.0\.1:{port}: ") as caught:
             server.make_server(self.data, port=port)
         self.assertNotIn("in use by another program", str(caught.exception))  # the bind's error, not the probe's
+        cause = caught.exception.__cause__
+        self.assertIsInstance(cause, OSError)
+        self.assertIn(str(cause), str(caught.exception))  # the message carries the OS's own reason
 
     def test_a_probe_that_gets_no_answer_takes_the_port(self):
         # A probe that times out means nothing listens there: the port is free (whatever the OS does on refusal).
@@ -178,6 +181,7 @@ class GuardTest(ServerCase):
             srv = server.make_server(self.data, port=port)
         self.addCleanup(srv.server_close)
         probe.assert_called_once()
+        self.assertLessEqual(probe.call_args.kwargs["timeout"], 1)  # a silent port must not stall the start
         self.assertEqual(srv.server_address, ("127.0.0.1", port))
 
     def test_a_port_another_program_holds_on_all_addresses_is_a_config_error(self):
