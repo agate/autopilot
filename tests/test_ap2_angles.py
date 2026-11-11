@@ -419,10 +419,18 @@ class LayerTest(AngleCase):
             env = {k: v for k, v in angles._GIT_ENV.items() if k != "GIT_NO_LAZY_FETCH"}
             with mock.patch.object(angles, "_GIT_ENV", env), mock.patch.dict(os.environ):
                 os.environ.pop("GIT_NO_LAZY_FETCH", None)   # the runner's own env must not hide the fetch
+                os.environ["LC_ALL"] = "C"                   # git's own message, untranslated
                 with self.assertRaises(AngleError) as e:
                     self.load(repo=clone, commit=commit)
             self.assertTrue(str(e.exception).startswith(where), str(e.exception))
             self.assertIn("promisor remote", str(e.exception))
+            self.assertEqual(store(), before)
+        with self.subTest(case="the caller's env asks for a fetch"):
+            # The guard values win over the caller's own environment.
+            with mock.patch.dict(os.environ, {"GIT_NO_LAZY_FETCH": "0", "GIT_ALLOW_PROTOCOL": "file"}):
+                with self.assertRaises(AngleError) as e:
+                    self.load(repo=clone, commit=commit)
+            self.assertIn("not in this clone (a partial clone)", str(e.exception))
             self.assertEqual(store(), before)
 
     def test_present_blob_git_cannot_read_is_not_called_missing(self):

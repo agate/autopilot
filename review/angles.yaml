@@ -71,14 +71,14 @@
 - name: "Accessibility & UX"
   question: "What can a keyboard-only, screen-reader or zoomed-in user no longer reach, read or operate after this change?"
   when: { kinds: [ui] }
-  brief: "Use the changed screens with the keyboard only, with a screen reader and at 200% zoom. Check labels, focus order, contrast and touch targets, and say what a user can no longer do."
+  brief: "Read each changed screen's code as a keyboard-only, screen-reader and 200%-zoom user would meet it (in your head; do not run the app). Check labels, focus order, contrast and touch targets, and say what a user can no longer do."
 
 # --- tests ---
 
 - name: "Test value"
   question: "Would these tests fail if the code they cover broke? Name a plausible bug they would let through."
   when: { kinds: [tests] }
-  brief: "For each new or changed test, break the code it covers in one plausible way and say whether the test fails. Flag tests that only check the path that already worked, or mock away the thing they claim to test."
+  brief: "For each new or changed test, picture one plausible bug in the code it covers (in your head; change no files) and say whether the test would fail. Flag tests that only check the path that already worked, or mock away the thing they claim to test."
 
 - name: "Flakiness & isolation"
   question: "Where do these tests depend on timing, order, shared state, the network or the clock, so they pass or fail at random?"
