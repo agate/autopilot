@@ -1673,6 +1673,35 @@ class StoppedLeavesTheListTest(WorkerCase):
         self.assertEqual(w.check(), [])
         self.assertEqual(self.resumes(), [])
 
+    def test_end_drops_a_worker_whose_started_close_cannot_save(self):
+        w = self.workers()
+        a = self.start(w)
+        self.drop_agent(a["short_id"])
+        self.assertEqual(w.check()[0]["did"], "resumed")
+        self.drop_agent(resources.Registry(self.data).read()[0]["short_id"])
+        with self.save_fails_once(w):
+            self.assertEqual(w.check()[0]["error"], "OSError")
+        self.assertEqual(resources.Registry(self.data).read()[0]["closing"]["path"], "died")
+        Store(self.data, self.cfg, self.clock).path(a["card"]).unlink()  # every save fails from here on
+        with self.assertRaisesRegex(Exception, f"no card {a['card']}"):
+            w.end(a["card"], "implement")
+        self.assertEqual(resources.Registry(self.data).read(), [])
+        with self.assertRaisesRegex(WorkerError, f"no implement worker on card {a['card']}"):
+            w.end(a["card"], "implement")
+
+    def test_end_finishes_a_question_whose_stop_landed_late(self):
+        w = self.workers()
+        a = self.start(w)
+        self.write_result(a["card"], "question.json", {"text": "Which port?"})
+        with self.stop_lands_late():
+            self.assertEqual(w.check()[0]["error"], "TimeoutExpired")
+        out = w.end(a["card"], "implement")
+        self.assertEqual(out["did"], "asked")
+        c = self.get(a["card"])
+        self.assertEqual((c["ask"]["type"], c["ask"]["text"]), ("answer", "Which port?"))
+        self.assertEqual(c["sessions"]["implement"]["state"], "asked")
+        self.assertEqual(resources.Registry(self.data).read(), [])
+
     def test_a_failed_save_after_the_blocked_pause_still_raises_the_resume_hint(self):
         w = self.workers()
         a = self.start(w)

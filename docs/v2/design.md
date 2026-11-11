@@ -1121,7 +1121,9 @@ Calls the author made without asking (check them):
     (stop again, save, drop, raise the same ask or hint) instead of acting on the session's state, since a stop that
     timed out may still have landed. Once the stop has returned, a failed step drops it only where a kept record would be misread as dead and resumed
     (end, the idle pause, the blocked pause); done, question, died twice and a parked worker that cannot resume
-    keep it, so the next check closes it again and raises its ask. The blocked pause raises its resume hint only
+    keep it, so the next check closes it again and raises its ask. `end` that finishes another path's mark does
+    that path's close and follow-up, but with end's drop rule: once the stop has returned the record always leaves
+    the list, so a save that keeps failing (e.g. the card file is gone) cannot hold its slot and ports forever. The blocked pause raises its resume hint only
     once the stop has returned. The archive copy is best-effort (`archive: null` and `archive_error` on the line;
     `finish` copies every id again). Dead once: resume in place (same slot) with "You were
     interrupted. Check your worktree and run files first..."; dead twice: stop and set a `fix` ask. Parked: with

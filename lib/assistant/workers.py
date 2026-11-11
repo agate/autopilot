@@ -519,8 +519,11 @@ class Workers:
             if rec is None:
                 raise WorkerError(f"no {role} worker on card {card_id}")
             try:
-                # A close that was started is finished first (its mark); otherwise this is an end.
-                out = self._finish_close(rec, records, rec.get("closing") or self._mark("end"), by)
+                # A close that was started is finished first (its mark and follow-up); otherwise this is an end.
+                # Either way end's own drop rule applies: once the stop returned, the record leaves the list, so a
+                # save that keeps failing cannot hold the worker's slot and ports forever.
+                mark = rec.get("closing") or self._mark("end")
+                out = self._finish_close(rec, records, dict(mark, drop_on_error=True), by)
             except Exception as e:  # noqa: BLE001 - raised below, once the list without the record is written back
                 failed = e
         if failed is not None:
