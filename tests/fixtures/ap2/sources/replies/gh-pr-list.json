@@ -1,0 +1,26 @@
+[
+  {
+    "author": {"id": "U_kgDOAAAAAQ", "is_bot": false, "login": "octo-dev", "name": "Octo Dev"},
+    "createdAt": "2026-11-09T17:02:11Z",
+    "headRepository": {"id": "R_kgDOAAAAAg", "name": "widgets"},
+    "number": 42,
+    "title": "Retry failed card payments once, 2 seconds later",
+    "url": "https://github.com/example/widgets/pull/42"
+  },
+  {
+    "author": {"id": "U_kgDOAAAAAQ", "is_bot": false, "login": "octo-dev", "name": "Octo Dev"},
+    "createdAt": "2026-11-10T08:45:00Z",
+    "headRepository": {"id": "R_kgDOAAAAAw", "name": "gadgets"},
+    "number": 7,
+    "title": "Show the delivery date on the order page",
+    "url": "https://github.com/example/gadgets/pull/7"
+  },
+  {
+    "author": {"id": "U_kgDOAAAAAQ", "is_bot": false, "login": "octo-dev", "name": "Octo Dev"},
+    "createdAt": "2026-11-10T09:00:00Z",
+    "headRepository": {"id": "R_kgDOAAAAAw", "name": "gadgets"},
+    "number": 8,
+    "title": "",
+    "url": "https://github.com/example/gadgets/pull/8"
+  }
+]

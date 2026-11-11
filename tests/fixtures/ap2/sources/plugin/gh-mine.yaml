@@ -1,0 +1,17 @@
+# A test-only built-in: the user's own open PRs, read with gh (no AI, no tokens).
+source: gh-mine
+brings: messages
+read:
+  via: command
+  run: gh pr list --author @me --json number,title,url,author,createdAt,headRepository
+  every: 5m
+fill: paths
+form:
+  id: .number
+  at: .createdAt
+  text: .title
+  author: .author.login
+  place: .headRepository.name
+link: .url
+key: "{place}#{id}"
+sort: { all: pr_review }

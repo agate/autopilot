@@ -680,7 +680,12 @@ Calls the author made without asking (check them):
   calls first and which refuses in shadow mode), `datadir.py` (lookup and layout), `cli.py` (the `ap2` command,
   run by `bin/ap2`), and the card store: `cards.py` (card shape, ids and checks), `store.py` (the `Store` API:
   add, get, update, list, restore, propose_opposite, prune, search), `restore.py` (restore points and proposed
-  opposite actions) and `index.py` (`index.sqlite`); the gate: `routines.py` (routine files and slots) and `gate.py` (one gate run, `ap2 gate`); templates and roles: `templates.py` (loading, the user's override, validation, briefs) and `roles.py` (the shipped roles and their tools). `ap2 config [--data PATH]` prints the effective config and `data_dir` as JSON. With stdout
+  opposite actions) and `index.py` (`index.sqlite`); the gate: `routines.py` (routine files and slots) and `gate.py`
+  (one gate run, `ap2 gate`); templates and roles: `templates.py` (loading, the user's override, validation,
+  briefs) and `roles.py` (the shipped roles and their tools); and the source engine: `sources.py` (loading,
+  `extends:`, checks), `form.py` (the form, the path language, `{field}` patterns and derived fields) and
+  `engine.py` (read, fill, check, link and key, sort, card). `ap2 config [--data PATH]` prints the effective config
+  and `data_dir` as JSON. With stdout
   closed, `ap2 config` sets up the folder, prints nothing and exits 0; when its reader goes away
   (`ap2 config | true`) it exits 1 with nothing on stderr; when a write fails (a full disk) it prints one line,
   `ap2: cannot write the output: ...`, and exits 1. `ap2` with no arguments prints the usage, listing the
@@ -753,6 +758,111 @@ Calls the author made without asking (check them):
   `ap2 card list [--lane L] [--kind K] [--parent ID]`, `ap2 search <text...>`, `ap2 restore <point id> [--by NAME]`,
   each with `--data PATH`. `--by` defaults to `ap2`. `card add -` reads stdin as UTF-8, like a file, whatever the locale. Output is JSON (a card, or a list oldest first; cards made in the same second are in id order); an error is
   one line `ap2: ...` on stderr with exit 1.
+- **[decided by the builder]** The source engine (design 5).
+  - Loading: `<plugin>/sources/*.yaml` (the repo's `sources/`; a missing folder means no built-in sources) and
+    `<data>/sources/*.yaml`, read with `yamlish`. A file's name without `.yaml` is its source's name: lowercase
+    letters, digits, `-` and `_`, at most 64 (it reaches a path). Files starting with `.` and other suffixes are
+    not sources. `source:` must equal the file name; a file with `extends:` may leave it out. `extends: <own name>`
+    means the built-in file of that name; `extends: <other name>` means that source as loaded (the user's when
+    there is one), and the result takes the extending file's name. Maps merge key by key; lists, scalars and null
+    replace. A missing base, a cycle, a bad name or a mismatched `source:` raise `SourceError` (a `ConfigError`,
+    so `ap2` prints it as one `ap2: ...` line) naming the file. `load(name)` reads only the files it needs;
+    `load_all()` (and `ap2 source list`) fails on the first bad file, naming it. A source file is at most
+    `sources.MAX_SOURCE` (1 MiB); a larger one is refused (`<file>: larger than 1048576 bytes`).
+  - Every file a read or the loader takes (a source file, the `--raw` output, the `--records` file) is read with a
+    byte limit, by `sources.read_capped`: at most the limit plus one byte is read, and a file with more than the limit
+    is refused. Its size from stat is not trusted, so a pipe (`/dev/stdin`, `<(...)`), a device or a file that
+    grows while it is read cannot pass the limit.
+  - Checks (on the merged file): top-level keys `source`, `brings` (`messages | work`), `read` (a map; `via` is
+    `command | mcp | connector | skill`; `command` needs `run`; optional `every`, text; optional `timeout`,
+    1-600 seconds, default 60; other keys are the via's own and pass), `fill` (`paths | ai`), `form`, `link`,
+    `key`, `sort`, plus `instructions` (text). `status_map`, `writes` (events `on_start`, `on_pr`, `on_merge`),
+    `never` (a list) and `plan` (text) are allowed only when `brings: work`. Any other key is refused with its
+    name and line. `form` holds only the fields of 5.2 plus `place_id`, and must name `id`, `at` and `text`, and
+    `status` when `brings: work`; with `fill: ai` each value is a non-empty hint, with `fill: paths` a path.
+    `key` is optional and defaults to `{source}:{id}`; it must name at least one field. `sort` maps each
+    category to a template name (`[a-z][a-z0-9_-]*`), `update_card` or `none`.
+  - The path language (`fill: paths`), jq-like: a path starts with `.`; `.` alone is the whole item; `.name`
+    takes a key (`."a key"` quotes one); `[]` takes every item of a list (`.[]` at the top); `[text]` keeps the
+    list items holding `text` word for word as a text value at any depth (`.fields.issuelinks[is blocked by].key`);
+    `[a.b=text]` keeps those whose `.a.b` is `text`. No indexes or slices (`[0]`, `[-1]`, `[1:]`, `[:]` are refused). A step on the wrong type
+    gives nothing. The `id` path up to its first `[]` is the item path: every other path (and a `link` path)
+    must start with it, and each item is one record; with no `[]`, a list reply is the items and anything else
+    is one item. When nothing fans out before the item path's `[]`, a reply with no list there (an error object such as
+    `{"message": "API rate limit exceeded"}`, `null`, or a map) fails the read with `SourceError` naming the raw
+    file, instead of reading as no items; an empty list is zero items. Only `depends_on` may fan out further (a list); other fields must be a text or an integer
+    (written as text). A record whose required field is missing, empty or of the wrong type, or whose optional
+    field has the wrong type, is dropped and listed in the read's `dropped` with the reason.
+  - Link and key: `link` is `none`, a path (`.url`, `fill: paths` only) or a `{field}` pattern; `key` is a
+    pattern. Values in a link pattern are percent-encoded; the link must start with `http://` or `https://`.
+    Patterns may name the record's fields and the derived fields, defined once in `form.derived`: `id_digits`
+    (the id without its dots, Slack's `p` link), `place_id` (the record's own when the form fills it, else
+    `place`) and `source` (the source's name). A pattern naming a value the record lacks (`{thread_id}` on a
+    top-level message, `{site}` before a setting supplies it) drops the record with the reason; so does one
+    naming an empty or blank value (`key: {thread_id} is empty`), so two different items never share a key
+    such as `C0123ABCD:`.
+  - Sort and cards: `fill: paths` with one category gives every record that category; with several it makes no
+    card (the item says why); `fill: ai` records carry their `category`, a text that must be in `sort`. A
+    `fill: ai` record's `id`, and its `thread_id` and `at` when it has them, must appear word for word in the
+    raw tool output (read as UTF-8, bad bytes replaced); one that does not is dropped with the reason
+    (`form.id '...' is not in the raw output`), so a model cannot invent an id. A new card is
+    `kind` = the template, `lane` `needs` (`brings: messages`) or `planned` (`brings: work`), `pri` P2,
+    `origin` `source`, `feed` the source's name, `title` the text's first line (80 characters), `key`, and
+    `source: {name, record, link, raw}` (the record's ids, the link, and the raw file it came from); a work
+    card also gets `status`, through `status_map`. The same `key` updates the card that has it (`plain`,
+    `title`, `source`, `status`; never `kind`, `lane`, `pri` or `ask`) with `by: source:<name>` and
+    `did: read <name>`; when only `raw` would change, nothing is written. `update_card` updates only, `none`
+    makes nothing. The cards are found by key with `Store.list()` once per read. A card the store refuses to
+    add or update (a stored card edited by hand into a bad one) drops only that item, naming the card or key,
+    and a dry run drops it the same way; a failure of the store itself (a file or index error) still stops the
+    read with one `ap2:` line, and so does a card file the store cannot read at all (not JSON, or not a card),
+    as `ap2 card list` does.
+  - Code-made plain words (no AI), per language, in `engine.PHRASES` (`en` and `zh`; a code like `zh-Hans`
+    uses `zh`): what, "New from <source> by <author> in <place>: <first line of the text>"; where, "It was
+    written at <at>. [Its status there is "<status>".] Nothing has been done with it yet."; do, "Read it at the
+    link and decide what it needs." (messages) or "Nothing yet; it waits in Planned until it is started."
+    (work). A configured language without phrases refuses the read before anything is saved, rather than put
+    another language's words on its page.
+  - `via: command`: `read.run` is split with `shlex` and run with `subprocess` (no shell, stdin empty, the data
+    folder as the working folder, `read.timeout`). Its stdout is saved first, as is, to
+    `<data>/sources/.raw/<source>/<YYYYMMDDTHHMMSSZ>-<6 hex>.json`, even when the command fails or the output is
+    not JSON; a read that passes `read.timeout` is stopped and its partial stdout is saved the same way (the
+    error names the file, as it does for a nonzero exit; a dry run keeps nothing). At most `engine.MAX_OUTPUT`
+    (64 MiB) of stdout is kept: a command that prints more is stopped, and the first 64 MiB is saved as partial
+    output the same way; only the last 64 KiB of stderr is kept. The command runs in its own
+    process group, and the whole group is killed on timeout, so the children it started stop too. A stop sends
+    SIGKILL to the group again and again (at most `engine.STOP_TRIES`, 100, times, 1 ms apart) until the group is
+    empty: on macOS a child that is being forked at the first kill can miss it and live on in the group. An
+    interrupted read (Ctrl-C, or any error while waiting) kills the command's group too. While a read waits (in
+    the main thread), every signal in `engine.STOP_SIGNALS` (SIGHUP, SIGQUIT, SIGTERM, SIGUSR1, SIGUSR2, SIGALRM,
+    SIGVTALRM, SIGPROF, SIGXCPU) that is at its default action kills the command's group too, then ap2 exits with
+    128 + the signal number; one that is ignored or already handled is left alone, so nohup keeps working. Ctrl-C
+    does the same through KeyboardInterrupt. These handlers are in place before the command starts; a signal that
+    comes while it starts is handled right after. While the group is being killed, further signals are ignored,
+    and the previous handlers are put back when the read ends.
+    After a timeout kill the engine waits at most 5 more seconds for the rest of the output,
+    then keeps what it has. A command that exited but left something it started holding its output open says so
+    in the error, with its exit code. Then what the engine made of it goes next to it as `<same name>.report.json` (items, dropped).
+    `mcp`, `connector` and `skill` reads are not run here: `Engine.read_saved(source, raw_path, records=None)`
+    takes a scan session's saved output (copied under `.raw/<source>/` unless it is there already) and, for
+    `fill: ai`, its records. Records with `fill: paths`, or none with `fill: ai`, are refused before anything
+    is run or saved. Every file a read takes (the `--raw` output and the `--records` file) is refused before it
+    is copied or parsed when it is larger than `engine.MAX_OUTPUT` (64 MiB), as a command's output past it would
+    be. The `--records` file must hold a JSON list (`null` is refused, not read as no records). A saved file
+    already in `.raw/<source>/` is named by that folder's path even when `.raw` is a link to another folder. A raw
+    save that fails (a full disk) removes the file it started. Old raw files are not pruned yet.
+  - A read handles at most `engine.MAX_ITEMS` (10,000) items: a reply with more items, or a scan session with
+    more `fill: ai` records, fails the read, and the error names the raw file it was saved as (a dry run saves
+    none). No card is made or changed. This is the simplest limit to raise later; it keeps one read's time,
+    memory and report small.
+  - Shadow mode: a source's `writes` are never run. `Engine.apply_writes(source, event)` calls
+    `config.require_live` first (shadow mode raises `ShadowModeError`), and in live mode still runs nothing and
+    says so; a later slice runs the writes.
+  - Commands, each with `--data PATH`, JSON on stdout, errors as one `ap2: ...` line with exit 1:
+    `ap2 source list`, `ap2 source show <name>` (the merged file), `ap2 source read <name> [--raw FILE]
+    [--records FILE] [--dry-run]`. `--dry-run` runs the read and prints each item with `action` (`add`,
+    `update`, `unchanged`, `none`) and the card it would add (`would_add`) or the fields it would change
+    (`would_change`), and writes nothing, not even the data folder's layout.
 - **[decided by the builder]** The gate and routines (slice 5, design 4.3 and 7.1 to 7.4). Modules:
   `lib/assistant/routines.py` (routine files, slots, missed runs) and `lib/assistant/gate.py` (one run).
   - Routine files are JSON, `<data>/routines/<name>.json`, not YAML: the gate writes `last_slot` back, and a JSON
