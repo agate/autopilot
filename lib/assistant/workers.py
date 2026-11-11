@@ -176,20 +176,33 @@ class Workers:
         text = "\n".join(lines)
         return PR_COMMAND + text if role not in AGENTS else text
 
-    def _tools(self, project: dict, cwd: str) -> dict:
-        """The project with the session's tools, for the permission floor: the ones it lists, as they are, or when
-        it lists none, the ones a session in `cwd` starts with, found the way v1 does (`perms.discover_tools`, one
-        `claude -p` call). A worker never starts without its outward tools denied: no list, no start."""
+    def _tools(self, card: dict, project: dict, cwd: str, discover: bool = True) -> tuple:
+        """(the project with the session's tools, for the permission floor; the list to save on the card or None).
+        The tools are the ones the project lists, as they are; else the list the card keeps from its first start
+        (`sessions.<role>.tools`, any role); else, only when no worker of the card has run yet (so no session ever
+        runs without the floor in a folder a worker wrote) and `discover`, the ones a session starts with, found
+        the way v1 does (`perms.discover_tools`, one `claude -p` call) in the project's `repo` when it is a folder
+        (v1's `ap perms write` lists them in the main checkout), else in `cwd`. A worker never starts without its
+        outward tools denied: no list, no start."""
         if project.get("tools"):
-            return project
+            return project, None
+        name = project.get("name")
+        where = f"projects/{name}.yaml `tools`" if name else "its projects/<name>.yaml `tools`"
+        ask = "" if name else "give the card a project and "
+        entries = [e for r, e in sorted((card.get("sessions") or {}).items()) if r in ROLES and isinstance(e, dict)]
+        saved = next((e["tools"] for e in entries if isinstance(e.get("tools"), list)), None)
+        if saved is not None:
+            return dict(project, tools=list(saved)), None
+        if not discover or any(e.get("id") or e.get("ids") for e in entries):
+            raise WorkerError(f"no saved tool list for card {card['id']}; {ask}list the tools in {where}")
+        repo = project.get("repo")
+        folder = str(Path(repo).resolve()) if repo and Path(repo).is_dir() else cwd
         try:
-            tools = v1_perms.discover_tools(self.claude, cwd)
+            tools = list(v1_perms.discover_tools(self.claude, folder))
         except (OSError, RuntimeError, subprocess.SubprocessError) as e:
-            name = project.get("name")
-            hint = (f"list them in projects/{name}.yaml `tools`" if name else
-                    "give the card a project and list them in its projects/<name>.yaml `tools`")
-            raise WorkerError(f"cannot list the session's tools for the permission floor: {e}; {hint}") from e
-        return dict(project, tools=list(tools))
+            raise WorkerError(f"cannot list the session's tools for the permission floor: {e}; {ask}list them in "
+                              f"{where}") from e
+        return dict(project, tools=tools), tools
 
     def _launch(self, argv: list, cwd: str, env: dict) -> tuple:
         """Run `claude --bg ...`; return (short id, session id or "")."""
@@ -306,9 +319,11 @@ class Workers:
             env = self._env(card, role, project, port_range, branch)
             name = session_name(card_id, role)
             settings = self.run_dir(card_id) / f"settings-{role}.json"
-            write_json(settings, floor(role, self._tools(project, cwd), self.data, env))
             argv = self._argv(role, name, settings, self._prompt(prompt, card, role, project, port_range, branch),
                               sid)
+            # A resume means a worker of the card ran: its saved list is reused, never found again.
+            listed, found = self._tools(card, project, cwd, discover=not resume)
+            write_json(settings, floor(role, listed, self.data, env))
             if parked:
                 self._stop(card_id, role, parked.get("short_id"), by)  # the parked session sits idle; the copy
                 # takes its place
@@ -319,7 +334,7 @@ class Workers:
                    "idle_since": None, "blocked_since": None}
             records[:] = [r for r in records if r is not old] + [rec]
         self._save_session(card_id, role, by, id=new_sid or sid, cwd=cwd, needs=needs, state="running", why=None,
-                           question=None)
+                           question=None, **({} if found is None else {"tools": found}))
         self._close_worker_asks(card_id, role, by)  # a new session: its old prompt, pause or question is over
         return rec
 
@@ -422,9 +437,11 @@ class Workers:
         project = self._project(card)
         settings = self.run_dir(rec["card"]) / f"settings-{rec['role']}.json"
         env = self._env(card, rec["role"], project, rec["ports"], rec.get("branch") or "")
-        if not (rec.get("cwd") and Path(rec["cwd"]).is_dir()):  # checked before the tools are listed there
+        if not (rec.get("cwd") and Path(rec["cwd"]).is_dir()):  # checked first, so a gone worktree says so
             raise WorkerError(f"cannot start the session: the worker's folder {rec.get('cwd') or '(none)'} is gone")
-        write_json(settings, floor(rec["role"], self._tools(project, rec["cwd"]), self.data, env))
+        # A worker of the card ran (this one): never list the tools again in the folder it wrote.
+        write_json(settings, floor(rec["role"], self._tools(card, project, rec["cwd"], discover=False)[0], self.data,
+                                   env))
         argv = self._argv(rec["role"], rec["session_name"], settings, prompt, rec["session_id"] or rec["short_id"])
         if rec.get("parked"):
             self._stop(rec["card"], rec["role"], rec.get("short_id"), BY)

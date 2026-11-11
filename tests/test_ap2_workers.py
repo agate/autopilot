@@ -6,6 +6,7 @@ from __future__ import annotations
 import gzip
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -25,7 +26,7 @@ from assistant import config, resources, transcripts
 from assistant.config import Config, ShadowModeError
 from assistant.resources import WorkerError
 from assistant.store import Store
-from assistant.workers import DIED, Workers
+from assistant.workers import DIED, PROTECTED, Workers
 from autopilot import perms as v1_perms
 from autopilot import sessions as v1_sessions
 
@@ -242,6 +243,19 @@ class ResourcesTest(WorkerCase):
         with self.assertRaisesRegex(WorkerError, "device is held"):
             self.start(w, needs=["device"])
 
+    def test_a_paused_holder_resumes_with_its_resource(self):
+        w = self.workers()
+        a = self.start(w, needs=["device"])
+        self.set_agent(a["short_id"], status="idle")
+        w.check()
+        self.clock.advance(60)
+        self.assertEqual(w.check()[0]["did"], "paused")
+        back = w.start(a["card"], "implement", prompt="Continue.", resume=True)  # no needs given
+        self.assertEqual(back["needs"], ["device"])
+        self.assertEqual(resources.Registry(self.data).read()[0]["needs"], ["device"])
+        with self.assertRaisesRegex(WorkerError, f"device is held by {a['card']} · implement"):
+            self.start(w, needs=["device"])
+
     def test_the_planner_never_starts_two_cards_needing_the_same_resource(self):
         cands = [{"project": "app", "card": "c1", "needs": ["native-dev-loop"]},
                  {"project": "app", "card": "c2", "needs": ["native-dev-loop"]},
@@ -325,10 +339,12 @@ class ProjectSetupTest(WorkerCase):
         deny = settings["permissions"]["deny"]
         self.assertIn("mcp__Tracker__send_message", deny)  # outward tool: denied (v1 perms.denied_tools)
         self.assertNotIn("mcp__Tracker__read_issue", deny)
-        self.assertIn(f"Edit(/{self.data}/items/**)", deny)
-        self.assertIn(f"Edit(/{self.data}/config.yaml)", deny)
-        self.assertIn(f"Edit(/{self.data}/templates/**)", deny)  # the user's templates and sources (design 6)
-        self.assertIn(f"Edit(/{self.data}/sources/**)", deny)
+        # The data folder's own files, the user's templates and sources (design 6), and every card's settings files.
+        self.assertLessEqual({"config.yaml", "workers.json", ".workers.lock", ".store.lock", "index.sqlite",
+                              "items/**", "restore/**", "projects/**", "templates/**", "sources/**",
+                              "sessions/**/settings-*.json"}, set(PROTECTED))
+        for name in PROTECTED:
+            self.assertIn(f"Edit(/{self.data}/{name})", deny)
         self.assertIn("Bash(gh pr comment:*)", deny)
         self.assertEqual(settings["permissions"]["allow"], [f"Bash({ROOT / 'bin' / 'ap2'} worker park:*)"])
         self.assertEqual(settings["env"], {k: v for k, v in env.items() if k.startswith("AP2_")})
@@ -343,6 +359,32 @@ class ProjectSetupTest(WorkerCase):
         (self.data / "projects" / "shop.yaml").write_text("repo: /x\nextra_host: [a]\n")
         cid = self.add_card(project="shop")
         with self.assertRaisesRegex(config.ConfigError, r"shop.yaml: line 2: unknown key 'extra_host'"):
+            self.workers().start(cid, "implement", cwd=self.wt)
+        self.assertEqual(self.bg_calls(), [])
+
+    def test_a_value_of_the_wrong_type_is_refused_with_its_line(self):
+        rows = [("tools: mcp__Tracker__send_message", "tools must be a list of names"),
+                ("extra_hosts: a.com", "extra_hosts must be a list of names"),
+                ("resources: [native-dev-loop, '']", "resources must be a list of names"),
+                ("branch_prefix: [a]", "branch_prefix must be a text"),
+                ("repo: ''", "repo must be a text"),
+                ("health_checks:\n  - name: x", "health_checks must be a list of {name, command, fix} maps")]
+        cid = self.add_card(project="shop")
+        for row, reason in rows:
+            with self.subTest(row=row):
+                (self.data / "projects" / "shop.yaml").write_text(f"branch_pattern: x\n{row}\n")
+                with self.assertRaisesRegex(config.ConfigError, r"shop\.yaml: line 2: " + re.escape(reason)):
+                    self.workers().start(cid, "implement", cwd=self.wt)
+        self.assertEqual(self.bg_calls(), [])
+
+    def test_a_project_name_that_is_not_a_name_is_refused(self):
+        from assistant import projects
+        for bad in ("../x", "Shop", "a/b", "", None):
+            with self.subTest(name=bad):
+                with self.assertRaisesRegex(config.ConfigError, "not a project name"):
+                    projects.path(self.data, bad)
+        cid = self.add_card(project="../projects/shop")
+        with self.assertRaisesRegex(config.ConfigError, "not a project name"):
             self.workers().start(cid, "implement", cwd=self.wt)
         self.assertEqual(self.bg_calls(), [])
 
@@ -363,7 +405,10 @@ class ProjectSetupTest(WorkerCase):
 
 class ToolDiscoveryTest(WorkerCase):
     """A project that lists no `tools` gets them the way v1 does (`perms.discover_tools`), so its outward MCP tools
-    are denied as well."""
+    are denied as well. The list is found once per card, by its first worker start, before any worker of the card
+    has run (so never in a folder a worker wrote); every later start, resume or role reuses it."""
+
+    FOUND = ["Read", "Bash", "mcp__slack__slack_send_message", "mcp__slack__slack_read_channel"]
 
     def test_unlisted_tools_are_discovered_and_the_outward_ones_denied(self):
         cid = self.add_card()  # no project: no `tools` listed
@@ -378,23 +423,68 @@ class ToolDiscoveryTest(WorkerCase):
         self.assertNotIn("mcp__slack__slack_read_channel", deny)
         self.assertNotIn("Read", deny)
 
+    def test_a_fresh_start_discovers_once_and_saves_the_list_on_the_card(self):
+        cid = self.add_card()
+        self.workers().start(cid, "implement", cwd=self.wt)
+        self.assertEqual(len(self.discovery_calls()), 1)
+        self.assertEqual(self.get(cid)["sessions"]["implement"]["tools"], self.FOUND)
+
     def test_a_project_with_no_tools_listed_is_discovered_too(self):
         (self.data / "projects").mkdir()
         (self.data / "projects" / "bare.yaml").write_text("repo: /repos/bare\n")
         cid = self.add_card(project="bare")
         self.workers().start(cid, "implement", cwd=self.wt)
         self.assertEqual(len(self.discovery_calls()), 1)
+        self.assertEqual(self.discovery_calls()[0]["cwd"], str(self.wt))  # its repo is not a folder here
         self.assertIn("mcp__slack__slack_send_message", self.deny(cid))
 
-    def test_an_in_place_resume_discovers_again(self):
+    def test_the_list_is_found_in_the_projects_repo_when_it_is_a_folder(self):
+        repo = self.tmp / "repo"
+        repo.mkdir()
+        (self.data / "projects").mkdir()
+        (self.data / "projects" / "bare.yaml").write_text(f"repo: {repo}\n")
+        cid = self.add_card(project="bare")
+        self.workers().start(cid, "implement", cwd=self.wt)
+        self.assertEqual([c["cwd"] for c in self.discovery_calls()], [str(repo)])  # the main checkout, as v1
+        self.assertEqual(self.bg_calls()[0]["cwd"], str(self.wt))
+
+    def test_an_in_place_resume_reuses_the_saved_list(self):
         w = self.workers()
         a = self.start(w)
+        before = self.deny(a["card"])
         self.drop_agent(a["short_id"])
+        # A worker may have planted files in its folder by now: a session there is never run without the floor.
         with mock.patch.dict(os.environ, {"FAKE_TOOLS": "Read,mcp__Tracker__create_issue"}):
             self.assertEqual(w.check()[0]["did"], "resumed")
-        self.assertEqual(len(self.discovery_calls()), 2)
-        self.assertEqual(self.discovery_calls()[1]["cwd"], str(self.wt))  # listed in the worker's own folder
-        self.assertIn("mcp__Tracker__create_issue", self.deny(a["card"]))
+        self.assertEqual(len(self.discovery_calls()), 1)  # no second `claude -p`
+        self.assertEqual(self.deny(a["card"]), before)
+
+    def test_a_later_role_on_the_card_reuses_the_saved_list(self):
+        w = self.workers()
+        a = self.start(w)
+        before = self.deny(a["card"])
+        self.write_result(a["card"])
+        self.assertEqual(w.check()[0]["did"], "ended")
+        with mock.patch.dict(os.environ, {"FAKE_TOOLS": "Read,mcp__Tracker__create_issue"}):
+            w.start(a["card"], "review", cwd=self.wt)  # the folder the implementer wrote
+        self.assertEqual(len(self.discovery_calls()), 1)
+        self.assertEqual(self.deny(a["card"], "review"), before)
+        self.assertEqual(len(self.bg_calls()), 2)
+
+    def test_a_card_whose_worker_ran_with_no_saved_list_is_refused(self):
+        sid = "0b4c6f4e-0000-4000-8000-000000000001"
+        cid = self.add_card(sessions={"implement": {"id": sid, "ids": [sid], "cwd": str(self.wt)}})
+        with self.assertRaisesRegex(WorkerError, rf"^no saved tool list for card {cid}; give the card a project and "
+                                                 r"list the tools in its projects/<name>\.yaml `tools`$"):
+            self.workers().start(cid, "review", cwd=self.wt)
+        (self.data / "projects").mkdir()
+        (self.data / "projects" / "bare.yaml").write_text("repo: /repos/bare\n")
+        cid = self.add_card(project="bare", sessions={"implement": {"ids": [sid]}})
+        with self.assertRaisesRegex(WorkerError, rf"^no saved tool list for card {cid}; list the tools in "
+                                                 r"projects/bare\.yaml `tools`$"):
+            self.workers().start(cid, "implement", cwd=self.wt)
+        self.assertEqual((self.discovery_calls(), self.bg_calls()), ([], []))
+        self.assertEqual(resources.Registry(self.data).read(), [])
 
     def test_a_failed_discovery_starts_nothing(self):
         cid = self.add_card()
@@ -407,16 +497,33 @@ class ToolDiscoveryTest(WorkerCase):
         self.assertEqual(self.bg_calls(), [])
         self.assertEqual(resources.Registry(self.data).read(), [])
 
-    def test_a_failed_discovery_on_resume_counts_as_a_death(self):
+    def test_a_resume_with_no_saved_list_counts_as_a_death(self):
         w = self.workers()
         a = self.start(w)
+        sessions = self.get(a["card"])["sessions"]
+        del sessions["implement"]["tools"]  # e.g. a card from before the list was kept
+        Store(self.data, self.cfg, self.clock).update(a["card"], {"sessions": sessions}, by="test")
         self.drop_agent(a["short_id"])
-        with mock.patch.dict(os.environ, {"FAKE_TOOLS_FAIL": "1"}):
-            out = w.check()[0]
+        out = w.check()[0]
         self.assertEqual((out["state"], out["did"]), ("dead", "nothing"))
-        self.assertIn("cannot list the session's tools", out["note"])
+        self.assertIn(f"no saved tool list for card {a['card']}", out["note"])
+        self.assertEqual(len(self.discovery_calls()), 1)  # never listed again in the worker's folder
         self.assertEqual(len(self.bg_calls()), 1)  # never resumed without its floor
         self.assertEqual(resources.Registry(self.data).read()[0]["resumes"], 1)
+        self.assertEqual(w.check()[0]["did"], "stopped")
+
+    def test_an_in_place_resume_never_lists_the_tools(self):
+        (self.data / "projects").mkdir()
+        (self.data / "projects" / "shop.yaml").write_text("tools: [mcp__Tracker__read_issue]\n")
+        cid = self.add_card(project="shop")
+        with mock.patch("autopilot.sessions.list_all", return_value=[]):  # no session id reaches the card
+            a = self.workers().start(cid, "implement", cwd=self.wt)
+        (self.data / "projects" / "shop.yaml").write_text("repo: /repos/shop\n")  # its tools no longer listed
+        self.drop_agent(a["short_id"])
+        out = self.workers().check()[0]
+        self.assertEqual((out["state"], out["did"]), ("dead", "nothing"))
+        self.assertIn(f"no saved tool list for card {cid}", out["note"])
+        self.assertEqual((self.discovery_calls(), len(self.bg_calls())), ([], 1))
 
     def test_a_failed_discovery_names_the_cards_project_file(self):
         (self.data / "projects").mkdir()
@@ -426,7 +533,7 @@ class ToolDiscoveryTest(WorkerCase):
             with self.assertRaisesRegex(WorkerError, r"; list them in projects/bare\.yaml `tools`$"):
                 self.workers().start(cid, "implement", cwd=self.wt)
 
-    def test_a_discovery_that_times_out_starts_nothing_and_counts_as_a_death(self):
+    def test_a_discovery_that_times_out_starts_nothing(self):
         timeout = subprocess.TimeoutExpired("claude", 180)
         with mock.patch.object(v1_perms, "discover_tools", side_effect=timeout):
             with self.assertRaisesRegex(WorkerError, "cannot list the session's tools"):
@@ -435,13 +542,9 @@ class ToolDiscoveryTest(WorkerCase):
         w = self.workers()
         a = self.start(w)
         self.drop_agent(a["short_id"])
-        with mock.patch.object(v1_perms, "discover_tools", side_effect=timeout):
-            out = w.check()[0]
-            self.assertNotIn("error", out)
-            self.assertIn("cannot list the session's tools", out["note"])
-            self.assertEqual(resources.Registry(self.data).read()[0]["resumes"], 1)
-            self.assertEqual(w.check()[0]["did"], "stopped")
-        self.assertEqual(len(self.bg_calls()), 1)  # never resumed without its floor
+        with mock.patch.object(v1_perms, "discover_tools", side_effect=timeout) as found:
+            self.assertEqual(w.check()[0]["did"], "resumed")  # the resume reuses the saved list
+        found.assert_not_called()
 
     def test_a_missing_claude_starts_nothing(self):
         cid = self.add_card()  # no project: no `tools` listed, so they must be discovered
@@ -1029,6 +1132,31 @@ class NobodyWaitsTest(WorkerCase):
         self.assertEqual(saved["state"], "paused")
         self.assertIn("paused, can resume", saved["why"])
         self.assertIsNone(self.get(a["card"]).get("ask"))
+
+    def test_an_unknown_listing_keeps_the_block_clock_and_its_ask(self):
+        w = self.workers()
+        a = self.start(w)
+        self.set_agent(a["short_id"], status="waiting")
+        self.assertEqual(w.check()[0]["did"], "asked")
+        since = resources.Registry(self.data).read()[0]["blocked_since"]
+        self.clock.advance(20)
+        with mock.patch("autopilot.sessions.list_all", return_value=None):  # the listing failed: says nothing
+            self.assertEqual(w.check()[0]["state"], "unknown")
+        self.assertEqual(self.get(a["card"])["ask"]["reason"], "permission_prompt")
+        self.assertEqual(resources.Registry(self.data).read()[0]["blocked_since"], since)
+        self.clock.advance(10)
+        self.assertEqual(w.check()[0]["did"], "paused")  # 30 minutes from the first sight of the prompt
+
+    def test_an_unknown_listing_keeps_the_idle_clock(self):
+        w = self.workers()
+        a = self.start(w)
+        self.set_agent(a["short_id"], status="idle")
+        w.check()
+        self.clock.advance(50)
+        with mock.patch("autopilot.sessions.list_all", return_value=None):
+            self.assertEqual(w.check()[0]["state"], "unknown")
+        self.clock.advance(10)
+        self.assertEqual(w.check()[0]["did"], "paused")  # 60 minutes from the first sight of the idle session
 
     def test_working_again_resets_the_idle_clock(self):
         w = self.workers()

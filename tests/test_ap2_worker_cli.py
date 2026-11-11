@@ -134,20 +134,25 @@ class WorkerCommandTest(unittest.TestCase):
     def test_answer_resume_and_a_parked_resume_by_check(self):
         self.live()
         cid = self.add_card()
-        rec = self.ok("worker", "start", cid, "implement", "--cwd", str(self.wt))
+        rec = self.ok("worker", "start", cid, "implement", "--cwd", str(self.wt), "--needs", "native-dev-loop")
         (self.data / "sessions" / cid / "question.json").write_text(json.dumps({"text": "Three retries or five?"}))
         self.assertEqual([o["did"] for o in self.ok("worker", "check")], ["asked"])
         answered = self.ok("worker", "answer", cid, "Three", "retries")
         last = self.bg_calls()[-1]["argv"]
         self.assertEqual(last[1:3], ["--resume", rec["session_id"]])
         self.assertIn("The answer: Three retries", last[-1])
+        self.assertEqual(self.held(), [["native-dev-loop"]])  # the resumed worker still holds its resource
         self.ok("worker", "end", cid, "implement")
         again = self.ok("worker", "start", cid, "implement", "--resume")
         self.assertEqual(self.bg_calls()[-1]["argv"][:3], ["--bg", "--resume", answered["session_id"]])
+        self.assertEqual(self.held(), [["native-dev-loop"]])
         self.ok("worker", "park", cid, "implement", "--usage", str(self.usage(self.tmp / "u.json", 95, -60)))
         under = self.usage(self.tmp / "under.json", 3)
         self.assertEqual([o["did"] for o in self.ok("worker", "check", "--usage", str(under))], ["resumed"])
         self.assertEqual(self.bg_calls()[-1]["argv"][1:3], ["--resume", again["session_id"]])
+
+    def held(self) -> list:
+        return [r["needs"] for r in json.loads((self.data / "workers.json").read_text())["workers"]]
 
     def test_errors_are_one_line(self):
         cid = self.add_card()
@@ -159,6 +164,8 @@ class WorkerCommandTest(unittest.TestCase):
                                                         str(self.tmp / "missing.json")))
         self.live()
         self.assertIn("no question from a worker", self.fails("worker", "answer", cid, "yes"))
+        self.assertIn("cannot read", self.fails("worker", "start", cid, "implement", "--cwd", str(self.wt),
+                                                "--prompt-file", str(self.tmp / "missing.md")))
 
     def test_data_flag_wins_over_env(self):
         other = self.tmp / "other"
