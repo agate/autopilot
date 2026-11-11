@@ -1050,7 +1050,10 @@ Calls the author made without asking (check them):
     `127.0.0.1:<port>`, because macOS would let it share a port another program holds on all addresses. Nothing
     is installed: "started at login" comes with the slice that writes launchd jobs.
   - The request guard: every request must carry `Host: 127.0.0.1:<port>` or `localhost:<port>`, or it gets 403,
-    so a site that points its own name at 127.0.0.1 (DNS rebinding) cannot read cards. While it runs, the server
+    so a site that points its own name at 127.0.0.1 (DNS rebinding) cannot read cards. A request to `/api/` that
+    a browser marks as coming from another site (`Sec-Fetch-Site` other than `same-origin` or `none`) is 403, so
+    another web site cannot time searches to learn what the cards hold; a browser that does not send the header
+    gets no such guard. The page `/` is still served, so a link from elsewhere opens it. While it runs, the server
     trusts every account and process on this Mac: the Host and Origin checks stop other web sites, not other
     local users, who can read every card, source and setting and post questions. A per-run token is later work
     if that is not acceptable. Every reply has

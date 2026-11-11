@@ -316,6 +316,13 @@ class Handler(BaseHTTPRequestHandler):
         if len(hosts) != 1 or hosts[0].strip().lower() not in (f"{HOST}:{port}", f"localhost:{port}"):
             raise HTTPError(403, f"refused: the Host header must be {HOST}:{port} or localhost:{port}")
 
+    def _check_fetch_site(self) -> None:
+        """An API request a browser marks as sent from another site is refused: a site must not time searches to
+        learn what the cards hold. A request without Sec-Fetch-Site (curl, older browsers) passes."""
+        sites = self.headers.get_all("Sec-Fetch-Site") or []
+        if any(site.strip().lower() not in ("same-origin", "none") for site in sites):
+            raise HTTPError(403, "refused: a request from another site")
+
     def _own_origins(self) -> tuple:
         port = self.server.server_address[1]
         return (f"http://{HOST}:{port}", f"http://localhost:{port}")
@@ -374,6 +381,8 @@ class Handler(BaseHTTPRequestHandler):
         if not raw_path.startswith("/"):
             raise HTTPError(404, "no such page")
         parts = [unquote(p, errors="surrogateescape") for p in raw_path.split("/")[1:]]
+        if parts and parts[0] == "api":
+            self._check_fetch_site()
         query = parse_qs(raw_query, keep_blank_values=True, errors="surrogateescape")
         method = self.command
         if len(parts) == 4 and parts[:2] == ["api", "cards"] and parts[3] == "questions":

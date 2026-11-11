@@ -700,7 +700,7 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
   }
   async function loadList() {
     const want = S.list;  // a reply for a list the page has since left is dropped, not drawn under the new title
-    if (searchTooLong(want)) { S.listData = null; showError(null); drawList(); return; }  // no request: it would be 400
+    if (searchTooLong(want)) { S.listData = null; drawList(); return; }  // no request: it would be 400
     try {
       const data = await api(listQuery(want));
       if (S.list !== want) return;
@@ -1004,7 +1004,6 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     if (r.name === 'lane' || r.name === 'search' || r.name === 'project' || r.name === 'card') await loadList();
   }
 
-  $('search').maxLength = SEARCH_MAX_CHARS;
   $('search').addEventListener('keydown', e => {
     if (e.isComposing || e.keyCode === 229) return;  // the Enter that ends an IME composition
     if (e.key !== 'Enter') return;

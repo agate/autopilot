@@ -150,6 +150,7 @@ class Ap2ServeCommandTest(unittest.TestCase):
         lines = r.stderr.splitlines()
         self.assertEqual(len(lines), 1, r.stderr)
         self.assertTrue(lines[0].startswith(f"ap2: cannot listen on 127.0.0.1:{port}: "), lines[0])
+        self.assertNotIn("in use by another program", lines[0])  # the bind's error, not the probe's
 
     def test_a_port_another_program_holds_on_all_addresses_is_one_line_and_exit_1(self):
         held = socket.socket()

@@ -163,8 +163,22 @@ class GuardTest(ServerCase):
         self.addCleanup(held.close)
         held.bind(("127.0.0.1", 0))
         port = held.getsockname()[1]
-        with self.assertRaisesRegex(ConfigError, rf"^cannot listen on 127\.0\.0\.1:{port}: "):
+        with self.assertRaisesRegex(ConfigError, rf"^cannot listen on 127\.0\.0\.1:{port}: ") as caught:
             server.make_server(self.data, port=port)
+        self.assertNotIn("in use by another program", str(caught.exception))  # the bind's error, not the probe's
+
+    def test_a_probe_that_gets_no_answer_takes_the_port(self):
+        # A probe that times out means nothing listens there: the port is free (whatever the OS does on refusal).
+        free = socket.socket()
+        free.bind(("127.0.0.1", 0))
+        port = free.getsockname()[1]
+        free.close()
+        with mock.patch("assistant.server.socket.create_connection",
+                        side_effect=TimeoutError("timed out")) as probe:
+            srv = server.make_server(self.data, port=port)
+        self.addCleanup(srv.server_close)
+        probe.assert_called_once()
+        self.assertEqual(srv.server_address, ("127.0.0.1", port))
 
     def test_a_port_another_program_holds_on_all_addresses_is_a_config_error(self):
         # macOS lets SO_REUSEADDR bind 127.0.0.1:<port> while 0.0.0.0:<port> listens; Linux refuses the bind.
@@ -241,6 +255,35 @@ class GuardTest(ServerCase):
     def test_a_garbage_request_line_still_gets_a_status_line_and_the_safe_headers(self):
         self.start()
         self.assert_status_line_and_safe_headers(self.raw(b"GARBAGE\r\n\r\n"))
+
+    def test_an_api_request_a_browser_marks_as_from_another_site_is_refused(self):
+        card = self.add()
+        before = tree(self.data)
+        self.start()
+        origin = {"Origin": "http://" + f"127.0.0.1:{self.port}"}
+        for site in ("cross-site", "same-site", " Cross-Site "):
+            for method, path, body, headers in (("GET", "/api/cards?q=x", None, {}), ("GET", "/api/state", None, {}),
+                                                ("POST", f"/api/cards/{card['id']}/questions", {"text": "Why?"},
+                                                 origin)):
+                with self.subTest(site=site, method=method, path=path), \
+                        mock.patch("assistant.store.Store.search", side_effect=AssertionError("the search ran")):
+                    status, hdrs, reply = self.call(method, path, body, {**headers, "Sec-Fetch-Site": site})
+                    self.assertEqual(status, 403, reply)
+                    self.assertIn("another site", reply["error"])
+                    self.assertEqual(hdrs.get("cache-control"), "no-store")
+                    self.assertEqual(tree(self.data), before)
+        for site in ("same-origin", "none", "Same-Origin"):
+            with self.subTest(site=site):
+                self.assertEqual(self.call("GET", "/api/state", headers={"Sec-Fetch-Site": site})[0], 200)
+        with self.subTest("the page itself"):
+            status, hdrs, page = self.call("GET", "/", headers={"Sec-Fetch-Site": "cross-site"})
+            self.assertEqual(status, 200)
+            self.assertTrue(hdrs["content-type"].startswith("text/html"))
+        with self.subTest("a foreign Host is refused for its Host first"):
+            status, _, reply = self.call("GET", "/api/state",
+                                         headers={"Host": "cards.example.com", "Sec-Fetch-Site": "cross-site"})
+            self.assertEqual(status, 403)
+            self.assertIn("Host", reply["error"])
 
     def test_a_foreign_host_cannot_post_a_question_either(self):
         card = self.add()
@@ -367,7 +410,8 @@ class ListTest(ServerCase):
     def test_an_oversized_search_is_400_and_leaves_the_data_folder_alone(self):
         self.assertEqual(self.ok("/api/cards?q=pelican")["total"], 2)  # the index is built
         self.assertTrue((self.data / "index.sqlite").exists())
-        for name, q in (("51 words", "+".join(["a"] * 51)), ("501 characters", "a" * 501)):
+        for name, q in (("51 words", "+".join(["a"] * 51)), ("51 tab-separated words", "%09".join(["a"] * 51)),
+                        ("501 characters", "a" * 501)):
             ran = AssertionError("the search ran")  # the cap is checked before any search
             with self.subTest(name), mock.patch("assistant.store.Store.search", side_effect=ran):
                 before = tree(self.data)
