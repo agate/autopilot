@@ -170,6 +170,36 @@ class CardTooDeepToCheckTest(DeepCase):
         self.assertEqual(self.files(), before)
 
 
+# -- a card file that parses but has a wrong-shaped field too deep to print -----------------------------------------
+
+class TooDeepToPrint:
+    """A value whose repr raises the RecursionError a value nested too deeply raises (on 3.14, `json.loads` reads
+    deeper than `repr` can print)."""
+
+    def __repr__(self):
+        raise RecursionError("Stack overflow while getting the repr of an object")
+
+
+class FieldTooDeepToPrintTest(DeepCase):
+    def test_check_stored_turns_the_recursion_error_into_a_too_deep_error(self):
+        for field, rest in {"audit": {"plain": {}},
+                            "plain": {"audit": []},
+                            "ask": {"audit": [], "plain": {}}}.items():
+            with self.subTest(field):
+                with self.assertRaisesRegex(cards.TooDeepError, rf"\A{field} must be .*nested too deeply\Z"):
+                    cards.check_stored({**rest, field: TooDeepToPrint()})
+
+    def test_a_card_file_with_a_deep_audit_object_is_refused_naming_the_file(self):
+        card_id = "c-20261101-000000-abcdef"
+        path = self.store.path(card_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        depth = 25_000  # parses on 3.14 but is too deep for its repr; too deep to parse on 3.9-3.13
+        path.write_text('{"id": "%s", "audit": ' % card_id + '{"a":' * depth + "1" + "}" * depth + "}",
+                        encoding="utf-8")
+        with self.assertRaisesRegex(cards.TooDeepError, re.escape(f"{path}: ") + ".*nested too deeply"):
+            self.store.get(card_id)
+
+
 # -- criterion 3: a restore point too deep to parse ----------------------------------------------------------------
 
 class PointTooDeepTest(DeepCase):

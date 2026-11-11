@@ -137,12 +137,20 @@ def check_stored(card) -> None:
     if not isinstance(card, dict):
         raise CardError(f"a card is a JSON object, not {type(card).__name__}")
     if not isinstance(card.get("audit"), list):
-        raise CardError("audit missing" if "audit" not in card else f"audit must be a list, not {card['audit']!r}")
+        raise CardError("audit missing" if "audit" not in card else _must_be(card, "audit", "a list"))
     if not isinstance(card.get("plain"), dict):
-        raise CardError("plain missing" if "plain" not in card else f"plain must be an object, not {card['plain']!r}")
+        raise CardError("plain missing" if "plain" not in card else _must_be(card, "plain", "an object"))
     if card.get("ask") is not None and not isinstance(card["ask"], dict):
-        raise CardError(f"ask must be an object or null, not {card['ask']!r}")
+        raise CardError(_must_be(card, "ask", "an object or null"))
     check_unicode(card)
+
+
+def _must_be(card: dict, field: str, what: str) -> str:
+    """`<field> must be <what>, not <value>`; a TooDeepError when the value is nested too deeply to print."""
+    try:
+        return f"{field} must be {what}, not {card[field]!r}"
+    except RecursionError:
+        raise TooDeepError(f"{field} must be {what}, and is nested too deeply") from None
 
 
 def plain_problems(plain, languages: tuple) -> list:
