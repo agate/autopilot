@@ -122,12 +122,29 @@ def _not_connected(event: dict) -> list:
     return list(dict.fromkeys(rules))
 
 
+# Characters a gitignore pattern reads as syntax. Claude Code matches Read/Edit rules as gitignore patterns, so a
+# path holding one (or ending in a space, which gitignore strips) would make the floor's Edit denials match nothing.
+PATTERN_CHARS = "[]*?\\!#"
+
+
+def require_literal(data: Path) -> None:
+    """Refuse (WorkerError) when the data folder or the package path is one a gitignore pattern cannot name
+    literally: the floor fails closed instead of writing denials that match nothing."""
+    for what, path in (("data folder", str(data)), ("package folder", str(package_root()))):
+        if any(c in path for c in PATTERN_CHARS) or path.endswith(" "):
+            raise WorkerError(f"the {what} {path} has a character a permission rule reads as a pattern "
+                              f"({' '.join(PATTERN_CHARS)}) or ends in a space, so the worker's floor cannot deny "
+                              "edits in it; use a folder name without those characters")
+
+
 def floor(role: str, project: dict, data: Path, env: dict) -> dict:
     """The worker's permission floor (`--settings`): v1's outward-tool denials (`perms.denied_tools`, from the
     project's `tools`; `Workers._tools` fills them in when it lists none, with `deny_servers`, the whole-server
-    rules) and Bash denials, the data folder's own files and the package, and the worker's env."""
+    rules) and Bash denials, the data folder's own files and the package, and the worker's env. Refused for a path
+    a gitignore pattern cannot name literally (`require_literal`)."""
     if role not in ROLES:
         raise WorkerError(f"role must be one of {', '.join(ROLES)}, not {role!r}")
+    require_literal(data)
     deny = v1_perms.denied_tools(list(project.get("tools") or []))
     deny += list(project.get("deny_servers") or [])  # whole servers `_tools` found not connected at init
     deny += [f"Edit(/{data}/{name})" for name in PROTECTED]
@@ -393,6 +410,7 @@ class Workers:
             settings = self.run_dir(card_id) / f"settings-{role}.json"
             argv = self._argv(role, name, settings, self._prompt(prompt, card, role, project, port_range, branch),
                               sid)
+            require_literal(self.data)  # before the tool discovery runs a session
             write_json(settings, floor(role, self._tools(project, cwd, env), self.data, env))
             if parked:
                 self._stop(card_id, role, parked.get("short_id"), by)  # the parked session sits idle; the copy
@@ -509,6 +527,7 @@ class Workers:
         env = self._env(card, rec["role"], project, rec["ports"], rec.get("branch") or "")
         if not (rec.get("cwd") and Path(rec["cwd"]).is_dir()):  # checked first, so a gone worktree says so
             raise WorkerError(f"cannot start the session: the worker's folder {rec.get('cwd') or '(none)'} is gone")
+        require_literal(self.data)  # before the tool discovery runs a session
         write_json(settings, floor(rec["role"], self._tools(project, rec["cwd"], env), self.data, env))
         argv = self._argv(rec["role"], rec["session_name"], settings, prompt, rec["session_id"] or rec["short_id"])
         if rec.get("parked"):

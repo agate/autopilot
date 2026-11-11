@@ -1077,7 +1077,8 @@ Calls the author made without asking (check them):
     three words of its title. The session gets them the way v1 passes setup: `--settings <run dir>/settings-<role>.json`
     (the permission floor: v1's outward-tool and Bash denials, plus `Edit` denials on the data folder's own files
     (including the user's `templates/**` and `sources/**`, the rules the worker floor in `roles.py` promises; every
-    card's run directory stays writable except its settings files) and the package, and one allow rule, `Bash(<package>/bin/ap2 worker park:*)`, as v1 allows its park command) and env `AP2_ROLE`, `AP2_DATA`, `AP2_CARD`, `AP2_PROJECT`, `AP2_RUN_DIR`, `AP2_PORTS`,
+    card's run directory stays writable except its settings files) and the package, and one allow rule, `Bash(<package>/bin/ap2 worker park:*)`, as v1 allows its park command; the floor refuses a data folder or package path that a gitignore pattern cannot
+    name literally (one holding `[ ] * ? \ ! #` or ending in a space), before any session starts) and env `AP2_ROLE`, `AP2_DATA`, `AP2_CARD`, `AP2_PROJECT`, `AP2_RUN_DIR`, `AP2_PORTS`,
     `AP2_BRANCH`, `AP2_EXTRA_HOSTS`, `AP2_MCP_SERVERS`, `AP2_HEALTH_CHECKS` (JSON), in both the process env and the
     settings' `env`. v1's `AUTOPILOT_*` variables are dropped, so v1's park hook never takes a v2 worker for its
     own. The prompt ends with the card, role, branch, port range, run directory, extra hosts, the result file to

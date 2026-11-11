@@ -405,6 +405,29 @@ class ProjectSetupTest(WorkerCase):
         self.assertNotIn("mcp__slack__slack_send_message", deny)
 
 
+class LiteralPathTest(WorkerCase):
+    """Claude Code matches Read/Edit rules as gitignore patterns, so the floor refuses a data folder or package path
+    that a pattern cannot name literally: its Edit denials would silently match nothing."""
+
+    def test_a_data_folder_a_pattern_cannot_name_is_refused_before_any_session(self):
+        data = self.tmp / "x [v2]"  # `[v2]` is a character class in a gitignore pattern
+        data.mkdir()
+        cid = Store(data, self.cfg, self.clock).add(card(), by="test")["id"]
+        w = Workers(data, cfg=self.cfg, claude=FAKE, transcripts_dir=self.fake_home / "projects", clock=self.clock,
+                    store=Store(data, self.cfg, self.clock))
+        with self.assertRaisesRegex(WorkerError, re.escape(str(data))):
+            w.start(cid, "implement", cwd=self.wt, prompt="Do the work.")
+        self.assertEqual(self.bg_calls(), [])
+        self.assertEqual(self.discovery_calls(), [])  # refused before the tool discovery, too
+
+    def test_floor_refuses_a_path_with_a_pattern_character(self):
+        for bad in ("/tmp/a*b", "/tmp/a?b", "/tmp/a!b", "/tmp/a#b", "/tmp/a\\b", "/tmp/a[b", "/tmp/a]b",
+                    "/tmp/ab "):
+            with self.subTest(path=bad):
+                with self.assertRaisesRegex(WorkerError, re.escape(bad)):
+                    workers_mod.floor("implement", {"tools": ["Read"]}, Path(bad), {})
+
+
 class ServerRuleTest(unittest.TestCase):
     """The whole-server deny rule names a server the way Claude Code keys it: every character outside
     `[A-Za-z0-9_-]` becomes `_`, and a `claude.ai ` server then has its `_` runs squeezed and the ends trimmed."""
@@ -415,7 +438,8 @@ class ServerRuleTest(unittest.TestCase):
                            ("claude.ai Drive", "mcp__claude_ai_Drive"),
                            ("claude.ai Acme - Slack", "mcp__claude_ai_Acme_-_Slack"),
                            ("plugin:expo:expo", "mcp__plugin_expo_expo"),
-                           ("my  server!", "mcp__my__server_")):  # not claude.ai: no squeezing, no trimming
+                           ("my  server!", "mcp__my__server_"),  # not claude.ai: no squeezing, no trimming
+                           ("claude.ai__x!", "mcp__claude_ai__x_")):  # no space after "claude.ai": not one either
             self.assertEqual(workers_mod._server_rule(name), rule, name)
 
     def test_only_named_servers_in_a_list_are_read(self):

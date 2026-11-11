@@ -154,6 +154,17 @@ class WorkerCommandTest(unittest.TestCase):
     def held(self) -> list:
         return [r["needs"] for r in json.loads((self.data / "workers.json").read_text())["workers"]]
 
+    def test_empty_needs_hold_no_resource(self):
+        # v1's runbook passes `--needs ""` on every start: an empty name is no resource, so two such workers never
+        # block each other.
+        self.live()
+        a = self.ok("worker", "start", self.add_card(), "implement", "--cwd", str(self.wt), "--needs", "")
+        self.assertEqual(a["needs"], [])
+        b = self.ok("worker", "start", self.add_card(), "implement", "--cwd", str(self.wt), "--needs", ",")
+        self.assertEqual(b["needs"], [])
+        self.assertEqual(self.held(), [[], []])
+        self.assertEqual(len(self.bg_calls()), 2)
+
     def test_errors_are_one_line(self):
         cid = self.add_card()
         self.assertIn(f"no implement worker on card {cid}", self.fails("worker", "end", cid, "implement"))
