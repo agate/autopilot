@@ -403,7 +403,11 @@ def run(data: Path, source: Optional[str] = None, names: Optional[list] = None, 
     root = source_root(source)
     data = Path(data)
     # datadir's own test: letter case folded, then the same folder by file identity (symlinks, firmlinks).
-    if datadir._inside(data, root) or datadir._inside(root, data):
+    try:
+        overlap = datadir._inside(data, root) or datadir._inside(root, data)
+    except (OSError, RuntimeError) as e:
+        raise V1ImportError(f"cannot use the data folder {data}: {e}") from e
+    if overlap:
         raise V1ImportError(f"data folder {data} and the v1 data folder {root} overlap (one is inside the other); "
                             f"the import never writes under --from")
     # The projects folder may be a symlink to a folder outside --from: the data folder must not overlap that either.
@@ -418,12 +422,15 @@ def run(data: Path, source: Optional[str] = None, names: Optional[list] = None, 
         raise V1ImportError(f"data folder {data} and the v1 projects folder {real} overlap (one is inside the "
                             f"other); the import never writes under --from")
     # A projects folder that cannot be looked into (a link into a locked folder) is one line too, also where exists()
-    # above says False instead of raising. A dangling link passes: its name was compared above.
+    # above says False instead of raising. A dangling link, or one to a non-folder, stops the import: its name was
+    # compared above, but a differently spelled name for the same place (Unicode forms, firmlinks) cannot be ruled
+    # out until the place exists, and ensure would create it. v1 cannot use such a projects folder either.
     try:
         if real is not None:
             os.stat(real)
-    except (FileNotFoundError, NotADirectoryError):
-        pass
+    except (FileNotFoundError, NotADirectoryError) as e:
+        raise V1ImportError(f"cannot use the v1 projects folder {projects}: it is a link to {real}, "
+                            f"which is not a folder") from e
     except OSError as e:
         raise V1ImportError(f"cannot use the v1 projects folder {projects}: {e}") from e
     cfg = config.load(data)

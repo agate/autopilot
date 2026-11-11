@@ -718,6 +718,53 @@ class ImportV1Test(unittest.TestCase):
         self.assertIn("projects folder", line)
         self.assertFalse(self.data.exists())
 
+    def test_a_dangling_symlinked_projects_folder_stops_the_import_with_one_line(self):
+        if not hasattr(os, "symlink"):
+            self.skipTest("no symlinks here")
+        shutil.move(str(self.v1 / "projects" / "shop"), str(self.v1 / "shop"))  # keep shop as a legacy project
+        shutil.rmtree(self.v1 / "projects")
+        target = self.tmp / "nowhere" / "projects"
+        try:
+            (self.v1 / "projects").symlink_to(target, target_is_directory=True)
+        except (OSError, NotImplementedError) as e:
+            self.skipTest(f"cannot make a symlink: {e}")
+        line = self.fails()
+        self.assertIn("projects folder", line)
+        self.assertFalse(self.data.exists())
+        self.assertFalse(target.exists())
+
+    def test_a_dangling_projects_link_to_the_data_folder_spelled_another_way_is_refused(self):
+        if not hasattr(os, "symlink"):
+            self.skipTest("no symlinks here")
+        nfc, nfd = "caf\u00e9", "cafe\u0301"
+        (self.tmp / nfc).mkdir()
+        if not os.path.exists(self.tmp / nfd):
+            self.skipTest("this file system does not treat the NFC and NFD spellings as one name")
+        shutil.move(str(self.v1 / "projects" / "shop"), str(self.v1 / "shop"))  # keep shop as a legacy project
+        shutil.rmtree(self.v1 / "projects")
+        try:
+            (self.v1 / "projects").symlink_to(self.tmp / nfc / "target", target_is_directory=True)
+        except (OSError, NotImplementedError) as e:
+            self.skipTest(f"cannot make a symlink: {e}")
+        self.data = self.tmp / nfd / "target"
+        line = self.fails()
+        self.assertIn("projects folder", line)
+        self.assertFalse((self.tmp / nfc / "target").exists())
+
+    def test_a_data_folder_the_overlap_check_cannot_look_into_is_one_line(self):
+        # Only the import's own first check (data against --from) fails, as Path.exists can on a locked folder;
+        # datadir.resolve's check against ~/.claude runs as usual.
+        inside = datadir._inside
+        def locked(path, other):
+            if other == self.v1:
+                raise PermissionError(13, "Permission denied")
+            return inside(path, other)
+        with mock.patch.object(importv1.datadir, "_inside", side_effect=locked):
+            line = self.fails()
+        self.assertIn("data folder", line)
+        self.assertIn("Permission denied", line)
+        self.assertFalse(self.data.exists())
+
     def test_a_symlinked_project_folder_inside_an_unreadable_folder_stops_the_import_with_one_line(self):
         if not hasattr(os, "symlink"):
             self.skipTest("no symlinks here")
