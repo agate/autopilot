@@ -397,27 +397,33 @@ How it is built (`lib/assistant/angles.py`, the table in `review/angles.yaml`):
   key, so line numbers stay the file's own). A file that is not a list (a map, a flow list such as `[]`, a bare
   word, or a top-level `angles:` beside its items) is refused as "must be a list of angles".
 - **[decided by the builder]** Limits, since a repo's file comes from a PR author: a line whose `[` / `{` nest more
-  than 32 deep (`MAX_NESTING`; a real angle needs a few) is refused, naming the line, before the file is parsed,
-  since each nested key costs the parser memory; at most 200 globs in one `when.paths` (`MAX_GLOBS`); at most 256
-  characters in one glob (`MAX_GLOB`). With these the picker's glob work is bounded by 200 x 256 characters per
-  angle and changed file. The nesting count stops lowering at a line's first quote, so it can only count too deep,
-  never too shallow.
+  than 32 deep, or that starts with more than 32 `- ` list items (`MAX_NESTING`; a real angle needs a few), is
+  refused, naming the line, before the file is parsed, since each nested level costs the parser memory (a key path
+  per nested key, a copy of the rest of the line per item); at most 200 globs in the whole file, across every
+  `when.paths` (`MAX_GLOBS`); at most 256 characters in one glob (`MAX_GLOB`); no glob or kind twice in one `when`.
+  With these a repo file's own globs cost the picker at most 200 x 256 characters per changed file, and a `why`
+  writes out at most three reasons and only counts the rest. Brackets are counted as `yamlish` reads them (its
+  comment scan: a comment ends the line, a quote opens a string only where a value starts, a bracket opens a
+  collection only where a value starts or inside an open one), so brackets it reads as text are not counted, and
+  the count is never below its real depth.
 - **[decided by the builder]** An angle's keys: `name` (non-empty text, unique in its file, compared as written),
-  `question` and `brief` (non-empty text), `when`, plus `extends` and `off`. Any other key is refused, naming the
-  file, line and key. Text from the file in an error (a key, name, kind or glob) is shown as its repr, control
-  characters escaped, cut to 80 characters. A key in `templates.WIDEN` (compared with `templates._norm`, so
+  `question` and `brief` (non-empty text), `when`, plus `extends` and `off`. A `name`, an `extends` target and a
+  glob must be printable (no control characters), since each is shown on one line. Any other key is refused,
+  naming the file, line and key. Text from the file in an error (a key, name, kind or glob) is shown as its repr,
+  control characters escaped, cut to 80 characters. A key in `templates.WIDEN` (compared with `templates._norm`, so
   `allowedTools`, `allowed-tools` and `allowed_tools` are one key), at any depth, is refused first with an
   `AngleWidenError`: an angle cannot add tools or permissions. `AngleError` and `AngleWidenError` are
   `ConfigError`s; a broken angle file stops the load with a clear error, like a broken template (D19).
 - **[decided by the builder]** `when` is `always`, or a map with `paths` (a non-empty list of globs) and/or `kinds`
-  (a non-empty list of `data`, `infra`, `api`, `ci`, `ui`, `tests`, `docs`). Kinds come from file paths with
-  secretary's patterns (`AREAS`, `TESTS`, `DOCS`), copied into `angles.py`; as in secretary, the five code kinds are
-  read only from files that are neither tests nor docs (`api/test_x.py` is `tests`, not `api`). A glob matches the
-  whole repo-relative path: `**` is any number of folders (a final `**` is everything under its folder), `*` and `?`
-  stay inside one path segment, and every other character is itself (`[` included). A glob starting with `/` is
-  refused, since it could never match. A glob comes from a file a PR author can write, so the matcher works segment
-  by segment, never with a backtracking regex, in time bounded by the glob's and the path's lengths. An angle
-  matches when any changed file matches one of its globs, or the PR has one of its kinds.
+  (a non-empty list of `data`, `infra`, `api`, `ci`, `ui`, `tests`, `docs`), neither holding an entry twice. Kinds
+  come from file paths with secretary's patterns (`AREAS`, `TESTS`, `DOCS`), copied into `angles.py`; as in
+  secretary, the five code kinds are read only from files that are neither tests nor docs (`api/test_x.py` is
+  `tests`, not `api`). A glob matches the whole repo-relative path: `**` is any number of folders (a final `**` is
+  everything under its folder), `*` and `?` stay inside one path segment, and every other character is itself (`[`
+  included). A glob starting with `/` is refused, since it could never match. A glob comes from a file a PR author
+  can write, so the matcher works segment by segment, never with a backtracking regex, in time bounded by the
+  glob's and the path's lengths. An angle matches when any changed file matches one of its globs, or the PR has one
+  of its kinds.
 - **[decided by the builder]** Layers: built in, then the user's, then the repo's; the later one wins on the same
   name. An entry with neither `extends` nor `off` is a whole angle (all of `name`, `question`, `when`, `brief`) and
   adds or replaces; a replaced angle keeps its place in the table and a new one goes last. `extends: <name>` merges

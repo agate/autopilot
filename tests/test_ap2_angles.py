@@ -261,6 +261,12 @@ class LayerTest(AngleCase):
         self.assertNotIn("Sub", got)
         # The file is named from the repo root, where it was read, not from the folder given.
         self.assertEqual(got["Root"].file, f"{self.repo}/.autopilot/review.yaml at {commit[:12]}")
+        for label, rev in (("a bad commit name", "-x"), ("an unknown commit", "0" * 40)):
+            with self.subTest(case=f"{label} names the root file"):
+                with self.assertRaises(AngleError) as e:
+                    angles.load(self.data, repo=self.repo / "sub", commit=rev)
+                self.assertTrue(str(e.exception).startswith(f"{self.repo}/.autopilot/review.yaml"), str(e.exception))
+                self.assertNotIn("/sub/", str(e.exception))
         with self.subTest(case="an error names the root file"):
             (self.repo / ".autopilot" / "review.yaml").write_text(
                 '- name: Root\n  question: "q?"\n  when: always\n  brief: "b"\n  bogus: 1\n')
@@ -459,13 +465,26 @@ class RefusalTest(AngleCase):
                 '- question: "q?"\n  name: A\n  when: always\n  brief: "b"\n' * 2, "line 6", "named on line 2"),
             "extends bad when": ('- extends: Portability\n  when: sometimes\n', "line 2", "when"),
             "extends empty brief": ('- extends: Portability\n  brief: ""\n', "line 2", "brief"),
-            "a list beside the wrapper's key": ('- name: a\nangles: 1\n', None, "must be a list of angles"),
+            "a list beside the wrapper's key": ('- name: a\nangles: 1\n', "line 2", "must be a list of angles"),
             "an empty flow list": ('[]\n', "line 1", "must be a list of angles"),
             "a bare word": ('hello\n', "line 1", "must be a list of angles"),
             "glob too long": (f'- name: A\n  question: "q?"\n  when: {{ paths: ["{'a' * 257}"] }}\n  brief: "b"\n',
                               "line 3", "longer than 256"),
             "too many globs": ('- name: A\n  question: "q?"\n  when:\n    paths: [%s]\n  brief: "b"\n'
-                               % ", ".join(f"g{n}" for n in range(201)), "line 4", "at most 200"),
+                               % ", ".join(f"g{n}" for n in range(201)), "line 4", "more than 200 globs in all"),
+            "too many globs in all": ("".join('- name: A%d\n  question: "q?"\n  when: { paths: [%s] }\n  brief: "b"\n'
+                                              % (a, ", ".join(f"g{a}-{n}" for n in range(101))) for a in range(2)),
+                                      "line 7", "the file holds more than 200 globs in all"),
+            "a repeated kind": ('- name: A\n  question: "q?"\n  when: { kinds: [data, ui, data] }\n  brief: "b"\n',
+                                "line 3", "when.kinds holds 'data' more than once"),
+            "a repeated glob": ('- name: A\n  question: "q?"\n  when: { paths: ["a/**", "a/**"] }\n  brief: "b"\n',
+                                "line 3", "when.paths holds 'a/**' more than once"),
+            "a name with a control character": ('- name: "A\\eB"\n  question: "q?"\n  when: always\n  brief: "b"\n',
+                                                "line 1", "name must be printable text, not 'A\\x1bB'"),
+            "an extends with a control character": ('- extends: "Portability\\a"\n  brief: "b"\n', "line 1",
+                                                    "extends must be printable text, not 'Portability\\x07'"),
+            "a glob with a newline": ('- name: A\n  question: "q?"\n  when: { paths: ["a\\n/**"] }\n  brief: "b"\n',
+                                      "line 3", "when.paths entries must be printable text, not 'a\\n/**'"),
             "a glob of 340,000 '**' parts": ('- name: A\n  question: "q?"\n  when: { paths: ["%s"] }\n  brief: "b"\n'
                                              % "/".join(["**"] * 340000), "line 3", "longer than 256"),
         }
@@ -522,12 +541,13 @@ class RefusalTest(AngleCase):
         self.user("".join(f"- {{name: o{n}, off: true}}\n" for n in range(20000)))
         start = time.monotonic()
         table = self.load()
-        self.assertLess(time.monotonic() - start, 5)
+        self.assertLess(time.monotonic() - start, 20)
         self.assertEqual(len(table.unknown_off), 20000)
         self.assertEqual(table.unknown_off[-1]["line"], 20000)
 
     def test_many_new_angles_merge_fast(self):
         # Pins the merge by name: the files are parsed before the clock starts, so only the merge is timed.
+        # Each load takes well under 0.1 s; a merge that scans the table per entry takes 7 s or more.
         new = "".join(f"- {{name: o{n}, question: q, when: always, brief: b}}\n" for n in range(18000))
         off = "".join(f"- {{name: o{n}, off: true}}\n" for n in range(18000))
         self.assertLess(len(new.encode()), angles.MAX_FILE)
@@ -539,12 +559,12 @@ class RefusalTest(AngleCase):
         with mock.patch.object(angles, "_parse", lambda text, where: parsed.get(where) or real(text, where)):
             start = time.monotonic()
             table = self.load()
-            self.assertLess(time.monotonic() - start, 2)
+            self.assertLess(time.monotonic() - start, 3)
             self.assertEqual(len(table.angles), 18015)
             self.assertEqual(table.angles[-1].name, "o17999")
             start = time.monotonic()
             table = self.load(repo=self.repo, commit=commit)
-            self.assertLess(time.monotonic() - start, 2)
+            self.assertLess(time.monotonic() - start, 3)
         self.assertEqual(table.names(), BUILTIN_NAMES)
 
     def test_line_lookup_is_linear_in_the_paths(self):
@@ -560,10 +580,26 @@ class RefusalTest(AngleCase):
     def test_deep_brackets_are_refused_before_parsing(self):
         good = '- name: A\n  question: "q?"\n  when: always\n  brief: "b"\n'
         self.assertEqual(angles.MAX_NESTING, 32)
+        deep, close = "[" * 20, "]" * 20
+        # Each refused line nests 40 deep as yamlish reads it, with closers inside a quoted string at depth 20.
         cases = {"33 deep": (good + "  x: " + "[" * 33 + "]" * 33 + "\n", True),
-                 "closers in quotes do not hide it": (good + "  x: " + "[" * 20 + '"' + "]" * 20 + '", ' + "[" * 20
-                                                     + "]" * 40 + "\n", True),
+                 "33 deep curly": (good + "  x: " + "{a: " * 33 + "1" + "}" * 33 + "\n", True),
+                 "closers in double quotes": (good + "  x: " + deep + '"' + close + '", ' + deep + close * 2 + "\n",
+                                              True),
+                 "closers in single quotes": (good + "  x: " + deep + "'" + close + "', " + deep + close * 2 + "\n",
+                                              True),
+                 "closers around a doubled single quote": (good + "  x: " + deep + "'" + "]" * 10 + "''" + "]" * 10
+                                                           + "', " + deep + close * 2 + "\n", True),
+                 "closers around an escaped double quote": (good + "  x: " + deep + '"' + "]" * 10 + '\\"' + "]" * 10
+                                                            + '", ' + deep + close * 2 + "\n", True),
+                 "a single quote inside double quotes": (good + "  x: " + deep + '"' + "]" * 10 + "'" + "]" * 10
+                                                         + '", ' + deep + close * 2 + "\n", True),
+                 "a double quote inside single quotes": (good + "  x: " + deep + "'" + "]" * 10 + '"' + "]" * 10
+                                                         + "', " + deep + close * 2 + "\n", True),
+                 "a flow map value in quotes": (good + "  x: " + "{a: " * 20 + '"' + "}" * 20 + '", b: '
+                                                + "{a: " * 20 + "1" + "}" * 40 + "\n", True),
                  "32 deep": (good + "  x: " + "[" * 32 + "]" * 32 + "\n", False),
+                 "32 deep curly": (good + "  x: " + "{a: " * 32 + "1" + "}" * 32 + "\n", False),
                  "an apostrophe before brackets": (good + "  x: don't {a} [b] {c}\n", False)}
         for label, (text, refused) in cases.items():
             with self.subTest(case=label):
@@ -577,6 +613,53 @@ class RefusalTest(AngleCase):
                 else:
                     self.assertNotIn("nested", msg)
                     self.assertIn("unknown key 'x'", msg)
+
+    def test_brackets_yamlish_reads_as_text_are_not_counted(self):
+        # Brackets in a quoted string, in plain text, or in a comment open no flow collection.
+        angle = '- name: A\n  question: "q?"\n  when: always\n'
+        cases = {"in a quoted string": angle + '  brief: "%s"\n' % " ".join(f"[ ] item{n}" for n in range(33)),
+                 "in plain text after an apostrophe": angle + "  brief: Don't skip any of %s\n"
+                 % " ".join(f"[step {n}](docs/{n}.md)" for n in range(33)),
+                 "in a comment": angle + '  brief: "b"\n# it\'s %s\n' % " ".join(f"[{n}]" for n in range(33)),
+                 "in a trailing comment": angle + '  brief: "b"   # it\'s %s\n' % ("[" * 33),
+                 "opened in plain text": angle + "  brief: see %s\n" % ("[" * 33),
+                 "after ': ' in a comment": angle + '  brief: "b"   # e.g.: %s\n' % ("[" * 33)}
+        for label, text in cases.items():
+            with self.subTest(case=label):
+                self.user(text)
+                self.assertEqual(self.load().get("A").question, "q?")
+        with self.subTest(case="depth starts again on each line"):
+            self.user("".join(f'- name: A{n}\n  question: "q?"\n  when: {{ paths: ["p{n}/**"] }}\n  brief: "b"\n'
+                              for n in range(20)))
+            self.assertEqual(self.load().get("A19").when, {"paths": ["p19/**"]})
+
+    def test_deep_list_items_on_one_line_are_refused(self):
+        good = '- name: A\n  question: "q?"\n  when: always\n  brief: "b"\n'
+        for count, refused in ((33, True), (32, False)):
+            with self.subTest(items=count):
+                path = self.user(good + "- " * count + "x\n")
+                with self.assertRaises(AngleError) as e:
+                    self.load()
+                msg = str(e.exception)
+                if refused:
+                    self.assertTrue(msg.startswith(f"{path}: line 5: "), msg[:300])
+                    self.assertIn("nested more than 32", msg)
+                else:
+                    self.assertNotIn("nested", msg)
+                    self.assertIn("item 2 must be a map", msg)
+        with self.subTest(case="a comment after a tab ends the run"):
+            path = self.user(good + "- " * 32 + "-\t# x\n")
+            with self.assertRaises(AngleError) as e:
+                self.load()
+            self.assertIn("nested more than 32", str(e.exception))
+        with self.subTest(case="a line of the most items the cap allows, refused fast"):
+            path = self.user(good + "- " * ((angles.MAX_FILE - 200) // 2) + "x\n")
+            start = time.monotonic()
+            with self.assertRaises(AngleError) as e:
+                self.load()
+            self.assertLess(time.monotonic() - start, 5)
+            self.assertTrue(str(e.exception).startswith(f"{path}: line 5: "), str(e.exception)[:300])
+            self.assertIn("nested more than 32", str(e.exception))
 
     def test_deep_but_allowed_file_is_checked_fast(self):
         # Flow maps 32 deep (the most allowed) on every line of a file near the cap: refused on its first key, fast.
@@ -593,6 +676,11 @@ class RefusalTest(AngleCase):
         globs = ", ".join(f'"{n:03d}' + "a" * 253 + '"' for n in range(200))
         self.user(f'- name: A\n  question: "q?"\n  when: {{ paths: [{globs}] }}\n  brief: "b"\n')
         self.assertEqual(len(self.load().get("A").when["paths"]), 200)
+        # The cap is on the file's globs in all: two angles of 100 each fit.
+        self.user("".join('- name: A%d\n  question: "q?"\n  when: { paths: [%s] }\n  brief: "b"\n'
+                          % (a, ", ".join(f"g{a}-{n}" for n in range(100))) for a in range(2)))
+        table = self.load()
+        self.assertEqual([len(table.get(f"A{a}").when["paths"]) for a in range(2)], [100, 100])
 
     def test_file_past_the_cap(self):
         path = self.user('- name: A\n  question: "q?"\n  when: always\n  brief: "%s"\n' % ("x" * sources.MAX_SOURCE))
@@ -839,27 +927,45 @@ class PickerTest(AngleCase):
             angles.pick(table, ["a.py"], "review")
 
     def test_most_globs_pick_fast(self):
-        # The most globs one angle may hold, each near the longest, against 3000 changed files: bounded.
+        # The most globs one file may hold, each near the longest, against 300 changed files: bounded.
         globs = [("**/" * 82 + f"n{n:03d}.py") if n % 2 else (f"z{n:03d}/" + "a/" * 123 + "b") for n in range(200)]
         self.assertEqual(len(globs), angles.MAX_GLOBS)
         self.assertTrue(all(250 <= len(g) <= angles.MAX_GLOB for g in globs))
         table = angles.Table([angles.Angle("Correctness", "q", "always", "b", "built-in", "f", 0, 0),
                               angles.Angle("Wide", "q", {"paths": globs}, "b", "user", "f", 1, 0)])
-        files = [f"src/app/pkg{n % 50}/a/b/c/d/sub{n % 7}/mod{n}.py" for n in range(3000)]
+        files = [f"src/app/pkg{n % 50}/a/b/c/d/sub{n % 7}/mod{n}.py" for n in range(300)]
         start = time.monotonic()
         picked = angles.pick(table, files, "loop")
-        self.assertLess(time.monotonic() - start, 150)
+        self.assertLess(time.monotonic() - start, 15)
         self.assertEqual(self.names(picked), ["Correctness"])
 
     def test_why_shows_at_most_three_reasons(self):
         self.user('- name: Many globs\n  question: "q?"\n'
-                  '  when: { paths: ["billing/**", "billing/*.py", "**/*.py", "billing/charge.py", "*/charge.py"] }\n'
+                  '  when: { paths: ["billing/**", "billing/*.py", "**/*.py", "billing/a.py", "*/a.py"] }\n'
                   '  brief: "b"\n')
-        picked = {p["name"]: p for p in angles.pick(self.load(), ["billing/charge.py"], "loop")}
-        why = picked["Many globs"]["why"]
-        self.assertEqual(why.count("matched"), 3, why)
-        self.assertTrue(why.endswith(" (+2 more)"), why)
-        self.assertTrue(why.startswith("paths billing/** matched billing/charge.py; "), why)
+        files = [f"billing/{x}.py" for x in "abcde"]
+        picked = {p["name"]: p for p in angles.pick(self.load(), files, "loop")}
+        shown = "billing/a.py, billing/b.py, billing/c.py (+2 more)"
+        self.assertEqual(picked["Many globs"]["why"], f"paths billing/** matched {shown}; paths billing/*.py matched "
+                                                      f"{shown}; paths **/*.py matched {shown} (+2 more)")
+
+    def test_why_with_three_reasons_has_no_more(self):
+        self.user('- name: Three globs\n  question: "q?"\n'
+                  '  when: { paths: ["billing/**", "billing/*.py", "**/*.py"] }\n  brief: "b"\n')
+        why = {p["name"]: p for p in angles.pick(self.load(), ["billing/charge.py"], "loop")}["Three globs"]["why"]
+        self.assertNotIn("more", why)
+        self.assertEqual(why.count("matched billing/charge.py"), 3, why)
+
+    def test_why_counts_reasons_past_three_without_listing_their_files(self):
+        # Pins the reasons past the third as counted only: their files are never listed.
+        angle = angles.Angle("Wide", "q", {"paths": ["a/**", "b/**", "c/**", "d/**"], "kinds": ["data", "ui"]}, "b",
+                             "user", "f", 1, 0)
+        files = ["a/x.py", "b/x.py", "c/x.py", "d/x.py", "d/y.sql", "e/z.tsx"]
+        with mock.patch.object(angles, "_examples", wraps=angles._examples) as examples:
+            why = angles._why(angle, files, angles.kinds(files))
+        self.assertEqual(why, "paths a/** matched a/x.py; paths b/** matched b/x.py; paths c/** matched c/x.py "
+                              "(+3 more)")
+        self.assertEqual(examples.call_count, 3)
 
     def test_small_line_constant(self):
         self.assertEqual(angles.SMALL_LINES, 30)

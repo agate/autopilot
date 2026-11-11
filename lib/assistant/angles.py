@@ -33,8 +33,9 @@ USER_FILE = Path("review") / "angles.yaml"          # in the data folder
 REPO_FILE = ".autopilot/review.yaml"                 # in the reviewed commit
 MAX_FILE = sources.MAX_SOURCE
 GIT_TIMEOUT = 30
-# A repo's file comes from a PR author, so its cost is capped: at most this many globs in one when.paths, at most
-# this many characters in one glob, and '[' / '{' nested at most this deep on a line (a real angle needs ~5).
+# A repo's file comes from a PR author, so its cost is capped: at most this many globs in the file in all, at most
+# this many characters in one glob, and '[' / '{' (or '- ' items) nested at most this deep on a line (a real angle
+# needs ~5).
 MAX_GLOBS = 200
 MAX_GLOB = 256
 MAX_NESTING = 32
@@ -70,7 +71,6 @@ KINDS = tuple(k for k, _ in CODE_KINDS) + ("tests", "docs")
 _COMMIT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/~^@{}-]{0,254}\Z")
 _WRAP = "angles:\n"   # yamlish reads only a top-level map, so a file is read as the list under this key
 _NOT_A_LIST = "an angle file must be a list of angles ('- name: ...')"
-_BRACKET = re.compile(r"[][{}\"']")
 
 
 class AngleError(ConfigError):
@@ -162,12 +162,13 @@ def _git_failed(p: subprocess.CompletedProcess, where: str, what: str) -> AngleE
 def _read_repo(repo, commit: str) -> tuple:
     """(text or None, where) of `.autopilot/review.yaml` at `commit` in `repo`. Read-only: `rev-parse`, `ls-tree`
     and `cat-file`. A path missing at that commit is no layer; every other failure is an AngleError."""
-    if not isinstance(commit, str) or not _COMMIT.match(commit):
-        raise AngleError(f"{repo}/{REPO_FILE}: {_show(commit)} is not a commit name")
     # The file is read from the repo root (ls-tree --full-tree), so it is named from there too. A bare repo has no
-    # top folder and keeps the path given; a folder that is no repo fails on the next command.
+    # top folder and keeps the path given; a folder that is no repo fails on the next command. Finding the top does
+    # not use the commit, so the commit name is checked after it and its refusal names the root's file too.
     p = _git(repo, ["rev-parse", "--show-toplevel"], f"{repo}/{REPO_FILE}")
     top = (os.fsdecode(p.stdout).rstrip("\n") if p.returncode == 0 else "") or str(repo)
+    if not isinstance(commit, str) or not _COMMIT.match(commit):
+        raise AngleError(f"{top}/{REPO_FILE}: {_show(commit)} is not a commit name")
     where = f"{top}/{REPO_FILE} at {commit}"
     p = _git(repo, ["rev-parse", "--verify", "--quiet", f"{commit}^{{commit}}"], where)
     if p.returncode != 0:
@@ -202,6 +203,7 @@ def _read_repo(repo, commit: str) -> tuple:
 class _Checker:
     def __init__(self, where: str, lines: dict):
         self.where, self.lines = where, lines
+        self.globs = 0    # the globs of every when.paths so far, capped at MAX_GLOBS for the file
         # A list item (i,) -> the smallest line of its keys. Every other path line() is asked about is a map key,
         # so only one-element prefixes are kept: one step per key, whatever its depth.
         self.first = {}
@@ -234,6 +236,9 @@ class _Checker:
         v = entry[key]
         if not isinstance(v, str) or not v.strip():
             self.fail(path + (key,), f"{key} must be non-empty text, not {_show(v)}")
+        # A name is printed on one line (pick's name and why, unknown_off), so it holds no control character.
+        if key in ("name", "extends") and not v.isprintable():
+            self.fail(path + (key,), f"{key} must be printable text, not {_show(v)}")
 
     def when(self, v, path: tuple) -> None:
         at = path + ("when",)
@@ -250,11 +255,19 @@ class _Checker:
             items = v[k]
             if not isinstance(items, list) or not items:
                 self.fail(at + (k,), f"when.{k} must be a non-empty list, not {_show(items)}")
-            if k == "paths" and len(items) > MAX_GLOBS:
-                self.fail(at + (k,), f"when.paths holds {len(items)} globs; at most {MAX_GLOBS}")
+            if k == "paths":
+                self.globs += len(items)
+                if self.globs > MAX_GLOBS:
+                    self.fail(at + (k,), f"the file holds more than {MAX_GLOBS} globs in all")
+            seen = set()
             for x in items:
                 if not isinstance(x, str) or not x.strip():
                     self.fail(at + (k,), f"when.{k} entries must be non-empty text, not {_show(x)}")
+                if x in seen:
+                    self.fail(at + (k,), f"when.{k} holds {_show(x)} more than once")
+                seen.add(x)
+                if k == "paths" and not x.isprintable():
+                    self.fail(at + (k,), f"when.paths entries must be printable text, not {_show(x)}")
                 if k == "paths" and len(x) > MAX_GLOB:
                     self.fail(at + (k,), f"glob {_show(x)} is longer than {MAX_GLOB} characters")
                 if k == "kinds" and x not in KINDS:
@@ -277,24 +290,62 @@ def _reason(reason: str) -> str:
     return s if len(s) <= 200 else s[:197] + "..."
 
 
-def _nesting(text: str, where: str) -> None:
-    """Refuse a line whose '[' / '{' nest deeper than MAX_NESTING, before yamlish keeps a path per key. A flow
-    collection ends on its line. A closing bracket after the line's first quote is not counted, since it may sit
-    inside a quoted string: quoted text can make the count too high, never too low."""
-    for no, line in enumerate(text.split("\n"), 1):
-        if "[" not in line and "{" not in line:
-            continue
-        depth, quoted = 0, False
-        for ch in _BRACKET.findall(line):
-            if ch in "[{":
+def _items(s: str) -> int:
+    """How many `- ` list items start the line text `s` (its indent dropped): yamlish reads `- - x` as a list in a
+    list, one level per `-`. A `-` before a tab counts too: yamlish cuts the comment from `- -\t# c` and reads two
+    items, and refuses `-\t` anywhere else. So the count is never below yamlish's."""
+    j, n, count = 0, len(s), 0
+    while j < n and s[j] == "-" and (j + 1 == n or s[j + 1] in " \t"):
+        count += 1
+        j += 1
+        while j < n and s[j] == " ":
+            j += 1
+    return count
+
+
+def _too_deep(s: str, no: int) -> bool:
+    """Whether the flow collections on the line text `s` (its indent dropped) nest deeper than MAX_NESTING, read as
+    yamlish reads them: the scan of `yamlish._strip_comment`, whose helpers decide what it decides. A comment ends
+    the line; a quote opens a string only where a value starts; a '[' / '{' opens a collection only where a value
+    starts or inside an open one, and any ']' / '}' inside one closes it, as yamlish's flow reader does. A line
+    yamlish refuses as it reads (an unclosed quote) is left to it."""
+    i, n, depth, quote_end = 0, len(s), 0, -1
+    lead = yamlish._lead_end(s)
+    last = before_last = -1
+    try:
+        while i < n:
+            c = s[i]
+            if c == "#" and (i == 0 or s[i - 1] in " \t"):
+                return False
+            if c in "\"'" and yamlish._value_start(s, i, depth, quote_end, lead, last, before_last):
+                i = quote_end = yamlish._quote_end(s, i, no)
+            elif c in "[{" and (depth or yamlish._value_start(s, i, 0, quote_end, lead, last, before_last)):
                 depth += 1
                 if depth > MAX_NESTING:
-                    raise AngleError(f"{where}: line {no}: '[' and '{{' nested more than {MAX_NESTING} deep; an "
-                                     "angle needs only a few levels")
-            elif ch in "\"'":
-                quoted = True
-            elif not quoted and depth:
+                    return True
+            elif c in "]}" and depth:
                 depth -= 1
+            if s[i] not in " \t":
+                last, before_last = i, last
+            i += 1
+    except yamlish.YamlError:
+        return False
+    return False
+
+
+def _nesting(text: str, where: str) -> None:
+    """Refuse a line that nests deeper than MAX_NESTING, before yamlish reads it: its '[' / '{' flow collections, or
+    its leading `- ` items. yamlish keeps a key path per nested key and a copy of the rest of the line per item, so a
+    deep line costs memory in step with its depth squared or its depth times its length. Both counts are taken as
+    yamlish reads the line, so text yamlish reads as text is not counted, and never fall below its real depth."""
+    for no, line in enumerate(text.split("\n"), 1):
+        s = line.lstrip(" ")
+        if _items(s) > MAX_NESTING:
+            raise AngleError(f"{where}: line {no}: '- ' list items nested more than {MAX_NESTING} deep on one line; "
+                             "an angle needs only a few levels")
+        if ("[" in s or "{" in s) and _too_deep(s, no):
+            raise AngleError(f"{where}: line {no}: '[' and '{{' nested more than {MAX_NESTING} deep; an angle needs "
+                             "only a few levels")
 
 
 def _parse(text: str, where: str) -> tuple:
@@ -499,15 +550,22 @@ def _why(angle: Angle, files: list, found: dict) -> Optional[str]:
     """Why `angle` matches the PR, in one line, or None when it does not."""
     if angle.when == "always":
         return "always"
-    reasons = []
+    # At most three reasons are written out; the rest are only counted.
+    reasons, more = [], 0
     for pattern in angle.when.get("paths", []):
-        hit = [f for f in files if glob_match(pattern, f)]
-        if hit:
-            reasons.append(f"paths {pattern} matched {_examples(hit)}")
+        if len(reasons) < 3:
+            hit = [f for f in files if glob_match(pattern, f)]
+            if hit:
+                reasons.append(f"paths {pattern} matched {_examples(hit)}")
+        elif any(glob_match(pattern, f) for f in files):
+            more += 1
     for kind in angle.when.get("kinds", []):
         if kind in found:
-            reasons.append(f"kind {kind}: {_examples(found[kind])}")
-    return "; ".join(reasons[:3]) + (" (+%d more)" % (len(reasons) - 3) if len(reasons) > 3 else "") or None
+            if len(reasons) < 3:
+                reasons.append(f"kind {kind}: {_examples(found[kind])}")
+            else:
+                more += 1
+    return "; ".join(reasons) + (" (+%d more)" % more if more else "") or None
 
 
 def _picked(angle: Angle, why: str) -> dict:
