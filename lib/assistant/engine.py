@@ -538,7 +538,7 @@ class Engine:
     def _card(self, src, kind: str, record: dict, link, key: str, raw) -> dict:
         card = {"kind": kind, "lane": LANE[src.brings], "feed": src.name, "links": [], "pri": PRI,
                 "origin": "source", "plain": plain_words(src, record, link, self.languages),
-                "title": snippet(record["text"], TITLE), "key": key,
+                "title": {lang: snippet(record["text"], TITLE) for lang in self.languages}, "key": key,
                 "source": {"name": src.name, "record": record, "link": link, "raw": raw}}
         if src.brings == "work" and "status" in record:
             card["status"] = str(src.data.get("status_map", {}).get(record["status"], record["status"]))
@@ -730,9 +730,12 @@ def required(src: sources.Source) -> tuple:
 
 def _same(key: str, old, new) -> bool:
     """Whether a card's field already holds the new value. The source block's `raw` does not count: a new read of
-    the same item is not a change."""
+    the same item is not a change. Nor does the title's shape: an old card's one-text title equal to every slot of
+    the new per-language title already holds those words (design 3.1)."""
     if key == "source" and isinstance(old, dict) and isinstance(new, dict):
         return {k: v for k, v in old.items() if k != "raw"} == {k: v for k, v in new.items() if k != "raw"}
+    if key == "title" and isinstance(old, str) and isinstance(new, dict) and new:
+        return all(v == old for v in new.values())
     return old == new
 
 

@@ -3,6 +3,7 @@ end / dead / parked, no process waiting for a human, transcripts and shadow mode
 (`tests/bin/fake-claude-v2`) against temp folders and an injected clock; nothing reaches the real ~/.claude."""
 from __future__ import annotations
 
+import contextlib
 import errno
 import gzip
 import json
@@ -11,6 +12,7 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import types
@@ -429,6 +431,15 @@ class ProjectSetupTest(WorkerCase):
         with self.assertRaisesRegex(config.ConfigError, "not a project name"):
             self.workers().start(cid, "implement", cwd=self.wt)
         self.assertEqual(self.bg_calls(), [])
+
+    def test_an_object_title_gives_the_branch_its_primary_language_words(self):
+        title = {"zh": "重试 other words", "en": "Retry failed payments"}
+        cid = self.add_card(project="shop", key="widgets-key", title=title)
+        rec = self.workers().start(cid, "implement", cwd=self.wt, prompt="Do the work.")
+        self.assertEqual(rec["branch"], "me.widgets-key.retry-failed-payments")
+        text = self.add_card(project="shop", key="other-key", title="Retry failed payments")
+        self.assertEqual(self.workers().start(text, "review", cwd=self.wt)["branch"],
+                         "me.other-key.retry-failed-payments")
 
     def test_branch_without_a_prefix_and_from_the_card(self):
         from assistant import projects
@@ -2238,6 +2249,394 @@ class ShadowModeTest(WorkerCase):
         self.assertEqual(len(resources.Registry(self.data).read()), 1)  # not stopped as a worker that died twice
         self.assertIsNone(self.get(a["card"]).get("ask"))
         self.assertEqual(len(self.bg_calls()), 1)
+
+
+# -- 8. follow-ups from the worker review ------------------------------------------------------------------------------
+
+class WorkerAskRaceTest(WorkerCase):
+    """A worker's ask is read, checked and written under one hold of the store lock (`Store.update_checked`), so
+    a user's ask that lands right after the worker's look at the card is never overwritten or closed."""
+
+    USER = {"type": "answer", "text": "mine"}
+
+    def user_ask_after_first_hold(self, w, cid):
+        """Count the store lock's holds; once the first one ends, the user's ask lands (a locked write of its own),
+        as it would when the user answers the page between two of the worker's holds."""
+        real = w.store._locked
+        holds = []
+
+        @contextlib.contextmanager
+        def locked():
+            with real():
+                holds.append(1)
+                yield
+            if len(holds) == 1:
+                Store(self.data, self.cfg, self.clock).update(cid, {"ask": self.USER}, by="user")
+
+        return mock.patch.object(w.store, "_locked", locked), holds
+
+    def test_a_users_ask_that_lands_after_the_look_survives_set_ask(self):
+        w = self.workers()
+        cid = self.add_card()
+        patch, holds = self.user_ask_after_first_hold(w, cid)
+        with patch:
+            w._set_ask(cid, {"type": "fix", "role": "implement", "reason": workers_mod.ATTACH, "text": "attach"},
+                       "ap2 worker")
+        self.assertEqual(self.get(cid)["ask"], self.USER)
+        self.assertEqual(len(holds), 1)  # the look and the write are one hold
+
+    def test_set_ask_keeps_a_users_ask_it_finds_under_the_lock(self):
+        w = self.workers()
+        cid = self.add_card(ask=self.USER)
+        self.assertFalse(w._set_ask(cid, {"type": "fix", "role": "implement", "reason": workers_mod.ATTACH,
+                                          "text": "attach"}, "ap2 worker"))
+        self.assertEqual(self.get(cid)["ask"], self.USER)
+
+    def test_set_ask_replaces_the_roles_own_worker_ask(self):
+        w = self.workers()
+        attach = {"type": "fix", "role": "implement", "reason": workers_mod.ATTACH, "text": "attach",
+                  "from": "worker"}
+        cid = self.add_card(ask=attach)
+        q = {"type": "answer", "role": "implement", "text": "which?"}
+        self.assertTrue(w._set_ask(cid, q, "ap2 worker"))
+        self.assertEqual(self.get(cid)["ask"], dict(q, **{"from": "worker"}))
+
+    def test_a_users_ask_that_lands_after_the_look_survives_close_worker_asks(self):
+        w = self.workers()
+        attach = {"type": "fix", "role": "implement", "reason": workers_mod.ATTACH, "text": "attach",
+                  "from": "worker"}
+        cid = self.add_card(ask=attach)
+        patch, holds = self.user_ask_after_first_hold(w, cid)
+        with patch:
+            w._close_worker_asks(cid, "implement", "ap2 worker")
+        self.assertEqual(self.get(cid)["ask"], self.USER)
+        self.assertEqual(len(holds), 1)
+
+    def test_a_users_ask_that_lands_while_an_answer_resumes_survives(self):
+        w = self.workers()
+        a = self.start(w)
+        self.write_result(a["card"], "question.json", {"text": "Three retries or five?"})
+        self.assertEqual(w.check()[0]["did"], "asked")
+        real = w.start
+
+        def start(*args, **kw):
+            rec = real(*args, **kw)  # it closes the worker's question
+            Store(self.data, self.cfg, self.clock).update(a["card"], {"ask": self.USER}, by="user")
+            return rec
+
+        with mock.patch.object(w, "start", side_effect=start):
+            w.answer(a["card"], "Three.")
+        self.assertEqual(self.get(a["card"])["ask"], self.USER)
+
+    def test_close_worker_asks_closes_only_its_kinds(self):
+        w = self.workers()
+        q = {"type": "answer", "role": "implement", "text": "which?", "from": "worker"}
+        cid = self.add_card(ask=q)
+        w._close_worker_asks(cid, "implement", "ap2 worker", kinds=("attach",))
+        self.assertEqual(self.get(cid)["ask"], q)
+        w._close_worker_asks(cid, "review", "ap2 worker")  # another role's ask is not this role's
+        self.assertEqual(self.get(cid)["ask"], q)
+        w._close_worker_asks(cid, "implement", "ap2 worker")
+        self.assertIsNone(self.get(cid).get("ask"))
+
+
+@unittest.skipIf(fcntl is None, "needs POSIX file locks")
+class DiscoveryOutsideTheLockTest(WorkerCase):
+    """`start()` finds the session's tools (up to DISCOVER_TIMEOUT seconds) before it takes the worker list's lock,
+    then checks again under the lock everything the lock protects."""
+
+    def lock_is_free(self) -> bool:
+        fd = os.open(str(self.data / resources.LOCK), os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            return False
+        finally:
+            os.close(fd)
+
+    def test_the_discovery_runs_with_the_worker_list_unlocked(self):
+        w = self.workers()
+        cid = self.add_card()  # no project: its tools are discovered
+        seen = []
+
+        def discover(cwd, env):
+            seen.append(self.lock_is_free())
+            return ["mcp__Tracker__send_message"], []
+
+        with mock.patch.object(w, "_discover", side_effect=discover):
+            rec = w.start(cid, "implement", cwd=self.wt)
+        self.assertEqual(seen, [True])
+        self.assertIn("mcp__Tracker__send_message", self.deny(cid))
+        self.assertEqual(resources.Registry(self.data).read(), [rec])
+
+    def test_a_start_refused_before_the_lock_runs_no_discovery(self):
+        w = self.workers()
+        a = self.start(w)
+        n = len(self.discovery_calls())
+        with self.assertRaisesRegex(WorkerError, "already running"):
+            w.start(a["card"], "implement", cwd=self.wt)
+        self.assertEqual(len(self.discovery_calls()), n)
+
+    def test_a_worker_that_lands_on_the_card_during_the_discovery_refuses_the_start(self):
+        w = self.workers()
+        cid = self.add_card()
+        settings = transcripts.run_dir(self.data, cid) / "settings-implement.json"
+
+        def discover(cwd, env):
+            self.assertTrue(self.lock_is_free())  # else the lock below would wait forever
+            with resources.Registry(self.data).locked() as records:
+                records.append({"card": cid, "role": "review", "session_name": f"{cid} · review",
+                                "ports": [7200, 7209]})
+            return [], []
+
+        with mock.patch.object(w, "_discover", side_effect=discover):
+            with self.assertRaisesRegex(WorkerError, f"card {cid} already has a worker: {cid} · review"):
+                w.start(cid, "implement", cwd=self.wt)
+        self.assertEqual(self.bg_calls(), [])
+        self.assertFalse(settings.exists())  # a refused start writes no floor
+
+    def test_the_slot_and_needs_are_checked_again_under_the_lock(self):
+        w = self.workers()
+        cid = self.add_card()
+
+        def discover(cwd, env):
+            self.assertTrue(self.lock_is_free())  # else the lock below would wait forever
+            with resources.Registry(self.data).locked() as records:
+                records.append({"card": "c-other", "role": "implement", "session_name": "c-other · implement",
+                                "ports": [7200, 7209], "needs": ["device"]})
+            return [], []
+
+        with mock.patch.object(w, "_discover", side_effect=discover):
+            with self.assertRaisesRegex(WorkerError, "resource device is held by c-other · implement"):
+                w.start(cid, "implement", cwd=self.wt, needs=["device"])
+        self.assertEqual(self.bg_calls(), [])
+
+    def test_ports_taken_during_the_discovery_give_the_next_range_and_its_floor(self):
+        w = self.workers()
+        cid = self.add_card()
+
+        def discover(cwd, env):
+            self.assertEqual(env["AP2_PORTS"], "7200-7209")  # the range planned before the lock
+            self.assertTrue(self.lock_is_free())
+            with resources.Registry(self.data).locked() as records:
+                records.append({"card": "c-other", "role": "implement", "session_name": "c-other · implement",
+                                "ports": [7200, 7209]})
+            return [], []
+
+        with mock.patch.object(w, "_discover", side_effect=discover):
+            rec = w.start(cid, "implement", cwd=self.wt)
+        self.assertEqual(rec["ports"], [7210, 7219])
+        f = transcripts.run_dir(self.data, cid) / "settings-implement.json"
+        self.assertEqual(json.loads(f.read_text())["env"]["AP2_PORTS"], "7210-7219")
+        self.assertIn("Your port range: 7210-7219.", self.bg_calls()[0]["argv"][-1])
+
+
+class ShortIdOnRecordTest(WorkerCase):
+    """The short id `claude --bg` prints is on the worker list before the listing is asked for the session id, so a
+    Ctrl-C or an error there never leaves a running copy that no record points at."""
+
+    def newest_short(self) -> str:
+        return self.agents()[-1]["id"]
+
+    def test_start_records_the_short_id_before_the_listing(self):
+        w = self.workers()
+        cid = self.add_card()
+        with mock.patch.object(workers_mod.v1_sessions, "list_all", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                w.start(cid, "implement", cwd=self.wt, prompt="Do the work.")
+        recs = resources.Registry(self.data).read()
+        self.assertEqual(len(recs), 1)
+        self.assertEqual((recs[0]["card"], recs[0]["short_id"], recs[0]["session_id"]),
+                         (cid, self.newest_short(), ""))
+        out = w.check()[0]  # the next check fills the session id in
+        self.assertEqual(out["state"], "running")
+        sid = resources.Registry(self.data).read()[0]["session_id"]
+        self.assertTrue(sid)
+        self.assertEqual(self.get(cid)["sessions"]["implement"]["ids"], [sid])
+
+    def test_an_in_place_resume_records_the_new_short_id_before_the_listing(self):
+        w = self.workers()
+        a = self.start(w)
+        self.drop_agent(a["short_id"])
+        listing = v1_sessions.list_all(FAKE)  # what the check sees: the worker is gone, so dead
+        with mock.patch.object(workers_mod.v1_sessions, "list_all", side_effect=[listing, KeyboardInterrupt()]):
+            with self.assertRaises(KeyboardInterrupt):
+                w.check()
+        rec = resources.Registry(self.data).read()[0]
+        self.assertEqual(len(self.bg_calls()), 2)  # the copy runs
+        self.assertNotEqual(rec["short_id"], a["short_id"])
+        self.assertEqual((rec["short_id"], rec["session_id"], rec["resumes"]), (self.newest_short(), "", 1))
+
+
+class FinishRetryTest(WorkerCase):
+    """`finish` remembers per role which originals `claude rm` already removed (`sessions.<role>.removed_ids`),
+    so a retry removes only the rest, and a role is marked removed once every id of it is in that set."""
+
+    def two_ids(self):
+        w = self.workers()
+        a = self.start(w)
+        self.drop_agent(a["short_id"])
+        self.assertEqual(w.check()[0]["did"], "resumed")  # in place, under a new id
+        b = resources.Registry(self.data).read()[0]
+        w.end(a["card"], "implement")
+        return w, a["card"], a["session_id"], b["session_id"]
+
+    def rm_calls(self) -> list:
+        return [c["argv"][1] for c in self.calls() if c["argv"][:1] == ["rm"]]
+
+    def test_a_retry_removes_only_the_id_left_and_marks_the_role_removed(self):
+        w, cid, first, second = self.two_ids()
+        real = transcripts.remove_original
+
+        def rm(cfg, claude, sid):
+            if sid == first:
+                raise WorkerError(f"cannot delete the Claude Code session {sid}: claude rm {sid} exited 1: busy")
+            return real(cfg, claude, sid)
+
+        with mock.patch.object(workers_mod.transcripts, "remove_original", side_effect=rm):
+            out = w.finish(cid)
+        self.assertEqual((out["removed"], len(out["failed"])), ([second], 1))
+        entry = self.get(cid)["sessions"]["implement"]
+        self.assertEqual(entry["removed_ids"], [second])
+        self.assertNotIn("removed", entry)
+        before = len(self.rm_calls())
+        out = w.finish(cid)
+        self.assertEqual(self.rm_calls()[before:], [first])  # the id already removed is not removed again
+        self.assertEqual(out["removed"], [first])
+        self.assertNotIn("failed", out)
+        entry = self.get(cid)["sessions"]["implement"]
+        self.assertEqual((entry["state"], entry["removed"]), ("finished", True))
+        self.assertEqual(sorted(entry["removed_ids"]), sorted([first, second]))
+
+    def test_a_retry_tries_only_the_id_whose_rm_failed(self):
+        w, cid, first, second = self.two_ids()
+        with mock.patch.object(workers_mod.transcripts, "remove_original",
+                               side_effect=[None, WorkerError("claude rm failed")]):
+            w.finish(cid)
+        with mock.patch.object(workers_mod.transcripts, "remove_original", return_value=None) as rm:
+            w.finish(cid)
+        self.assertEqual([c.args[2] for c in rm.call_args_list], [second])  # never the id already removed
+        self.assertTrue(self.get(cid)["sessions"]["implement"]["removed"])
+
+    def test_a_role_already_marked_removed_is_not_removed_again(self):
+        w = self.workers()
+        a = self.start(w)
+        w.end(a["card"], "implement")
+        self.assertEqual(w.finish(a["card"])["removed"], [a["session_id"]])
+        before = len(self.rm_calls())
+        out = w.finish(a["card"])
+        self.assertEqual(self.rm_calls()[before:], [])
+        self.assertEqual(out["removed"], [])
+        self.assertTrue(self.get(a["card"])["sessions"]["implement"]["removed"])
+
+    def test_a_role_marked_removed_by_an_older_finish_is_not_removed_again(self):
+        w = self.workers()
+        a = self.start(w)
+        w.end(a["card"], "implement")
+        sessions = self.get(a["card"])["sessions"]
+        sessions["implement"] = dict(sessions["implement"], state="finished", removed=True)  # no removed_ids yet
+        Store(self.data, self.cfg, self.clock).update(a["card"], {"sessions": sessions}, by="test")
+        self.assertEqual(w.finish(a["card"])["removed"], [])
+        self.assertEqual(self.rm_calls(), [])
+
+    def test_a_session_started_after_a_finish_is_removed_by_the_next_finish(self):
+        w = self.workers()
+        a = self.start(w)
+        w.end(a["card"], "implement")
+        self.assertEqual(w.finish(a["card"])["removed"], [a["session_id"]])
+        b = self.start(w, card_id=a["card"])  # the same role again, under a new id
+        self.assertNotEqual(b["session_id"], a["session_id"])
+        w.end(a["card"], "implement")
+        before = len(self.rm_calls())
+        out = w.finish(a["card"])
+        self.assertEqual(self.rm_calls()[before:], [b["session_id"]])  # once, and never the id already removed
+        self.assertEqual(out["removed"], [b["session_id"]])
+        self.assertNotIn("failed", out)
+        entry = self.get(a["card"])["sessions"]["implement"]
+        self.assertTrue(entry["removed"])
+        self.assertEqual(entry["removed_ids"], [a["session_id"], b["session_id"]])
+
+
+class ResumeAuditTest(WorkerCase):
+    def test_a_resume_writes_the_card_as_the_checks_caller(self):
+        w = self.workers()
+        a = self.start(w)
+        n = len(self.get(a["card"])["audit"])
+        self.drop_agent(a["short_id"])
+        self.assertEqual(w.check(by="tester")[0]["did"], "resumed")
+        new = self.get(a["card"])["audit"][n:]
+        self.assertTrue(new)
+        self.assertEqual({e["by"] for e in new}, {"tester"})
+
+    def resume_closes(self, ask: dict):
+        w = self.workers()
+        a = self.start(w)
+        self.assertTrue(w._set_ask(a["card"], ask, "ap2 worker"))
+        n = len(self.get(a["card"])["audit"])
+        self.drop_agent(a["short_id"])
+        self.assertEqual(w.check(by="tester")[0]["did"], "resumed")
+        self.assertIsNone(self.get(a["card"]).get("ask"))
+        new = self.get(a["card"])["audit"][n:]
+        self.assertTrue(new)
+        self.assertEqual({e["by"] for e in new}, {"tester"})
+
+    def test_the_stop_before_a_resume_closes_the_attach_ask_as_the_checks_caller(self):
+        self.resume_closes({"type": "fix", "role": "implement", "reason": workers_mod.ATTACH, "text": "attach"})
+
+    def test_a_resume_closes_the_question_ask_as_the_checks_caller(self):
+        self.resume_closes({"type": "answer", "role": "implement", "text": "which?"})
+
+    def test_a_parked_resume_writes_the_card_as_the_checks_caller(self):
+        w = self.workers()
+        a = self.start(w)
+        w.park(a["card"], "implement", "x", usage_file=usage_file(self.tmp / "u.json", 95))
+        n = len(self.get(a["card"])["audit"])
+        self.clock.advance(4 * 60)
+        fresh = usage_file(self.tmp / "fresh.json", 3, resets_at="2026-01-05T17:00:00+00:00", fetched=self.clock())
+        self.assertEqual(w.check(by="tester", usage_file=fresh)[0]["did"], "resumed")
+        new = self.get(a["card"])["audit"][n:]
+        self.assertTrue(new)
+        self.assertEqual({e["by"] for e in new}, {"tester"})
+
+
+class WriteBackErrorTest(WorkerCase):
+    """`Registry.locked` writes the list back however its block ends; when the block raised and the write fails too,
+    the block's own error is the one raised, with the write error noted on it."""
+
+    def test_the_blocks_own_error_wins(self):
+        reg = resources.Registry(self.data)
+        with mock.patch.object(resources, "write_json", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(WorkerError, "^first$") as caught:
+                with reg.locked() as records:
+                    records.append({"card": "c1", "role": "implement"})
+                    raise WorkerError("first")
+        if sys.version_info >= (3, 11):  # add_note is new in 3.11; older Python drops the write error
+            notes = getattr(caught.exception, "__notes__", [])
+            self.assertTrue(any("disk full" in n for n in notes), notes)
+
+    def test_a_ctrl_c_wins_over_the_write_error(self):
+        reg = resources.Registry(self.data)
+        with mock.patch.object(resources, "write_json", side_effect=OSError("disk full")):
+            with self.assertRaises(KeyboardInterrupt):
+                with reg.locked() as records:
+                    records.append({"card": "c1", "role": "implement"})
+                    raise KeyboardInterrupt
+
+    def test_the_write_error_is_raised_when_the_block_succeeded(self):
+        reg = resources.Registry(self.data)
+        with mock.patch.object(resources, "write_json", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(OSError, "disk full"):
+                with reg.locked() as records:
+                    records.append({"card": "c1", "role": "implement"})
+
+    def test_a_block_that_raised_still_has_its_change_written(self):
+        reg = resources.Registry(self.data)
+        with self.assertRaisesRegex(WorkerError, "first"):
+            with reg.locked() as records:
+                records.append({"card": "c1", "role": "implement"})
+                raise WorkerError("first")
+        self.assertEqual(reg.read(), [{"card": "c1", "role": "implement"}])
 
 
 if __name__ == "__main__":

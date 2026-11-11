@@ -301,6 +301,144 @@ class PlainWordsTest(StoreCase):
             store.add(card(plain=plain(("en",))), by="w")
 
 
+class TitleLanguagesTest(StoreCase):
+    """Design 3.1: a title is null, one text (the same words in every language) or one text per language."""
+
+    cfg = Config(primary_language="en", secondary_language="zh")
+
+    def zh_card(self, **over):
+        return card(plain=plain(("en", "zh")), **over)
+
+    def test_a_text_an_object_and_null_are_accepted(self):
+        for title in ("Retry failed payments", {"en": "Retry failed payments", "zh": "重试失败的付款"}, None):
+            with self.subTest(title=title):
+                added = self.store.add(self.zh_card(title=title), by="w")
+                self.assertEqual(self.store.get(added["id"])["title"], title)
+
+    def test_a_title_with_extra_languages_is_accepted(self):
+        title = {"en": "Retry", "zh": "重试", "ja": "再試行"}
+        self.assertEqual(self.store.add(self.zh_card(title=title), by="w")["title"], title)
+
+    def test_a_bad_shape_is_refused_naming_the_title(self):
+        for bad in (3, [], {}, {"en": 3}, {"en": None}, {"en": ["x"]}, {3: "x"}, True):
+            with self.subTest(title=bad):
+                with self.assertRaises(CardError) as e:
+                    self.store.add(self.zh_card(title=bad), by="w")
+                self.assertRegex(str(e.exception), r"^title(\.\w+)? must be ")
+        self.assertEqual(list(self.data.glob("items/*/*.json")), [])
+
+    def test_the_bad_shape_message(self):
+        with self.assertRaises(CardError) as e:
+            self.store.add(self.zh_card(title=3), by="w")
+        self.assertEqual(str(e.exception), "title must be a text, an object of one text per language, or null, "
+                                           "not 3")
+        with self.assertRaisesRegex(CardError, r"^title\.en must be a text, not 3$"):
+            self.store.add(self.zh_card(title={"en": 3}), by="w")
+
+    def test_an_object_title_needs_every_language(self):
+        for title, message in (({"en": "Retry"}, "title.zh missing"),
+                               ({"zh": "重试"}, "title.en missing"),
+                               ({"en": "", "zh": "重试"}, "title.en is empty"),
+                               ({"en": "Retry", "zh": "  \n"}, "title.zh is empty"),
+                               ({"ja": "再試行"}, "title.en missing; title.zh missing"),
+                               ({"en": " ", "ja": "x"}, "title.en is empty; title.zh missing")):
+            with self.subTest(title=title):
+                with self.assertRaises(CardError) as e:
+                    self.store.add(self.zh_card(title=title), by="w")
+                self.assertEqual(str(e.exception), message)
+                self.assertNotIsInstance(e.exception, PlainWordsError)
+        self.assertEqual(list(self.data.glob("items/*/*.json")), [])
+
+    def test_an_object_title_missing_a_language_is_refused_on_update(self):
+        added = self.store.add(self.zh_card(), by="w")
+        with self.assertRaisesRegex(CardError, r"^title\.zh missing$"):
+            self.store.update(added["id"], {"title": {"en": "New words"}}, by="w")
+        self.assertEqual(self.store.get(added["id"]), added)
+
+    def test_a_text_title_is_not_checked_against_the_languages(self):
+        added = self.store.add(self.zh_card(title="One text for both"), by="w")
+        updated = self.store.update(added["id"], {"lane": "running"}, by="w")
+        self.assertEqual(updated["title"], "One text for both")
+        back = self.store.restore(updated["audit"][-1]["restore"], by="user")
+        self.assertEqual((back["lane"], back["title"]), ("planned", "One text for both"))
+
+    def test_a_card_stored_with_one_language_still_updates_its_other_fields(self):
+        en = Store(self.data, cfg=Config(primary_language="en"), clock=self.clock)
+        added = en.add(card(title="Old text title"), by="w")
+        updated = self.store.update(added["id"], {"plain": plain(("en", "zh"))}, by="w")
+        self.assertEqual(updated["title"], "Old text title")
+
+    def test_restore_does_not_recheck_the_title_languages(self):
+        en = Store(self.data, cfg=Config(primary_language="en"), clock=self.clock)
+        added = en.add(card(title={"en": "English only"}), by="w")
+        self.clock.tick(minutes=1)
+        changed = en.update(added["id"], {"title": {"en": "Changed"}}, by="w")
+        self.clock.tick(minutes=1)
+        back = self.store.restore(changed["audit"][-1]["restore"], by="user")  # zh is set now
+        self.assertEqual(back["title"], {"en": "English only"})
+
+    def test_one_language_store_checks_only_the_primary(self):
+        en = Store(self.data, cfg=Config(primary_language="en"), clock=self.clock)
+        en.add(card(title={"en": "English only"}), by="w")
+        with self.assertRaisesRegex(CardError, r"^title\.en missing$"):
+            en.add(card(title={"zh": "只有中文"}), by="w")
+
+    def test_search_finds_a_word_only_the_zh_slot_holds(self):
+        title = {"en": "Retry failed payments", "zh": "结账时重试 heron"}
+        added = self.store.add(self.zh_card(title=title), by="w")
+        other = self.store.add(self.zh_card(title={"en": "Something else", "zh": "别的"}), by="w")
+        self.assertEqual([c["id"] for c in self.store.search("heron")], [added["id"]])
+        self.assertEqual([c["id"] for c in self.store.search("重试")], [added["id"]])
+        self.assertEqual([c["id"] for c in self.store.search("retry")], [added["id"]])
+        self.assertEqual([c["id"] for c in self.store.search("别的")], [other["id"]])
+
+
+class TitleForTest(unittest.TestCase):
+    """cards.title_for: the title in one language, the primary one when that language has none."""
+
+    def test_an_object_gives_the_languages_slot(self):
+        c = {"title": {"en": "Retry", "zh": "重试"}}
+        self.assertEqual(cards.title_for(c, "zh", "en"), "重试")
+        self.assertEqual(cards.title_for(c, "en", "en"), "Retry")
+
+    def test_a_missing_or_empty_slot_falls_back_to_the_primary(self):
+        for title in ({"en": "Retry"}, {"en": "Retry", "zh": ""}, {"en": "Retry", "zh": "  "},
+                      {"en": "Retry", "zh": None}, {"en": "Retry", "zh": 3}):
+            with self.subTest(title=title):
+                self.assertEqual(cards.title_for({"title": title}, "zh", "en"), "Retry")
+
+    def test_no_slot_and_no_primary_gives_null(self):
+        for title in ({"ja": "再試行"}, {"en": "", "zh": " "}, {}):
+            with self.subTest(title=title):
+                self.assertIsNone(cards.title_for({"title": title}, "zh", "en"))
+
+    def test_a_text_is_returned_as_it_is(self):
+        self.assertEqual(cards.title_for({"title": "Same words"}, "zh", "en"), "Same words")
+        self.assertEqual(cards.title_for({"title": "Same words"}, "en", "en"), "Same words")
+
+    def test_null_and_anything_else_give_null(self):
+        for c in ({}, {"title": None}, {"title": 3}, {"title": ["x"]}, {"title": True}, None, "card"):
+            with self.subTest(card=c):
+                self.assertIsNone(cards.title_for(c, "en", "en"))
+
+
+class TitleSearchTextTest(unittest.TestCase):
+    def base(self, title):
+        return {"kind": "code", "feed": "chat", "plain": {}, "title": title}
+
+    def test_an_object_title_gives_every_slot_sorted_by_language(self):
+        text = cards.search_text(self.base({"zh": "重试", "en": "Retry", "ja": "再試行"}))
+        self.assertEqual(text.split("\n"), ["Retry", "再試行", "重试", "code", "chat"])
+
+    def test_a_text_title_is_indexed_as_before(self):
+        self.assertEqual(cards.search_text(self.base("Retry")).split("\n"), ["Retry", "code", "chat"])
+
+    def test_a_slot_that_is_not_text_is_left_out(self):
+        self.assertEqual(cards.search_text(self.base({"en": "Retry", "zh": 3})).split("\n"),
+                         ["Retry", "code", "chat"])
+        self.assertEqual(cards.search_text(self.base(None)).split("\n"), ["code", "chat"])
+
+
 class AuditTest(StoreCase):
     def test_audit_after_each_step(self):
         added = self.store.add(card(), by="scan")
@@ -451,6 +589,66 @@ class OppositeActionTest(StoreCase):
         added = self.store.add(card(ask={"type": "answer", "text": "which repo?"}), by="w")
         with self.assertRaisesRegex(CardError, "already has an open answer ask"):
             self.store.propose_opposite(added["id"], "close_pr", ["gh", "pr", "close", "12"], by="w")
+        self.assertEqual(self.store.get(added["id"]), added)
+
+
+class CheckedUpdateTest(StoreCase):
+    """`update_checked` reads the card, asks `check(card)` and writes, all under one hold of the store lock, so no
+    other writer can land between the look and the change."""
+
+    def test_a_check_that_says_yes_writes_the_change(self):
+        added = self.store.add(card(), by="w")
+        new = self.store.update_checked(added["id"], {"lane": "running"}, by="w", check=lambda c: True,
+                                        did="move it")
+        self.assertEqual(new["lane"], "running")
+        self.assertEqual(self.store.get(added["id"]), new)
+        self.assertEqual((new["audit"][-1]["by"], new["audit"][-1]["did"]), ("w", "move it"))
+        self.assertIsNotNone(new["audit"][-1]["restore"])
+
+    def test_a_check_that_says_no_writes_nothing(self):
+        added = self.store.add(card(), by="w")
+        before = sorted((self.data / "restore").glob("*")) if (self.data / "restore").exists() else []
+        self.assertIsNone(self.store.update_checked(added["id"], {"lane": "running"}, by="w",
+                                                    check=lambda c: False))
+        self.assertEqual(self.store.get(added["id"]), added)
+        after = sorted((self.data / "restore").glob("*")) if (self.data / "restore").exists() else []
+        self.assertEqual(after, before)  # no restore point either
+
+    def test_the_check_sees_the_card_on_disk_with_the_store_lock_held(self):
+        import fcntl
+        added = self.store.add(card(), by="w")
+        self.store.update(added["id"], {"ask": {"type": "answer", "text": "which repo?"}}, by="user")
+        seen = []
+
+        def check(c):
+            fd = os.open(str(self.data / ".store.lock"), os.O_RDWR)
+            try:
+                with self.assertRaises(BlockingIOError):  # held by this very update
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                os.close(fd)
+            seen.append(c["ask"])
+            return c["ask"] is None
+
+        self.assertIsNone(self.store.update_checked(added["id"], {"ask": {"type": "fix", "text": "x"}}, by="w",
+                                                    check=check))
+        self.assertEqual(seen, [{"type": "answer", "text": "which repo?"}])
+        self.assertEqual(self.store.get(added["id"])["ask"], {"type": "answer", "text": "which repo?"})
+
+    def test_a_check_may_say_what_the_change_did(self):
+        added = self.store.add(card(), by="w")
+        new = self.store.update_checked(added["id"], {"lane": "running"}, by="w", did="planned",
+                                        check=lambda c: f"moved from {c['lane']}")
+        self.assertEqual(new["audit"][-1]["did"], f"moved from {added['lane']}")
+
+    def test_it_refuses_what_update_refuses(self):
+        added = self.store.add(card(), by="w")
+        with self.assertRaisesRegex(CardError, "changes must be a non-empty object"):
+            self.store.update_checked(added["id"], {}, by="w", check=lambda c: True)
+        with self.assertRaisesRegex(CardError, "cannot be changed; the store sets it"):
+            self.store.update_checked(added["id"], {"audit": []}, by="w", check=lambda c: True)
+        with self.assertRaisesRegex(CardError, "no card"):
+            self.store.update_checked("c-20260101-000000-abcdef", {"lane": "running"}, by="w", check=lambda c: True)
         self.assertEqual(self.store.get(added["id"]), added)
 
 

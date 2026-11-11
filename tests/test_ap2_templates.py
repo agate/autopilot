@@ -560,6 +560,39 @@ class BriefTest(unittest.TestCase):
                          "Check the carrier page for 1Z999AA10123456784. If it says out for delivery, nudge me.")
 
 
+class TitleBriefTest(TempFolder):
+    """Design 3.1: `{title}` fills the primary language's title, for a text title or one slot per language."""
+
+    def test_an_object_title_fills_its_primary_slot(self):
+        card = {"title": {"en": "E", "zh": "Z"}}
+        self.assertEqual(templates.fill_brief("In {title}.", card), "In E.")
+        self.assertEqual(templates.fill_brief("In {title}.", card, primary="zh"), "In Z.")
+
+    def test_a_text_title_fills_as_it_is(self):
+        self.assertEqual(templates.fill_brief("In {title}.", {"title": "T"}), "In T.")
+        self.assertEqual(templates.fill_brief("In {title}.", {"title": "T"}, primary="zh"), "In T.")
+
+    def test_an_object_title_without_the_primary_slot_is_missing(self):
+        with self.assertRaises(BriefError) as e:
+            templates.fill_brief("In {title}.", {"title": {"zh": "Z"}})
+        self.assertEqual(e.exception.missing, ["title"])
+        self.assertIn("the card has no {title}", str(e.exception))
+        with self.assertRaises(BriefError) as e:
+            templates.fill_brief("In {title}.", {"title": {"en": "E"}}, primary="zh")
+        self.assertEqual(e.exception.missing, ["title"])
+
+    def test_a_dotted_title_slot_still_reads_the_field(self):
+        self.assertEqual(templates.fill_brief("{title.zh}", {"title": {"en": "E", "zh": "Z"}}), "Z")
+
+    def test_a_user_brief_with_title_runs_for_an_object_title(self):
+        shutil.copy(FIXTURES / "question.yaml", self.data / "templates" / "question.yaml")
+        runs = templates.catalog(self.data)["question"].runs({"id": "c-1", "title": {"en": "t"}})
+        self.assertEqual(runs[0]["brief"], "Answer the question in t. Draft a short reply; never send it.")
+        card = {"id": "c-1", "title": {"en": "t", "zh": "z"}}
+        runs = templates.catalog(self.data)["question"].runs(card, primary="zh")
+        self.assertEqual(runs[0]["brief"], "Answer the question in z. Draft a short reply; never send it.")
+
+
 class CheckTest(TempFolder):
     def test_check_validates_without_installing(self):
         path = self.write("parcel.yaml", (FIXTURES / "parcel.yaml").read_text())

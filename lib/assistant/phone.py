@@ -11,7 +11,7 @@ secondary_language, languages, settings, lanes, projects, heartbeat, cards, full
   `source.raw`, and every child or link that is not on the phone, which becomes `{id, off_phone: true}`.
 - `phone_hide_quotes`: a card made from a source record shows "Ana wrote a message in #team" (engine's
   HIDDEN_PHRASES) instead of the record's words, in its row (`title: null`, `title_hidden` per language) and in
-  its full card (title, `plain.what`, `source.record` and the source block).
+  its full card (title and `plain.what` per language, `source.record` and the source block).
 
 Building writes nothing (the store is read without its lock file, as the local page's GETs do), starts no process
 and opens no connection. Publishing the data is a later dispatcher step, live mode only.
@@ -123,7 +123,7 @@ def build(data, cfg: Optional[config.Config] = None, now: Optional[datetime] = N
             card["source"].pop("raw", None)
         if c["id"] in hidden:
             texts = hidden[c["id"]]
-            card["title"] = texts[langs[0]]
+            card["title"] = dict(texts)
             card["plain"]["what"] = dict(texts)
             card.pop("key", None)  # a source's key may be made from the record's text; the phone does not use it
             record = {k: v for k, v in card["source"]["record"].items() if k != "text"}
@@ -146,8 +146,8 @@ def build(data, cfg: Optional[config.Config] = None, now: Optional[datetime] = N
         if c.get("kind") != "project" or c["id"] not in by_id:
             continue
         kids = children.get(c["id"], [])
-        p = {"id": c["id"], "title": c.get("title"), "done": sum(1 for k in kids if k.get("lane") == "done"),
-             "total": len(kids)}
+        p = {"id": c["id"], "title": server.titles(c, langs),
+             "done": sum(1 for k in kids if k.get("lane") == "done"), "total": len(kids)}
         if c["id"] in hidden:
             p["title"], p["title_hidden"] = None, dict(hidden[c["id"]])
         projects.append(p)
