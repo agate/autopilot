@@ -1,0 +1,417 @@
+"""`ap2 import-v1`: v1 projects become cards, read-only (design 10, 12 "v1 import")."""
+from __future__ import annotations
+
+import contextlib
+import io
+import json
+import os
+import shutil
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from tests.helpers import ROOT
+from tests.test_ap2_cli import temp_inside_the_accounts_claude
+from assistant import cards, cli
+from assistant.store import Store
+
+FIXTURE = ROOT / "tests" / "fixtures" / "v1-data"
+SHOP_TASKS = ("PROJ-1", "PROJ-2", "PROJ-3", "PROJ-4", "PROJ-5", "PROJ-6")
+
+
+def snapshot(root: Path) -> dict:
+    """Every file and folder under `root`: a file's bytes and mtime, a folder's mtime."""
+    out = {}
+    for dirpath, dirnames, filenames in os.walk(root):
+        d = Path(dirpath)
+        out[str(d.relative_to(root)) + "/"] = (None, d.stat().st_mtime_ns)
+        for name in filenames:
+            p = d / name
+            out[str(p.relative_to(root))] = (p.read_bytes(), p.stat().st_mtime_ns)
+    return out
+
+
+class ImportV1Test(unittest.TestCase):
+    def setUp(self):
+        if temp_inside_the_accounts_claude():
+            self.skipTest("the temp folder is inside the account's ~/.claude, so ap2 refuses every temp data folder")
+        self.tmp = Path(tempfile.mkdtemp(prefix="ap2-import-v1-")).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.v1 = self.tmp / "v1"
+        shutil.copytree(FIXTURE, self.v1)
+        self.data = self.tmp / "data"
+        home = self.tmp / "home"
+        home.mkdir()
+        env = {k: v for k, v in os.environ.items() if k not in ("AP2_DATA", "AUTOPILOT_DATA")}
+        # The real home and the real v1 data folder are never reached: AUTOPILOT_DATA points at an empty temp path.
+        env.update(HOME=str(home), AUTOPILOT_DATA=str(self.tmp / "no-v1-here"))
+        patcher = mock.patch.dict(os.environ, env, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    # -- helpers ------------------------------------------------------------------------------------------------
+
+    def run_cli(self, *args, source=True):
+        argv = ["import-v1", "--data", str(self.data)]
+        if source:
+            argv += ["--from", str(self.v1)]
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli.main(argv + list(args))
+        return code, out.getvalue(), err.getvalue()
+
+    def ok(self, *args, **kw):
+        code, out, err = self.run_cli(*args, **kw)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(err, "")
+        return json.loads(out)
+
+    def fails(self, *args, **kw):
+        code, out, err = self.run_cli(*args, **kw)
+        self.assertEqual(code, 1, out)
+        self.assertEqual(out, "")
+        lines = err.splitlines()
+        self.assertEqual(len(lines), 1, err)
+        self.assertTrue(lines[0].startswith("ap2: "), err)
+        return lines[0]
+
+    def by_key(self):
+        return {c["key"]: c for c in Store(self.data).list()}
+
+    def actions(self, report):
+        return {c["key"]: c["action"] for p in report["projects"] for c in p["cards"]}
+
+    def set_config(self, text):
+        self.data.mkdir(parents=True, exist_ok=True)
+        (self.data / "config.yaml").write_text(text, encoding="utf-8")
+
+    def edit_state(self, folder, change):
+        path = self.v1 / folder / "state.json"
+        state = json.loads(path.read_text(encoding="utf-8"))
+        change(state)
+        path.write_text(json.dumps(state), encoding="utf-8")
+
+    def card_files(self):
+        return sorted((self.data / "items").glob("*/*.json")) if (self.data / "items").exists() else []
+
+    # -- 1. a v1 project becomes cards ------------------------------------------------------------------------
+
+    def test_a_project_becomes_a_project_card_code_cards_and_question_cards(self):
+        report = self.ok("--project", "shop")
+        got = self.by_key()
+        self.assertEqual(sorted(got), sorted(["v1:shop", "v1:shop:D1", "v1:shop:D2"]
+                                             + [f"v1:shop:{t}" for t in SHOP_TASKS]))
+        for c in got.values():
+            self.assertEqual(c["feed"], "v1-import")
+            self.assertEqual(c["project"], "shop")
+            self.assertEqual(c["audit"][0]["by"], "v1-import")
+
+        proj = got["v1:shop"]
+        self.assertEqual((proj["kind"], proj["lane"], proj["pri"], proj["title"]), ("project", "running", "P2", "shop"))
+        self.assertIsNone(proj.get("parent"))
+        self.assertEqual(proj["source"]["record"], {
+            "repo": "/srv/repos/shop", "branch_pattern": "{prefix}.{task}.{short}", "branch_prefix": "dev",
+            "folder": str(self.v1 / "projects" / "shop")})
+
+        lanes = {"PROJ-1": "planned", "PROJ-2": "running", "PROJ-3": "running", "PROJ-4": "needs",
+                 "PROJ-5": "done", "PROJ-6": "done"}
+        statuses = {"PROJ-1": "todo", "PROJ-2": "in_progress", "PROJ-3": "in_review", "PROJ-4": "blocked",
+                    "PROJ-5": "done", "PROJ-6": "skipped"}
+        for task in SHOP_TASKS:
+            c = got[f"v1:shop:{task}"]
+            with self.subTest(task=task):
+                self.assertEqual(c["kind"], "code")
+                self.assertEqual(c["parent"], proj["id"])
+                self.assertEqual(c["lane"], lanes[task])
+                self.assertEqual(c["status"], statuses[task])
+                self.assertEqual(c["pri"], "P1" if task == "PROJ-2" else "P2")
+                self.assertEqual(c["origin"], "found" if task == "PROJ-2" else "source")
+                self.assertEqual(sorted(c["source"]["record"]), ["branch", "depends_on", "link", "pr"])
+        self.assertEqual(got["v1:shop:PROJ-3"]["source"]["record"], {
+            "pr": "https://github.com/org/repo/pull/7", "branch": "dev.PROJ-3.receipt", "depends_on": [],
+            "link": "https://example.com/browse/PROJ-3"})
+        self.assertEqual(got["v1:shop:PROJ-2"]["source"]["record"]["depends_on"], ["PROJ-1"])
+
+        ask, gate = got["v1:shop:D1"], got["v1:shop:D2"]
+        self.assertEqual((ask["kind"], ask["lane"]), ("question", "needs"))
+        self.assertEqual(ask["ask"], {"type": "answer", "from": "v1"})
+        self.assertEqual(ask["parent"], got["v1:shop:PROJ-4"]["id"])  # its task's card
+        self.assertEqual(gate["ask"], {"type": "approve", "from": "v1"})
+        self.assertEqual(gate["parent"], proj["id"])  # no task: the project card
+        # self, system and answered decisions make no card; the report counts them
+        self.assertEqual(report["projects"][0]["not_imported"], {"decisions": 3})
+        self.assertEqual(set(self.actions(report).values()), {"add"})
+        self.assertEqual(report["refused"], [])
+        self.assertFalse(report["dry_run"])
+        self.assertEqual(report["from"], str(self.v1))
+
+    def test_a_project_whose_tasks_are_all_done_or_skipped_is_done(self):
+        self.ok("--project", "notes")
+        got = self.by_key()
+        self.assertEqual(got["v1:notes"]["lane"], "done")
+        self.assertEqual(got["v1:notes:PROJ-201"]["lane"], "done")
+        self.assertEqual(got["v1:notes:PROJ-202"]["lane"], "done")
+
+    # -- 2. v1's files are unchanged byte for byte --------------------------------------------------------------
+
+    def test_v1_files_are_unchanged_after_a_dry_run_an_import_and_a_rerun(self):
+        before = snapshot(self.v1)
+        self.ok("--dry-run")
+        self.assertEqual(snapshot(self.v1), before)
+        self.ok()
+        self.assertEqual(snapshot(self.v1), before)
+        self.ok()
+        self.assertEqual(snapshot(self.v1), before)
+        self.assertTrue(self.card_files())  # the import did write, into the v2 data folder
+
+    # -- 3. a dry run writes nothing ----------------------------------------------------------------------------
+
+    def test_dry_run_into_an_empty_data_folder_writes_nothing(self):
+        report = self.ok("--dry-run")
+        self.assertTrue(report["dry_run"])
+        self.assertFalse(self.data.exists())  # not even the data folder's layout
+        entries = [c for p in report["projects"] for c in p["cards"]]
+        self.assertTrue(entries)
+        for e in entries:
+            self.assertEqual(e["action"], "add")
+            self.assertIsNone(e["card"])
+            self.assertEqual(e["would_add"]["key"], e["key"])
+            self.assertEqual(e["would_add"]["kind"], e["kind"])
+
+    def test_dry_run_after_an_import_reports_unchanged_and_writes_nothing(self):
+        self.ok()
+        before = snapshot(self.data)
+        report = self.ok("--dry-run")
+        self.assertEqual(set(self.actions(report).values()), {"unchanged"})
+        self.assertEqual(snapshot(self.data), before)
+
+    def test_dry_run_after_a_change_reports_would_change_and_writes_nothing(self):
+        self.ok()
+        self.edit_state("projects/shop", lambda s: s["tasks"][0].update(status="done"))
+        before = snapshot(self.data)
+        report = self.ok("--dry-run")
+        changed = [c for p in report["projects"] for c in p["cards"] if c["action"] == "update"]
+        self.assertEqual([c["key"] for c in changed], ["v1:shop:PROJ-1"])
+        self.assertEqual(changed[0]["would_change"], ["lane", "plain", "status"])
+        self.assertEqual(snapshot(self.data), before)
+
+    # -- 4. a re-run is safe ------------------------------------------------------------------------------------
+
+    def test_a_rerun_changes_nothing_and_a_status_change_updates_only_that_card(self):
+        self.ok()
+        first = self.by_key()
+        again = self.ok()
+        self.assertEqual(set(self.actions(again).values()), {"unchanged"})
+        self.assertEqual(self.by_key(), first)
+
+        self.edit_state("projects/shop", lambda s: s["tasks"][0].update(status="in_progress"))
+        report = self.ok()
+        acts = self.actions(report)
+        self.assertEqual([k for k, a in acts.items() if a != "unchanged"], ["v1:shop:PROJ-1"])
+        self.assertEqual(acts["v1:shop:PROJ-1"], "update")
+        now = self.by_key()
+        self.assertEqual(len(now), len(first))  # no second card
+        card = now["v1:shop:PROJ-1"]
+        self.assertEqual((card["lane"], card["status"]), ("running", "in_progress"))
+        self.assertEqual(card["id"], first["v1:shop:PROJ-1"]["id"])
+        self.assertEqual(len(card["audit"]), 2)
+        for key, c in now.items():
+            if key != "v1:shop:PROJ-1":
+                self.assertEqual(c, first[key], key)
+
+    def test_a_decision_answered_in_v1_closes_its_question_card(self):
+        self.ok("--project", "shop")
+        self.edit_state("projects/shop", lambda s: s["decisions"][0].update(status="answered", answer="A"))
+        report = self.ok("--project", "shop")
+        self.assertEqual(self.actions(report)["v1:shop:D1"], "update")
+        card = self.by_key()["v1:shop:D1"]
+        self.assertEqual(card["lane"], "done")
+        self.assertIsNone(card["ask"])
+        self.assertEqual(report["projects"][0]["not_imported"], {"decisions": 4})
+
+    def test_a_task_gone_from_v1_keeps_its_card(self):
+        self.ok("--project", "shop")
+        self.edit_state("projects/shop", lambda s: s.update(tasks=s["tasks"][1:]))
+        report = self.ok("--project", "shop")
+        self.assertNotIn("v1:shop:PROJ-1", self.actions(report))
+        self.assertIn("v1:shop:PROJ-1", self.by_key())
+
+    # -- 5. text in each language -------------------------------------------------------------------------------
+
+    def test_each_configured_language_gets_its_text(self):
+        self.set_config("secondary_language: zh\n")
+        self.ok()
+        got = self.by_key()
+        both = got["v1:shop:PROJ-1"]
+        self.assertEqual(both["title"], "Add the cart")  # the primary language's text
+        self.assertEqual(both["plain"]["what"], {"en": "Add the cart", "zh": "加购物车"})
+        only_en = got["v1:shop:PROJ-2"]
+        self.assertEqual(only_en["plain"]["what"], {"en": "Fix the checkout total", "zh": "Fix the checkout total"})
+        label = got["v1:shop:D2"]
+        self.assertEqual(label["title"], "Two different answers arrived for D9. Which one counts?")
+        self.assertEqual(label["plain"]["what"]["zh"], "D9 收到了两个不同的回答。以哪个为准？")  # v1's labels.zh.json
+        for c in got.values():
+            cards.check_plain(c, ("en", "zh"))
+            self.assertIn("v1", c["plain"]["do"]["en"])
+            self.assertIn("v1", c["plain"]["do"]["zh"])
+        self.assertIn("shop", got["v1:shop:PROJ-1"]["plain"]["where"]["en"])
+        self.assertIn("PROJ-1", got["v1:shop:PROJ-1"]["plain"]["where"]["en"])
+
+    def test_a_label_with_no_translation_falls_back_to_english(self):
+        self.set_config("secondary_language: zh\n")
+        (self.v1 / "labels.zh.json").unlink()
+        self.ok("--project", "shop")
+        what = self.by_key()["v1:shop:D2"]["plain"]["what"]
+        self.assertEqual(what["zh"], what["en"])
+
+    def test_a_language_with_a_script_uses_its_base_language(self):
+        self.set_config("secondary_language: zh-Hans\n")
+        self.ok("--project", "shop")
+        self.assertEqual(self.by_key()["v1:shop:PROJ-1"]["plain"]["what"]["zh-Hans"], "加购物车")
+
+    def test_a_language_without_phrases_is_refused_before_anything_is_written(self):
+        self.set_config("secondary_language: fr\n")
+        line = self.fails()
+        self.assertIn("fr", line)
+        self.assertEqual(self.card_files(), [])
+        self.assertEqual(sorted(p.name for p in self.data.iterdir()), ["config.yaml"])
+
+    # -- 6. finding projects ------------------------------------------------------------------------------------
+
+    def test_both_the_projects_folder_and_a_legacy_top_level_project_are_found(self):
+        report = self.ok()
+        self.assertEqual([(p["name"], p["folder"]) for p in report["projects"]],
+                         [("notes", str(self.v1 / "notes")), ("shop", str(self.v1 / "projects" / "shop"))])
+        self.assertIn("v1:notes", self.by_key())
+
+    def test_a_legacy_folder_shadowed_by_the_projects_folder_is_not_imported_twice(self):
+        shutil.copytree(self.v1 / "projects" / "shop", self.v1 / "shop")
+        self.edit_state("shop", lambda s: s["tasks"].append(dict(s["tasks"][0], id="PROJ-99")))
+        report = self.ok()
+        self.assertEqual([p["name"] for p in report["projects"]], ["notes", "shop"])
+        self.assertEqual(report["projects"][1]["folder"], str(self.v1 / "projects" / "shop"))
+        self.assertNotIn("v1:shop:PROJ-99", self.by_key())
+
+    def test_a_projects_folder_without_config_does_not_hide_the_legacy_project(self):
+        (self.v1 / "projects" / "notes").mkdir()
+        (self.v1 / "projects" / "notes" / "state.json").write_text("{}", encoding="utf-8")
+        report = self.ok("--project", "notes")
+        self.assertEqual(report["projects"][0]["folder"], str(self.v1 / "notes"))
+
+    def test_a_folder_name_v1_would_refuse_is_not_a_project(self):
+        shutil.copytree(self.v1 / "notes", self.v1 / "projects" / "Bad_Name")
+        report = self.ok()
+        self.assertEqual([p["name"] for p in report["projects"]], ["notes", "shop"])
+
+    def test_project_limits_the_import(self):
+        report = self.ok("--project", "notes")
+        self.assertEqual([p["name"] for p in report["projects"]], ["notes"])
+        self.assertEqual({c["project"] for c in self.by_key().values()}, {"notes"})
+
+    def test_an_unknown_project_is_one_line_and_writes_nothing(self):
+        line = self.fails("--project", "shop", "--project", "nope")
+        self.assertIn("nope", line)
+        self.assertFalse(self.data.exists())
+
+    def test_with_no_from_autopilot_data_is_used(self):
+        with mock.patch.dict(os.environ, {"AUTOPILOT_DATA": str(self.v1)}):
+            report = self.ok("--project", "notes", source=False)
+        self.assertEqual(report["from"], str(self.v1))
+        self.assertIn("v1:notes", self.by_key())
+
+    def test_with_no_from_and_no_autopilot_data_the_home_folder_is_used(self):
+        home = Path(os.environ["HOME"])
+        shutil.copytree(FIXTURE, home / ".claude" / "autopilot-data")
+        os.environ.pop("AUTOPILOT_DATA")
+        report = self.ok("--dry-run", source=False)
+        self.assertEqual(report["from"], str(home / ".claude" / "autopilot-data"))
+        self.assertEqual([p["name"] for p in report["projects"]], ["notes", "shop"])
+
+    def test_a_missing_v1_folder_is_one_line(self):
+        line = self.fails(source=False)  # AUTOPILOT_DATA points at a path that does not exist
+        self.assertIn("no-v1-here", line)
+        self.assertFalse(self.data.exists())
+
+    def test_a_data_folder_inside_the_v1_folder_is_refused(self):
+        self.data = self.v1 / "v2-data"
+        line = self.fails()
+        self.assertIn("inside", line)
+        self.assertFalse(self.data.exists())
+
+    def test_odd_v1_values_do_not_stop_the_import(self):
+        def odd(state):
+            state["decisions"].append({"id": "D8", "kind": ["ask"], "status": "open", "title": {"en": "x"}})
+            state["decisions"].append({"id": "D7", "kind": "gate", "status": "open", "title": {"key": ["x"]}})
+        self.edit_state("notes", odd)
+        report = self.ok("--project", "notes")
+        self.assertEqual(report["projects"][0]["not_imported"], {"decisions": 1})
+        self.assertEqual(self.by_key()["v1:notes:D7"]["title"], "['x']")
+
+    # -- 7. a broken project does not stop the others -----------------------------------------------------------
+
+    def test_a_project_with_bad_state_is_refused_and_the_others_still_import(self):
+        (self.v1 / "notes" / "state.json").write_text("{not json", encoding="utf-8")
+        code, out, err = self.run_cli()
+        self.assertEqual(code, 1, err)
+        report = json.loads(out)
+        self.assertEqual([p["name"] for p in report["projects"]], ["shop"])
+        self.assertEqual(len(report["refused"]), 1)
+        refused = report["refused"][0]
+        self.assertEqual((refused["name"], refused["folder"]), ("notes", str(self.v1 / "notes")))
+        self.assertIn("state.json", refused["reason"])
+        self.assertIn("v1:shop", self.by_key())
+        self.assertNotIn("v1:notes", self.by_key())
+        self.assertTrue(err.startswith("ap2: "), err)
+        self.assertEqual(len(err.splitlines()), 1, err)
+
+    def test_each_kind_of_broken_project_is_refused_with_its_reason(self):
+        cases = {
+            "missing state.json": (lambda d: (d / "state.json").unlink(), "state.json"),
+            "config.json not JSON": (lambda d: (d / "config.json").write_text("[", encoding="utf-8"), "config.json"),
+            "state not an object": (lambda d: (d / "state.json").write_text("[]", encoding="utf-8"), "object"),
+            "a task without id": (lambda d: (d / "state.json").write_text(
+                json.dumps({"tasks": [{"title": {"en": "x"}, "status": "todo"}], "decisions": []}),
+                encoding="utf-8"), "id"),
+            "an unknown task status": (lambda d: (d / "state.json").write_text(
+                json.dumps({"tasks": [{"id": "PROJ-9", "status": "later"}], "decisions": []}),
+                encoding="utf-8"), "later"),
+            "an id used twice": (lambda d: (d / "state.json").write_text(
+                json.dumps({"tasks": [{"id": "PROJ-9", "status": "todo"}],
+                            "decisions": [{"id": "PROJ-9", "kind": "ask", "status": "open"}]}),
+                encoding="utf-8"), "twice"),
+            "a decision without id": (lambda d: (d / "state.json").write_text(
+                json.dumps({"tasks": [], "decisions": [{"kind": "ask", "status": "open"}]}), encoding="utf-8"),
+                "decisions[0] has no id"),
+            "a status that is not text": (lambda d: (d / "state.json").write_text(
+                json.dumps({"tasks": [{"id": "PROJ-9", "status": ["todo"]}], "decisions": []}),
+                encoding="utf-8"), "unknown status"),
+            "text that is not Unicode": (lambda d: (d / "state.json").write_text(
+                '{"tasks": [{"id": "PROJ-9", "status": "todo", "title": {"en": "\\ud800"}}], "decisions": []}',
+                encoding="utf-8"), "Unicode"),
+        }
+        for name, (breakit, word) in cases.items():
+            with self.subTest(name):
+                shutil.rmtree(self.v1)
+                shutil.copytree(FIXTURE, self.v1)
+                shutil.rmtree(self.data, ignore_errors=True)
+                breakit(self.v1 / "notes")
+                code, out, err = self.run_cli()
+                self.assertEqual(code, 1, err)
+                report = json.loads(out)
+                self.assertEqual([r["name"] for r in report["refused"]], ["notes"])
+                self.assertIn(word, report["refused"][0]["reason"])
+                self.assertEqual([p["name"] for p in report["projects"]], ["shop"])
+                self.assertNotIn("v1:notes", self.by_key())
+
+    # -- the command line ---------------------------------------------------------------------------------------
+
+    def test_the_command_is_in_the_usage(self):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.assertEqual(cli.main([]), 2)
+        self.assertIn("import-v1", err.getvalue())
+
+
+if __name__ == "__main__":
+    unittest.main()
