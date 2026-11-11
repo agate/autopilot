@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import itertools
 import json
 import os
 import sqlite3
@@ -46,6 +47,51 @@ def write_json(path: Path, obj) -> None:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(tmp)
         raise
+
+
+# The deepest dict / list nesting a card or its changes may hold; far under where the copy or the writer stop.
+MAX_DEPTH = 200
+
+
+def check_writable(value, what: str = "card is", *, shared: bool = True) -> None:
+    """Refuse `value` when its dicts, lists and tuples nest more than MAX_DEPTH deep (the top one is depth 1).
+    `json.loads` and the checks' unindented `json.dumps` run in C and follow a value much deeper than
+    `copy.deepcopy` and the indented writer, which stop at the recursion limit. Where they stop depends on how deep
+    the caller's stack already is, so trying the copy gives one answer on write and another on read (a card the
+    store wrote and then could not read). A fixed bound well under that limit gives the same answer everywhere, and
+    walking the value (with a list, not recursion; nothing copied, no text built; a shared value walked again only
+    when met deeper) is cheap on every read. Raises TooDeepError `<what> nested too deeply to copy or write` at the
+    first level past the bound. Anything else (a value JSON cannot write, a container already on the path, i.e. a
+    cycle) is left to the card checks. `shared=False` is for a value fresh from `json.loads`, a tree with no shared
+    containers: the memo of what was walked would then skip nothing and only hold one entry per container."""
+    kinds = (dict, list, tuple)
+    if not isinstance(value, kinds):
+        return
+
+    def inside(node):
+        return itertools.chain.from_iterable(node.items()) if isinstance(node, dict) else iter(node)
+
+    path = [(value, inside(value))]
+    on_path = {id(value)}
+    walked = {id(value): 1} if shared else None  # id -> the deepest depth a container was already walked from
+    while path:
+        node, rest = path[-1]
+        for child in rest:
+            if isinstance(child, kinds) and id(child) not in on_path:
+                if len(path) >= MAX_DEPTH:
+                    raise cards.TooDeepError(f"{what} nested too deeply to copy or write")
+                depth = len(path) + 1
+                # an empty one holds nothing deeper: counted above, never walked into; one already walked from as
+                # deep or deeper holds nothing new (so each is walked at most MAX_DEPTH times, not once per path)
+                if child and (walked is None or walked.get(id(child), 0) < depth):
+                    if walked is not None:
+                        walked[id(child)] = depth
+                    path.append((child, inside(child)))
+                    on_path.add(id(child))
+                    break
+        else:
+            path.pop()
+            on_path.discard(id(node))
 
 
 class Store:
@@ -87,6 +133,7 @@ class Store:
             raise CardError(f"{path}: not a card file (its id is not its file name)")
         try:
             cards.check_stored(card)
+            check_writable(card, shared=False)  # fresh from json.loads: a tree
         except CardError as e:
             raise (cards.TooDeepError if isinstance(e, cards.TooDeepError) else CardError)(
                 f"{path}: not a card file: {e}") from None
@@ -147,6 +194,7 @@ class Store:
             raise CardError(f"{', '.join(given)} {'is' if len(given) == 1 else 'are'} set by the store; leave "
                             f"{'it' if len(given) == 1 else 'them'} out")
         cards.validate(card, self.languages)
+        check_writable(card)
         with self._guard():
             at = self.clock()
             new = copy.deepcopy(card)
@@ -191,6 +239,7 @@ class Store:
         old = self._load(card_id)
         if check is not None:
             check(old)
+        check_writable(changes, "changes are")
         new = copy.deepcopy(old)
         new.update(copy.deepcopy(changes))
         cards.validate(new, self.languages)
@@ -215,8 +264,10 @@ class Store:
             # hand edit too), and the languages may have changed since. Any point the store saved can be put back.
             try:
                 cards.check_stored(old)
+                check_writable(old, shared=False)  # before restore.save, so a point too deep leaves no orphan point
             except CardError as e:
-                raise CardError(f"{restore.path(self.data, point_id)}: not a card restore point: {e}") from None
+                raise (cards.TooDeepError if isinstance(e, cards.TooDeepError) else CardError)(
+                    f"{restore.path(self.data, point_id)}: not a card restore point: {e}") from None
             at = self.clock()
             current = self._read(self.path(card_id)) if self.path(card_id).exists() else None
             saved = restore.save(self.data, current, at, write_json) if current is not None else None
@@ -239,6 +290,30 @@ class Store:
 
         with self._guard():
             return self._update(card_id, {"ask": ask}, by, f"propose {action}", check=no_open_ask)
+
+    def ask_about(self, card_id: str, text: str, by: str) -> dict:
+        """Save a question about the card (design 9.4) at the end of its `questions` list (made when missing) as
+        `{id, at, by, text, status: "pending", answer: null}`; return the card, the new question last. The card
+        is read and written under one hold of the store lock, so two questions at once are never lost; the
+        audit entry is `ask <question id>` with its restore point. Nothing answers it here: a later slice picks
+        up pending questions and writes the answer."""
+        by = self._by(by)
+        cards.check_id(card_id)
+        if not (isinstance(text, str) and text.strip()):
+            raise CardError(f"a question must be a non-empty text, not {text!r}")
+        cards.check_unicode(text, "question")
+        with self._guard():
+            asked = self._load(card_id).get("questions", [])
+            if not isinstance(asked, list):
+                raise CardError(f"card {card_id}: questions must be a list, not {asked!r}")
+            at = self.clock()
+            taken = {q["id"] for q in asked if isinstance(q, dict) and isinstance(q.get("id"), str)}
+            question_id = cards.new_id("q", at)
+            while question_id in taken:
+                question_id = cards.new_id("q", at)
+            question = {"id": question_id, "at": cards.stamp(at), "by": by, "text": text, "status": "pending",
+                        "answer": None}
+            return self._update(card_id, {"questions": asked + [question]}, by, f"ask {question_id}")
 
     def prune(self, now: Optional[datetime] = None) -> list:
         """Remove restore points older than 30 days; return their ids."""
