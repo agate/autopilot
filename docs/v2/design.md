@@ -702,8 +702,10 @@ Calls the author made without asking (check them):
   briefs) and `roles.py` (the shipped roles and their tools); the source engine: `sources.py` (loading,
   `extends:`, checks), `form.py` (the form, the path language, `{field}` patterns and derived fields) and
   `engine.py` (read, fill, check, link and key, sort, card); scan sessions: `scan.py` (the plan, the brief, the
-  save-raw hook and the take); and for workers, `workers.py`, `resources.py`, `transcripts.py` and `projects.py`
-  (see the workers entry below). `ap2 config [--data PATH]` prints the effective config and `data_dir` as JSON.
+  save-raw hook and the take); for workers, `workers.py`, `resources.py`, `transcripts.py` and `projects.py`
+  (see the workers entry below); and the local page: `server.py` (the server, its JSON routes and the request
+  guard, run by `ap2 serve`) and `builtin/page/local.html` (the one page, inline CSS and JS, found from
+  `server.py`'s own path). `ap2 config [--data PATH]` prints the effective config and `data_dir` as JSON.
   With stdout
   closed, `ap2 config` sets up the folder, prints nothing and exits 0; when its reader goes away
   (`ap2 config | true`) it exits 1 with nothing on stderr; when a write fails (a full disk) it prints one line,
@@ -1202,6 +1204,88 @@ Calls the author made without asking (check them):
     what it would replace, `builtin`, `user` or null; it copies nothing). They only read: none creates the data
     folder. Errors follow the other commands (one `ap2: ...` line, exit 1).
   - Later work: template versions (6: "the old version stays") and Claude's suggested changes are not built yet.
+- **[decided by the builder]** The local page (design 9.1, 9.4, 10).
+  - `ap2 serve [--port N] [--data PATH]` sets up the data folder like `ap2 card`, prints one JSON line
+    (`url`, `data_dir`, `mode`) and serves until Ctrl-C or SIGTERM (exit 0). It binds `127.0.0.1` only (there is
+    no `--host`; the address is never looked up by name); the port is 4317 by default and 0 takes a free one. A
+    port that cannot be used is one `ap2: cannot listen on 127.0.0.1:<port>: ...` line, exit 1; a port outside
+    0-65535 is an argument error, exit 2. Before listening on a fixed port it checks that nothing answers on
+    `127.0.0.1:<port>`, because macOS would let it share a port another program holds on all addresses. Nothing
+    is installed: "started at login" comes with the slice that writes launchd jobs.
+  - The request guard: every request must carry `Host: 127.0.0.1:<port>` or `localhost:<port>`, or it gets 403,
+    so a site that points its own name at 127.0.0.1 (DNS rebinding) cannot read cards. A request to `/api/` that
+    a browser marks as coming from another site (`Sec-Fetch-Site` other than `same-origin` or `none`) is 403, so
+    another web site cannot time searches to learn what the cards hold; a browser that does not send the header
+    gets no such guard. The page `/` is still served, so a link from elsewhere opens it. While it runs, the server
+    trusts every account and process on this Mac: the Host and Origin checks stop other web sites, not other
+    local users, who can read every card, source and setting and post questions. A per-run token is later work
+    if that is not acceptable. Every reply has
+    `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`,
+    `Cross-Origin-Opener-Policy: same-origin` (a page on another site that opens this page in a window keeps no
+    handle to it, so it cannot keep changing its address to run searches) and the page's Content-Security-Policy
+    (`default-src 'none'`, the page's own inline script and style, `connect-src 'self'`, `form-action 'none'`,
+    `frame-ancestors 'none'`), and never an `Access-Control-Allow-*` header; `OPTIONS` is
+    405, so no other site passes a preflight. Replies of 400 and up are logged to stderr, the UTC time first;
+    2xx replies are not (the page polls).
+  - Routes, JSON in and out: `GET /` (the page), `GET /api/state` (mode, languages, lane counts, `running`, the
+    projects with `done`/`total` from their children, the heartbeat, `usage: null` and the page's `url`),
+    `GET /api/cards?lane=&kind=&parent=&q=&limit=` (`{total, cards}`, each a row: `id`, `title`, `kind`, `lane`,
+    `pri`, `feed`, `parent`, `origin`, `ask_type`, `plain_where` per language, `updated_at`; lane order, then by
+    `pri` and the newest change in Needs you, Running and Planned, History newest first; `q` goes through the
+    store's search and the other filters apply to its result; a `q` over 500 characters or 50 words is 400, so a
+    page on another site cannot make the store rebuild its index on every request), `GET /api/cards/<id>`
+    (`card`, `template`, `view`, `source_block`, `children`, `links`, `activity`), `GET /api/sources[/<name>]`
+    (each source's summary and its card count; one source adds its merged `data` and `files`),
+    `GET /api/templates[/<kind>]` (the summary; one kind is `ap2 template show` plus its card count),
+    `GET /api/settings` (the config, the data folder, the URL,
+    and the bytes in each data-folder folder and `index.sqlite`, counted with lstat and never following a link).
+    A bad filter or body is 400, an unknown card, source, template or route 404, a damaged card file or a bad
+    source, template or config file 500 with the one-line error that names the file. These JSON shapes are the
+    ones the phone page slice reuses.
+  - The full card's `view` is its template's block list, with `questions` added at the end when the template
+    leaves it out, because every full card has the Ask box (9.4). A card whose kind has no template shows
+    `source_block` (when it has a source), `children`, `links`, `questions` and `activity`; a template that fails
+    to load still serves the card, with `template: null` and `template_error`. The source block's link is kept
+    only when it starts with `http://` or `https://`; any other becomes null with `link_refused: true`. A linked
+    card that is gone is `{id, missing: true}`; one whose file is damaged adds its `error` there instead of
+    failing the whole card (the card's own damaged file is a 500).
+  - The heartbeat is `{last_run_at, age_seconds, late}` from `gate.json`, `late` at 180 seconds or more. No file
+    is late with nulls; a file that cannot be read, is not JSON, has no readable `last_run_at`, or whose time is
+    ahead of the clock ("the clock may have gone back") adds `error` and is late. `/favicon.ico` is a 204, so a
+    browser's ask for it leaves no error line in the log.
+  - Questions: `POST /api/cards/<id>/questions` with `Content-Type: application/json` and `{"text": "..."}` (at
+    most 2000 characters, valid Unicode, a body of at most 64 KiB) saves the question through
+    `Store.ask_about(card_id, text, by)`, which reads and writes the card under one hold of the store lock. The
+    card's `questions` list (made when missing) gains `{id: "q-YYYYMMDD-HHMMSS-xxxxxx", at, by: "page", text,
+    status: "pending", answer: null}`, and the audit gains `ask <question id>` with its restore point, so each
+    question is an activity entry. The reply is 201 `{question, card}`. Refused with nothing written: bad text or
+    a body that is not a JSON object (400), no `Content-Length` (411), a body over 64 KiB (413), another content
+    type (415, so a plain HTML form on another site cannot post), an `Origin` other than this server's own (403),
+    a card whose `questions` is not a list or that fails the store's checks (409), no such card (404).
+    **The page saves the question on the card as `status: pending`; a later slice (workers) picks up pending
+    questions, runs the read-only session in the card's folder and writes `answer`, `answered_at` and the files
+    or messages it used.** Until then the page shows "Saved. Your Mac answers it when question answering is
+    turned on." Nothing in this slice answers it: no session, no process.
+  - Read-only and shadow mode: the question POST is the only route that changes anything. Every other `POST`,
+    `PUT`, `PATCH` and `DELETE` is 405 and writes nothing, in shadow and live mode alike. **Saving a question is
+    allowed in shadow mode, because it writes only inside the data folder, which shadow mode allows (10).** No
+    route calls `config.require_live`, because none writes outside the data folder; a later route that does must
+    call it first. The GETs write nothing: they read the store without creating its lock file, except a search
+    (`q`), which may build `index.sqlite`, the store's own cache, as `ap2 search` does. The question route may
+    create `.store.lock`, the store's own empty lock file, when it is missing, even for a refused question;
+    nothing else is written on a refusal. The server starts no process and calls no Jira, Slack, GitHub or
+    `claude`.
+  - The page is one file with inline CSS and JS and no fonts or scripts from another host. It writes card text
+    only as text (`textContent`), never as HTML. Screens by hash route: `#/lane/<lane>`, `#/search/<words>`,
+    `#/project/<id>` (its children), `#/card/<id>`, `#/sources[/<name>]`, `#/templates[/<kind>]`, `#/settings`.
+    The top bar has search, the heartbeat ("Last check: 25s ago", red when late), the running count, and the
+    language switch only when `secondary_language` is set; the switch changes the whole page, labels and plain
+    words, shows the language codes (`EN`, `ZH`) so it puts no second language on the screen itself, and is
+    remembered in the browser. Labels are a table per language in the page, `en` and `zh` so far (a code such as `zh-Hans` uses `zh`);
+    a text that is missing in the chosen language says so instead of showing another language.
+  - Later work: template buttons (lane change, restore, child), the chat box (9.3), the Restore points screen,
+    usage, real worker counts, answering questions (the workers slice), "started at login" (launchd), the phone
+    page data (the next slice, which reuses these JSON shapes), and labels for languages other than `en` and `zh`.
 - **[decided by the builder]** Workers and sessions (8.1, 8.2, 8.5, 3.5), carried over from v1 by import
   (`lib/autopilot/workers.py`, `sessions.py`, `nextwork.py`, `budget.py`, `park.py`, `perms.py`; none changed).
   - Modules: `workers.py` (the `Workers` API: start, end, park, classify, list, check, answer, finish),
@@ -1347,9 +1431,13 @@ Calls the author made without asking (check them):
     `end CARD ROLE [--transcripts P]`, `check [--transcripts P] [--usage P]`,
     `park CARD ROLE [--note T] [--usage P]`, `answer CARD TEXT...`, `finish CARD [--transcripts P]`.
 - How the local server pushes updates to an open page (polling is fine).
+  - **[decided by the builder]** Polling: the page asks `/api/state` every 10 seconds and redraws the top bar,
+    the rail and the open list, so the heartbeat and new cards show without a reload.
 - Exact limits: idle timeout (decided: 60 minutes, and 30 at a permission prompt; see the workers entry), grace
   for missed slots, page sizes. Decided so far: raw source files and their reports are kept 30 days
   (`engine.RAW_KEEP`, section 12).
+  - **[decided by the builder]** Page sizes: a card list returns at most `limit` rows, 500 by default and 5000 at
+    most (a larger or smaller `limit` is a 400); `total` says how many matched.
 
 ## Appendix: example files
 

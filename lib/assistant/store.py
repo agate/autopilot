@@ -291,6 +291,30 @@ class Store:
         with self._guard():
             return self._update(card_id, {"ask": ask}, by, f"propose {action}", check=no_open_ask)
 
+    def ask_about(self, card_id: str, text: str, by: str) -> dict:
+        """Save a question about the card (design 9.4) at the end of its `questions` list (made when missing) as
+        `{id, at, by, text, status: "pending", answer: null}`; return the card, the new question last. The card
+        is read and written under one hold of the store lock, so two questions at once are never lost; the
+        audit entry is `ask <question id>` with its restore point. Nothing answers it here: a later slice picks
+        up pending questions and writes the answer."""
+        by = self._by(by)
+        cards.check_id(card_id)
+        if not (isinstance(text, str) and text.strip()):
+            raise CardError(f"a question must be a non-empty text, not {text!r}")
+        cards.check_unicode(text, "question")
+        with self._guard():
+            asked = self._load(card_id).get("questions", [])
+            if not isinstance(asked, list):
+                raise CardError(f"card {card_id}: questions must be a list, not {asked!r}")
+            at = self.clock()
+            taken = {q["id"] for q in asked if isinstance(q, dict) and isinstance(q.get("id"), str)}
+            question_id = cards.new_id("q", at)
+            while question_id in taken:
+                question_id = cards.new_id("q", at)
+            question = {"id": question_id, "at": cards.stamp(at), "by": by, "text": text, "status": "pending",
+                        "answer": None}
+            return self._update(card_id, {"questions": asked + [question]}, by, f"ask {question_id}")
+
     def prune(self, now: Optional[datetime] = None) -> list:
         """Remove restore points older than 30 days; return their ids."""
         with self._guard():
