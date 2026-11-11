@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -13,6 +14,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests.helpers import LIB, ROOT
 from assistant import guard
@@ -110,6 +112,70 @@ class DecideTest(unittest.TestCase):
         self.assertEqual(guard._segments("echo $# ${#x}; b"), ["echo $# ${#x}", " b"])  # not comments
         self.assertEqual(guard._segments("cat <<E; x\nl1; 'q\nE\nz"), ["cat <<E", " x", "l1; 'q", "E", "z"])
         self.assertEqual(guard._segments("cat <<E\nno end; 'q"), ["cat <<E", "no end; 'q"])
+        # `<<-` strips the body's leading tabs, so a tab-indented delimiter line ends it.
+        self.check(["cat <<-EOF > /tmp/x\n\tbody\n\tEOF\n" + f"{PKG}/bin/ap2 card note C1 'rm it'"], deny=False)
+
+    def test_a_double_paren_that_bash_runs_as_two_subshells_is_no_arithmetic(self):
+        """`((cd x; ls) )` closes with `) )`, not `))`: two subshells, so a later `<<` opens a heredoc."""
+        self.check([f"((cd /tmp; ls) ); cat <<EOF\nit's\nEOF\nsed -i 's/a/b/\n' {DATA}/config.yaml",
+                    f"((cd /tmp && make) 2>&1)\ncat <<EOF > /tmp/x\ndon't\nEOF\necho x > {DATA}/config.yaml"],
+                   deny=True)
+        self.check([f"x=$((a<<b)); cat <<EOF\nit's\nEOF\nls {DATA}/items",
+                    f"echo $(( (1+2) << 1 )) $(((1+2)))\ncat <<EOF\nit's\nEOF\nls {DATA}"], deny=False)
+
+    def test_a_background_ampersand_splits_but_a_redirect_does_not(self):
+        self.check([f"ap2 card list & cp y {DATA}/config.yaml",
+                    f"ap2 card list &>/dev/null & rm {DATA}/config.yaml",
+                    f"ap2 card list |& tee {DATA}/config.yaml"], deny=True)
+        self.check([f"ls {DATA} 2>&1 >&2", f"rg x {DATA} &>/dev/null", f"rg x {DATA} &>>/dev/null",
+                    f"ls {DATA} 0<&3 &"], deny=False)
+        self.assertEqual(guard._segments("a & b |& c 2>&1 >&2 &>/dev/null &>>x <&3"),
+                         ["a ", " b ", " c 2>&1 >&2 &>/dev/null &>>x <&3"])
+        self.assertEqual(guard._segments("echo \\>& b"), ["echo \\>", " b"])  # an escaped `>` is no redirect
+
+    def test_a_noclobber_redirect_is_a_write_not_a_pipe(self):
+        self.check([f"echo x >| {DATA}/config.yaml", f"echo x 2>|{DATA}/config.yaml",
+                    f"ap2 card list >| {DATA}/config.yaml"], deny=True)
+        self.assertEqual(guard._segments("echo x >| f | wc"), ["echo x >| f ", " wc"])
+
+    def test_a_command_substitution_starts_fresh_quotes_even_inside_double_quotes(self):
+        self.check([f"who=\"$(git log -1 --format=\"%an's change\")\"\nls {DATA}/items\necho \"$who\" > /tmp/who.txt",
+                    f"ap2 card note C1 \"$(cat <<'EOF'\nit's\nEOF\n)\"\nls {DATA}/items"], deny=False)
+        self.check([f"echo \"$(date +\"%F #\")\" > {DATA}/config.yaml",
+                    f"ap2 card note C1 \"$(cat <<'EOF'\nit's\nEOF\n)\"\ncp a {DATA}/config.yaml"], deny=True)
+        self.assertEqual(guard._words('a "b $(c "d e") f" g'), ["a", "b $", "c", "d e", " f", "g"])
+
+    def test_an_ansi_c_quote_keeps_an_escaped_apostrophe(self):
+        self.check([f"printf $'a\\'b\\n' > /tmp/x\nls {DATA}/items"], deny=False)
+        self.check([f"ap2 card add --title $'it\\'s' ; cp a {DATA}/config.yaml"], deny=True)
+        self.assertEqual(guard._words("printf $'a\\'b' \"$'x'\""), ["printf", "a'b", "$'x'"])
+
+    def test_a_hash_that_does_not_start_a_word_is_no_comment(self):
+        self.check([f"echo x\\ #y > {DATA}/config.yaml",
+                    f"echo ${{x:- #}}; cp a {DATA}/config.yaml",
+                    f"echo ${{x// #/}}; cp a {DATA}/config.yaml",
+                    f"v=`echo a #`; cp a {DATA}/config.yaml",
+                    f"touch /tmp/a\\ #1 && cp a {DATA}/config.yaml"], deny=True)
+        self.check([f"(true) # cp a {DATA}/config.yaml", f"echo a \\\\ # cp a {DATA}/config.yaml"], deny=False)
+
+    def test_an_ap2_segment_that_runs_other_code_loses_its_exemption(self):
+        self.check([f"ap2 card add --title \"$(cp a {DATA}/config.yaml)\"",
+                    f"ap2 card add --title `cp a {DATA}/config.yaml`",
+                    f"ap2 card show C1 <(rm -rf {DATA}/items)",
+                    f"ap2(){{ cp a {DATA}/config.yaml; }}; ap2",
+                    f"ap2 () {{ rm -rf {DATA}/items; }}; ap2",
+                    f"ap2 card add --title 'it; cp a {DATA}/config.yaml"], deny=True)
+        self.check(["ap2 card add --body \"$(cat $AP2_RUN_DIR/b.md)\"",
+                    f"{PKG}/bin/ap2 card add --title x --body {DATA}/sessions/C1/b.md",
+                    f"ap2 card add --title '$(cp a {DATA}/config.yaml)'",
+                    f"ap2 card add --title \"$((1+2))\" --data {DATA}"], deny=False)
+
+    def test_a_parameter_expansion_of_the_data_folder_is_a_mention(self):
+        self.check(["rm -rf \"${AP2_DATA:?}/items\"", "rm -rf \"${AP2_DATA:?}\"/items",
+                    "cp a \"${AP2_DATA%/}/config.yaml\"", "echo x > \"${AP2_RUN_DIR%/*}/C2/x\"",
+                    # Accepted false deny: a brace after the run directory is never trusted.
+                    "echo x > ${AP2_RUN_DIR:?}/x"], deny=True)
+        self.check(["echo ${AP2_DATA_OLD:-x} > /tmp/x"], deny=False)
 
     def test_reads_and_writes_elsewhere_are_allowed(self):
         self.check([f"cat {DATA}/config.yaml",
@@ -156,6 +222,8 @@ class DecideTest(unittest.TestCase):
                     "cp x ${AP2_RUN_DIR}/\\.\\./C2/x",
                     'echo x > "$AP2_"DATA/config.yaml',
                     f"echo x >'{DATA[:5]}'{DATA[5:]}/config.yaml",
+                    # Mentions match case-insensitively (macOS folders are).
+                    f"echo x > {DATA.lower()}/config.yaml", f"echo x > {RUN.upper()}/../C2/x",
                     # Best effort: it cannot tell which path a command writes, so a copy out of the data folder
                     # is write-shaped too (`cat` it instead, or use Read).
                     f"cp {DATA}/config.yaml {RUN}/config-copy.yaml",
@@ -170,7 +238,9 @@ class DecideTest(unittest.TestCase):
                     # A glob or brace that can name a settings file or `..`.
                     "rm $AP2_RUN_DIR/*", "rm $AP2_RUN_DIR/settings*", "echo {} > $AP2_RUN_DIR/settings-implement.js?n",
                     "cp x $AP2_RUN_DIR/.*/config.yaml", "cp x $AP2_RUN_DIR/.*/.*/config.yaml",
-                    "cp x $AP2_RUN_DIR/{..,a}/config.yaml"], deny=True)
+                    "cp x $AP2_RUN_DIR/{..,a}/config.yaml",
+                    # `//` and `/./` read as `/`, so they do not hide the top level.
+                    "rm $AP2_RUN_DIR//*", "rm $AP2_RUN_DIR/./settings*"], deny=True)
         # The settings files live at the run directory's top level only: a glob below it is fine.
         self.check(["rm $AP2_RUN_DIR/media/*.png", "cp a.png $AP2_RUN_DIR/media/shot-?.png",
                     "rm -f $AP2_RUN_DIR/media/*", "cp $AP2_RUN_DIR/media/* /tmp/out/"], deny=False)
@@ -203,6 +273,8 @@ class DecideTest(unittest.TestCase):
         for payload in ({"tool_name": "Edit", "tool_input": {"file_path": f"{DATA}/config.yaml"}},
                         {"tool_name": "Write", "tool_input": {"file_path": f"{DATA}/config.yaml",
                                                               "content": "> x"}},
+                        {"tool_name": "Write", "tool_input": {"command": f"echo x > {DATA}/config.yaml"}},
+                        {"tool_name": "Other", "tool_input": {"command": f"echo x > {DATA}/config.yaml"}},
                         {"tool_name": "Bash"}, {"tool_name": "Bash", "tool_input": "x"},
                         {"tool_name": "Bash", "tool_input": {"command": 5}}, {}):
             with self.subTest(payload=payload):
@@ -220,17 +292,70 @@ class DecideTest(unittest.TestCase):
             guard.decide(bash(f"{body} {DATA}/x"), WORKER)
         self.assertLess(time.monotonic() - t, 2.5)
 
-    def test_a_payload_past_the_read_cap_is_judged_fast(self):
-        """The slowest fallback: a payload past MAX_STDIN whose one mention is a quote-split spelling at its end."""
+    def test_a_payload_past_the_read_cap_is_denied_when_it_is_a_bash_call(self):
+        """`main` reads MAX_STDIN + 1 bytes, so a write past them is never seen: a v2 worker's Bash call that long is
+        denied outright (no real command is 1 MiB)."""
         raw = (b'{"tool_name": "Bash", "tool_input": {"command": "' + b"a " * (guard.MAX_STDIN // 2)
                + b'> \\"$AP2_\\"DATA/config.yaml"}}')
         self.assertLessEqual(guard.MAX_STDIN, 1 << 20)
+        read = raw[:guard.MAX_STDIN + 1]  # exactly what main reads
+        self.assertNotIn(b"AP2_", read)
+        self.assertTrue(denied(guard._judge(read, WORKER)))
+        self.assertIsNone(guard._judge(read.replace(b'"Bash"', b'"Grep"'), WORKER))
+        self.assertIsNone(guard._judge(read, dict(WORKER, AP2_ROLE="")))
         t = time.monotonic()
-        self.assertTrue(denied(guard._fallback(raw[:guard.MAX_STDIN + 1] + raw[-40:], WORKER)))
+        # The slowest fallback (a payload too deep to parse is judged by it): a quote-split spelling at its end.
+        self.assertTrue(denied(guard._fallback(raw, WORKER)))
         self.assertIsNone(guard._fallback(raw.replace(b"$AP2_", b"$NOPE_"), WORKER))
         # And the largest command `decide` sees after a parse, with the same spelling.
         self.assertTrue(denied(guard.decide(bash("a " * (guard.MAX_STDIN // 2 - 40) + '> "$AP2_"DATA/c'), WORKER)))
         self.assertLess(time.monotonic() - t, 2.5)
+
+    def test_each_parser_shape_at_the_cap_answers_fast(self):
+        """The shapes that were slow (a digit run before a redirect, a long `sed -x -x ...`, a word with the run
+        directory many times) and a long run of each construct the parser tracks, each just under MAX_COMMAND."""
+        size, tail = guard.MAX_COMMAND - 40, " > $AP2_DATA/cards.yaml"
+
+        def fill(unit, head=""):
+            return head + (unit * (size // len(unit)))[:size - len(head)] + tail
+
+        shapes = {"digits": fill("1", "echo "), "sed": fill("-sed ", "sed "),
+                  "run dir": "cp x " + (RUN + "/a/") * ((size - 5) // (len(RUN) + 3)) + tail,
+                  "$(": fill("$(echo "), '"$(': fill('"$(a '), "$'": fill("$'a\\'b' "), "${": fill("${x:-"),
+                  "backticks": fill("`a #` "), "&": fill("a & "), "((": fill("((a) ) "), "$((": fill("$((a<<b)) "),
+                  "#": fill("a\\ #"), ">|": fill(">|a ")}
+        for name, cmd in shapes.items():
+            with self.subTest(name):
+                self.assertLessEqual(len(cmd), guard.MAX_COMMAND)
+                t = time.monotonic()
+                guard.decide(bash(cmd), WORKER)
+                self.assertLess(time.monotonic() - t, 2.5)
+
+    def test_a_judgement_past_the_deadline_is_a_deny_when_it_names_a_guarded_path(self):
+        if not hasattr(guard.signal, "setitimer"):
+            self.skipTest("no setitimer")
+
+        def forever(payload, env):
+            while True:
+                pass
+
+        with mock.patch.object(guard, "decide", forever), mock.patch.object(guard, "DEADLINE", 0.2):
+            t = time.monotonic()
+            self.assertTrue(denied(guard._judge(json.dumps(bash(f"echo x > {DATA}/config.yaml")).encode(),
+                                                WORKER)))
+            self.assertIsNone(guard._judge(json.dumps(bash("echo x > /tmp/x")).encode(), WORKER))
+            self.assertLess(time.monotonic() - t, 2.5)
+        self.assertEqual(guard.signal.getitimer(guard.signal.ITIMER_REAL), (0.0, 0.0))  # the timer is off again
+
+    def test_the_harmless_redirects_match_v1(self):
+        v1 = re.compile(r"\d*>&\d+|&>>?\s*/dev/null|\d*>>?\s*/dev/null")
+        rnd = random.Random(7)
+        texts = ["2>&1>/dev/null", "12>&3", "x2>/dev/null", "&>>/dev/null", "1>&x", "2>&-", ">& 2", "9" * 50]
+        texts += ["".join(rnd.choice(["1", "2", ">", "&", " ", "/dev/null", "x", ">>"]) for _ in range(12))
+                  for _ in range(3000)]
+        for text in texts:
+            with self.subTest(text=text):
+                self.assertEqual(guard._harmless(text), v1.sub(" ", text))
 
     def test_the_write_forms_match_v1(self):
         """`_writes` finds what v1's one `_WRITE` regex finds, for the forms it splits out and the near misses."""
@@ -239,9 +364,17 @@ class DecideTest(unittest.TestCase):
                         r"write_text|\bchmod\b|\btouch\b)")
         for text in ("dd if=a of=b", "dd if=a & of=b", "of=b dd", "ddx of=b", "dd dd of=b", "x dd y of=z",
                      "open('f', 'w')", "open('f')", "open(f) , 'w'", "open(f, \"a\")", "open(f,  '+')",
-                     "open(open(f), 'w')", "f.write(x)", "sed -n -i s/a/b/ f", "perl -pi -e x f", "cat f", ""):
+                     "open(open(f), 'w')", "f.write(x)", "sed -n -i s/a/b/ f", "perl -pi -e x f", "cat f", "",
+                     "sed -in f", "sed  -n\t-i f", "sed -n f -i", "xsed -i f", "sed -sed -i", "a-sed -i", "sed -1 -i"):
             with self.subTest(text=text):
                 self.assertEqual(guard._writes(text), bool(v1.search(text)))
+        # The sed form, which `_writes` checks token by token, on random text.
+        sed = re.compile(r"\bsed\s+(-[a-zA-Z]*\s+)*-i")
+        rnd = random.Random(11)
+        for _ in range(5000):
+            text = "".join(rnd.choice(["sed", " ", "-", "i", "n", "x", "\t", "-i", "_", "1"]) for _ in range(10))
+            with self.subTest(text=text):
+                self.assertEqual(guard._writes(text), bool(v1.search(text)), sed.search(text))
 
     def test_the_package_root_is_the_one_workers_uses(self):
         self.assertEqual(guard.package_root(), workers_mod.package_root())
@@ -295,6 +428,15 @@ class CommandTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(denied(json.loads(r.stdout)))
         r = self.run_hook(deep.replace(str(self.data).encode(), b"/tmp/elsewhere"))
+        self.assertEqual((r.returncode, r.stdout), (0, b""))
+
+    def test_a_bash_payload_past_the_read_cap_is_denied(self):
+        """The write sits past the bytes `main` reads, so it is never seen: the length alone denies the call."""
+        cmd = "echo " + "a " * (guard.MAX_STDIN // 2) + f"> {self.data}/config.yaml"
+        r = self.run_hook(json.dumps(bash(cmd)).encode())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(denied(json.loads(r.stdout)))
+        r = self.run_hook(json.dumps({"tool_name": "Grep", "tool_input": {"pattern": cmd}}).encode())
         self.assertEqual((r.returncode, r.stdout), (0, b""))
 
     def test_a_closed_stdout_still_exits_0(self):
