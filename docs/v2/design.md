@@ -910,16 +910,20 @@ Calls the author made without asking (check them):
   - Per-project setup: `<data>/projects/<name>.yaml`, named by the card's `project` field, with v1's keys `repo`,
     `branch_pattern` (`{prefix}.{task}.{short}`), `branch_prefix`, `resources`, `health_checks`, `extra_hosts`,
     `mcp_servers`, and `tools` (the MCP tool names a session in the repo has). An unknown key is refused with its
-    line. A project that lists `tools` is used as is. When it lists none (or the card has no project), a card's
-    tool list is found at most once, by its first worker start, before any worker of the card has run: the way v1
-    does (`perms.discover_tools`: one `claude -p ... --output-format stream-json`, after the shadow-mode refusal,
-    under the worker list's lock) in the project's `repo` when it is a folder (the main checkout, as v1's
-    `ap perms write`), else in the worker's folder. The card keeps it (`sessions.<role>.tools`), and every later
-    start, resume or role of the card reuses it, so no session ever runs without the floor in a folder a worker
-    wrote (a planted `CLAUDE.md` or settings file). The outward MCP tools are always denied. If they cannot be
-    listed (no init event, claude failed or timed out), or a worker of the card ran and no list is kept, nothing
-    starts: the `WorkerError` says to list them in `projects/<name>.yaml` `tools`. On a dead worker's resume that
-    counts as its one resume; a parked worker is stopped as when its resume cannot start. An in-place resume first
+    line. The floor's tool list comes only from places no worker can change, and the session that finds it
+    (which runs with no floor) never runs in a folder a worker can write. A project that lists `tools` is used as
+    is, always first (`projects/**` is Edit-denied). When it lists none (or the card has no project), ap2 finds
+    them every time it writes a floor (start, `--resume`, answer, in-place resume) the way v1 does
+    (`perms.discover_tools`: one `claude -p ... --output-format stream-json`, after the shadow-mode refusal, under
+    the worker list's lock) in exactly one of two folders: the project's `repo` when it is a folder (the main
+    checkout, as v1's `ap perms write`), else a fresh empty temporary folder made for that one call and removed
+    right after (it finds the user-scope tools, all a card with no repo has). Never the worker's folder, never
+    `<data>`. No tool list is read from or saved on a card: a card is not trusted storage (`ap2 card add`, workers
+    and scans write cards). A start whose folder resolves to the project's `repo` itself is refused ("a worker
+    runs in a worktree, not in the project's repo <path>"), so no worker writes the folder the tools are found
+    in. The outward MCP tools are always denied. If they cannot be listed (no init event, claude failed or timed
+    out), nothing starts: the `WorkerError` says to list them in `projects/<name>.yaml` `tools`. On a dead
+    worker's resume that counts as its one resume; a parked worker is stopped as when its resume cannot start. An in-place resume first
     checks that the worker's folder is still there, so a gone worktree says "cannot start the session". The branch is the card's `branch`, else the pattern with the card's `key` (else its id) and the first
     three words of its title. The session gets them the way v1 passes setup: `--settings <run dir>/settings-<role>.json`
     (the permission floor: v1's outward-tool and Bash denials, plus `Edit` denials on the data folder's own files

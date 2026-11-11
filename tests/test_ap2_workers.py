@@ -405,86 +405,138 @@ class ProjectSetupTest(WorkerCase):
 
 class ToolDiscoveryTest(WorkerCase):
     """A project that lists no `tools` gets them the way v1 does (`perms.discover_tools`), so its outward MCP tools
-    are denied as well. The list is found once per card, by its first worker start, before any worker of the card
-    has run (so never in a folder a worker wrote); every later start, resume or role reuses it."""
+    are denied as well. The list comes only from places no worker can change: the project file, else a discovery
+    on every floor ap2 writes, in the project's `repo` (a folder no worker runs in) or a fresh empty folder. It is
+    never read from or saved on a card, and never found in the worker's folder or the data folder."""
 
-    FOUND = ["Read", "Bash", "mcp__slack__slack_send_message", "mcp__slack__slack_read_channel"]
+    def repo_project(self, name="bare", extra=""):
+        repo = self.tmp / "repo"
+        repo.mkdir(exist_ok=True)
+        (self.data / "projects").mkdir(exist_ok=True)
+        (self.data / "projects" / f"{name}.yaml").write_text(f"repo: {repo}\n{extra}")
+        return repo
+
+    def assert_found_elsewhere(self, calls):
+        """Each discovery ran in a folder that is neither under the worker's folder nor the data folder, and is
+        gone now."""
+        self.assertTrue(calls)
+        for c in calls:
+            where = Path(c["cwd"]).resolve()
+            for folder in (self.wt, self.data):
+                self.assertNotEqual(where, folder)
+                self.assertNotIn(folder, where.parents)
+            self.assertFalse(where.exists())
 
     def test_unlisted_tools_are_discovered_and_the_outward_ones_denied(self):
         cid = self.add_card()  # no project: no `tools` listed
         self.workers().start(cid, "implement", cwd=self.wt)
         found = self.discovery_calls()
         self.assertEqual(len(found), 1)
-        self.assertEqual(found[0]["cwd"], str(self.wt))
+        self.assert_found_elsewhere(found)
         self.assertEqual(found[0]["argv"][found[0]["argv"].index("--output-format") + 1], "stream-json")
         self.assertLess(self.calls().index(found[0]), self.calls().index(self.bg_calls()[0]))
         deny = self.deny(cid)
         self.assertIn("mcp__slack__slack_send_message", deny)
         self.assertNotIn("mcp__slack__slack_read_channel", deny)
         self.assertNotIn("Read", deny)
+        self.assertNotIn("tools", self.get(cid)["sessions"]["implement"])  # never saved on the card
 
-    def test_a_fresh_start_discovers_once_and_saves_the_list_on_the_card(self):
-        cid = self.add_card()
-        self.workers().start(cid, "implement", cwd=self.wt)
-        self.assertEqual(len(self.discovery_calls()), 1)
-        self.assertEqual(self.get(cid)["sessions"]["implement"]["tools"], self.FOUND)
-
-    def test_a_project_with_no_tools_listed_is_discovered_too(self):
+    def test_with_no_repo_folder_the_tools_are_found_in_a_fresh_empty_folder(self):
         (self.data / "projects").mkdir()
-        (self.data / "projects" / "bare.yaml").write_text("repo: /repos/bare\n")
-        cid = self.add_card(project="bare")
-        self.workers().start(cid, "implement", cwd=self.wt)
-        self.assertEqual(len(self.discovery_calls()), 1)
-        self.assertEqual(self.discovery_calls()[0]["cwd"], str(self.wt))  # its repo is not a folder here
-        self.assertIn("mcp__slack__slack_send_message", self.deny(cid))
+        (self.data / "projects" / "bare.yaml").write_text("repo: /repos/bare\n")  # not a folder here
+        seen = []
+        real = v1_perms.discover_tools
 
-    def test_the_list_is_found_in_the_projects_repo_when_it_is_a_folder(self):
-        repo = self.tmp / "repo"
-        repo.mkdir()
-        (self.data / "projects").mkdir()
-        (self.data / "projects" / "bare.yaml").write_text(f"repo: {repo}\n")
-        cid = self.add_card(project="bare")
-        self.workers().start(cid, "implement", cwd=self.wt)
-        self.assertEqual([c["cwd"] for c in self.discovery_calls()], [str(repo)])  # the main checkout, as v1
-        self.assertEqual(self.bg_calls()[0]["cwd"], str(self.wt))
+        def spy(claude, cwd):
+            seen.append((cwd, sorted(os.listdir(cwd))))
+            return real(claude, cwd)
 
-    def test_an_in_place_resume_reuses_the_saved_list(self):
+        with mock.patch.object(v1_perms, "discover_tools", side_effect=spy):
+            self.workers().start(self.add_card(project="bare"), "implement", cwd=self.wt)
+            self.workers().start(self.add_card(), "implement", cwd=self.data)  # no project; <data> as its folder
+        self.assertEqual([files for _cwd, files in seen], [[], []])  # empty when claude ran there
+        self.assertNotEqual(seen[0][0], seen[1][0])  # one folder per call
+        self.assert_found_elsewhere(self.discovery_calls())
+        self.assertEqual([c["cwd"] for c in self.bg_calls()], [str(self.wt), str(self.data)])
+
+    def test_every_floor_finds_the_tools_in_the_projects_repo(self):
+        repo = self.repo_project()
         w = self.workers()
-        a = self.start(w)
-        before = self.deny(a["card"])
+        a = w.start(self.add_card(project="bare"), "implement", cwd=self.wt)  # a fresh start
         self.drop_agent(a["short_id"])
-        # A worker may have planted files in its folder by now: a session there is never run without the floor.
-        with mock.patch.dict(os.environ, {"FAKE_TOOLS": "Read,mcp__Tracker__create_issue"}):
-            self.assertEqual(w.check()[0]["did"], "resumed")
-        self.assertEqual(len(self.discovery_calls()), 1)  # no second `claude -p`
-        self.assertEqual(self.deny(a["card"]), before)
-
-    def test_a_later_role_on_the_card_reuses_the_saved_list(self):
-        w = self.workers()
-        a = self.start(w)
-        before = self.deny(a["card"])
+        self.assertEqual(w.check()[0]["did"], "resumed")  # an in-place resume
         self.write_result(a["card"])
         self.assertEqual(w.check()[0]["did"], "ended")
-        with mock.patch.dict(os.environ, {"FAKE_TOOLS": "Read,mcp__Tracker__create_issue"}):
-            w.start(a["card"], "review", cwd=self.wt)  # the folder the implementer wrote
-        self.assertEqual(len(self.discovery_calls()), 1)
-        self.assertEqual(self.deny(a["card"], "review"), before)
-        self.assertEqual(len(self.bg_calls()), 2)
+        w.start(a["card"], "review", cwd=self.wt)  # a later role
+        self.write_result(a["card"], "question.json", {"text": "Which?"})
+        self.assertEqual(w.check()[0]["did"], "asked")
+        w.answer(a["card"], "This one.")  # an answer
+        self.assertEqual([c["cwd"] for c in self.discovery_calls()], [str(repo)] * 4)  # the main checkout, as v1
+        self.assertEqual({c["cwd"] for c in self.bg_calls()}, {str(self.wt)})
+        self.assertIn("mcp__slack__slack_send_message", self.deny(a["card"], "review"))
 
-    def test_a_card_whose_worker_ran_with_no_saved_list_is_refused(self):
+    def test_a_card_cannot_bring_its_own_tool_list(self):
         sid = "0b4c6f4e-0000-4000-8000-000000000001"
-        cid = self.add_card(sessions={"implement": {"id": sid, "ids": [sid], "cwd": str(self.wt)}})
-        with self.assertRaisesRegex(WorkerError, rf"^no saved tool list for card {cid}; give the card a project and "
-                                                 r"list the tools in its projects/<name>\.yaml `tools`$"):
-            self.workers().start(cid, "review", cwd=self.wt)
-        (self.data / "projects").mkdir()
-        (self.data / "projects" / "bare.yaml").write_text("repo: /repos/bare\n")
-        cid = self.add_card(project="bare", sessions={"implement": {"ids": [sid]}})
-        with self.assertRaisesRegex(WorkerError, rf"^no saved tool list for card {cid}; list the tools in "
-                                                 r"projects/bare\.yaml `tools`$"):
-            self.workers().start(cid, "implement", cwd=self.wt)
+        cid = self.add_card(sessions={"implement": {"tools": []}, "review": {"id": sid, "ids": [sid], "tools": []}})
+        w = self.workers()
+        w.start(cid, "implement", cwd=self.wt)
+        self.assertIn("mcp__slack__slack_send_message", self.deny(cid))
+        w.end(cid, "implement")
+        w.start(cid, "review", cwd=self.wt)  # a role of the card that ran before is not refused either
+        self.assertIn("mcp__slack__slack_send_message", self.deny(cid, "review"))
+        self.assertEqual(len(self.discovery_calls()), 2)
+
+    def test_another_cards_folder_is_never_where_the_tools_are_found(self):
+        w = self.workers()
+        a = self.start(w)  # card A's worker in the shared folder
+        (self.wt / "CLAUDE.md").write_text("planted\n")
+        (self.wt / ".claude").mkdir()
+        (self.wt / ".claude" / "settings.json").write_text("{}\n")
+        w.end(a["card"], "implement")
+        self.start(w)  # card B's first start in the same folder, no repo
+        self.assertEqual(len(self.discovery_calls()), 2)
+        self.assert_found_elsewhere(self.discovery_calls())
+
+    def test_a_worker_never_runs_in_the_projects_repo(self):
+        repo = self.repo_project()
+        link = self.tmp / "link"
+        link.symlink_to(repo)
+        cid = self.add_card(project="bare")
+        for cwd in (repo, link):
+            with self.assertRaisesRegex(WorkerError, rf"^a worker runs in a worktree, not in the project's repo "
+                                                     rf"{re.escape(str(repo))}$"):
+                self.workers().start(cid, "implement", cwd=cwd)
         self.assertEqual((self.discovery_calls(), self.bg_calls()), ([], []))
         self.assertEqual(resources.Registry(self.data).read(), [])
+
+    def test_a_project_that_lists_tools_always_wins(self):
+        self.repo_project()
+        w = self.workers()
+        a = w.start(self.add_card(project="bare"), "implement", cwd=self.wt)
+        self.assertEqual(len(self.discovery_calls()), 1)
+        w.end(a["card"], "implement")
+        self.repo_project(extra="tools: [mcp__Tracker__create_issue]\n")
+        w.start(a["card"], "review", cwd=self.wt)
+        self.assertEqual(len(self.discovery_calls()), 1)  # no new `claude -p`
+        deny = self.deny(a["card"], "review")
+        self.assertIn("mcp__Tracker__create_issue", deny)
+        self.assertNotIn("mcp__slack__slack_send_message", deny)
+
+    def test_an_in_place_resume_lists_the_tools_again(self):
+        (self.data / "projects").mkdir()
+        (self.data / "projects" / "shop.yaml").write_text("tools: [mcp__Tracker__read_issue]\n")
+        cid = self.add_card(project="shop")
+        w = self.workers()
+        a = w.start(cid, "implement", cwd=self.wt)
+        self.assertEqual(self.discovery_calls(), [])
+        (self.data / "projects" / "shop.yaml").write_text("repo: /repos/shop\n")  # its tools no longer listed
+        self.drop_agent(a["short_id"])
+        with mock.patch.dict(os.environ, {"FAKE_TOOLS": "Read,mcp__Tracker__create_issue"}):
+            self.assertEqual(w.check()[0]["did"], "resumed")
+        self.assertEqual(len(self.discovery_calls()), 1)
+        self.assert_found_elsewhere(self.discovery_calls())
+        self.assertIn("mcp__Tracker__create_issue", self.deny(cid))
+        self.assertEqual(len(self.bg_calls()), 2)
 
     def test_a_failed_discovery_starts_nothing(self):
         cid = self.add_card()
@@ -497,33 +549,32 @@ class ToolDiscoveryTest(WorkerCase):
         self.assertEqual(self.bg_calls(), [])
         self.assertEqual(resources.Registry(self.data).read(), [])
 
-    def test_a_resume_with_no_saved_list_counts_as_a_death(self):
+    def test_a_failed_discovery_on_a_dead_workers_resume_counts_as_its_one_resume(self):
         w = self.workers()
         a = self.start(w)
-        sessions = self.get(a["card"])["sessions"]
-        del sessions["implement"]["tools"]  # e.g. a card from before the list was kept
-        Store(self.data, self.cfg, self.clock).update(a["card"], {"sessions": sessions}, by="test")
         self.drop_agent(a["short_id"])
-        out = w.check()[0]
+        with mock.patch.dict(os.environ, {"FAKE_TOOLS_FAIL": "1"}):
+            out = w.check()[0]
         self.assertEqual((out["state"], out["did"]), ("dead", "nothing"))
-        self.assertIn(f"no saved tool list for card {a['card']}", out["note"])
-        self.assertEqual(len(self.discovery_calls()), 1)  # never listed again in the worker's folder
+        self.assertIn("cannot list the session's tools", out["note"])
         self.assertEqual(len(self.bg_calls()), 1)  # never resumed without its floor
         self.assertEqual(resources.Registry(self.data).read()[0]["resumes"], 1)
         self.assertEqual(w.check()[0]["did"], "stopped")
 
-    def test_an_in_place_resume_never_lists_the_tools(self):
-        (self.data / "projects").mkdir()
-        (self.data / "projects" / "shop.yaml").write_text("tools: [mcp__Tracker__read_issue]\n")
-        cid = self.add_card(project="shop")
-        with mock.patch("autopilot.sessions.list_all", return_value=[]):  # no session id reaches the card
-            a = self.workers().start(cid, "implement", cwd=self.wt)
-        (self.data / "projects" / "shop.yaml").write_text("repo: /repos/shop\n")  # its tools no longer listed
-        self.drop_agent(a["short_id"])
-        out = self.workers().check()[0]
-        self.assertEqual((out["state"], out["did"]), ("dead", "nothing"))
-        self.assertIn(f"no saved tool list for card {cid}", out["note"])
-        self.assertEqual((self.discovery_calls(), len(self.bg_calls())), ([], 1))
+    def test_a_parked_worker_whose_discovery_fails_is_stopped(self):
+        w = self.workers()
+        a = self.start(w)
+        w.park(a["card"], "implement", "x", usage_file=usage_file(self.tmp / "u.json", 95))
+        self.clock.advance(4 * 60)
+        fresh = usage_file(self.tmp / "fresh.json", 3, resets_at="2026-01-05T17:00:00+00:00", fetched=self.clock())
+        with mock.patch.dict(os.environ, {"FAKE_TOOLS_FAIL": "1"}):
+            out = w.check(usage_file=fresh)[0]
+        self.assertEqual((out["state"], out["did"]), ("parked", "stopped"))
+        self.assertIn("cannot list the session's tools", out["note"])
+        c = self.get(a["card"])
+        self.assertEqual((c["ask"]["type"], c["ask"]["reason"]), ("fix", DIED))
+        self.assertEqual(len(self.bg_calls()), 1)
+        self.assertEqual(resources.Registry(self.data).read(), [])
 
     def test_a_failed_discovery_names_the_cards_project_file(self):
         (self.data / "projects").mkdir()
@@ -543,8 +594,10 @@ class ToolDiscoveryTest(WorkerCase):
         a = self.start(w)
         self.drop_agent(a["short_id"])
         with mock.patch.object(v1_perms, "discover_tools", side_effect=timeout) as found:
-            self.assertEqual(w.check()[0]["did"], "resumed")  # the resume reuses the saved list
-        found.assert_not_called()
+            out = w.check()[0]
+        found.assert_called_once()
+        self.assertEqual((out["did"], len(self.bg_calls())), ("nothing", 1))  # counts as its one resume
+        self.assertEqual(resources.Registry(self.data).read()[0]["resumes"], 1)
 
     def test_a_missing_claude_starts_nothing(self):
         cid = self.add_card()  # no project: no `tools` listed, so they must be discovered
@@ -1526,6 +1579,7 @@ class ShadowModeTest(WorkerCase):
         self.assertEqual((out["state"], out["did"]), ("dead", "nothing"))
         self.assertIn("shadow mode", out["note"])
         self.assertEqual(len(self.bg_calls()), 1)
+        self.assertEqual(len(self.discovery_calls()), 1)  # the refusal comes first: no `claude -p` in shadow mode
         self.assertEqual(resources.Registry(self.data).read()[0].get("resumes", 0), 0)  # a refusal is no resume
         self.assertEqual(self.workers().check()[0]["did"], "nothing")
 

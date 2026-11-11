@@ -10,8 +10,8 @@ Keys (every one optional):
 - `extra_hosts`: host names a worker may reach besides the usual ones.
 - `mcp_servers`: MCP server names the project's workers use.
 - `tools`: the MCP tool names a session in the repo has; the outward ones are denied in the worker's permission
-  floor. When none are listed, a card's first worker start finds them the way v1's `ap perms write` does
-  (`perms.discover_tools`, in `workers.py`) and the card keeps them for its later starts.
+  floor. When none are listed, every floor a worker gets finds them the way v1's `ap perms write` does
+  (`perms.discover_tools`, in `workers.py`): in `repo` when it is a folder, else in a fresh empty folder.
 
 Nothing here writes; a missing file is the defaults.
 """
