@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -77,7 +78,12 @@ class Ap2PhoneCommandTest(unittest.TestCase):
         r = self.run_ap2("phone", "build", "--out", str(out))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout, b"")
-        self.assertEqual(out.read_bytes(), shown.stdout)
+        # The two runs read the clock separately and may straddle a second, so mask the one clock field first.
+        clock = re.compile(rb'"generated_at": "[^"]*"')
+        written = out.read_bytes()
+        self.assertEqual(len(clock.findall(shown.stdout)), 1, shown.stdout)
+        self.assertEqual(len(clock.findall(written)), 1, written)
+        self.assertEqual(clock.sub(b'"generated_at": "X"', written), clock.sub(b'"generated_at": "X"', shown.stdout))
         self.assertEqual(sorted(p.name for p in self.tmp.iterdir()), ["data", "home", "phone.json"])  # no temp left
 
     def test_out_replaces_an_old_file_and_may_sit_in_the_data_folder(self):
