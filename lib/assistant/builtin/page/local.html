@@ -295,6 +295,7 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     "q.pending": "Saved. Your Mac answers it when question answering is turned on.",
     "q.none": "No questions yet.",
     "q.failed": "Not saved:",
+    "q.refused": "Not saved: this card cannot take a question yet (for example, its plain words are not written in every language).",
     "act.restore": "restore point {id}",
     "sources.hint": "Where cards come from: the built-in files, and your own in the data folder's sources/.",
     "sources.pick": "Pick a source to see it here.",
@@ -339,7 +340,8 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     "settings.disk": "Disk use",
     "settings.total": "Total",
     "settings.unset": "not set",
-    "error.load": "Could not load:"
+    "error.load": "Could not load:",
+    "error.offline": "The local server is not answering. Is ap2 serve running?"
   },
   "zh": {
     "app.name": "助理",
@@ -424,6 +426,7 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     "q.pending": "已保存。开启问题回答后，你的 Mac 会回答它。",
     "q.none": "还没有提问。",
     "q.failed": "没有保存：",
+    "q.refused": "没有保存：这张卡片现在还不能提问（比如它的白话说明还没有写全所有语言）。",
     "act.restore": "恢复点 {id}",
     "sources.hint": "卡片从哪里来：内置的文件，以及数据文件夹 sources/ 里你自己的文件。",
     "sources.pick": "选一个来源，在这里查看。",
@@ -468,7 +471,8 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     "settings.disk": "磁盘占用",
     "settings.total": "合计",
     "settings.unset": "未设置",
-    "error.load": "加载失败："
+    "error.load": "加载失败：",
+    "error.offline": "本地服务器没有响应。ap2 serve 在运行吗？"
   }
 }
 </script>
@@ -543,7 +547,15 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
 
   // --- data -----------------------------------------------------------------------------------------------------
   async function api(path, opts) {
-    const r = await fetch(path, Object.assign({cache: 'no-store', credentials: 'same-origin'}, opts || {}));
+    let r;
+    try {
+      r = await fetch(path, Object.assign({cache: 'no-store', credentials: 'same-origin'}, opts || {}));
+    } catch (e) {
+      // The browser's own words for a dead connection are English only; say it in the page's language instead.
+      const err = new Error(L('error.offline'));
+      err.offline = true;
+      throw err;
+    }
     let body = null;
     try { body = await r.json(); } catch (e) { body = null; }
     if (!r.ok) {
@@ -766,7 +778,7 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
         h('div', {class: 'muted mono'}, timeEl(q.at)), answer));
     }
     const input = h('input', {type: 'text', maxlength: QUESTION_MAX, placeholder: L('q.placeholder'), 'aria-label': L('q.placeholder')});
-    const status = h('p', {class: 'warn', role: 'status', hidden: true});
+    const status = h('div', {class: 'warn', role: 'status', hidden: true});
     const send = async () => {
       if (button.disabled) return;  // a second Enter while the first question is still posting
       const value = input.value;
@@ -779,7 +791,9 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
         // Only while the page still shows this card: a reply after the reader moved on must not draw it there.
         if (S.route && S.route.name === 'card' && S.route.arg === card.id) await loadCard(card.id);
       } catch (e) {
-        status.textContent = L('q.failed') + ' ' + e.message;
+        // A refusal's reason is the store's own English words: a label in the page's language, the reason under it.
+        if (e.status === 409) status.replaceChildren(h('p', {text: L('q.refused')}), h('p', {class: 'mono', text: e.message}));
+        else status.replaceChildren(h('p', {text: L('q.failed') + ' ' + e.message}));
         status.hidden = false;
       } finally { button.disabled = false; }
     };

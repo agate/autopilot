@@ -1023,6 +1023,20 @@ class PageTest(ServerCase):
         self.assertIn("/^user, extends (.+)$/", text)
         self.assertRegex(text, r"""L\('origin\.extends', \{name: """)
 
+    def test_the_pages_error_lines_stay_in_its_language(self):
+        text = PAGE.read_text(encoding="utf-8")
+        labels = json.loads(re.search(r'<script type="application/json" id="labels">(.*?)</script>', text,
+                                      re.S).group(1))
+        for lang in ("en", "zh"):
+            for key in ("error.offline", "q.refused"):
+                with self.subTest(lang=lang, key=key):
+                    self.assertIn(key, labels[lang])
+        # A fetch that never reaches the server is reported with a label, not the browser's English words.
+        self.assertRegex(text, r"""\} catch \(e\) \{[^}]*new Error\(L\('error\.offline'\)\)""")
+        # A refused question shows a label, with the store's reason as a separate diagnostic line.
+        self.assertIn("if (e.status === 409) status.replaceChildren(h('p', {text: L('q.refused')}), "
+                      "h('p', {class: 'mono', text: e.message}))", text)
+
     def test_the_pages_search_caps_match_the_servers(self):
         text = PAGE.read_text(encoding="utf-8")
         self.assertIn(f"const SEARCH_MAX_CHARS = {server.SEARCH_MAX_CHARS};", text)
