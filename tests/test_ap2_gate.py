@@ -5,6 +5,7 @@ Every test injects the time; none sleeps or reads the machine's time zone (each 
 from __future__ import annotations
 
 import builtins
+import dataclasses
 import errno
 import json
 import os
@@ -940,6 +941,115 @@ class ChangedZoneTest(GateCase):
         with self.assertRaises(routines.RoutineError) as cm:
             routines.load(p)
         self.assertTrue(str(cm.exception).startswith(f"{p}: last_slot_tz:"), str(cm.exception))
+
+
+class MovedIntoRepeatedHourTest(GateCase):
+    """A `tz` change whose moved slot lands in the second pass of the hour the clocks go back. Chicago 01:30 (CDT)
+    on 2026-11-01 is 06:30 UTC, which is New York 01:30 (EST), the second time New York reads 01:30 that night.
+    The 01:45 slot first happens at 05:45 UTC, before that run, so it must not run; 02:00 (07:00 UTC) must."""
+    NY = "America/New_York"
+    AT = ["01:30", "01:45", "02:00"]
+    MOMENT = utc(2026, 11, 1, 6, 30)
+
+    def put_moved(self, name="digest", **over) -> Path:
+        fields = dict(tz=self.NY, schedule={"days": "daily", "at": self.AT}, last_slot="2026-11-01T01:30",
+                      last_slot_tz="America/Chicago")
+        fields.update(over)
+        return self.put(name, **fields)
+
+    # criterion 1: the moved moment is kept
+
+    def test_a_moved_slot_keeps_its_exact_moment(self):
+        r = routines.load(self.put_moved())
+        self.assertEqual(r.last_slot, "2026-11-01T01:30")
+        self.assertEqual(r.moved_at, self.MOMENT)
+        self.assertEqual(r.moved_at.utcoffset(), timedelta(0))
+        self.assertEqual(r.moved_from, "2026-11-01T01:30 in America/Chicago")
+        west = routines.load(self.put("west", tz=LA, last_slot="2026-11-10T09:00", last_slot_tz=self.NY))
+        self.assertEqual((west.last_slot, west.moved_at), ("2026-11-10T06:00", utc(2026, 11, 10, 14, 0)))
+
+    def test_a_slot_that_was_not_moved_has_no_moment(self):
+        for label, over in (("no last_slot_tz", {"last_slot_tz": None}), ("no key", {}),
+                            ("same zone", {"last_slot_tz": self.NY}),
+                            ("no last_slot", {"last_slot": None})):
+            with self.subTest(label):
+                fields = dict(tz=self.NY, schedule={"days": "daily", "at": self.AT}, last_slot="2026-11-01T01:30")
+                if label == "no last_slot":
+                    fields["last_slot_tz"] = "America/Chicago"
+                fields.update(over)
+                r = routines.load(self.put(**fields))
+                self.assertIsNone(r.moved_at)
+                self.assertIsNone(r.moved_from)
+
+    # criterion 2: due skips a slot whose moment is not after the moved moment
+
+    def test_a_slot_whose_first_pass_came_before_the_move_is_not_due(self):
+        r = routines.load(self.put_moved())
+        self.assertIsNone(routines.due(r, utc(2026, 11, 1, 6, 46)))
+        d = routines.due(r, utc(2026, 11, 1, 7, 1))
+        self.assertEqual((d.slot, d.at, d.action, d.late_by),
+                         ("2026-11-01T02:00", utc(2026, 11, 1, 7, 0), "run", timedelta(minutes=1)))
+
+    def test_a_slot_at_the_moved_moment_is_not_due_and_one_after_it_is(self):
+        # The 01:45 slot is 05:45 UTC. A moment at it means the slot ran; a moment a minute before it means it did not.
+        r = routines.load(self.put_moved())
+        now = utc(2026, 11, 1, 6, 46)
+        self.assertIsNone(routines.due(dataclasses.replace(r, moved_at=utc(2026, 11, 1, 5, 45)), now))
+        d = routines.due(dataclasses.replace(r, moved_at=utc(2026, 11, 1, 5, 44)), now)
+        self.assertEqual((d.slot, d.action), ("2026-11-01T01:45", "late"))
+
+    # criterion 3: nothing changes without a move
+
+    def test_the_same_schedule_with_no_move_gives_the_base_result(self):
+        want = routines.Due("2026-11-01T01:45", utc(2026, 11, 1, 5, 45), "late", timedelta(minutes=61))
+        for label, over in (("no last_slot_tz", {"last_slot_tz": None}), ("same zone", {"last_slot_tz": self.NY})):
+            with self.subTest(label):
+                r = routines.load(self.put_moved(**over))
+                self.assertEqual(routines.due(r, utc(2026, 11, 1, 6, 46)), want)
+                self.assertEqual(routines.slot_at(r), utc(2026, 11, 1, 5, 30))  # fold 0, as before
+
+    def test_a_move_west_still_runs_the_new_zones_slot(self):
+        # Eastern 09:00 is Pacific 06:00: the moment is 14:00 UTC and the Pacific 09:00 slot (17:00 UTC) is after it.
+        r = routines.load(self.put(tz=LA, last_slot="2026-11-10T09:00", last_slot_tz=self.NY))
+        self.assertEqual(routines.due(r, utc(2026, 11, 10, 17, 1)).action, "run")
+
+    # criterion 4: the clock-went-back check uses the real moment
+
+    def test_slot_at_is_the_moved_moment(self):
+        self.assertEqual(routines.slot_at(routines.load(self.put_moved())), self.MOMENT)
+
+    def test_the_clock_went_back_check_compares_the_moved_moment(self):
+        p = self.put_moved()
+        before = p.read_bytes()
+        out = self.gate(utc(2026, 11, 1, 6, 28))  # the moment is 2 minutes ahead: inside the grace
+        self.assertEqual((out["routines"], out["errors"]), ([], []))
+        self.assertEqual(p.read_bytes(), before)
+        for now in (utc(2026, 11, 1, 5, 30), utc(2026, 11, 1, 5, 0)):  # 60 and 90 minutes ahead
+            with self.subTest(now=now):
+                out = self.gate(now)
+                self.assertEqual(out["routines"], [])
+                msg = (f"{p}: last_slot 2026-11-01T01:30 in America/Chicago (2026-11-01T01:30 in {self.NY}) is "
+                       f"later than now ({cards.stamp(now)}); the clock may have gone back. Set last_slot to null "
+                       f"or an earlier slot to run it again.")
+                self.assertEqual(out["errors"], [{"routine": "digest", "file": str(p), "error": msg}])
+                self.assertEqual(p.read_bytes(), before)
+
+    # criterion 5: the gate run agrees
+
+    def test_the_gate_runs_no_slot_twice_across_the_move(self):
+        p = self.put_moved()
+        before = p.read_bytes()
+        out = self.gate(utc(2026, 11, 1, 6, 46))
+        self.assertEqual((out["routines"], out["errors"]), ([], []))
+        self.assertEqual(self.routine_cards(), [])
+        self.assertEqual(p.read_bytes(), before)
+        out = self.gate(utc(2026, 11, 1, 7, 1))
+        self.assertEqual([(f["slot"], f["action"]) for f in out["routines"]], [("2026-11-01T02:00", "run")])
+        self.assertEqual(out["errors"], [])
+        self.assertEqual([c["key"] for c in self.routine_cards()], ["digest@2026-11-01T02:00"])
+        obj = self.file()
+        self.assertEqual((obj["last_slot"], obj["last_slot_tz"]), ("2026-11-01T02:00", self.NY))
+        self.assertEqual(self.gate(utc(2026, 11, 1, 7, 2))["routines"], [])
 
 
 class FatalLineTest(GateCase):

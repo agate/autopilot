@@ -62,6 +62,9 @@ class Routine:
     # When `last_slot` was moved from the file's `last_slot_tz` to `tz`: the file's text and that old zone, such as
     # "2026-11-11T09:00 in Asia/Tokyo". None when `last_slot` is the file's text as it is.
     moved_from: Optional[str] = None
+    # With `moved_from`: the exact UTC moment of the file's `last_slot` in its old zone. The moved text alone can
+    # name a time that happens twice in `tz` (the hour the clocks go back); this says which one. None otherwise.
+    moved_at: Optional[datetime] = None
 
     def within(self) -> Optional[timedelta]:
         """How late a missed slot may still run: None for `once` (any time), zero for `skip`."""
@@ -178,32 +181,34 @@ def parse(path: Path, obj) -> Routine:
     if text is not None and not check_slot(text):
         _fail(path, "last_slot", f"last_slot must be a YYYY-MM-DDTHH:MM time or null, not {text!r}")
     last_tz = obj.get("last_slot_tz")
-    last = _in_zone(path, text, last_tz, obj["tz"], tz)
+    last, moved_at = _in_zone(path, text, last_tz, obj["tz"], tz)
     moved_from = f"{text} in {last_tz}" if text is not None and last_tz not in (None, obj["tz"]) else None
     paused = obj.get("paused", False)
     if not isinstance(paused, bool):
         _fail(path, "paused", f"paused must be true or false, not {paused!r}")
     return Routine(name=name, path=path, title=title, days=days, at=at, tz_name=obj["tz"], tz=tz,
-                   missed_run=missed, last_slot=last, paused=paused, moved_from=moved_from)
+                   missed_run=missed, last_slot=last, paused=paused, moved_from=moved_from, moved_at=moved_at)
 
 
-def _in_zone(path: Path, last: Optional[str], last_tz, tz_name: str, tz) -> Optional[str]:
-    """`last_slot` as a slot in the routine's zone. A file whose `last_slot_tz` names another zone (the user changed
-    `tz`) has its slot read as a wall time in that old zone and written again as wall-clock text in `tz`, so a move
-    west does not skip slots. No `last_slot_tz` (a file from before it was saved) means the slot is already in `tz`.
-    The file itself is changed only by the next `write_last_slot`."""
+def _in_zone(path: Path, last: Optional[str], last_tz, tz_name: str, tz):
+    """`(slot, moment)`: `last_slot` as a slot in the routine's zone, and its UTC moment when it was moved (else
+    None). A file whose `last_slot_tz` names another zone (the user changed `tz`) has its slot read as a wall time in
+    that old zone and written again as wall-clock text in `tz`, so a move west does not skip slots; the text and the
+    moment come from that one reading. No `last_slot_tz` (a file from before it was saved) means the slot is already
+    in `tz`. The file itself is changed only by the next `write_last_slot`."""
     if last_tz is not None and not isinstance(last_tz, str):
         _fail(path, "last_slot_tz", f"last_slot_tz must be an IANA time zone name or null, not {last_tz!r}")
     if last_tz is None or last_tz == tz_name:
-        return last
+        return last, None
     try:
         old = ZoneInfo(last_tz)
     except (ZoneInfoNotFoundError, ValueError, OSError):
         _fail(path, "last_slot_tz", f"not a known IANA time zone name: {last_tz!r}")
     if last is None:
-        return None
+        return None, None
     try:
-        return slot_time(datetime.strptime(last, SLOT_FORMAT), old).astimezone(tz).strftime(SLOT_FORMAT)
+        moment = slot_time(datetime.strptime(last, SLOT_FORMAT), old)
+        return moment.astimezone(tz).strftime(SLOT_FORMAT), moment
     except OverflowError:  # e.g. year 9999 west of UTC: past the end of the calendar Python can hold
         _fail(path, "last_slot", f"{last} in {last_tz} cannot be moved to {tz_name}: it is out of range")
 
@@ -264,9 +269,11 @@ def slot_time(wall: datetime, tz) -> datetime:
 
 
 def slot_at(r: Routine) -> datetime:
-    """The UTC time of `r.last_slot` (which must be set), read as a wall time in the routine's zone. A slot at the
-    very ends of the calendar (year 1 east of UTC, year 9999 west of it) has no UTC time; it is the earliest or the
-    latest time there is."""
+    """The UTC time of `r.last_slot` (which must be set): its moment when it was moved from another zone, else read
+    as a wall time in the routine's zone. A slot at the very ends of the calendar (year 1 east of UTC, year 9999 west
+    of it) has no UTC time; it is the earliest or the latest time there is."""
+    if r.moved_at is not None:
+        return r.moved_at
     wall = datetime.strptime(r.last_slot, SLOT_FORMAT)
     try:
         return slot_time(wall, r.tz)
@@ -296,7 +303,8 @@ def latest_slot(r: Routine, now: datetime):
 
 def due(r: Routine, now: datetime, grace: timedelta = GRACE) -> Optional[Due]:
     """What the gate must do for `r` at `now`, or None. Only the latest slot is considered, so a Mac that slept
-    through several slots runs at most one of them."""
+    through several slots runs at most one of them. After a `tz` change, a slot at or before the moved moment has
+    already passed, even when its text is later (a move into the second pass of the hour the clocks go back)."""
     if r.paused:
         return None
     latest = latest_slot(r, now)
@@ -304,6 +312,8 @@ def due(r: Routine, now: datetime, grace: timedelta = GRACE) -> Optional[Due]:
         return None
     slot, at = latest
     if r.last_slot is not None and slot <= r.last_slot:
+        return None
+    if r.moved_at is not None and at <= r.moved_at:
         return None
     late_by = now - at
     if late_by <= grace:
