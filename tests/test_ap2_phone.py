@@ -331,12 +331,14 @@ class ScrubTest(PhoneCase):
         asked = self.ask(f"看{self.data}里的日志")
         self.assertEqual(self.build()["full"][asked["id"]]["card"]["ask"]["text"], "看<data>里的日志")
 
-    def test_a_data_path_after_a_flag_becomes_data_but_not_inside_a_longer_path(self):
+    def test_a_data_path_after_a_flag_or_inside_a_longer_path_becomes_data(self):
         flag = self.ask(f"ld: -L{self.data}/runs not found")
         inside = self.ask(f"copied to /Volumes/Backup+{self.data}/g")
+        two = self.ask(f"看{self.data}/a和{self.data}/b")
         full = self.build()["full"]
         self.assertEqual(full[flag["id"]]["card"]["ask"]["text"], "ld: -L<data>/runs not found")
-        self.assertEqual(full[inside["id"]]["card"]["ask"]["text"], f"copied to /Volumes/Backup+{self.data}/g")
+        self.assertEqual(full[inside["id"]]["card"]["ask"]["text"], "copied to /Volumes/Backup+<data>/g")
+        self.assertEqual(full[two["id"]]["card"]["ask"]["text"], "看<data>/a和<data>/b")
 
     def test_an_ask_text_that_is_not_a_string_has_each_string_scrubbed(self):
         per_lang = self.ask({"en": f"see {self.data}/x", "zh": f"看 {self.data}/x",
@@ -358,10 +360,14 @@ class ScrubTest(PhoneCase):
         other = self.ask(f"see {real}/worktrees/b/log.txt, and {real}")
         sibling = self.ask(f"{real}y/worktrees/c is not under home")
         kept = {f"{real}.old/a": f"{real}.old/a", f"{real}+old/a": f"{real}+old/a",
-                f"/mnt/backup{real}/a": f"/mnt/backup{real}/a", f"see {real}.": "see ~.",
+                f"/mnt/backup{real}/a": "/mnt/backup~/a", f"see {real}.": "see ~.",
                 f"请看{home}/worktrees/c 的日志": "请看~/worktrees/c 的日志",
                 f"clang -I{home}/a/include": "clang -I~/a/include", f"see _{real}/a_": "see _~/a_",
-                f"file://{real}/a": "file://~/a", f"HOME={home}/a": "HOME=~/a"}
+                f"file://{real}/a": "file://~/a", f"HOME={home}/a": "HOME=~/a",
+                f"已把{home}/a改成{home}/b": "已把~/a改成~/b", f"{home}/a、{home}/b": "~/a、~/b",
+                f"cd {home}/w&&{home}/bin/run": "cd ~/w&&~/bin/run", f"mv /tmp/a {home}/b": "mv /tmp/a ~/b",
+                f"PATH=/usr/bin:{home}/bin": "PATH=/usr/bin:~/bin", f"/opt/a,{home}/b;{home}/c": "/opt/a,~/b;~/c",
+                f"{real}/repo{real}/repo/a": "~/repo~/repo/a", f"file://localhost{real}/a": "file://localhost~/a"}
         rows = {text: self.ask(text) for text in kept}
         with mock.patch.dict(os.environ, {"HOME": str(home)}):
             full = self.build()["full"]
@@ -372,6 +378,13 @@ class ScrubTest(PhoneCase):
                          "then start it again")
         self.assertEqual(full[other["id"]]["card"]["ask"]["text"], "see ~/worktrees/b/log.txt, and ~")
         self.assertEqual(full[sibling["id"]]["card"]["ask"]["text"], f"{real}y/worktrees/c is not under home")
+
+    def test_many_home_paths_in_one_text_are_all_replaced(self):
+        home = self.tmp / "Users" / "x"
+        home.mkdir(parents=True)
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            scrub = phone._Scrub(self.data)
+        self.assertEqual(scrub(f"{home}/a " * 20000), "~/a " * 20000)
 
     def test_a_data_folder_under_home_is_data_not_a_tilde_path(self):
         card = self.bad_template_and_gate()

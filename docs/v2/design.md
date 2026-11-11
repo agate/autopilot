@@ -1362,15 +1362,17 @@ Calls the author made without asking (check them):
     page (`GET /api/cards/<id>`, `/api/state`) keep the full paths.
     - **[decided by the builder]** A path outside the data and home folders (`/private/var/...`, `/tmp/...`)
       stays as it is: it names neither the user nor the data folder's place. Easy to add later.
-    - **[decided by the builder]** A folder's path is replaced only as a whole path name: no ASCII name
-      character (a letter, digit, `_ - + @ ~ $ % # =`, or a dot and one) may come next, so home `/Users/x`
-      does not change `/Users/xy/...` or `/Users/x.old/...`. It is left alone only when it continues a longer
-      path, that is the text just before it is a `/` and a name (`/mnt/backup/Users/x`); after a flag or a word
-      (`-I/Users/x/a`, `请看/Users/x`) it is replaced. Text in another script (Chinese) right next to a path does
-      not stop it, so a folder `/Users/xé` would read `~é`: a wrong name, never a leak. An ask text that is not
-      a string (an object per language, a list) has each of its strings scrubbed, an object's keys and values
-      alike. A home of `/` (or none found) changes nothing. The data folder goes
+    - **[decided by the builder]** A folder's path is replaced only as a whole name on its right side: no
+      ASCII name character (a letter, digit, `_ - + @ ~ $ % # =`, or a dot and one) may come next, so home
+      `/Users/x` does not change `/Users/xy/...` or `/Users/x.old/...`. Text in another script (Chinese) right
+      next to a path does not stop it, so a folder `/Users/xé` would read `~é`: a wrong name, never a leak. An
+      ask text that is not a string (an object per language, a list) has each of its strings scrubbed, an
+      object's keys and values alike. A home of `/` (or none found) changes nothing. The data folder goes
       first, so a data folder under home reads `<data>`, not `~/...`.
+    - **[decided by the builder]** On its left side there is no exception: a folder's path is replaced wherever
+      it sits, also inside a longer path, so `/mnt/backup/Users/x/a` reads `/mnt/backup~/a` and
+      `/Users/x/repo/Users/x/repo/a` reads `~/repo~/repo/a`. The folder's path in any spot still names the user or the data folder's place; a path
+      that looks odd is a wrong label, never a leak; and each left-side rule tried let a realistic text through.
     - **[decided by the builder]** Only these three texts are scrubbed; a card's own words (its title, plain
       words, questions) are what a person or a source wrote and stay as they are.
   - Read-only, in shadow and live mode alike: building writes nothing in the data folder (it reads the store
