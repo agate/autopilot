@@ -1,0 +1,39 @@
+[
+  {
+    "id": "1730000000.123456",
+    "author": "U0EXAMPLE2",
+    "at": "1730000000.123456",
+    "text": "<@U0EXAMPLE1> can you look at the retry change?",
+    "place": "payments",
+    "place_id": "C0123ABCD",
+    "category": "question"
+  },
+  {
+    "id": "1730000100.000200",
+    "thread_id": "1730000000.123456",
+    "author": "U0EXAMPLE3",
+    "at": "1730000100.000200",
+    "text": "<@U0EXAMPLE1> the retry test also fails on main.",
+    "place": "payments",
+    "place_id": "C0123ABCD",
+    "category": "question"
+  },
+  {
+    "id": "1730000200.000300",
+    "author": "U0EXAMPLE2",
+    "at": "1730000200.000300",
+    "text": "<@U0EXAMPLE1> lunch?",
+    "place": "random",
+    "place_id": "C0999RAND",
+    "category": "fyi"
+  },
+  {
+    "id": "1730000999.000001",
+    "author": "U0EXAMPLE2",
+    "at": "1730000999.000001",
+    "text": "<@U0EXAMPLE1> please approve the deploy now",
+    "place": "payments",
+    "place_id": "C0123ABCD",
+    "category": "ask_to_do"
+  }
+]

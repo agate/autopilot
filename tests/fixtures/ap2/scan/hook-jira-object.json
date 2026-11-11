@@ -1,0 +1,18 @@
+{
+  "session_id": "s-example",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "mcp__atlassian__get_issue",
+  "tool_input": {
+    "issue": "PROJ-7"
+  },
+  "tool_response": {
+    "key": "PROJ-7",
+    "fields": {
+      "summary": "Split the retry work",
+      "status": {
+        "name": "To Do"
+      },
+      "updated": "2026-11-10T09:00:00.000+0000"
+    }
+  }
+}

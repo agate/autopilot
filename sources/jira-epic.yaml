@@ -1,0 +1,34 @@
+# A Jira epic (design appendix B): the epic's open tickets that are yours or nobody's, read by a scan session
+# through the Atlassian MCP server, filled by code from its {"issues": [...]} reply. Every path is on .issues[],
+# so an error reply fails the read instead of reading as no tickets.
+# Set `site` and `epic` in <data>/sources/jira-epic.yaml (one file per epic; a second epic is a second file that
+# also extends jira-epic):
+#   extends: jira-epic
+#   settings: { site: jira.example.com, epic: PROJ-1 }
+source: jira-epic
+brings: work
+settings:
+  site: ""
+  epic: ""
+read:
+  via: mcp
+  server: atlassian
+  tool: search_issues
+  jql: "parent = {epic} AND (assignee = currentUser() OR assignee is EMPTY)"
+  every: each pass
+fill: paths
+form:
+  id: .issues[].key
+  at: .issues[].fields.updated
+  text: .issues[].fields.summary
+  status: .issues[].fields.status.name
+  depends_on: .issues[].fields.issuelinks[type.inward=is blocked by].inwardIssue.key
+link: "https://{site}/browse/{id}"
+key: "{id}"
+status_map: { "To Do": todo, "In Progress": in_progress, "In Review": in_review, "Done": done }
+sort: { all: code }
+writes:
+  on_start: { transition: "In Progress", assign: me }
+  on_pr:    { transition: "In Review", remote_link: pr }
+  on_merge: { transition: "Done" }
+never: [create_ticket, comment]

@@ -9,7 +9,8 @@ from pathlib import Path
 
 from assistant import config, datadir, templates
 from assistant.cards import LANES, CardError
-from assistant.config import ConfigError
+from assistant.config import ConfigError, ShadowModeError
+from assistant.resources import WorkerError
 from assistant.store import Store
 
 DATA_HELP = f"data folder (default: ${datadir.ENV}, else ~/Documents/Assistant)"
@@ -75,9 +76,98 @@ def _parser() -> argparse.ArgumentParser:
     r.add_argument("--by", default="ap2", help=BY_HELP)
     r.add_argument("--data", metavar="PATH", help=DATA_HELP)
     _source_parser(sub)
+    _scan_parser(sub)
     _gate_parser(sub)
     _template_parser(sub)
+    _worker_parser(sub)
     return p
+
+
+# -- ap2 worker (design 8.1, 8.2) ------------------------------------------------------------------------------------
+
+TRANSCRIPTS_HELP = "folder Claude Code keeps conversations in, read only (default: ~/.claude/projects)"
+USAGE_HELP = "Claude Code's usage cache (default: ~/.claude.json)"
+
+
+def _worker_parser(sub) -> None:
+    w = sub.add_parser("worker", help="start, check, end or list workers",
+                       description="Workers are `claude --bg` sessions, one per card and role. Starting or resuming "
+                                   "one needs live mode; listing, checking, ending and archiving work in shadow mode.")
+    ws = w.add_subparsers(dest="worker_command", metavar="<worker command>", title="worker commands")
+    ws.required = True
+
+    def add(name, help_, description, card=True, role=True, transcripts=False):
+        c = ws.add_parser(name, help=help_, description=description)
+        if card:
+            c.add_argument("card", metavar="CARD")
+        if role:
+            c.add_argument("role", metavar="ROLE", choices=_roles())
+        if transcripts:
+            c.add_argument("--transcripts", metavar="PATH", help=TRANSCRIPTS_HELP)
+        c.add_argument("--by", default="ap2 worker", help=BY_HELP.replace("ap2)", "ap2 worker)"))
+        c.add_argument("--data", metavar="PATH", help=DATA_HELP)
+        return c
+
+    add("list", "print every worker and its state", "Print every worker on record, with its state, as a JSON list.",
+        card=False, role=False)
+    s = add("start", "start a worker on a card",
+            "Start a `claude --bg` worker for ROLE on CARD in --cwd, and print its record. Live mode only.")
+    s.add_argument("--cwd", metavar="PATH", help="the folder the session runs in (a worktree)")
+    s.add_argument("--prompt-file", metavar="FILE", help="the brief, as a text file")
+    s.add_argument("--needs", default=None, metavar="A,B", help="single-use resources the work needs")
+    s.add_argument("--resume", action="store_true", help="continue the saved (or parked) session")
+    add("end", "stop a worker and keep its session on the card",
+        "Stop the worker, save its session id on the card and archive its transcript.", transcripts=True)
+    c = add("check", "look at every worker and act on its state",
+            "Classify every worker and act: end the done, ask for questions, resume the dead once, pause the idle "
+            "and the blocked. Prints what it did as a JSON list.", card=False, role=False, transcripts=True)
+    c.add_argument("--usage", metavar="PATH", help="resume parked workers whose usage window has reset; " + USAGE_HELP)
+    pk = add("park", "park a worker at the usage line", "A worker parks itself while usage is at the park line; it "
+             "keeps its slot and ports.")
+    pk.add_argument("--note", default="", help="one line: where the worker is and the next step")
+    pk.add_argument("--usage", metavar="PATH", help=USAGE_HELP)
+    a = add("answer", "answer a worker's question and resume it",
+            "Resume the worker that asked CARD's question, with TEXT in its prompt. Live mode only.", role=False)
+    a.add_argument("text", nargs="+", metavar="TEXT")
+    add("finish", "archive a done card's sessions",
+        "Make the last gzipped copy of each of CARD's sessions; in live mode also delete the originals "
+        "(`claude rm`).", role=False, transcripts=True)
+
+
+def _roles():
+    from assistant.workers import ROLES
+    return ROLES
+
+
+def cmd_worker(args) -> int:
+    from assistant.workers import Workers
+
+    data = datadir.ensure(datadir.resolve(args.data))
+    w = Workers(data, transcripts_dir=getattr(args, "transcripts", None))
+    sub = args.worker_command
+    if sub == "list":
+        out = w.list()
+    elif sub == "start":
+        prompt = ""
+        if args.prompt_file:
+            try:
+                prompt = Path(args.prompt_file).read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as e:
+                raise WorkerError(f"cannot read {args.prompt_file!r}: {e}") from e
+        needs = None if args.needs is None else [n for n in args.needs.split(",") if n]
+        out = w.start(args.card, args.role, cwd=args.cwd, prompt=prompt, needs=needs, resume=args.resume, by=args.by)
+    elif sub == "end":
+        out = w.end(args.card, args.role, by=args.by)
+    elif sub == "check":
+        out = w.check(by=args.by, usage_file=args.usage)
+    elif sub == "park":
+        out = w.park(args.card, args.role, args.note, usage_file=args.usage)
+    elif sub == "answer":
+        out = w.answer(args.card, " ".join(args.text), by=args.by)
+    else:
+        out = w.finish(args.card, by=args.by)
+    _print_json(out)
+    return 0
 
 
 class _OutputError(Exception):
@@ -193,6 +283,7 @@ def cmd_restore(args) -> int:
 
 
 COMMANDS = {"config": cmd_config, "card": cmd_card, "search": cmd_search, "restore": cmd_restore}
+COMMANDS["worker"] = cmd_worker
 
 
 # -- ap2 source (the source engine, design 5) ---------------------------------------------------------------------
@@ -356,6 +447,63 @@ def cmd_template(args) -> int:
 COMMANDS["template"] = cmd_template
 
 
+# --- ap2 scan (scan sessions, design 5.3) ------------------------------------------------------------------------
+# Starting the session itself is a later slice; these are its plan, its PostToolUse hook and its take.
+
+def _scan_parser(sub) -> None:
+    sc = sub.add_parser("scan", help="plan a scan session, save its replies, take its cards",
+                        description="The scan-session contract for via: mcp, connector and skill sources: plan "
+                                    "what the session calls, save each tool reply (the hook), and turn the finished "
+                                    "scan into cards.")
+    sc_sub = sc.add_subparsers(dest="scan_command", metavar="<scan command>", title="scan commands")
+    sc_sub.required = True
+    pl = sc_sub.add_parser("plan", help="write a scan plan and print it with its brief",
+                           description="Write sources/.scan/<stamp>/plan.json for the sources NAME (none: every "
+                                       "mcp, connector and skill source) and print it: the calls, the errors and "
+                                       "the brief. Starts no process.")
+    pl.add_argument("names", nargs="*", metavar="NAME")
+    pl.add_argument("--data", metavar="PATH", help=DATA_HELP)
+    sv = sc_sub.add_parser("save-raw", help="the PostToolUse hook: log one tool reply of a scan",
+                           description="Read one PostToolUse hook payload (tool_name, tool_input, tool_response) "
+                                       "from stdin and append it to the scan folder's calls.jsonl when the plan "
+                                       "names its tool.")
+    sv.add_argument("--plan", required=True, metavar="FILE", help="the scan's plan.json")
+    tk = sc_sub.add_parser("take", help="turn a finished scan into cards",
+                           description="Build each planned call's raw output from the scan log and read it "
+                                       "(ap2 source read --raw), printing each read and the errors.")
+    tk.add_argument("plan", metavar="PLAN", help="the scan's plan.json")
+    tk.add_argument("--dry-run", action="store_true", help="show what each item would become; save nothing")
+    tk.add_argument("--data", metavar="PATH", help=DATA_HELP)
+
+
+def cmd_scan(args) -> int:
+    from assistant import engine as engine_module, scan
+
+    if args.scan_command == "save-raw":
+        if sys.stdin is None:
+            raise scan.ScanError("cannot read the hook payload: stdin is closed")
+        stream = getattr(sys.stdin, "buffer", sys.stdin)
+        try:
+            payload = stream.read(engine_module.MAX_OUTPUT + 1)
+        except OSError as e:
+            raise scan.ScanError(f"cannot read the hook payload: {e}") from e
+        if isinstance(payload, str):
+            payload = payload.encode("utf-8", errors="surrogateescape")
+        _print_json(scan.save_raw(args.plan, payload))
+        return 0
+    path = datadir.resolve(args.data)
+    if args.scan_command == "plan":
+        _print_json(scan.plan(datadir.ensure(path), args.names))
+        return 0
+    if not args.dry_run:
+        datadir.ensure(path)
+    _print_json(scan.take(path, args.plan, dry_run=args.dry_run))
+    return 0
+
+
+COMMANDS["scan"] = cmd_scan
+
+
 def main(argv: list) -> int:
     # sys.stderr is None when stderr is closed; print(file=None) would then write to stdout, so say nothing.
     parser = _parser()
@@ -366,7 +514,7 @@ def main(argv: list) -> int:
                 parser.print_help(sys.stderr)
             return 2
         code = COMMANDS[args.command](args)
-    except (ConfigError, CardError) as e:
+    except (ConfigError, CardError, WorkerError, ShadowModeError) as e:
         try:
             _write(f"ap2: {e}\n", sys.stderr)  # a closed stderr (None) gets nothing
         except (BrokenPipeError, _OutputError):

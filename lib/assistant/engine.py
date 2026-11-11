@@ -59,8 +59,11 @@ STOP_TRIES = 100
 STOP_SIGNALS = tuple(s for s in (getattr(signal, n, None) for n in (
     "SIGHUP", "SIGQUIT", "SIGTERM", "SIGUSR1", "SIGUSR2", "SIGALRM", "SIGVTALRM", "SIGPROF", "SIGXCPU"))
     if s is not None)
-# fill: ai fields that must appear word for word in the raw tool output (design 5.3).
-WORD_FOR_WORD = ("id", "thread_id", "at")
+# fill: ai fields that must appear word for word in the raw tool output (design 5.3); place_id builds links and keys.
+WORD_FOR_WORD = ("id", "thread_id", "at", "place_id")
+# Around a word-for-word match: a letter or digit, or one of these followed by a letter or digit, means the value
+# is only part of a longer token (1730000000 inside 1730000000.123456, C0123 inside C0123ABCD).
+JOINERS = "._:-"
 
 # The code-made plain words (design 3.7), one entry per language. A language is matched exactly, then by its first
 # part (zh-Hans -> zh). The quoted text stays in the words its author wrote.
@@ -340,10 +343,12 @@ class Engine:
 
     @staticmethod
     def check_records(src: sources.Source, records, raw_text: str, raw: Optional[str] = None) -> tuple:
-        """`fill: ai`: check the records a scan session filled (design 5.3). Each record's `id`, and its `thread_id`
-        and `at` when present, must appear word for word in `raw_text`, the tool's raw output, so a model cannot
-        invent them. Each record carries its `category`, one of `sort`'s. Too many records is refused (SourceError,
-        naming `raw`, where the raw output was saved)."""
+        """`fill: ai`: check the records a scan session filled (design 5.3). Each record's `id`, and its `thread_id`,
+        `at` and `place_id` when present (the derived `place_id`, so also a `place` that stands in for it, named
+        `place` in the reason), must appear word for word in `raw_text`, the tool's raw output, as a whole token
+        (`word_for_word`), so a model cannot invent them. A record whose `place` or `place_id` is in
+        `read.skip_channels` (a leading `#` ignored) is dropped. Each record carries its `category`, one of
+        `sort`'s. Too many records is refused (SourceError, naming `raw`, where the raw output was saved)."""
         if not isinstance(records, list):
             raise SourceError(f"{src.name}: records must be a list, not {type(records).__name__}")
         _check_count(src, len(records), raw)
@@ -351,9 +356,14 @@ class Engine:
         for n, rec in enumerate(records):
             try:
                 record = form.check_record(rec, required(src))
+                skipped = _skipped(src, record)
+                if skipped:
+                    raise ValueError(skipped)
+                values = form.derived(record, src.name)  # a `place_id` made from `place` is checked too
                 for field in WORD_FOR_WORD:
-                    if field in record and record[field] not in raw_text:
-                        raise ValueError(f"form.{field} {record[field]!r} is not in the raw output")
+                    if field in values and not word_for_word(values[field], raw_text):
+                        shown = "place" if field == "place_id" and "place_id" not in record else field
+                        raise ValueError(f"form.{shown} {values[field]!r} is not in the raw output")
                 category = rec.get("category")
                 if not isinstance(category, str) or category not in src.sort:
                     raise ValueError(f"category {category!r} is not one of sort's ({', '.join(src.sort)})")
@@ -361,13 +371,17 @@ class Engine:
                 dropped.append({"item": n, "reason": str(e)})
                 continue
             entries.append({"item": n, "record": record, "link": None, "category": category})
-        return entries, dropped
+        return _one_per_key(src, entries), dropped
 
     # -- link, key, sort, card ----------------------------------------------------------------------------------
 
     def link_and_key(self, src: sources.Source, record: dict, link: Optional[str] = None) -> tuple:
-        """The record's (link, key). Raises ValueError naming what is missing or wrong."""
-        values = form.derived(record, src.name)
+        """The record's (link, key). Patterns may name the record's fields, the derived ones and the source's
+        settings (which never share a name with those). A setting is the user's own text, so it goes into a link as
+        written (`site: jira.example.com:8443`); only the record's values are percent-encoded. Raises ValueError
+        naming what is missing or wrong."""
+        settings = sources.settings(src)
+        values = {**settings, **form.derived(record, src.name)}
         try:
             key = form.fill_pattern(src.key, values)
         except ValueError as e:
@@ -375,8 +389,10 @@ class Engine:
         if src.link[0] == "none":
             return None, key
         if src.link[0] == "pattern":
+            parts = tuple(("text", settings[s]) if kind == "field" and settings.get(s, "").strip() else (kind, s)
+                          for kind, s in src.link[1])
             try:
-                link = form.fill_pattern(src.link[1], values, url=True)
+                link = form.fill_pattern(parts, values, url=True)
             except ValueError as e:
                 raise ValueError(f"link: {e}") from None
         if not re.match(r"https?://[^\s/]", link or ""):
@@ -598,11 +614,79 @@ def _stop(proc: subprocess.Popen) -> None:
 
 
 def _check_fill(src: sources.Source, records) -> None:
-    """Refuse records that do not suit the source's `fill`, before anything is run or saved."""
+    """Refuse records that do not suit the source's `fill`, and a source whose patterns name an empty setting,
+    before anything is run or saved."""
     if src.fill == "paths" and records is not None:
         raise SourceError(f"{src.name}: fill: paths fills its own records; give only the raw output")
     if src.fill == "ai" and records is None:
         raise SourceError(f"{src.name}: fill: ai records are filled by a scan session; give them with the raw output")
+    sources.unset_settings(src)
+
+
+def word_for_word(value: str, text: str) -> bool:
+    """Whether `value` appears in `text` as a whole token: the character just before it and just after it is not a
+    letter or digit, nor one of JOINERS with a letter or digit beyond it. So `1730000000.123456` is found at the end
+    of a sentence ("... 1730000000.123456."), but `1730000000` is not found inside it. An empty value is found."""
+    if not value:
+        return True
+    start = text.find(value)
+    while start >= 0:
+        end = start + len(value)
+        if _edge(text, start - 1, -1) and _edge(text, end, 1):
+            return True
+        start = text.find(value, start + 1)
+    return False
+
+
+def _edge(text: str, i: int, step: int) -> bool:
+    """Whether text[i], the character next to a match (`step` points away from it), ends the token there."""
+    if i < 0 or i >= len(text):
+        return True
+    c = text[i]
+    if c.isalnum():
+        return False
+    beyond = i + step
+    return not (c in JOINERS and 0 <= beyond < len(text) and text[beyond].isalnum())
+
+
+def _one_per_key(src: sources.Source, entries: list) -> list:
+    """`fill: ai` entries that share a key (the messages of one Slack thread) all read as one record, so a read makes
+    one card and a re-read of the same thread is `unchanged`, instead of updating the card once per message on every
+    read. The latest record (by `at`, then `id`, as text) gives every entry of the key its record; the earliest
+    record whose category makes a card (a template, not `update_card` or `none`) gives the category, else the latest
+    `update_card` one's, else the latest's, so a recovery and a later `fyi` reply still update the card in either
+    order. Each entry keeps its `item`, so the report still lists every record. An entry whose key cannot be made is
+    kept as it is, for `build` to drop with the reason."""
+    groups, order = {}, []
+    for e in entries:
+        try:
+            key = form.fill_pattern(src.key, {**sources.settings(src), **form.derived(e["record"], src.name)})
+        except ValueError:
+            order.append([e])
+            continue
+        if key not in groups:
+            groups[key] = []
+            order.append(groups[key])
+        groups[key].append(e)
+    out = []
+    for group in order:
+        by_time = sorted(group, key=lambda e: (e["record"]["at"], e["record"]["id"]))
+        making = [e["category"] for e in by_time if src.sort[e["category"]] not in sources.SORT_SPECIAL]
+        updating = [e["category"] for e in by_time if src.sort[e["category"]] == "update_card"]
+        category = making[0] if making else (updating[-1] if updating else by_time[-1]["category"])
+        out.extend({**e, "record": by_time[-1]["record"], "category": category} for e in group)
+    return sorted(out, key=lambda e: e["item"])
+
+
+def _skipped(src: sources.Source, record: dict) -> Optional[str]:
+    """The reason a `fill: ai` record is dropped by `read.skip_channels`, or None. A leading `#` is ignored on both
+    sides, and letter case too (Slack channel names are lowercase)."""
+    skip = {str(x).lstrip("#").casefold() for x in src.data["read"].get("skip_channels") or []}
+    for field in ("place", "place_id"):
+        value = record.get(field)
+        if value and value.lstrip("#").casefold() in skip:
+            return f"form.{field} {value!r} is in read.skip_channels"
+    return None
 
 
 def _check_count(src: sources.Source, n: int, raw: Optional[str]) -> None:
