@@ -35,6 +35,9 @@ LOG_MAX_BYTES = 1_000_000  # then gate.log becomes gate.log.1 (one old file is k
 WATCHES = "watches.json"
 EVERY = re.compile(r"([1-9][0-9]{0,3})(m|h)\Z", re.ASCII)
 BY = "gate"
+# Ends the watch error for a time ahead of now, the one error after which the watch still runs (the routine
+# error for a last_slot ahead of now says it too).
+WENT_BACK = "the clock may have gone back"
 
 
 @contextlib.contextmanager
@@ -172,7 +175,11 @@ def _parse_time(text) -> Optional[datetime]:
 def due_watches(data: Path, watches, now: datetime):
     """The watches due at `now` (`now - last_check_at >= every`), as `(names, errors)`; records `last_check_at`
     for each due one in `<data>/watches.json`. Each watch is `{name, every, last_check_at?}`; the time saved in
-    watches.json wins when it is later. The gate does not read the sources itself; the caller does."""
+    watches.json wins when it is later. A given or saved time later than `now` (past the grace) means the clock went
+    back, and it is reported. A saved time ahead makes the watch due now, so its time is written again and it
+    recovers on its own (a watch looked at once early is harmless). A given time ahead is left out, so the saved
+    time still counts: it is reported on every run the caller passes it, and the watch runs by `every`. The gate
+    does not read the sources itself; the caller does."""
     if not watches:
         return [], []
     state, damaged = _read_watch_state(data)
@@ -190,11 +197,17 @@ def due_watches(data: Path, watches, now: datetime):
                 saved = _parse_time(saved)
             except ValueError:
                 saved = None  # a damaged saved time: the watch is due now and the time is written again
-            last = max((t for t in (given, saved) if t is not None), default=None)
         except ValueError as e:
             errors.append({"watch": name if isinstance(name, str) else None, "error": str(e)})
             continue
-        if last is None or now - last >= every:
+        # Gaps, not `now + GRACE`, so a `now` at the end of the calendar cannot overflow.
+        ahead = [t for t in (given, saved) if t is not None and t - now > routines.GRACE]
+        if ahead:  # one error per watch, quoting the latest time that is ahead
+            errors.append({"watch": name, "error": f"last_check_at {cards.stamp(max(ahead))} is later than now "
+                                                   f"({cards.stamp(now)}); {WENT_BACK}"})
+        saved_ahead = saved is not None and saved - now > routines.GRACE  # repaired: `now` is written over it
+        last = max((t for t in (given, saved) if t is not None and t not in ahead), default=None)
+        if last is None or saved_ahead or now - last >= every:
             found.append(name)
             state[name] = {"last_check_at": cards.stamp(now)}
     if found:
@@ -212,17 +225,31 @@ def _safe(value):
 def run(data, now: datetime, watches=(), store: Optional[Store] = None) -> dict:
     """One gate run at `now` (an aware datetime). Returns what it found, also written to `<data>/gate.json`; a run
     that finds the lock held returns `{"locked": true, ...}` and does nothing. Raises ConfigError when the data
-    folder or config.yaml is not usable."""
+    folder or config.yaml is not usable; that error is also the last line of `<data>/gate.log`, `fatal: ...`."""
     data = Path(data)
     if now.tzinfo is None:
         raise ValueError("now must be an aware datetime")
-    with _lock(data) as held:
-        if not held:
-            return {"locked": True, "lock": str(data / LOCK)}
-        try:
-            return _run(data, now, watches, store)
-        except OSError as e:
-            raise ConfigError(f"the gate cannot use the data folder {data}: {e}") from e
+    try:
+        with _lock(data) as held:
+            if not held:
+                return {"locked": True, "lock": str(data / LOCK)}
+            try:
+                return _run(data, now, watches, store)
+            except OSError as e:
+                raise ConfigError(f"the gate cannot use the data folder {data}: {e}") from e
+    except ConfigError as e:
+        _log_fatal(data, now, e)
+        raise
+
+
+def _log_fatal(data: Path, now: datetime, error: ConfigError) -> None:
+    """One `fatal: <error>` line in gate.log, best effort: a run started by launchd has no terminal, so this is
+    where the user finds why it stopped. Nothing is written when the data folder does not exist."""
+    try:
+        if data.is_dir():
+            Log(data, now)(f"fatal: {error}")
+    except Exception:
+        pass  # e.g. gate.log is a folder, the disk is full or `now` has no UTC stamp: the error itself still comes out
 
 
 def _run(data: Path, now: datetime, watches, store: Optional[Store]) -> dict:
@@ -238,6 +265,15 @@ def _run(data: Path, now: datetime, watches, store: Optional[Store]) -> dict:
     by_key = None  # the routine cards, read once, only when a slot is due
     for r in loaded:
         try:
+            if r.last_slot is not None and routines.slot_at(r) - now > routines.GRACE:
+                # The clock went back (or the file was edited ahead). Not repaired: moving last_slot back by
+                # itself could run a slot twice. The routine waits, as it would anyway, and the user is told.
+                # After a tz change, quote the file's own text and zone first, then the slot it became.
+                slot = (f"{r.moved_from} ({r.last_slot} in {r.tz_name})" if r.moved_from is not None
+                        else r.last_slot)
+                raise routines.RoutineError(
+                    f"{r.path}: last_slot {slot} is later than now ({cards.stamp(now)}); {WENT_BACK}. Set "
+                    f"last_slot to null or an earlier slot to run it again.")
             d = routines.due(r, now)
             if d is None:
                 continue
@@ -271,6 +307,8 @@ def _run(data: Path, now: datetime, watches, store: Optional[Store]) -> dict:
     for e in watch_errors:
         if "watches" in e:
             log(f"watches: error: {e['error']}")
+        elif e["error"].endswith(WENT_BACK):  # a time later than now: reported, and the watch still ran
+            log(f"watch {e['watch']}: error: {e['error']}")
         else:
             log(f"watch {e['watch']}: refused: {e['error']}")
     if due_names:

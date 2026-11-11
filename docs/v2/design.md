@@ -760,7 +760,7 @@ Calls the author made without asking (check them):
     lowercase letters, digits, `-` and `_`. Keys: `title` (text), `schedule` (`days`: `daily`, `weekdays` or a
     list of `mon`..`sun`; `at`: a list of `HH:MM`), `tz` (an IANA name, read with `zoneinfo`), and optional
     `missed_run` (default `once_within: 3h`; see 7.3), `last_slot` (`YYYY-MM-DDTHH:MM` wall-clock time in `tz`, or
-    null) and `paused` (default false). An unknown key, a repeated day or time, or a bad value is refused with one
+    null), `last_slot_tz` (the zone `last_slot` was written in, or null; see below) and `paused` (default false). An unknown key, a repeated day or time, or a bad value is refused with one
     error, `<file>: <field>: <why>`; a bad routine is listed in the run's `errors` and the others still run. An
     unknown key is quoted with its escapes (`'owner'`, `schedule.'every'`), so a key JSON can hold but UTF-8
     cannot (a lone `\ud800`) never stops `gate.json` from being written. A title UTF-8 cannot write is refused the
@@ -803,6 +803,31 @@ Calls the author made without asking (check them):
     (`ENOLCK` on a network share) is a config error: one `ap2: cannot lock the gate ...` line and exit 1. The gate
     starts no process, opens no socket and writes only inside the data folder; the time is passed in
     (`gate.run(data, now)`), never read inside.
+  - A clock that went back. A routine whose `last_slot`, read in its `tz`, is more than the 5-minute grace after
+    now gets one error, `<file>: last_slot <slot> is later than now (<now>); the clock may have gone back. Set
+    last_slot to null or an earlier slot to run it again.`, in `errors` and gate.log; after a `tz` change `<slot>` is
+    the file's text and its old zone, then the moved slot in brackets (`2026-11-11T09:00 in Asia/Tokyo
+    (2026-11-10T19:00 in America/New_York)`). The file is not changed and no card is made, so the routine keeps
+    waiting: moving `last_slot` back by itself could run a slot twice. A watch whose given or saved `last_check_at`
+    is more than the grace after now gets one error `{"watch", "error": "last_check_at <time> is later than now
+    (<now>); ..."}` and is repaired instead, since a watch looked at once early is harmless. A saved time ahead
+    makes the watch due now, so its time is written again and it recovers on its own. A given time ahead is left
+    out and the saved time still counts; a caller that keeps passing it gets the error on every run, and the watch
+    still runs by `every`. Both checks compare the gap to now, so a `now` at the end of the calendar cannot overflow.
+  - A changed `tz`. Each `last_slot` write also writes `last_slot_tz`, the `tz` in the file it re-reads (the gate
+    keeps the three-argument call `write_last_slot(path, slot, write)`). When a file's `last_slot_tz` is set and
+    differs from `tz`, the routine reads `last_slot` as a wall time in the old zone and uses that moment as
+    wall-clock text in the new zone (Eastern 09:00 becomes Pacific 06:00, so the Pacific 09:00 slot still runs); a
+    reset would instead make the routine `start` again and skip the slot. The file changes only at the next write.
+    An unknown old zone is refused on `last_slot_tz`; a slot that cannot be moved (past the end of the calendar) is
+    refused on `last_slot`. A file without `last_slot_tz` behaves as before. A known limit: when the moved slot lands
+    in the second pass of the new zone's repeated hour at the end of daylight saving time, a slot later in that same
+    hour (whose first pass came before the last run) may run once, late. It needs a `tz` change during that hour,
+    and it is accepted.
+  - A fatal error. When a run stops with a config error (config.yaml cannot be read, the lock cannot be opened, the
+    data folder fails) and the data folder exists, `gate.run` appends `<UTC time> fatal: <error>` to gate.log, best
+    effort, then raises the same error; `ap2 gate` still prints one `ap2: ...` line and exits 1. Keeping launchd's
+    own stderr belongs to the slice that installs the launchd job.
   - `ap2 gate [--data PATH] [--now ISO]` runs once and prints the run as JSON. `--now` needs a zone (`Z` or an
     offset); a time without one is an argument error (exit 2). `--now` may not be later than the real time plus
     the 5-minute grace, also an argument error: a run writes `last_slot`, makes cards and prunes restore points,

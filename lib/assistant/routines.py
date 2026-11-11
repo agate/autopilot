@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import MAXYEAR, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -28,7 +28,7 @@ except ImportError:  # Python before 3.9
 
 FOLDER = "routines"
 SUFFIX = ".json"
-KEYS = ("title", "schedule", "tz", "missed_run", "last_slot", "paused")
+KEYS = ("title", "schedule", "tz", "missed_run", "last_slot", "last_slot_tz", "paused")
 REQUIRED = ("title", "schedule", "tz")
 SCHEDULE_KEYS = ("days", "at")
 DAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")  # date.weekday() order
@@ -59,6 +59,9 @@ class Routine:
     missed_run: str
     last_slot: Optional[str]
     paused: bool
+    # When `last_slot` was moved from the file's `last_slot_tz` to `tz`: the file's text and that old zone, such as
+    # "2026-11-11T09:00 in Asia/Tokyo". None when `last_slot` is the file's text as it is.
+    moved_from: Optional[str] = None
 
     def within(self) -> Optional[timedelta]:
         """How late a missed slot may still run: None for `once` (any time), zero for `skip`."""
@@ -171,14 +174,38 @@ def parse(path: Path, obj) -> Routine:
     if not (isinstance(missed, str) and MISSED.match(missed)):
         _fail(path, "missed_run", f"missed_run must be skip, once or once_within: <N>h (N from 1 to 999), "
                                   f"not {missed!r}")
-    last = obj.get("last_slot")
-    if last is not None and not check_slot(last):
-        _fail(path, "last_slot", f"last_slot must be a YYYY-MM-DDTHH:MM time or null, not {last!r}")
+    text = obj.get("last_slot")
+    if text is not None and not check_slot(text):
+        _fail(path, "last_slot", f"last_slot must be a YYYY-MM-DDTHH:MM time or null, not {text!r}")
+    last_tz = obj.get("last_slot_tz")
+    last = _in_zone(path, text, last_tz, obj["tz"], tz)
+    moved_from = f"{text} in {last_tz}" if text is not None and last_tz not in (None, obj["tz"]) else None
     paused = obj.get("paused", False)
     if not isinstance(paused, bool):
         _fail(path, "paused", f"paused must be true or false, not {paused!r}")
     return Routine(name=name, path=path, title=title, days=days, at=at, tz_name=obj["tz"], tz=tz,
-                   missed_run=missed, last_slot=last, paused=paused)
+                   missed_run=missed, last_slot=last, paused=paused, moved_from=moved_from)
+
+
+def _in_zone(path: Path, last: Optional[str], last_tz, tz_name: str, tz) -> Optional[str]:
+    """`last_slot` as a slot in the routine's zone. A file whose `last_slot_tz` names another zone (the user changed
+    `tz`) has its slot read as a wall time in that old zone and written again as wall-clock text in `tz`, so a move
+    west does not skip slots. No `last_slot_tz` (a file from before it was saved) means the slot is already in `tz`.
+    The file itself is changed only by the next `write_last_slot`."""
+    if last_tz is not None and not isinstance(last_tz, str):
+        _fail(path, "last_slot_tz", f"last_slot_tz must be an IANA time zone name or null, not {last_tz!r}")
+    if last_tz is None or last_tz == tz_name:
+        return last
+    try:
+        old = ZoneInfo(last_tz)
+    except (ZoneInfoNotFoundError, ValueError, OSError):
+        _fail(path, "last_slot_tz", f"not a known IANA time zone name: {last_tz!r}")
+    if last is None:
+        return None
+    try:
+        return slot_time(datetime.strptime(last, SLOT_FORMAT), old).astimezone(tz).strftime(SLOT_FORMAT)
+    except OverflowError:  # e.g. year 9999 west of UTC: past the end of the calendar Python can hold
+        _fail(path, "last_slot", f"{last} in {last_tz} cannot be moved to {tz_name}: it is out of range")
 
 
 def read(path: Path) -> dict:
@@ -236,6 +263,18 @@ def slot_time(wall: datetime, tz) -> datetime:
     return step.replace(tzinfo=tz, fold=0).astimezone(timezone.utc)
 
 
+def slot_at(r: Routine) -> datetime:
+    """The UTC time of `r.last_slot` (which must be set), read as a wall time in the routine's zone. A slot at the
+    very ends of the calendar (year 1 east of UTC, year 9999 west of it) has no UTC time; it is the earliest or the
+    latest time there is."""
+    wall = datetime.strptime(r.last_slot, SLOT_FORMAT)
+    try:
+        return slot_time(wall, r.tz)
+    except OverflowError:
+        edge = datetime.max if wall.year == MAXYEAR else datetime.min
+        return edge.replace(tzinfo=timezone.utc)
+
+
 def latest_slot(r: Routine, now: datetime):
     """`(slot text, UTC time)` of the latest slot at or before `now`, or None when there is none in the last
     `LOOK_BACK_DAYS` days. Slots are compared by their wall-clock text, so each one happens once, even on a day
@@ -279,11 +318,16 @@ def due(r: Routine, now: datetime, grace: timedelta = GRACE) -> Optional[Due]:
     return Due(slot, at, "skip", late_by)
 
 
-def write_last_slot(path: Path, slot: str, write) -> None:
-    """Set `last_slot` in the routine file, atomically, with `write(path, obj)` (the store's JSON writer). The file
-    is read again first, so a change made since the gate read it is kept."""
+def write_last_slot(path: Path, slot: str, write, tz_name: Optional[str] = None) -> None:
+    """Set `last_slot`, and `last_slot_tz` (the zone `slot` is in), in the routine file, atomically, with
+    `write(path, obj)` (the store's JSON writer). The file is read again first, so a change made since the gate read
+    it is kept. `tz_name` defaults to the `tz` the file holds now."""
     obj = read(path)
     if not isinstance(obj, dict):
         raise RoutineError(f"{path}: (file): a routine is a JSON object, not {type(obj).__name__}")
+    if tz_name is None:
+        tz_name = obj.get("tz") if isinstance(obj.get("tz"), str) else None
     obj["last_slot"] = slot
+    if tz_name is not None:
+        obj["last_slot_tz"] = tz_name
     write(Path(path), obj)
