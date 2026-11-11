@@ -1046,8 +1046,9 @@ Calls the author made without asking (check them):
     (`url`, `data_dir`, `mode`) and serves until Ctrl-C or SIGTERM (exit 0). It binds `127.0.0.1` only (there is
     no `--host`; the address is never looked up by name); the port is 4317 by default and 0 takes a free one. A
     port that cannot be used is one `ap2: cannot listen on 127.0.0.1:<port>: ...` line, exit 1; a port outside
-    0-65535 is an argument error, exit 2. Nothing is installed: "started at login" comes with the slice that
-    writes launchd jobs.
+    0-65535 is an argument error, exit 2. Before listening on a fixed port it checks that nothing answers on
+    `127.0.0.1:<port>`, because macOS would let it share a port another program holds on all addresses. Nothing
+    is installed: "started at login" comes with the slice that writes launchd jobs.
   - The request guard: every request must carry `Host: 127.0.0.1:<port>` or `localhost:<port>`, or it gets 403,
     so a site that points its own name at 127.0.0.1 (DNS rebinding) cannot read cards. While it runs, the server
     trusts every account and process on this Mac: the Host and Origin checks stop other web sites, not other
@@ -1063,10 +1064,12 @@ Calls the author made without asking (check them):
     `GET /api/cards?lane=&kind=&parent=&q=&limit=` (`{total, cards}`, each a row: `id`, `title`, `kind`, `lane`,
     `pri`, `feed`, `parent`, `origin`, `ask_type`, `plain_where` per language, `updated_at`; lane order, then by
     `pri` and the newest change in Needs you, Running and Planned, History newest first; `q` goes through the
-    store's search and the other filters apply to its result), `GET /api/cards/<id>` (`card`, `template`, `view`,
-    `source_block`, `children`, `links`, `activity`), `GET /api/sources[/<name>]` (each source's summary and its
-    card count; one source adds its merged `data` and `files`), `GET /api/templates[/<kind>]` (the summary; one
-    kind is `ap2 template show` plus its card count), `GET /api/settings` (the config, the data folder, the URL,
+    store's search and the other filters apply to its result; a `q` over 500 characters or 50 words is 400, so a
+    page on another site cannot make the store rebuild its index on every request), `GET /api/cards/<id>`
+    (`card`, `template`, `view`, `source_block`, `children`, `links`, `activity`), `GET /api/sources[/<name>]`
+    (each source's summary and its card count; one source adds its merged `data` and `files`),
+    `GET /api/templates[/<kind>]` (the summary; one kind is `ap2 template show` plus its card count),
+    `GET /api/settings` (the config, the data folder, the URL,
     and the bytes in each data-folder folder and `index.sqlite`, counted with lstat and never following a link).
     A bad filter or body is 400, an unknown card, source, template or route 404, a damaged card file or a bad
     source, template or config file 500 with the one-line error that names the file. These JSON shapes are the

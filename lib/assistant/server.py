@@ -22,6 +22,7 @@ import contextlib
 import json
 import os
 import re
+import socket
 import sqlite3
 import stat
 import sys
@@ -50,6 +51,8 @@ PAGE = Path(__file__).resolve().parent / "builtin" / "page" / "local.html"
 
 LIST_LIMIT = 500        # rows a list returns when `limit` is not given
 LIST_MAX = 5000         # the largest `limit`
+SEARCH_MAX_CHARS = 500  # the longest `q`: a longer search is 400, so another site cannot make the index rebuild
+SEARCH_MAX_WORDS = 50   # the most words in `q`, for the same reason
 LATE_SECONDS = 180      # the heartbeat turns red after 3 minutes without a gate run (design 7.4)
 QUESTION_MAX = 2000     # characters in one question
 BODY_MAX = 64 * 1024    # bytes in a request body
@@ -237,6 +240,16 @@ def make_server(data, port: int = PORT, cfg: Optional[config.Config] = None, plu
     """The server for the data folder `data`, bound to 127.0.0.1:`port` (0 takes a free port), not yet serving.
     `cfg` None reads `config.yaml` on every request; `plugin_dir` is the built-in sources folder. Raises
     ConfigError when the port cannot be used."""
+    if port != 0:
+        # SO_REUSEADDR (kept for quick restarts) lets macOS bind 127.0.0.1:<port> while another program listens on
+        # all addresses at that port; whatever answers there first means the port is taken.
+        try:
+            probe = socket.create_connection((HOST, port), timeout=0.5)
+        except (OSError, OverflowError):
+            pass  # refused or no answer: free
+        else:
+            probe.close()
+            raise ConfigError(f"cannot listen on {HOST}:{port}: the port is in use by another program")
     try:
         srv = Server((HOST, port), Handler)
     except (OSError, OverflowError) as e:
@@ -472,6 +485,8 @@ class Handler(BaseHTTPRequestHandler):
             n = int(limit)
         else:
             raise HTTPError(400, f"limit must be a whole number from 1 to {LIST_MAX}, not {limit!r}")
+        if q is not None and (len(q) > SEARCH_MAX_CHARS or len(q.split()) > SEARCH_MAX_WORDS):
+            raise HTTPError(400, f"q must be at most {SEARCH_MAX_CHARS} characters and {SEARCH_MAX_WORDS} words")
         cfg = self.cfg()
         if q is not None and q.strip():
             found = [c for c in self._store_call(Store(self.server.data, cfg=cfg, clock=self.server.clock).search, q)

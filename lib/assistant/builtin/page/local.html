@@ -687,10 +687,16 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     for (const r of d.cards) body.append(rowEl(r));
   }
   async function loadList() {
+    const want = S.list;  // a reply for a list the page has since left is dropped, not drawn under the new title
     try {
-      S.listData = await api(listQuery(S.list));
+      const data = await api(listQuery(want));
+      if (S.list !== want) return;
+      S.listData = data;
       showError(null);
-    } catch (e) { S.listData = null; showError(e); }
+    } catch (e) {
+      if (S.list !== want) return;
+      S.listData = null; showError(e);
+    }
     drawList();
   }
 
@@ -747,6 +753,7 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     const input = h('input', {type: 'text', maxlength: QUESTION_MAX, placeholder: L('q.placeholder'), 'aria-label': L('q.placeholder')});
     const status = h('p', {class: 'warn', role: 'status', hidden: true});
     const send = async () => {
+      if (button.disabled) return;  // a second Enter while the first question is still posting
       const value = input.value;
       if (!value.trim()) return;
       button.disabled = true;

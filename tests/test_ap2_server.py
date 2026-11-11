@@ -157,6 +157,16 @@ class GuardTest(ServerCase):
         with self.assertRaisesRegex(ConfigError, rf"^cannot listen on 127\.0\.0\.1:{port}: "):
             server.make_server(self.data, port=port)
 
+    def test_a_port_another_program_holds_on_all_addresses_is_a_config_error(self):
+        # macOS lets SO_REUSEADDR bind 127.0.0.1:<port> while 0.0.0.0:<port> listens; Linux refuses the bind.
+        held = socket.socket()
+        self.addCleanup(held.close)
+        held.bind(("0.0.0.0", 0))
+        held.listen(1)
+        port = held.getsockname()[1]
+        with self.assertRaisesRegex(ConfigError, rf"^cannot listen on 127\.0\.0\.1:{port}: "):
+            server.make_server(self.data, port=port)
+
     def test_a_host_header_for_another_name_is_refused(self):
         self.start()
         for host in ("cards.example.com", f"cards.example.com:{self.port}", "127.0.0.1", f"127.0.0.1:{self.port + 1}",
@@ -194,6 +204,12 @@ class GuardTest(ServerCase):
         self.start()
         reply = self.raw(b"GET /api/state HTTP/1.0\r\n\r\n")
         self.assertTrue(reply.startswith(b"HTTP/1.0 403 "), reply[:80])
+
+    def test_two_host_headers_are_refused(self):
+        self.start()
+        reply = self.raw(f"GET /api/state HTTP/1.0\r\nHost: 127.0.0.1:{self.port}\r\n"
+                         "Host: cards.example.com\r\n\r\n".encode("ascii"))
+        self.assertTrue(reply.startswith(b"HTTP/1.0 403"), reply[:80])
 
     def assert_status_line_and_safe_headers(self, reply: bytes):
         self.assertTrue(reply.startswith(b"HTTP/1.0 "), reply[:80])
@@ -309,6 +325,13 @@ class ListTest(ServerCase):
                                "plain_where": {"en": "where a thing (en)"},
                                "updated_at": self.n_p2_new["updated_at"]})
 
+    def test_a_row_has_plain_where_in_both_languages(self):
+        zh = Config(secondary_language="zh")
+        card = self.add(cfg=zh, title="two languages", plain=plain("heron", langs=("en", "zh")))
+        self.start(cfg=zh)
+        rows = {r["id"]: r for r in self.ok("/api/cards")["cards"]}
+        self.assertEqual(rows[card["id"]]["plain_where"], {"en": "where heron (en)", "zh": "where heron (zh)"})
+
     def test_all_lanes_come_in_lane_order(self):
         body = self.ok("/api/cards")
         self.assertEqual(body["total"], 10)
@@ -328,6 +351,21 @@ class ListTest(ServerCase):
         self.assertEqual(self.ok("/api/cards?q=nothing+like+this")["total"], 0)
         self.assertEqual(self.ok("/api/cards?q=%20%20")["total"], 10)  # blank text is no filter
 
+    def test_an_oversized_search_is_400_and_leaves_the_data_folder_alone(self):
+        self.assertEqual(self.ok("/api/cards?q=pelican")["total"], 2)  # the index is built
+        self.assertTrue((self.data / "index.sqlite").exists())
+        for name, q in (("51 words", "+".join(["a"] * 51)), ("501 characters", "a" * 501)):
+            with self.subTest(name):
+                before = tree(self.data)
+                status, body = self.get(f"/api/cards?q={q}")
+                self.assertEqual(status, 400, body)
+                self.assertIn("error", body)
+                self.assertEqual(tree(self.data), before)
+        for name, q in (("50 words", "+".join(["a"] * 50)), ("500 characters", "a" * 500)):
+            with self.subTest(name):
+                self.assertEqual(self.get(f"/api/cards?q={q}")[0], 200)
+        self.assertEqual((server.SEARCH_MAX_CHARS, server.SEARCH_MAX_WORDS), (500, 50))
+
     def test_limit(self):
         body = self.ok("/api/cards?limit=2")
         self.assertEqual(body["total"], 10)
@@ -335,6 +373,10 @@ class ListTest(ServerCase):
         self.assertEqual(len(self.ok("/api/cards?limit=5000")["cards"]), 10)
         self.assertEqual(server.LIST_LIMIT, 500)
         self.assertEqual(server.LIST_MAX, 5000)
+        with mock.patch.object(server, "LIST_LIMIT", 3):
+            body = self.ok("/api/cards")
+        self.assertEqual(len(body["cards"]), 3)
+        self.assertEqual(body["total"], 10)
 
     def test_bad_filters_are_400(self):
         for query in ("lane=nope", "limit=0", "limit=5001", "limit=ten", "limit=-1", "q=%FF", "q=%ED%A0%80",

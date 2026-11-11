@@ -138,6 +138,19 @@ class Ap2ServeCommandTest(unittest.TestCase):
         self.assertEqual(len(lines), 1, r.stderr)
         self.assertTrue(lines[0].startswith(f"ap2: cannot listen on 127.0.0.1:{port}: "), lines[0])
 
+    def test_a_port_another_program_holds_on_all_addresses_is_one_line_and_exit_1(self):
+        held = socket.socket()
+        self.addCleanup(held.close)
+        held.bind(("0.0.0.0", 0))
+        held.listen(1)
+        port = held.getsockname()[1]
+        r = self.run_ap2("serve", "--port", str(port))
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.stdout, "")
+        lines = r.stderr.splitlines()
+        self.assertEqual(len(lines), 1, r.stderr)
+        self.assertTrue(lines[0].startswith(f"ap2: cannot listen on 127.0.0.1:{port}: "), lines[0])
+
     def test_a_bad_config_is_refused_before_listening(self):
         self.data.mkdir()
         (self.data / "config.yaml").write_text("mode: loud\n", encoding="utf-8")
