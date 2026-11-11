@@ -311,6 +311,13 @@ class ParkCommandRulesTest(Base):
                 self.assertTrue(_before(cmd))
                 self.assertTrue(park.is_park_command(cmd))
                 self.assertFalse(self.denied(cmd))
+        # The comment now counts as words, so a short line that was refused is allowed: bash still runs only
+        # `ap worker park` with too few arguments, which fails its own argument check.
+        for cmd in (f"{AP} worker park a T #x y", f"{AP} worker park #a b c"):
+            with self.subTest(cmd=cmd):
+                self.assertFalse(_before(cmd))
+                self.assertTrue(park.is_park_command(cmd))
+                self.assertFalse(self.denied(cmd))
 
     def test_a_word_start_comment_with_punctuation_or_a_lone_quote_is_now_refused(self):
         # bash runs only the park command here, but after shlex a quoted "#" and a word-start # give the same

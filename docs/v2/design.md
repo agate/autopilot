@@ -1545,7 +1545,9 @@ Calls the author made without asking (check them):
       character (`;`, `&`, `|`, `<`, `>`, `(`, `)`) or an unbalanced quote, such as `--note x # ; later`, is now
       refused, though it was allowed before and bash runs only the park command: after `shlex` a quoted `"#"`
       and an unquoted word-start `#` give the same token, so dropping the comment could hide a real `; cmd`, and
-      refusing fails closed (as v2's hook does).
+      refusing fails closed (as v2's hook does). The other way round, a word-start comment now counts as words
+      in a short line, so `<ap> worker park a T #x y` and `<ap> worker park #a b c`, refused before, are now
+      allowed: bash still runs only `ap worker park` with too few arguments, which fails its own argument check.
     - The deny reason names that command with the worker's own card and role filled in, and the window and its
       percent. A subagent's call (payload `agent_id`) is told to stop and reply to its parent with exactly
       `parked for quota`.
