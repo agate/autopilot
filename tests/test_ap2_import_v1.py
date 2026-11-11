@@ -279,12 +279,35 @@ class ImportV1Test(unittest.TestCase):
         self.assertEqual(card["plain"]["do"]["en"], importv1.PHRASES["en"]["do_closed"])
         self.assertEqual(report["projects"][0]["not_imported"], {"decisions": 4})
 
+    def test_a_decision_archived_in_v1_closes_its_question_card(self):
+        self.ok("--project", "shop")
+        before = self.by_key()["v1:shop:D1"]
+
+        def archive(state):
+            # As v1's ops.archive: a settled decision answered long ago moves out of state.json into archive.jsonl.
+            d1 = state["decisions"].pop(0)
+            d1.update(status="answered", answer="A", answered_at="2000-01-01T00:00:00Z")
+            with open(self.v1 / "projects" / "shop" / "archive.jsonl", "a", encoding="utf-8") as f:
+                f.write(json.dumps(d1) + "\n")
+        self.edit_state("projects/shop", archive)
+        report = self.ok("--project", "shop")
+        self.assertEqual(self.actions(report)["v1:shop:D1"], "update")
+        card = self.by_key()["v1:shop:D1"]
+        self.assertEqual((card["lane"], card["ask"]), ("done", None))
+        self.assertEqual(card["plain"]["do"]["en"], importv1.PHRASES["en"]["do_closed"])
+        self.assertEqual((card["id"], card["title"], card["parent"], card["source"]),
+                         (before["id"], before["title"], before["parent"], before["source"]))
+        self.assertEqual(card["plain"]["what"], before["plain"]["what"])
+        self.assertEqual(card["plain"]["where"], before["plain"]["where"])
+        self.assertEqual(set(self.actions(self.ok("--project", "shop")).values()), {"unchanged"})
+
     def test_a_task_gone_from_v1_keeps_its_card(self):
         self.ok("--project", "shop")
+        before = self.by_key()["v1:shop:PROJ-1"]
         self.edit_state("projects/shop", lambda s: s.update(tasks=s["tasks"][1:]))
         report = self.ok("--project", "shop")
         self.assertNotIn("v1:shop:PROJ-1", self.actions(report))
-        self.assertIn("v1:shop:PROJ-1", self.by_key())
+        self.assertEqual(self.by_key()["v1:shop:PROJ-1"], before)
 
     # -- 5. text in each language -------------------------------------------------------------------------------
 
@@ -317,6 +340,12 @@ class ImportV1Test(unittest.TestCase):
         self.assertEqual(c["title"], "Alte Idee")
         self.assertEqual(c["plain"]["what"], {"en": "Alte Idee", "zh": "Alte Idee"})
 
+    def test_a_title_without_the_configured_language_uses_english_before_another(self):
+        self.set_config("secondary_language: zh\n")
+        self.edit_state("projects/shop", lambda s: s["tasks"][0].update(title={"de": "Alte Idee", "en": "Old idea"}))
+        self.ok("--project", "shop")
+        self.assertEqual(self.by_key()["v1:shop:PROJ-1"]["plain"]["what"], {"en": "Old idea", "zh": "Old idea"})
+
     def test_a_label_with_a_format_spec_or_a_conversion_is_shown_as_written(self):
         for template in ("{id:>9223372036854775807}", "{id!r}"):
             with self.subTest(template):
@@ -329,7 +358,8 @@ class ImportV1Test(unittest.TestCase):
 
     def test_a_label_that_cannot_be_filled_is_shown_as_written(self):
         self.set_config("secondary_language: zh\n")
-        for template in ("{ broken {id}", "{0} for {id}", "{id.real} for {id}"):
+        for template in ("{ broken {id}", "{0} for {id}", "{id.real} for {id}", "{id[0]} for {id}",
+                         "{id.__class__} for {id}"):
             with self.subTest(template):
                 shutil.rmtree(self.data / "items", ignore_errors=True)
                 (self.v1 / "labels.zh.json").write_text(json.dumps({"two_answers": template}), encoding="utf-8")
@@ -382,14 +412,42 @@ class ImportV1Test(unittest.TestCase):
         self.assertEqual(self.by_key()["v1:shop:D2"]["title"], "no_such_label")
 
     def test_a_label_that_would_fill_too_long_is_shown_as_written(self):
-        template = "{i}" * 2000
+        template = "{i}" * 100
         (self.v1 / "labels.en.json").write_text(json.dumps({"boom": template}), encoding="utf-8")
         self.edit_state("projects/shop", lambda s: s["tasks"][0].update(
-            title={"key": "boom", "args": {"i": "x" * 2000}}))
+            title={"key": "boom", "args": {"i": "x" * 20}}))
         self.ok("--project", "shop")
         c = self.by_key()["v1:shop:PROJ-1"]
         self.assertEqual(c["title"], template)
         self.assertEqual(c["plain"]["what"]["en"], template)
+
+    def test_a_label_too_long_to_show_as_written_is_shown_as_its_key(self):
+        for template in ("A" * 5000, "{id:>9}" + "A" * 5000):
+            with self.subTest(template[:10]):
+                shutil.rmtree(self.data, ignore_errors=True)
+                (self.v1 / "labels.en.json").write_text(json.dumps({"big": template}), encoding="utf-8")
+                self.edit_state("projects/shop", lambda s: s["tasks"][0].update(
+                    title={"key": "big", "args": {"id": "D9"}}))
+                self.ok("--project", "shop")
+                c = self.by_key()["v1:shop:PROJ-1"]
+                self.assertEqual(c["title"], "big")
+                self.assertEqual(c["plain"]["what"]["en"], "big")
+
+    def test_the_filled_size_stops_early_and_turns_each_argument_into_text_once(self):
+        class Counted:
+            def __init__(self, text):
+                self.text, self.calls = text, 0
+
+            def __str__(self):
+                self.calls += 1
+                return self.text
+
+        one = Counted("x")
+        self.assertGreater(importv1._filled_size("{i}" * 3000, {"i": one}), importv1.MAX_LABEL)
+        self.assertEqual(one.calls, 1)  # the same field is turned into text once
+        many = {f"f{n}": Counted("x" * 600) for n in range(3000)}
+        self.assertGreater(importv1._filled_size("".join("{" + k + "}" for k in many), many), importv1.MAX_LABEL)
+        self.assertLessEqual(sum(c.calls for c in many.values()), 2)  # it stops once past MAX_LABEL
 
     def test_the_title_is_the_primary_languages_text_when_it_is_not_english(self):
         self.set_config("primary_language: zh\nsecondary_language: en\n")

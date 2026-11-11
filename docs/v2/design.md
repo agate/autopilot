@@ -1543,13 +1543,14 @@ Calls the author made without asking (check them):
     `link`); a `question` card per open `ask` or `gate` decision (`key: v1:<name>:<decision id>`, `lane: needs`,
     `ask: {type: answer | approve, from: v1}`, under its task's card, else the project's). Other decisions make no
     card and are counted in the report's `not_imported`. A question card made while its decision was open is
-    closed (`lane: done`, `ask: null`) once v1 settles it.
+    closed (`lane: done`, `ask: null`) once v1 settles it; a question card whose decision has left state.json (v1
+    archives only settled decisions) is closed the same way.
   - Text: a v1 text `{en, zh, ...}` gives each configured language its own text, else the base language
     (`zh-Hans` -> `zh`), else `en`, else its first string. A label `{key, args}` is filled with `str.format_map`
     (a placeholder without an argument stays as written, as v1's page does; a template with a format spec,
-    conversion, index or attribute, one that does not parse, or one that would fill past `MAX_LABEL` (10,000)
-    characters, is shown as written) from the package's
-    `templates/labels.<lang>.json` with the v1 folder's `labels.<lang>.json` on top (where v1 keeps its page
+    conversion, index or attribute, one that does not parse, or one that would fill past `MAX_LABEL` (1,000)
+    characters, is shown as written, or as its key when the template itself is longer than `MAX_LABEL`) from the
+    package's `templates/labels.<lang>.json` with the v1 folder's `labels.<lang>.json` on top (where v1 keeps its page
     translations), falling back to `en`, then to the key. `title` is the primary language's text. Plain words come
     from fixed phrases (`importv1.PHRASES`, `en` and `zh`): `what` is the title, `where` names the project (and
     task, with its v1 status), `do` says it is a read-only copy and to act on v1's page. A configured language

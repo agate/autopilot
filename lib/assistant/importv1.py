@@ -38,8 +38,9 @@ ASK = {"ask": "answer", "gate": "approve"}
 UPDATED = ("title", "plain", "lane", "status", "ask", "source")
 TASK_RECORD = ("pr", "branch", "depends_on", "link")
 PROJECT_RECORD = ("repo", "branch_pattern", "branch_prefix")
-# The longest a filled v1 label may be, in characters; a label that would fill longer is shown as written.
-MAX_LABEL = 10_000
+# The longest text a v1 label may give, in characters: a label that would fill longer is shown as written, and a
+# label to be shown as written that is itself longer is shown as its key. v1's own labels are about 100 characters.
+MAX_LABEL = 1_000
 
 # The code-made plain words, one entry per language. A language is matched exactly, then by its first part
 # (zh-Hans -> zh), as `engine.phrases` does.
@@ -114,29 +115,41 @@ class Labels:
             template = self.table(each).get(key)
             if template is not None:
                 size = _filled_size(template, args)
-                if size is None or size > MAX_LABEL:
-                    return template  # a format v1's page would not apply, or one filled too long, printed as written
+                if size is None:
+                    return _as_written(template, key)  # a format v1's page would not apply
+                if size > MAX_LABEL:
+                    return _as_written(template, key)  # one that would fill too long
                 try:
                     return template.format_map(_Keep(args))
                 except (ValueError, IndexError, KeyError, AttributeError, TypeError):
-                    return template  # a brace or a format v1's page would print as written
+                    return _as_written(template, key)  # a brace or a format v1's page would print as written
         return str(key)
+
+
+def _as_written(template: str, key: str) -> str:
+    """A label shown as written: the template, or its key when the template itself is longer than MAX_LABEL."""
+    return template if len(template) <= MAX_LABEL else key
 
 
 def _filled_size(template: str, args: dict) -> Optional[int]:
     """How many characters `template` has once filled from `args` (a placeholder without an argument counts as
     written), so a label repeating one field cannot build a huge string. None when a `{...}` is not a bare name:
     a format spec (`{id:>9}`), a conversion (`{id!r}`), an index or attribute (`{id[0]}`, `{id.real}`), none of
-    which v1's page applies. A template that does not parse is None too."""
+    which v1's page applies. A template that does not parse is None too. It stops as soon as the size passes
+    MAX_LABEL (the size so far is returned), and turns each argument into text once."""
     size = 0
+    lengths = {}
     try:
         for literal, field, spec, conversion in string.Formatter().parse(template):
             size += len(literal)
-            if field is None:
-                continue
-            if spec or conversion is not None or "." in field or "[" in field:
-                return None
-            size += len(str(args[field])) if field in args else len(field) + 2
+            if field is not None:
+                if spec or conversion is not None or "." in field or "[" in field:
+                    return None
+                if field not in lengths:
+                    lengths[field] = len(str(args[field])) if field in args else len(field) + 2
+                size += lengths[field]
+            if size > MAX_LABEL:
+                return size
     except ValueError:
         return None
     return size
@@ -310,10 +323,27 @@ class _Maker:
                          self.texts(d.get("title"), d["id"]), where, self.say("do_question" if open_ else "do_closed"),
                          record, parent, ask={"type": ASK[d["kind"]], "from": "v1"} if open_ else None)
 
+    def closed(self, old: dict) -> dict:
+        """The closed question card for `old`, a question card whose decision has left state.json: as `question`
+        makes it with `open_=False`, keeping the old card's title, `what`, `where`, source and parent."""
+        plain = old.get("plain") if isinstance(old.get("plain"), dict) else {}
+        what = plain.get("what") if isinstance(plain.get("what"), dict) else {}
+        where = plain.get("where") if isinstance(plain.get("where"), dict) else {}
+        fresh = self.say("question_where", project=self.name, about="")
+        source = old.get("source") if isinstance(old.get("source"), dict) else {}
+        entry = self.card("question", old["key"], "done",
+                          {lang: what.get(lang) or old.get("title") for lang in self.langs},
+                          {lang: where.get(lang) or fresh[lang] for lang in self.langs}, self.say("do_closed"),
+                          source.get("record"), None, title=old.get("title"), ask=None)
+        if old.get("parent"):
+            entry["card"]["parent"] = old["parent"]
+        return entry
 
-def plan(name: str, folder: Path, langs: tuple, labels: Labels, existing_keys) -> tuple:
-    """The cards one project makes, parents first, and how many decisions it does not import. Each card is checked
-    as the store will check it, so a project is refused before any of its cards is written. Raises _Refused."""
+
+def plan(name: str, folder: Path, langs: tuple, labels: Labels, existing: dict) -> tuple:
+    """The cards one project makes, parents first, and how many decisions it does not import. `existing` is this
+    feed's cards by key. Each card is checked as the store will check it, so a project is refused before any of its
+    cards is written. Raises _Refused."""
     cfg, tasks, decisions = read_project(folder)
     make = _Maker(name, folder, langs, labels)
     out = [make.project(cfg, tasks)] + [make.task(t) for t in tasks]
@@ -325,10 +355,18 @@ def plan(name: str, folder: Path, langs: tuple, labels: Labels, existing_keys) -
         if not is_open:
             skipped += 1
             # A question card made while it was open is closed when v1 settles it; no card is made for it otherwise.
-            if asks and f"v1:{name}:{d['id']}" in existing_keys:
+            if asks and f"v1:{name}:{d['id']}" in existing:
                 out.append(make.question(d, task_ids, False))
             continue
         out.append(make.question(d, task_ids, True))
+    # v1 removes a decision from state.json only when it archives it, and it archives only settled ones: a question
+    # card still open whose decision is gone is closed too.
+    ids = task_ids | {d["id"] for d in decisions}
+    prefix = f"v1:{name}:"
+    for key, old in sorted(existing.items()):
+        if (key.startswith(prefix) and key[len(prefix):] not in ids and old.get("kind") == "question"
+                and (old.get("lane") != "done" or old.get("ask") is not None)):
+            out.append(make.closed(old))
     for entry in out:
         try:
             cards.validate(entry["card"], langs)
