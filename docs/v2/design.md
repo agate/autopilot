@@ -1526,9 +1526,11 @@ Calls the author made without asking (check them):
   - Command: `ap2 import-v1 [--data PATH] [--from DIR] [--project NAME ...] [--dry-run]`. `--from` defaults to
     v1's own data root (`AUTOPILOT_DATA`, else `~/.claude/autopilot-data`, v1's `paths.data_root()`). A project is
     every `<from>/projects/<name>/` holding `config.json`, plus a legacy `<from>/<name>/config.json` whose
-    `projects/<name>/config.json` does not exist (v1's `ap_dir` rule); `<name>` must pass v1's `valid_name`.
-    `--project` (repeatable) limits it; a name not found, a missing `--from` folder, or a data folder inside
-    `--from` is one `ap2: ...` line, exit 1, nothing written.
+    `projects/<name>/config.json` does not exist (v1's `ap_dir` rule); `<name>` must pass v1's `valid_name`; a
+    folder that cannot be looked into counts as found, so it is refused alone. `--project` (repeatable) limits
+    it; a name not found, a missing `--from` folder, or a data folder and `--from` where either is inside the
+    other (compared as `datadir` does: letter case folded, then by file identity) is one `ap2: ...` line, exit 1,
+    nothing written.
   - Read-only for real: v1's files are read with `open(...).read()` and `json.loads`, never through v1's
     `state.load` or `mutate` (they take a lock file inside v1's folder). Nothing is created or changed under
     `--from`.
@@ -1544,7 +1546,8 @@ Calls the author made without asking (check them):
     closed (`lane: done`, `ask: null`) once v1 settles it.
   - Text: a v1 text `{en, zh, ...}` gives each configured language its own text, else the base language
     (`zh-Hans` -> `zh`), else `en`, else its first string. A label `{key, args}` is filled with `str.format_map`
-    (a placeholder without an argument stays as written, as v1's page does) from the package's
+    (a placeholder without an argument stays as written, as v1's page does; a template with a format spec or
+    conversion, or one that does not parse, is shown as written) from the package's
     `templates/labels.<lang>.json` with the v1 folder's `labels.<lang>.json` on top (where v1 keeps its page
     translations), falling back to `en`, then to the key. `title` is the primary language's text. Plain words come
     from fixed phrases (`importv1.PHRASES`, `en` and `zh`): `what` is the title, `where` names the project (and
@@ -1558,8 +1561,8 @@ Calls the author made without asking (check them):
     unchanged, card}], not_imported: {decisions}}], refused: [{name, folder, reason}]}`. Every card of a project
     is checked as the store will check it before any is written, so a project whose files cannot be read
     (missing, bad JSON, not an object, a task or decision without an id, an id used twice, an unknown task status,
-    text the store refuses) is listed under `refused` and the others still import; the command then prints one
-    `ap2: ...` line and exits 1 after the report.
+    text the store refuses, a value nested deeper than the store writes) is listed under `refused` and the others
+    still import; the command then prints one `ap2: ...` line and exits 1 after the report.
   - Writes only inside the data folder, so it runs in shadow mode (no `require_live`). Not imported:
     `events.jsonl`, reports, run folders, and `<data>/projects/<name>.yaml` (not written from `config.json`).
 - How the local server pushes updates to an open page (polling is fine).

@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import string
 from pathlib import Path
 from typing import Optional
 
@@ -23,7 +25,7 @@ from autopilot import paths as v1_paths
 from assistant import cards, config, datadir
 from assistant.cards import CardError
 from assistant.config import ConfigError
-from assistant.store import Store
+from assistant.store import Store, check_writable
 
 FEED = "v1-import"
 BY = "v1-import"
@@ -109,11 +111,23 @@ class Labels:
         for each in dict.fromkeys((lang, lang.split("-")[0], "en")):
             template = self.table(each).get(key)
             if template is not None:
+                if not _plain_fields(template):
+                    return template  # a format spec or conversion v1's page would not apply, printed as written
                 try:
                     return template.format_map(_Keep(args))
                 except (ValueError, IndexError, KeyError, AttributeError, TypeError):
                     return template  # a brace or a format v1's page would print as written
         return str(key)
+
+
+def _plain_fields(template: str) -> bool:
+    """True when every `{...}` in `template` is a bare name: no format spec (`{id:>9}`, which could build a huge
+    string) and no conversion (`{id!r}`). A template that does not parse is not plain either."""
+    try:
+        return all(not spec and conversion is None for _, field, spec, conversion in string.Formatter().parse(template)
+                   if field is not None)
+    except ValueError:
+        return False
 
 
 def _read_quietly(path: Path):
@@ -156,22 +170,35 @@ def source_root(given: Optional[str]) -> Path:
     return root
 
 
+def _has_config(folder: Path) -> bool:
+    """Whether `folder` holds config.json. A folder that cannot be looked into counts as found, so
+    `read_project` refuses that one project with its reason and the others still import."""
+    try:
+        os.stat(folder / "config.json")
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        return True
+    return True
+
+
 def find(root: Path) -> dict:
     """The v1 projects under `root`, as {name: folder}, by name. v1's `ap_dir` rule: the folder in projects/
     counts once it holds config.json; before that a legacy top-level folder with config.json is the project."""
     found = {}
     projects = root / "projects"
     try:
-        if projects.is_dir():
-            for d in sorted(projects.iterdir()):
-                if v1_paths.valid_name(d.name) and (d / "config.json").exists():
-                    found[d.name] = d
-        # A name already found has projects/<name>/config.json, which shadows its legacy folder.
-        for d in sorted(root.iterdir()):
-            if d.name not in found and v1_paths.valid_name(d.name) and (d / "config.json").exists():
-                found[d.name] = d
+        listed = sorted(projects.iterdir()) if projects.is_dir() else []
+        legacy = sorted(root.iterdir())
     except OSError as e:
         raise V1ImportError(f"cannot list the v1 data folder {root}: {e}") from e
+    for d in listed:
+        if v1_paths.valid_name(d.name) and _has_config(d):
+            found[d.name] = d
+    # A name already found has projects/<name>/config.json, which shadows its legacy folder.
+    for d in legacy:
+        if d.name not in found and v1_paths.valid_name(d.name) and _has_config(d):
+            found[d.name] = d
     return dict(sorted(found.items()))
 
 
@@ -293,6 +320,7 @@ def plan(name: str, folder: Path, langs: tuple, labels: Labels, existing_keys) -
     for entry in out:
         try:
             cards.validate(entry["card"], langs)
+            check_writable(entry["card"])  # the store's own depth bound, before any card is copied or written
         except CardError as e:
             raise _Refused(f"{entry['key']}: {e}") from None
     return out, skipped
@@ -312,17 +340,15 @@ def _cards_by_key(store: Store, dry_run: bool) -> dict:
     return out
 
 
-def _inside(path: Path, root: Path) -> bool:
-    return path == root or root in path.parents
-
-
 def run(data: Path, source: Optional[str] = None, names: Optional[list] = None, dry_run: bool = False) -> dict:
     """Import the v1 projects under `source` (or only `names`) into the card store in `data`; return the report.
     With `dry_run` nothing is written. Raises V1ImportError (nothing written) or CardError (the store failed)."""
     root = source_root(source)
     data = Path(data)
-    if _inside(data, root):
-        raise V1ImportError(f"data folder {data} is inside the v1 data folder {root}; the import never writes there")
+    # datadir's own test: letter case folded, then the same folder by file identity (symlinks, firmlinks).
+    if datadir._inside(data, root) or datadir._inside(root, data):
+        raise V1ImportError(f"data folder {data} and the v1 data folder {root} overlap (one is inside the other); "
+                            f"the import never writes under --from")
     cfg = config.load(data)
     langs = cards.languages(cfg)
     missing = [lang for lang in langs if phrases(lang) is None]

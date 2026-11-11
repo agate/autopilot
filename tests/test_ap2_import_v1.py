@@ -13,7 +13,8 @@ from unittest import mock
 
 from tests.helpers import ROOT
 from tests.test_ap2_cli import temp_inside_the_accounts_claude
-from assistant import cards, cli
+from tests.test_ap2_store import card as store_card
+from assistant import cards, cli, datadir, importv1
 from assistant.store import Store
 
 FIXTURE = ROOT / "tests" / "fixtures" / "v1-data"
@@ -178,6 +179,7 @@ class ImportV1Test(unittest.TestCase):
             self.assertIsNone(e["card"])
             self.assertEqual(e["would_add"]["key"], e["key"])
             self.assertEqual(e["would_add"]["kind"], e["kind"])
+            self.assertNotIn("parent", e["would_add"])  # its parent is only a would-add too
 
     def test_dry_run_after_an_import_reports_unchanged_and_writes_nothing(self):
         self.ok()
@@ -195,6 +197,26 @@ class ImportV1Test(unittest.TestCase):
         self.assertEqual([c["key"] for c in changed], ["v1:shop:PROJ-1"])
         self.assertEqual(changed[0]["would_change"], ["lane", "plain", "status"])
         self.assertEqual(snapshot(self.data), before)
+
+    def test_dry_run_into_a_data_folder_with_only_a_config_writes_nothing(self):
+        self.set_config("secondary_language: zh\n")
+        self.ok("--dry-run")
+        self.assertEqual(sorted(p.name for p in self.data.iterdir()), ["config.yaml"])
+
+    def test_dry_run_of_a_new_task_names_the_existing_project_card_as_its_parent(self):
+        self.ok("--project", "shop")
+        project_id = self.by_key()["v1:shop"]["id"]
+        self.edit_state("projects/shop", lambda s: s["tasks"].append(dict(s["tasks"][0], id="PROJ-99")))
+        report = self.ok("--dry-run", "--project", "shop")
+        added = [c for p in report["projects"] for c in p["cards"] if c["action"] == "add"]
+        self.assertEqual([c["key"] for c in added], ["v1:shop:PROJ-99"])
+        self.assertEqual(added[0]["would_add"]["parent"], project_id)
+
+    def test_dry_run_with_a_broken_project_exits_1(self):
+        (self.v1 / "notes" / "state.json").write_text("{", encoding="utf-8")
+        code, out, err = self.run_cli("--dry-run")
+        self.assertEqual(code, 1, err)
+        self.assertEqual([r["name"] for r in json.loads(out)["refused"]], ["notes"])
 
     # -- 4. a re-run is safe ------------------------------------------------------------------------------------
 
@@ -220,6 +242,23 @@ class ImportV1Test(unittest.TestCase):
             if key != "v1:shop:PROJ-1":
                 self.assertEqual(c, first[key], key)
 
+    def test_a_rerun_updates_a_changed_title_and_source_record(self):
+        self.ok("--project", "shop")
+        self.edit_state("projects/shop", lambda s: s["tasks"][0].update(
+            title={"en": "Add the basket"}, pr="https://github.com/org/repo/pull/9"))
+        report = self.ok("--project", "shop")
+        self.assertEqual(self.actions(report)["v1:shop:PROJ-1"], "update")
+        card = self.by_key()["v1:shop:PROJ-1"]
+        self.assertEqual(card["title"], "Add the basket")
+        self.assertEqual(card["source"]["record"]["pr"], "https://github.com/org/repo/pull/9")
+
+    def test_a_card_of_another_feed_with_the_same_key_is_left_alone(self):
+        datadir.ensure(self.data)
+        other = Store(self.data).add(store_card(feed="other", key="v1:shop:PROJ-1"), by="test")
+        report = self.ok("--project", "shop")
+        self.assertEqual(self.actions(report)["v1:shop:PROJ-1"], "add")
+        self.assertEqual(Store(self.data).get(other["id"]), other)
+
     def test_a_decision_answered_in_v1_closes_its_question_card(self):
         self.ok("--project", "shop")
         self.edit_state("projects/shop", lambda s: s["decisions"][0].update(status="answered", answer="A"))
@@ -228,6 +267,7 @@ class ImportV1Test(unittest.TestCase):
         card = self.by_key()["v1:shop:D1"]
         self.assertEqual(card["lane"], "done")
         self.assertIsNone(card["ask"])
+        self.assertEqual(card["plain"]["do"]["en"], importv1.PHRASES["en"]["do_closed"])
         self.assertEqual(report["projects"][0]["not_imported"], {"decisions": 4})
 
     def test_a_task_gone_from_v1_keeps_its_card(self):
@@ -257,6 +297,47 @@ class ImportV1Test(unittest.TestCase):
             self.assertIn("v1", c["plain"]["do"]["zh"])
         self.assertIn("shop", got["v1:shop:PROJ-1"]["plain"]["where"]["en"])
         self.assertIn("PROJ-1", got["v1:shop:PROJ-1"]["plain"]["where"]["en"])
+        self.assertEqual(both["plain"]["do"]["zh"], importv1.PHRASES["zh"]["do"])
+        self.assertIn("任务 PROJ-1", both["plain"]["where"]["zh"])
+
+    def test_a_title_with_only_another_language_uses_that_text(self):
+        self.set_config("secondary_language: zh\n")
+        self.edit_state("projects/shop", lambda s: s["tasks"][0].update(title={"de": "Alte Idee"}))
+        self.ok("--project", "shop")
+        c = self.by_key()["v1:shop:PROJ-1"]
+        self.assertEqual(c["title"], "Alte Idee")
+        self.assertEqual(c["plain"]["what"], {"en": "Alte Idee", "zh": "Alte Idee"})
+
+    def test_a_label_with_a_format_spec_or_a_conversion_is_shown_as_written(self):
+        for template in ("{id:>9223372036854775807}", "{id!r}"):
+            with self.subTest(template):
+                shutil.rmtree(self.data, ignore_errors=True)
+                (self.v1 / "labels.en.json").write_text(json.dumps({"two_answers": template}), encoding="utf-8")
+                self.ok("--project", "shop")
+                c = self.by_key()["v1:shop:D2"]
+                self.assertEqual(c["title"], template)
+                self.assertEqual(c["plain"]["what"]["en"], template)
+
+    def test_a_label_that_cannot_be_filled_is_shown_as_written(self):
+        self.set_config("secondary_language: zh\n")
+        for template in ("{ broken {id}", "{0} for {id}", "{id.real} for {id}"):
+            with self.subTest(template):
+                shutil.rmtree(self.data / "items", ignore_errors=True)
+                (self.v1 / "labels.zh.json").write_text(json.dumps({"two_answers": template}), encoding="utf-8")
+                self.ok("--project", "shop")
+                self.assertEqual(self.by_key()["v1:shop:D2"]["plain"]["what"]["zh"], template)
+
+    def test_a_placeholder_without_an_argument_stays_as_written(self):
+        self.edit_state("projects/shop", lambda s: s["decisions"][1].update(title={"key": "two_answers"}))
+        self.ok("--project", "shop")
+        self.assertEqual(self.by_key()["v1:shop:D2"]["title"],
+                         "Two different answers arrived for {id}. Which one counts?")
+        shutil.rmtree(self.data)
+        (self.v1 / "labels.en.json").write_text(json.dumps({"two_answers": "{id} and {other}"}), encoding="utf-8")
+        self.edit_state("projects/shop", lambda s: s["decisions"][1].update(
+            title={"key": "two_answers", "args": {"id": "D9"}}))
+        self.ok("--project", "shop")
+        self.assertEqual(self.by_key()["v1:shop:D2"]["title"], "D9 and {other}")
 
     def test_a_label_with_no_translation_falls_back_to_english(self):
         self.set_config("secondary_language: zh\n")
@@ -304,6 +385,25 @@ class ImportV1Test(unittest.TestCase):
         report = self.ok()
         self.assertEqual([p["name"] for p in report["projects"]], ["notes", "shop"])
 
+    def test_a_legacy_folder_name_v1_would_refuse_is_not_a_project(self):
+        shutil.copytree(self.v1 / "notes", self.v1 / "Bad_Name")
+        report = self.ok()
+        self.assertEqual([p["name"] for p in report["projects"]], ["notes", "shop"])
+
+    def test_a_project_folder_that_cannot_be_read_is_refused_and_the_others_still_import(self):
+        if os.geteuid() == 0:
+            self.skipTest("root reads a folder whatever its mode")
+        locked = self.v1 / "projects" / "locked"
+        shutil.copytree(self.v1 / "projects" / "shop", locked)
+        os.chmod(locked, 0)
+        self.addCleanup(os.chmod, locked, 0o755)
+        code, out, err = self.run_cli()
+        self.assertEqual(code, 1, err)
+        report = json.loads(out)
+        self.assertEqual([r["name"] for r in report["refused"]], ["locked"])
+        self.assertIn("config.json", report["refused"][0]["reason"])
+        self.assertEqual([p["name"] for p in report["projects"]], ["notes", "shop"])
+
     def test_project_limits_the_import(self):
         report = self.ok("--project", "notes")
         self.assertEqual([p["name"] for p in report["projects"]], ["notes"])
@@ -338,6 +438,39 @@ class ImportV1Test(unittest.TestCase):
         line = self.fails()
         self.assertIn("inside", line)
         self.assertFalse(self.data.exists())
+
+    def test_a_data_folder_that_is_the_v1_folder_is_refused(self):
+        self.data = self.v1
+        self.fails()
+        self.assertFalse((self.v1 / "items").exists())
+        self.assertFalse((self.v1 / "config.yaml").exists())
+
+    def test_a_data_folder_inside_the_v1_folder_through_a_symlink_is_refused(self):
+        link = self.tmp / "link"
+        link.symlink_to(self.v1)
+        self.data = link / "v2-data"
+        code, out, err = self.run_cli("--from", str(link), source=False)
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"the v1 data folder {self.v1} ", err)  # the folder the link points at, not the link
+        self.assertFalse((self.v1 / "v2-data").exists())
+
+    def test_a_v1_folder_inside_the_data_folder_is_refused(self):
+        self.data = self.tmp / "d"
+        self.v1 = self.data / "v1"
+        shutil.copytree(FIXTURE, self.v1)
+        before = snapshot(self.data)
+        self.fails()
+        self.assertEqual(snapshot(self.data), before)
+
+    def test_a_data_folder_inside_the_v1_folder_spelled_in_other_letter_case_is_refused(self):
+        probe = self.tmp / "case-probe"
+        probe.touch()
+        if not os.path.exists(str(probe).upper()):
+            self.skipTest("the temp file system tells letter case apart")
+        self.data = self.v1 / "v2-data"
+        code, out, err = self.run_cli("--from", str(self.tmp / "V1"), source=False)
+        self.assertEqual(code, 1, out)
+        self.assertFalse((self.v1 / "v2-data").exists())
 
     def test_odd_v1_values_do_not_stop_the_import(self):
         def odd(state):
@@ -403,6 +536,25 @@ class ImportV1Test(unittest.TestCase):
                 self.assertIn(word, report["refused"][0]["reason"])
                 self.assertEqual([p["name"] for p in report["projects"]], ["shop"])
                 self.assertNotIn("v1:notes", self.by_key())
+
+    def test_a_task_nested_too_deeply_refuses_its_project_before_any_card_is_written(self):
+        for depth in (300, 600):
+            with self.subTest(depth=depth):
+                shutil.rmtree(self.data, ignore_errors=True)
+                path = self.v1 / "projects" / "shop" / "state.json"
+                shutil.copy(FIXTURE / "projects" / "shop" / "state.json", path)
+                text = path.read_text(encoding="utf-8")
+                text = text.replace('"link": null, "needs": [], "critical": false, "phase": 2',
+                                    '"link": ' + "[" * depth + "]" * depth + ', "needs": [], "critical": false, '
+                                    '"phase": 2', 1)
+                path.write_text(text, encoding="utf-8")
+                code, out, err = self.run_cli()
+                self.assertEqual(code, 1, err)
+                report = json.loads(out)
+                self.assertEqual([r["name"] for r in report["refused"]], ["shop"])
+                self.assertIn("deep", report["refused"][0]["reason"])
+                self.assertEqual([p["name"] for p in report["projects"]], ["notes"])
+                self.assertEqual({c["project"] for c in self.by_key().values()}, {"notes"})
 
     # -- the command line ---------------------------------------------------------------------------------------
 
