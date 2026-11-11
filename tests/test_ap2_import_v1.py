@@ -301,6 +301,42 @@ class ImportV1Test(unittest.TestCase):
         self.assertEqual(card["plain"]["where"], before["plain"]["where"])
         self.assertEqual(set(self.actions(self.ok("--project", "shop")).values()), {"unchanged"})
 
+    def test_an_archived_decision_closes_its_card_keeping_each_languages_text(self):
+        self.set_config("secondary_language: zh\n")
+        self.ok("--project", "shop")
+        before = self.by_key()["v1:shop:D1"]
+        self.edit_state("projects/shop", lambda s: s["decisions"].pop(0))
+        self.ok("--project", "shop")
+        card = self.by_key()["v1:shop:D1"]
+        self.assertEqual((card["lane"], card["ask"]), ("done", None))
+        self.assertEqual(card["plain"]["what"], before["plain"]["what"])
+        self.assertEqual(card["plain"]["what"]["zh"], "用哪家支付？")
+        self.assertEqual(card["plain"]["where"], before["plain"]["where"])
+
+    def test_an_archived_decision_closes_a_card_made_before_a_language_was_added(self):
+        self.ok("--project", "shop")
+        self.set_config("secondary_language: zh\n")
+        self.edit_state("projects/shop", lambda s: s["decisions"].pop(0))
+        report = self.ok("--project", "shop")
+        self.assertEqual(report["refused"], [])
+        card = self.by_key()["v1:shop:D1"]
+        self.assertEqual((card["lane"], card["ask"]), ("done", None))
+        cards.check_plain(card, ("en", "zh"))
+
+    def test_a_state_without_decisions_is_refused_and_leaves_the_question_cards_open(self):
+        self.ok("--project", "shop")
+        before = self.by_key()
+        self.edit_state("projects/shop", lambda s: s.pop("decisions"))
+        code, out, err = self.run_cli("--project", "shop")
+        self.assertEqual(code, 1, err)
+        report = json.loads(out)
+        self.assertEqual([r["name"] for r in report["refused"]], ["shop"])
+        self.assertIn("decisions", report["refused"][0]["reason"])
+        now = self.by_key()
+        for key in ("v1:shop:D1", "v1:shop:D2"):
+            self.assertEqual(now[key], before[key], key)
+            self.assertEqual(now[key]["lane"], "needs", key)
+
     def test_a_task_gone_from_v1_keeps_its_card(self):
         self.ok("--project", "shop")
         before = self.by_key()["v1:shop:PROJ-1"]
@@ -432,6 +468,15 @@ class ImportV1Test(unittest.TestCase):
                 c = self.by_key()["v1:shop:PROJ-1"]
                 self.assertEqual(c["title"], "big")
                 self.assertEqual(c["plain"]["what"]["en"], "big")
+
+    def test_a_label_template_too_long_is_shown_as_its_key_without_being_parsed(self):
+        template = "{a}" * 2000  # 6,000 characters that fill to nothing
+        (self.v1 / "labels.en.json").write_text(json.dumps({"k": template}), encoding="utf-8")
+        self.edit_state("projects/shop", lambda s: s["tasks"][0].update(title={"key": "k", "args": {"a": ""}}))
+        with mock.patch.object(importv1, "_filled_size", wraps=importv1._filled_size) as spy:
+            self.ok("--project", "shop")
+        self.assertEqual(self.by_key()["v1:shop:PROJ-1"]["title"], "k")
+        self.assertNotIn(template, [c.args[0] for c in spy.call_args_list])
 
     def test_the_filled_size_stops_early_and_turns_each_argument_into_text_once(self):
         class Counted:
@@ -568,6 +613,21 @@ class ImportV1Test(unittest.TestCase):
         self.assertIn(f"the v1 data folder {self.v1} ", err)  # the folder the link points at, not the link
         self.assertFalse((self.v1 / "v2-data").exists())
 
+    def test_a_data_folder_inside_a_symlinked_project_folders_real_location_is_refused(self):
+        if not hasattr(os, "symlink"):
+            self.skipTest("no symlinks here")
+        real = self.tmp / "elsewhere" / "shop"
+        real.parent.mkdir()
+        shutil.move(str(self.v1 / "projects" / "shop"), str(real))
+        try:
+            (self.v1 / "projects" / "shop").symlink_to(real, target_is_directory=True)
+        except (OSError, NotImplementedError) as e:
+            self.skipTest(f"cannot make a symlink: {e}")
+        self.data = real / "v2"
+        line = self.fails()
+        self.assertIn("shop", line)
+        self.assertFalse(self.data.exists())
+
     def test_a_v1_folder_inside_the_data_folder_is_refused(self):
         self.data = self.tmp / "d"
         self.v1 = self.data / "v1"
@@ -638,6 +698,8 @@ class ImportV1Test(unittest.TestCase):
             "a status that is not text": (lambda d: (d / "state.json").write_text(
                 json.dumps({"tasks": [{"id": "PROJ-9", "status": ["todo"]}], "decisions": []}),
                 encoding="utf-8"), "unknown status"),
+            "a state without decisions": (lambda d: (d / "state.json").write_text(
+                json.dumps({"tasks": []}), encoding="utf-8"), "decisions"),
             "text that is not Unicode": (lambda d: (d / "state.json").write_text(
                 '{"tasks": [{"id": "PROJ-9", "status": "todo", "title": {"en": "\\ud800"}}], "decisions": []}',
                 encoding="utf-8"), "Unicode"),

@@ -1528,9 +1528,9 @@ Calls the author made without asking (check them):
     every `<from>/projects/<name>/` holding `config.json`, plus a legacy `<from>/<name>/config.json` whose
     `projects/<name>/config.json` does not exist (v1's `ap_dir` rule); `<name>` must pass v1's `valid_name`; a
     folder that cannot be looked into counts as found, so it is refused alone. `--project` (repeatable) limits
-    it; a name not found, a missing `--from` folder, or a data folder and `--from` where either is inside the
-    other (compared as `datadir` does: letter case folded, then by file identity) is one `ap2: ...` line, exit 1,
-    nothing written.
+    it; a name not found, a missing `--from` folder, or a data folder and `--from` (and each project folder,
+    symlinks followed) where either is inside the other (compared as `datadir` does: letter case folded, then by
+    file identity) is one `ap2: ...` line, exit 1, nothing written.
   - Read-only for real: v1's files are read with `open(...).read()` and `json.loads`, never through v1's
     `state.load` or `mutate` (they take a lock file inside v1's folder). Nothing is created or changed under
     `--from`.
@@ -1547,14 +1547,14 @@ Calls the author made without asking (check them):
     archives only settled decisions) is closed the same way.
   - Text: a v1 text `{en, zh, ...}` gives each configured language its own text, else the base language
     (`zh-Hans` -> `zh`), else `en`, else its first string. A label `{key, args}` is filled with `str.format_map`
-    (a placeholder without an argument stays as written, as v1's page does; a template with a format spec,
-    conversion, index or attribute, one that does not parse, or one that would fill past `MAX_LABEL` (1,000)
-    characters, is shown as written, or as its key when the template itself is longer than `MAX_LABEL`) from the
-    package's `templates/labels.<lang>.json` with the v1 folder's `labels.<lang>.json` on top (where v1 keeps its page
-    translations), falling back to `en`, then to the key. `title` is the primary language's text. Plain words come
-    from fixed phrases (`importv1.PHRASES`, `en` and `zh`): `what` is the title, `where` names the project (and
-    task, with its v1 status), `do` says it is a read-only copy and to act on v1's page. A configured language
-    with no phrases is refused before anything is written.
+    (a placeholder without an argument stays as written, as v1's page does; a template longer than `MAX_LABEL`
+    (1,000) characters is shown as its key, before it is parsed; a template with a format spec, conversion, index
+    or attribute, one that does not parse, or one that would fill past `MAX_LABEL` characters, is shown as
+    written) from the package's `templates/labels.<lang>.json` with the v1 folder's `labels.<lang>.json` on top
+    (where v1 keeps its page translations), falling back to `en`, then to the key. `title` is the primary
+    language's text. Plain words come from fixed phrases (`importv1.PHRASES`, `en` and `zh`): `what` is the title,
+    `where` names the project (and task, with its v1 status), `do` says it is a read-only copy and to act on v1's
+    page. A configured language with no phrases is refused before anything is written.
   - Re-run: the same key (among this feed's cards) updates `title`, `plain`, `lane`, `status`, `ask` and
     `source` when they changed, and leaves the card alone when nothing did. A card is never removed (a task gone
     from v1 keeps its card). `--dry-run` writes nothing, not even the data folder's layout, and reports
@@ -1562,9 +1562,10 @@ Calls the author made without asking (check them):
   - Report on stdout: `{from, dry_run, projects: [{name, folder, cards: [{key, kind, action: add | update |
     unchanged, card}], not_imported: {decisions}}], refused: [{name, folder, reason}]}`. Every card of a project
     is checked as the store will check it before any is written, so a project whose files cannot be read
-    (missing, bad JSON, not an object, a task or decision without an id, an id used twice, an unknown task status,
-    text the store refuses, a value nested deeper than the store writes) is listed under `refused` and the others
-    still import; the command then prints one `ap2: ...` line and exits 1 after the report.
+    (missing, bad JSON, not an object, a state.json without `decisions`, a task or decision without an id, an id
+    used twice, an unknown task status, text the store refuses, a value nested deeper than the store writes) is
+    listed under `refused` and the others still import; the command then prints one `ap2: ...` line and exits 1
+    after the report.
   - Writes only inside the data folder, so it runs in shadow mode (no `require_live`). Not imported:
     `events.jsonl`, reports, run folders, and `<data>/projects/<name>.yaml` (not written from `config.json`).
 - How the local server pushes updates to an open page (polling is fine).

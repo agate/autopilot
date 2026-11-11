@@ -38,8 +38,8 @@ ASK = {"ask": "answer", "gate": "approve"}
 UPDATED = ("title", "plain", "lane", "status", "ask", "source")
 TASK_RECORD = ("pr", "branch", "depends_on", "link")
 PROJECT_RECORD = ("repo", "branch_pattern", "branch_prefix")
-# The longest text a v1 label may give, in characters: a label that would fill longer is shown as written, and a
-# label to be shown as written that is itself longer is shown as its key. v1's own labels are about 100 characters.
+# The longest text a v1 label may give, in characters: a template longer than this is shown as its key (before it
+# is parsed), and a label that would fill longer is shown as written. v1's own labels are about 100 characters.
 MAX_LABEL = 1_000
 
 # The code-made plain words, one entry per language. A language is matched exactly, then by its first part
@@ -114,21 +114,18 @@ class Labels:
         for each in dict.fromkeys((lang, lang.split("-")[0], "en")):
             template = self.table(each).get(key)
             if template is not None:
+                if len(template) > MAX_LABEL:
+                    return str(key)  # too long to parse or to show as written
                 size = _filled_size(template, args)
                 if size is None:
-                    return _as_written(template, key)  # a format v1's page would not apply
+                    return template  # a format v1's page would not apply
                 if size > MAX_LABEL:
-                    return _as_written(template, key)  # one that would fill too long
+                    return template  # one that would fill too long
                 try:
                     return template.format_map(_Keep(args))
                 except (ValueError, IndexError, KeyError, AttributeError, TypeError):
-                    return _as_written(template, key)  # a brace or a format v1's page would print as written
+                    return template  # a brace or a format v1's page would print as written
         return str(key)
-
-
-def _as_written(template: str, key: str) -> str:
-    """A label shown as written: the template, or its key when the template itself is longer than MAX_LABEL."""
-    return template if len(template) <= MAX_LABEL else key
 
 
 def _filled_size(template: str, args: dict) -> Optional[int]:
@@ -264,6 +261,9 @@ def read_project(folder: Path) -> tuple:
     cfg = _read_object(folder, "config.json")
     state = _read_object(folder, "state.json")
     tasks = _items(state, "tasks")
+    # v1 cannot load a state.json without decisions; read as none, every open question card would be closed.
+    if "decisions" not in state:
+        raise _Refused("state.json: decisions missing")
     decisions = _items(state, "decisions")
     seen = set()
     for t in tasks + decisions:
@@ -412,6 +412,15 @@ def run(data: Path, source: Optional[str] = None, names: Optional[list] = None, 
             raise V1ImportError(f"no v1 project named {', '.join(unknown)} in {root} "
                                 f"(found: {', '.join(found) or 'none'})")
         found = {n: f for n, f in found.items() if n in names}
+    # A project folder may be a symlink to a folder outside --from: the data folder must not overlap that either.
+    for name, folder in found.items():
+        try:
+            real = folder.resolve()
+        except (OSError, RuntimeError) as e:
+            raise V1ImportError(f"cannot use the v1 project folder {folder}: {e}") from e
+        if datadir._inside(data, real) or datadir._inside(real, data):
+            raise V1ImportError(f"data folder {data} and the v1 project {name}'s folder {real} overlap (one is "
+                                f"inside the other); the import never writes under a v1 project")
     if not dry_run:
         datadir.ensure(data)
     store = Store(data, cfg=cfg)
