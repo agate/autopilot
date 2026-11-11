@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "tasks": [
+    {"id": "PROJ-201", "title": {"en": "Write the notes page"}, "depends_on": [], "status": "done",
+     "link": null, "needs": [], "critical": false, "phase": 1, "origin": "source"},
+    {"id": "PROJ-202", "title": {"en": "Drop the export"}, "depends_on": [], "status": "skipped",
+     "link": null, "needs": [], "critical": false, "phase": 1, "origin": "source"}
+  ],
+  "workers": [],
+  "decisions": [],
+  "last_report": null
+}

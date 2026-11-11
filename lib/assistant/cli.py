@@ -83,6 +83,7 @@ def _parser() -> argparse.ArgumentParser:
     _serve_parser(sub)
     _phone_parser(sub)
     sub.add_parser("hook-park", help="a worker's PreToolUse hook: at the usage line, deny all but its park")
+    _import_v1_parser(sub)
     return p
 
 
@@ -628,6 +629,38 @@ def _write_file_whole(path: Path, body: bytes) -> None:
 
 
 COMMANDS["phone"] = cmd_phone
+
+
+# --- ap2 import-v1 (design 10, 12 "v1 import") --------------------------------------------------------------------
+# v1's folder is only read; cards are written in the data folder only, so this runs in shadow mode.
+
+def _import_v1_parser(sub) -> None:
+    im = sub.add_parser("import-v1", help="copy v1 projects into cards, read-only",
+                        description="Read each v1 project (its config.json and state.json) and make or update its "
+                                    "cards: one project card, one code card per task, one question card per open "
+                                    "ask or gate. v1's files are only read. Prints the report as JSON; exits 1 "
+                                    "after it when a project could not be read.")
+    im.add_argument("--from", dest="from_dir", metavar="DIR",
+                    help="v1's data folder, read only (default: $AUTOPILOT_DATA, else ~/.claude/autopilot-data)")
+    im.add_argument("--project", action="append", metavar="NAME", help="import only this project (repeatable)")
+    im.add_argument("--dry-run", action="store_true", help="show what each card would become; write nothing")
+    im.add_argument("--data", metavar="PATH", help=DATA_HELP)
+
+
+def cmd_import_v1(args) -> int:
+    from assistant import importv1
+
+    out = importv1.run(datadir.resolve(args.data), args.from_dir, args.project, dry_run=args.dry_run)
+    _print_json(out)
+    if out["refused"]:
+        names = ", ".join(r["name"] for r in out["refused"])
+        _write(f"ap2: could not read the v1 project{'s' if len(out['refused']) > 1 else ''} {names}; "
+               f"see refused in the report\n", sys.stderr)
+        return 1
+    return 0
+
+
+COMMANDS["import-v1"] = cmd_import_v1
 
 
 def main(argv: list) -> int:
