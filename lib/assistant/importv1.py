@@ -182,13 +182,17 @@ def source_root(given: Optional[str]) -> Path:
     """`--from`, else v1's own data folder (`AUTOPILOT_DATA`, else ~/.claude/autopilot-data), absolute."""
     if given == "":
         raise V1ImportError("--from is empty; give v1's data folder")
-    raw = Path(given).expanduser() if given is not None else v1_paths.data_root()
+    raw = None
     try:
+        # Inside the try: `~nosuchuser` in --from, or a home folder that cannot be found, raises RuntimeError here.
+        raw = Path(given).expanduser() if given is not None else v1_paths.data_root()
         root = raw.resolve()
         # Inside the try: a folder that cannot be looked into or a name too long raises here, not in resolve().
         is_dir = root.is_dir()
     except (OSError, RuntimeError) as e:
-        raise V1ImportError(f"cannot use the v1 data folder {raw}: {e}") from e
+        named = raw if raw is not None else given
+        where = f"the v1 data folder {named}" if named is not None else "the default v1 data folder"
+        raise V1ImportError(f"cannot use {where}: {e}") from e
     if not is_dir:
         raise V1ImportError(f"no v1 data folder at {root} (give it with --from DIR)")
     return root

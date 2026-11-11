@@ -625,6 +625,13 @@ class ImportV1Test(unittest.TestCase):
         self.assertIn("no-v1-here", line)
         self.assertFalse(self.data.exists())
 
+    def test_an_unknown_user_in_from_is_one_line(self):
+        self.v1 = Path("~nosuchuser12345xyz/v1")  # pathlib cannot expand ~user for a user that does not exist
+        line = self.fails()
+        self.assertIn("v1 data folder", line)
+        self.assertIn("~nosuchuser12345xyz", line)
+        self.assertFalse(self.data.exists())
+
     def test_a_data_folder_inside_the_v1_folder_is_refused(self):
         self.data = self.v1 / "v2-data"
         line = self.fails()
