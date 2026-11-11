@@ -12,6 +12,10 @@ FAKE_TOOLS_FAIL   when set, `-p` prints nothing and exits 1 (as when claude is n
 FAKE_TOOLS_AFTER_INIT  `wait`: after the init event `-p` sleeps FAKE_TOOLS_SLEEP seconds (default 30) and then
                   writes `model-ran` in FAKE_CLAUDE_HOME, standing in for a model turn that acts
 FAKE_TOOLS_HANG   when set, `-p` prints nothing and sleeps FAKE_TOOLS_SLEEP seconds (default 30)
+FAKE_TOOLS_WRAPPER  when set, `-p` is a launcher that does not exec: it runs a child copy of itself with the same
+                  argv and stdout (without this flag and without logging) and waits for it; the child does the rest
+FAKE_TOOLS_BEFORE_INIT  when set, `-p` prints `not json`, `1` and a SessionStart `hook_response` event before init
+FAKE_MCP_SERVERS  the init event's `mcp_servers` as `name:status`, comma-separated (default: no `mcp_servers` key)
 
 `--bg` starts a session: it gets the next short id (s0001, s0002, ...) and session id, is listed as working, and
 writes a one-line transcript. `--resume <id>` copies the old transcript under the new id, as claude does.
@@ -22,6 +26,7 @@ writes a one-line transcript. `--resume <id>` copies the old transcript under th
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -68,6 +73,9 @@ elif cmd == "rm" and len(argv) > 1:
         sys.exit(1)
     for p in transcripts(argv[1]):
         p.unlink()
+elif cmd == "-p" and flag("--output-format") == "stream-json" and os.environ.get("FAKE_TOOLS_WRAPPER"):
+    child = {k: v for k, v in os.environ.items() if k not in ("FAKE_TOOLS_WRAPPER", "FAKE_CLAUDE_LOG")}
+    sys.exit(subprocess.call([sys.executable, os.path.abspath(__file__)] + argv, env=child))
 elif cmd == "-p" and flag("--output-format") == "stream-json":
     if home is not None:  # before any output, so a caller that kills it at its first line still finds the pid
         (home / "discover.pid").write_text(str(os.getpid()))
@@ -80,7 +88,14 @@ elif cmd == "-p" and flag("--output-format") == "stream-json":
     given = os.environ.get("FAKE_TOOLS")
     tools = [t for t in given.split(",") if t] if given is not None else [
         "Read", "Bash", "mcp__slack__slack_send_message", "mcp__slack__slack_read_channel"]
-    print(json.dumps({"type": "system", "subtype": "init", "tools": tools}), flush=True)
+    if os.environ.get("FAKE_TOOLS_BEFORE_INIT"):
+        for line in ("not json", "1", json.dumps({"type": "system", "subtype": "hook_response", "tools": []})):
+            print(line, flush=True)
+    init = {"type": "system", "subtype": "init", "tools": tools}
+    servers = os.environ.get("FAKE_MCP_SERVERS")
+    if servers is not None:
+        init["mcp_servers"] = [dict(zip(("name", "status"), s.rsplit(":", 1))) for s in servers.split(",") if s]
+    print(json.dumps(init), flush=True)
     if os.environ.get("FAKE_TOOLS_AFTER_INIT") == "wait":
         time.sleep(pause)
         if home is not None:

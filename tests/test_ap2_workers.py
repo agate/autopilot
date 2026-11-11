@@ -8,8 +8,10 @@ import json
 import os
 import re
 import shutil
+import signal
 import tempfile
 import time
+import types
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -28,6 +30,7 @@ from assistant.config import Config, ShadowModeError
 from assistant.resources import WorkerError
 from assistant.store import Store
 from assistant.workers import DIED, PROTECTED, Workers
+from autopilot import perms as v1_perms
 from autopilot import sessions as v1_sessions
 
 FAKE = str(ROOT / "tests" / "bin" / "fake-claude-v2")
@@ -427,6 +430,27 @@ class ToolDiscoveryTest(WorkerCase):
         with self.assertRaises(ProcessLookupError):  # killed and reaped: the pid is gone
             os.kill(pid, 0)
 
+    def assert_gone(self, pid, within=1.0):
+        """A grandchild is reaped by init, not by ap2, so its pid can stay a moment after the kill."""
+        end = time.monotonic() + within
+        while True:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            if time.monotonic() > end:
+                self.fail(f"process {pid} is still running")
+            time.sleep(0.01)
+
+    def kill_later(self, pid):
+        """A failing test never leaves a fake running."""
+        def end():
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        self.addCleanup(end)
+
     def test_unlisted_tools_are_discovered_and_the_outward_ones_denied(self):
         cid = self.add_card()  # no project: no `tools` listed
         self.workers().start(cid, "implement", cwd=self.wt)
@@ -500,6 +524,75 @@ class ToolDiscoveryTest(WorkerCase):
         self.assertIn("no init event within", out["note"])
         self.assertEqual(resources.Registry(self.data).read()[0]["resumes"], 1)
 
+    def test_a_launcher_that_does_not_exec_is_killed_with_its_whole_group_at_init(self):
+        # `claude` on PATH is a wrapper that runs the real claude as its child, which holds the same stdout.
+        cid = self.add_card()
+        with mock.patch.dict(os.environ, {"FAKE_TOOLS_WRAPPER": "1", "FAKE_TOOLS_AFTER_INIT": "wait"}):
+            began = time.monotonic()
+            self.workers().start(cid, "implement", cwd=self.wt)
+            took = time.monotonic() - began
+        pid = self.discover_pid()  # the child's pid: the wrapper writes none
+        self.kill_later(pid)
+        self.assertLess(took, 10)
+        self.assert_gone(pid)
+        self.assertFalse((self.fake_home / "model-ran").exists())
+        self.assertIn("mcp__slack__slack_send_message", self.deny(cid))
+
+    def test_a_launcher_that_does_not_exec_is_killed_with_its_whole_group_at_the_deadline(self):
+        with mock.patch.object(workers_mod, "DISCOVER_TIMEOUT", 0.5), \
+                mock.patch.dict(os.environ, {"FAKE_TOOLS_WRAPPER": "1", "FAKE_TOOLS_HANG": "1"}):
+            began = time.monotonic()
+            with self.assertRaisesRegex(WorkerError, r"no init event within 0\.5 s"):
+                self.start()
+            took = time.monotonic() - began
+        pid = self.discover_pid()
+        self.kill_later(pid)
+        self.assertLess(took, 1.5)  # the child would sleep 30 s with the pipe open
+        self.assert_gone(pid)
+        self.assertEqual(self.bg_calls(), [])
+
+    def test_an_error_while_reading_still_kills_the_whole_group(self):
+        class Boom(Exception):
+            pass
+
+        def loads(*_a, **_k):
+            raise Boom("cannot read the line")
+
+        cid = self.add_card()
+        broken = types.SimpleNamespace(loads=loads, dumps=json.dumps)  # only workers.py's json is broken
+        with mock.patch.object(workers_mod, "json", broken), \
+                mock.patch.dict(os.environ, {"FAKE_TOOLS_WRAPPER": "1", "FAKE_TOOLS_AFTER_INIT": "wait"}):
+            with self.assertRaises(Boom):
+                self.workers().start(cid, "implement", cwd=self.wt)
+        pid = self.discover_pid()
+        self.kill_later(pid)
+        self.assert_gone(pid)
+        self.assertFalse((self.fake_home / "model-ran").exists())
+        self.assertEqual(self.bg_calls(), [])
+
+    def test_lines_before_the_init_event_are_skipped(self):
+        # Real claude can print other events first (a SessionStart hook's `hook_response`), and non-JSON lines.
+        cid = self.add_card()
+        with mock.patch.dict(os.environ, {"FAKE_TOOLS_BEFORE_INIT": "1"}):
+            self.workers().start(cid, "implement", cwd=self.wt)
+        self.assertIn("mcp__slack__slack_send_message", self.deny(cid))
+        self.assertEqual(len(self.bg_calls()), 1)
+
+    def test_a_server_not_connected_at_the_init_event_is_denied_whole(self):
+        # Its tools are not in the init event yet, but the `--bg` session connects it later and could use them.
+        cid = self.add_card()
+        servers = "slack:connected,tracker:pending,claude.ai Drive:needs-auth,builds:failed"
+        with mock.patch.dict(os.environ, {"FAKE_MCP_SERVERS": servers}):
+            self.workers().start(cid, "implement", cwd=self.wt)
+        deny = self.deny(cid)
+        drive = v1_perms.tool_prefix("claude.ai Drive")[:-2]
+        self.assertEqual(drive, "mcp__claude_ai_Drive")
+        for rule in ("mcp__tracker", drive, "mcp__builds"):
+            self.assertIn(rule, deny)
+        self.assertIn("mcp__slack__slack_send_message", deny)  # a connected server: only its outward tools
+        self.assertNotIn("mcp__slack", deny)
+        self.assertNotIn("mcp__slack__slack_read_channel", deny)
+
     def test_a_card_cannot_bring_its_own_tool_list(self):
         sid = "0b4c6f4e-0000-4000-8000-000000000001"
         cid = self.add_card(sessions={"implement": {"tools": []}, "review": {"id": sid, "ids": [sid], "tools": []}})
@@ -551,7 +644,8 @@ class ToolDiscoveryTest(WorkerCase):
         cid = self.add_card()
         with mock.patch.dict(os.environ, {"FAKE_TOOLS_FAIL": "1"}):
             with self.assertRaisesRegex(WorkerError, r"cannot list the session's tools for the permission floor: "
-                                                     r".*no init event.*; give the card a project and list them "
+                                                     r"no init event \(claude exited 1; is claude logged in\?\); "
+                                                     r"give the card a project and list them "
                                                      r"in its projects/<name>\.yaml `tools`"):
                 self.workers().start(cid, "implement", cwd=self.wt)
         self.assertEqual(len(self.discovery_calls()), 1)

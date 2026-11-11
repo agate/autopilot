@@ -24,6 +24,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import threading
 from datetime import datetime
@@ -86,13 +87,39 @@ def _slug(text, words: int = 3) -> str:
     return "-".join(parts[:words]) or "work"
 
 
+def _kill_group(proc: subprocess.Popen) -> None:
+    """Kill the process group `proc` leads (started with `start_new_session`): a `claude` launcher that does not
+    exec, the real claude it runs, and the MCP servers and hooks they started all go."""
+    killpg = getattr(os, "killpg", None)
+    if killpg is None:  # not POSIX: only the direct child
+        if proc.poll() is None:
+            proc.kill()
+        return
+    try:
+        killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def _not_connected(event: dict) -> list:
+    """The server-level deny rule (`mcp__<prefix>`) of every MCP server the init event lists with a status other
+    than `connected`: its tools are not in the event yet, but the worker's session may connect it later."""
+    servers = event.get("mcp_servers")
+    rules = []
+    for s in servers if isinstance(servers, list) else []:
+        if isinstance(s, dict) and s.get("name") and s.get("status") != "connected":
+            rules.append(v1_perms.tool_prefix(str(s["name"]))[:-2])
+    return list(dict.fromkeys(rules))
+
+
 def floor(role: str, project: dict, data: Path, env: dict) -> dict:
     """The worker's permission floor (`--settings`): v1's outward-tool denials (`perms.denied_tools`, from the
-    project's `tools`; `Workers._tools` fills them in when it lists none) and Bash denials, the data folder's own
-    files and the package, and the worker's env."""
+    project's `tools`; `Workers._tools` fills them in when it lists none, with `deny_servers`, the whole-server
+    rules) and Bash denials, the data folder's own files and the package, and the worker's env."""
     if role not in ROLES:
         raise WorkerError(f"role must be one of {', '.join(ROLES)}, not {role!r}")
     deny = v1_perms.denied_tools(list(project.get("tools") or []))
+    deny += list(project.get("deny_servers") or [])  # whole servers `_tools` found not connected at init
     deny += [f"Edit(/{data}/{name})" for name in PROTECTED]
     deny += [f"Edit(/{package_root()}/**)"] + list(v1_perms.BASH_DENY)
     # The park command is the one step a parking worker takes; the auto-mode classifier must not judge it (v1 does
@@ -180,18 +207,21 @@ class Workers:
         text = "\n".join(lines)
         return PR_COMMAND + text if role not in AGENTS else text
 
-    def _discover(self, cwd: str, env: dict) -> list:
-        """The tools a session in `cwd` with `env` loads: one `claude -p ... --output-format stream-json`, read line
-        by line and killed at its first init event, before the model runs, so nothing in the folder can make it
-        call a tool. Raises RuntimeError (no init event, also past DISCOVER_TIMEOUT) or OSError."""
+    def _discover(self, cwd: str, env: dict) -> tuple:
+        """(tools, whole-server deny rules) of a session in `cwd` with `env`: one `claude -p ... --output-format
+        stream-json`, read line by line and killed at its first init event, before the model runs, so nothing in
+        the folder can make it call a tool. It runs in its own process group, and every kill ends the whole group.
+        Raises RuntimeError (no init event, also past DISCOVER_TIMEOUT) or OSError."""
         argv = [self.claude, "-p", DISCOVER_PROMPT, "--output-format", "stream-json", "--verbose"]
         proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                stderr=subprocess.DEVNULL, text=True, env=self._process_env(env))
+                                stderr=subprocess.DEVNULL, text=True, env=self._process_env(env),
+                                start_new_session=True)
         late = threading.Event()
 
         def deadline():
             late.set()
-            proc.kill()
+            if proc.returncode is None:  # not reaped yet, so the group id is still this one
+                _kill_group(proc)
 
         timeout = DISCOVER_TIMEOUT
         timer = threading.Timer(timeout, deadline)
@@ -204,17 +234,16 @@ class Workers:
                 except ValueError:
                     continue
                 if isinstance(event, dict) and event.get("type") == "system" and event.get("subtype") == "init":
-                    proc.kill()  # stopped at its first event: no model reply, so no tool call, ever happens
+                    _kill_group(proc)  # stopped at its init event: no model reply, so no tool call, ever happens
                     proc.wait()
-                    return list(v1_perms.parse_discovery(line))
+                    return list(v1_perms.parse_discovery(line)), _not_connected(event)
             code = proc.wait()
             if late.is_set():
                 raise RuntimeError(f"no init event within {timeout} s")
             raise RuntimeError(f"no init event (claude exited {code}; is claude logged in?)")
         finally:
             timer.cancel()
-            if proc.poll() is None:
-                proc.kill()
+            _kill_group(proc)
             proc.wait()
             proc.stdout.close()
 
@@ -223,19 +252,19 @@ class Workers:
         tools the project file lists (`projects/**` is Edit-denied) are used as they are, always first. Otherwise
         they are found on every floor written, in the worker's own folder `cwd` with its env (so the folder's
         local-scope and `.mcp.json` servers and the plugins are seen), by a session killed at its init event
-        (`_discover`). Never from a card. A worker never starts without its outward tools denied: no list, no
-        start."""
+        (`_discover`), with `deny_servers`: every MCP server not connected at that init event, denied whole. Never
+        from a card. A worker never starts without its outward tools denied: no list, no start."""
         if project.get("tools"):
             return project
         name = project.get("name")
         where = f"projects/{name}.yaml `tools`" if name else "its projects/<name>.yaml `tools`"
         ask = "" if name else "give the card a project and "
         try:
-            tools = self._discover(cwd, env)
+            tools, servers = self._discover(cwd, env)
         except (OSError, RuntimeError, subprocess.SubprocessError) as e:
             raise WorkerError(f"cannot list the session's tools for the permission floor: {e}; {ask}list them in "
                               f"{where}") from e
-        return dict(project, tools=tools)
+        return dict(project, tools=tools, deny_servers=servers)
 
     def _launch(self, argv: list, cwd: str, env: dict) -> tuple:
         """Run `claude --bg ...`; return (short id, session id or "")."""

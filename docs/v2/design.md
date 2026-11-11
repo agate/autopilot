@@ -920,7 +920,12 @@ Calls the author made without asking (check them):
     approved `<folder>/.mcp.json` and the plugins are all seen. Its output is read line by line; at the first init
     event (`type: system`, `subtype: init`, the event v1's `perms.parse_discovery` reads) the tools are taken and
     the process is killed at once, before anything else is read. If no init event arrives within
-    `DISCOVER_TIMEOUT` (180 s) it is killed too; the child is always killed and reaped before the call returns.
+    `DISCOVER_TIMEOUT` (180 s) it is killed too. It runs in its own process group and every kill ends the whole
+    group (a `claude` launcher that does not exec, the real claude under it, the MCP servers and hooks they
+    started), and the child is reaped before the call returns. A server the init event's `mcp_servers` lists as
+    not `connected` (pending, failed, needs-auth or anything else) has no tools in that event yet, so it is denied
+    whole (`mcp__<prefix>`, v1's `perms.tool_prefix` without the trailing `__`): a slow or not-yet-connected server
+    never goes out un-denied.
     No tool list is read from or saved on a card: a card is not trusted storage (`ap2 card add`, workers and
     scans write cards).
     Why this is safe: the session is killed at its init event, which comes before the model's first reply, so the
