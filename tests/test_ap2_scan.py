@@ -238,6 +238,21 @@ class SaveRawTest(ScanCase):
                 self.assertFalse(scan.save_raw(self.p["plan"], json.dumps(hook).encode())["kept"])
         self.assertFalse(self.log.exists())
 
+    def test_a_source_that_names_its_server_keeps_only_that_servers_tool(self):
+        self.settings("jira-ticket")
+        p = self.plan("jira-ticket")
+        other = dict(json.loads(payload("hook-jira-object.json")), tool_name="mcp__other__get_issue")
+        self.assertFalse(scan.save_raw(p["plan"], json.dumps(other).encode())["kept"])  # another server's get_issue
+        self.assertTrue(scan.save_raw(p["plan"], payload("hook-jira-object.json"))["kept"])
+        self.assertEqual([c["tool_name"] for c in scan.read_log(Path(p["folder"]))[0]], ["mcp__atlassian__get_issue"])
+
+    def test_a_connector_source_keeps_its_tool_on_any_server(self):
+        for name in ("mcp__claude_ai_Slack__slack_search_public", "mcp__x__slack_search_public"):
+            with self.subTest(name):
+                hook = dict(json.loads(payload("hook-slack-search.json")), tool_name=name)
+                self.assertTrue(scan.save_raw(self.p["plan"], json.dumps(hook).encode())["kept"])
+        self.assertEqual(len(self.lines()), 2)
+
     def test_a_symlinked_log_is_refused_and_its_target_is_unchanged(self):
         target = self.tmp / "elsewhere.txt"
         target.write_text("keep me\n")
@@ -305,6 +320,7 @@ class SaveRawTest(ScanCase):
         }
 
     def test_a_skill_plan_never_keeps_a_read_back_whatever_its_input_spells(self):
+        self.data = datadir.ensure(self.tmp / "Data")  # a capital in the path on any OS, so case folding is tested
         self.user("standup", self.STANDUP)
         p = self.plan("standup")
         for what, hook in self.read_backs(p).items():
@@ -314,9 +330,16 @@ class SaveRawTest(ScanCase):
         for tool_input in ({"command": f"cat {name}/records/standup.records.json"},  # the folder's name alone
                            {"command": f"cat {name.lower()}/records/standup.records.json"},
                            {"command": f"ls {str(self.data).upper()}/sources/.raw"},  # the data folder, any case
-                           {"path": f"{str(self.data).swapcase()}/items"}):
+                           {"path": f"{str(self.data).swapcase()}/items"},
+                           {"command": f"cat {self.data}-backup/x {self.data}/items/y"}):  # the second one names it
             with self.subTest(tool_input):
                 hook = {"tool_name": "Bash", "tool_input": tool_input, "tool_response": "x"}
+                self.assertFalse(scan.save_raw(p["plan"], json.dumps(hook).encode())["kept"])
+        for tool_input, reply in (({"command": f"rg --no-filename PROJ- {self.data}"}, "PROJ-4242"),  # at the end
+                                  ({"command": "rg PROJ- sources"},  # only the reply names the scan folder
+                                   f"sources/.scan/{name}/records/standup.records.json:PROJ-4242")):
+            with self.subTest(tool_input):
+                hook = {"tool_name": "Bash", "tool_input": tool_input, "tool_response": reply}
                 self.assertFalse(scan.save_raw(p["plan"], json.dumps(hook).encode())["kept"])
         hook = {"tool_name": "Bash", "tool_input": {"command": "standup-report"},
                 "tool_response": {"stdout": "PROJ-5 is done", "stderr": ""}}
@@ -367,12 +390,15 @@ class SaveRawTest(ScanCase):
         kept = ({"tool_name": "Read", "tool_input": {"file_path": f"{self.data}-backup/items/x.json"},
                  "tool_response": f"{self.data}-backup/items/x.json: PROJ-5"},
                 {"tool_name": "Read", "tool_input": {"file_path": f"{self.data}2/items/x.json"}, "tool_response": "x"},
+                {"tool_name": "Read", "tool_input": {"file_path": f"{self.data}.bak/x.json"}, "tool_response": "x"},
+                {"tool_name": "Read", "tool_input": {"file_path": f"{self.data}_old/x.json"}, "tool_response": "x"},
+                {"tool_name": "Read", "tool_input": {"file_path": f"{self.data}x/x.json"}, "tool_response": "x"},
                 {"tool_name": "Bash", "tool_input": {"command": "standup-report --repo acme/image.scanner"},
                  "tool_response": {"stdout": "PROJ-5 is done; bumped deps.scanner to 2.1", "stderr": ""}})
         for hook in kept:
             with self.subTest(hook["tool_input"]):
                 self.assertTrue(scan.save_raw(p["plan"], json.dumps(hook).encode())["kept"])
-        self.assertEqual(len(scan.read_log(Path(p["folder"]))[0]), 3)
+        self.assertEqual(len(scan.read_log(Path(p["folder"]))[0]), 6)
 
     def test_a_planned_argument_like_deps_scanner_is_kept_and_taken(self):
         self.user("slack-mentions", 'extends: slack-mentions\nsettings: { me: U0EXAMPLE1 }\n'
@@ -588,6 +614,26 @@ class TakeTest(ScanCase):
         slack = {r["source"]: r for r in out["reads"]}["slack-mentions"]
         self.assertEqual((self.data / slack["raw"]).read_text(), (SCAN / "slack-search.txt").read_text() + "\n\n"
                          + json.loads(payload("hook-slack-thread.json"))["tool_response"])
+
+    def test_another_servers_tool_of_the_same_name_is_not_the_sources_raw(self):
+        self.settings("jira-ticket")
+        self.user("standup", SaveRawTest.STANDUP)
+        p = self.plan("jira-ticket", "standup")
+        real = json.loads(payload("hook-jira-object.json"))
+        other = json.loads(json.dumps(real))
+        other["tool_name"] = "mcp__other__get_issue"
+        other["tool_response"]["fields"].update(summary="Text from another server", status={"name": "Done"})
+        for hook in (other, real):  # the other server's reply first
+            self.assertTrue(scan.save_raw(p["plan"], json.dumps(hook).encode())["kept"])
+        self.assertEqual([c["tool_name"] for c in scan.read_log(Path(p["folder"]))[0]],
+                         ["mcp__other__get_issue", "mcp__atlassian__get_issue"])  # the first kept for the skill
+        out = self.take(p)
+        ticket = {r["source"]: r for r in out["reads"]}["jira-ticket"]
+        self.assertEqual((self.data / ticket["raw"]).read_text(), scan.response_text(real["tool_response"]))
+        [item] = ticket["items"]
+        self.assertEqual((item["key"], item["record"]["text"], item["record"]["status"]),
+                         ("PROJ-7", "Split the retry work", "To Do"))
+        self.assertNotIn("another server", json.dumps(self.store().list()))
 
     def test_a_paths_call_reads_the_first_matching_reply(self):
         hook = json.loads(payload("hook-jira-search.json"))

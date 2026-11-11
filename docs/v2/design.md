@@ -974,9 +974,11 @@ Calls the author made without asking (check them):
     `tool_input`, `tool_response`) from stdin, at most `engine.MAX_OUTPUT` bytes, and appends one JSON line
     `{tool_name, tool_input, text}` to the scan folder's `calls.jsonl`, under an `flock` of that file. `text` is the
     response as is when it is text, the texts of a list of `{"type": "text"}` blocks joined by a newline, else its
-    JSON text. It keeps a call only when the tool name ends in `__<tool>` for a tool in the plan; when the plan runs
-    a skill, every tool but the session's own `Write`, `Edit`, `MultiEdit`, `NotebookEdit` and `TodoWrite`. A call
-    whose `tool_input` names the data folder as a path (as given, resolved, or `~/...` under the home folder,
+    JSON text. It keeps a call only when the tool name is a planned call's tool: exactly `mcp__<server>__<tool>`
+    when the source names its server (so `mcp__other__get_issue` is not `jira-ticket`'s), else a name ending in
+    `__<tool>`; when the plan runs a skill, every tool but the session's own `Write`, `Edit`, `MultiEdit`,
+    `NotebookEdit` and `TodoWrite`. A call whose `tool_input` names the data folder as a path (as given, resolved,
+    or `~/...` under the home folder,
     followed by a `/`, the end of the text or a character such as a quote, a space or `:`, so `<data>-backup` is
     another folder) or the scan folder's `<stamp>-<hex>` name, in any text at any depth and in any letter case (APFS
     is case-insensitive), is never kept; a call kept only because the plan runs a skill is also refused when its
@@ -990,9 +992,11 @@ Calls the author made without asking (check them):
     payload is one `ap2:` line, exit 1, the log unchanged. The plan must be a `plan.json` inside a `.scan/<scan>/`
     folder; the hook writes only there, and a `calls.jsonl` that is a symbolic link is refused (one `ap2:` line).
   - Take: `ap2 scan take PLAN [--dry-run] [--data PATH]` (`scan.take`) builds each call's raw file in the scan
-    folder: for `fill: paths`, the text of the first logged call of its tool whose `tool_input` holds every planned
-    argument with the same value; for `fill: ai`, every logged text of its tools (a skill's: every logged text), in
-    order, joined by a blank line, with no header added, so nothing code wrote can match an id. Each raw file is
+    folder: a logged call is a call's when its tool name matches as the hook's does (exactly
+    `mcp__<server>__<tool>` when the source names its server, else ending in `__<tool>`); for `fill: paths`, the
+    text of the first logged call of its tool whose `tool_input` holds every planned argument with the same value;
+    for `fill: ai`, every logged text of its tools (a skill's: every logged text), in order, joined by a blank line,
+    with no header added, so nothing code wrote can match an id. Each raw file is
     written to a temp file and renamed into place, so a symbolic link left at its path is replaced, never followed.
     Then it calls `Engine.read_saved`, which copies the raw under `.raw/<source>/`, writes the report, checks word
     for word and makes the cards. Take first plans each call again from its source as it loads now and refuses one that differs

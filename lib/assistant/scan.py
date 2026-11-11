@@ -253,7 +253,7 @@ def response_text(response) -> str:
 
 def keeps(p: dict, tool_name: str, tool_input=None, folder: Optional[Path] = None, tool_response=None,
           data: Optional[Path] = None) -> bool:
-    """Whether the hook logs a call of `tool_name`: a name ending in `__<tool>` for a tool in the plan, or, when
+    """Whether the hook logs a call of `tool_name`: a tool of a planned call (`calls_tool`), or, when
     the plan runs a skill, any tool but the session's own file writes. A call whose `tool_input` names the scan
     folder (its `<stamp>-<hex>` name) or the data folder as a path (as given, resolved, or `~/...` under the home
     folder), in any text at any depth and in any letter case, is never kept; nor is a call kept only for a skill
@@ -266,11 +266,20 @@ def keeps(p: dict, tool_name: str, tool_input=None, folder: Optional[Path] = Non
     paths = () if data is None else _spellings(Path(data))
     if _names(tool_input, words, paths):
         return False
-    if any(tool_name.endswith(f"__{t}") for call in p["calls"] for t in call_tools(call)):
+    if any(calls_tool(call, tool_name) for call in p["calls"]):
         return True  # a planned tool's reply is the source's own text, whatever it says
     if not any(call["via"] == "skill" for call in p["calls"]) or tool_name in OWN_WRITES:
         return False
     return not _names(tool_response, words, paths)
+
+
+def calls_tool(call: dict, tool_name: str) -> bool:
+    """Whether `tool_name` is one of `call`'s tools: exactly `mcp__<server>__<tool>` when the source names its
+    server, else any name ending in `__<tool>` (a connector's server name is known only inside the session). So a
+    tool of the same name on another server is not the source's. A skill call has no tools."""
+    server = call.get("server")
+    return any(tool_name == f"mcp__{server}__{t}" if server else tool_name.endswith(f"__{t}")
+               for t in call_tools(call))
 
 
 def _spellings(data: Path) -> tuple:
@@ -420,11 +429,10 @@ def raw_for(call: dict, logged: list) -> Optional[str]:
     """The raw output of one planned call, from the log; None when no logged call matches.
     `fill: paths`: the text of the first call of its tool whose tool_input holds every planned argument with the
     same value. `fill: ai`: every text of its tools (a skill's: every logged text), in order, joined by a blank line,
-    with nothing added, so no id can match text that code wrote."""
-    tools = call_tools(call)
+    with nothing added, so no id can match text that code wrote. A logged call is its tool's by `calls_tool`."""
 
     def mine(line):
-        return call["via"] == "skill" or any(line["tool_name"].endswith(f"__{t}") for t in tools)
+        return call["via"] == "skill" or calls_tool(call, line["tool_name"])
 
     if call["fill"] == "paths":
         for line in logged:
