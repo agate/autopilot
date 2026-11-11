@@ -14,7 +14,7 @@ import contextlib
 import json
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -222,6 +222,19 @@ def _safe(value):
     return value.encode("utf-8", "backslashreplace").decode("utf-8") if isinstance(value, str) else value
 
 
+def _raw_prune_due(data: Path, now: datetime) -> bool:
+    """True on the first gate run of a UTC day (design 12): when the previous run's `last_run_at` in gate.json is on
+    an earlier UTC date than `now`. The raw prune reads every card once a file is old, and a card keeps its first raw
+    file forever, so it runs at most once a day. Read before this run writes gate.json. Any doubt means True, so
+    nothing waits forever: gate.json missing or unreadable, not JSON, not an object, no `last_run_at` or not a UTC
+    stamp, or a `last_run_at` later than `now` (the clock went back). Never raises and logs nothing."""
+    try:
+        then = cards.parse_stamp(json.loads((data / HEARTBEAT).read_text(encoding="utf-8"))["last_run_at"])
+    except Exception:  # OSError, ValueError (UTF-8, JSON, stamp), TypeError, KeyError, RecursionError (too deep)
+        return True
+    return then > now or then.date() != now.astimezone(timezone.utc).date()
+
+
 def run(data, now: datetime, watches=(), store: Optional[Store] = None) -> dict:
     """One gate run at `now` (an aware datetime). Returns what it found, also written to `<data>/gate.json`; a run
     that finds the lock held returns `{"locked": true, ...}` and does nothing. Raises ConfigError when the data
@@ -323,15 +336,17 @@ def _run(data: Path, now: datetime, watches, store: Optional[Store]) -> dict:
     if pruned:
         log(f"pruned {len(pruned)} restore point(s) older than 30 days")
 
-    # Old raw source files and their reports (design 12): logged only; gate.json keeps its five keys.
-    raw = engine.prune_raw(data, now, store.list)
-    if raw["link"]:
-        log(f"prune raw: {raw['link']} is a link; raw source files are not pruned")
-    for e in raw["errors"]:
-        errors.append(e)
-        log(f"prune raw: error: {e['error']}")
-    if raw["removed"]:
-        log(f"pruned {len(raw['removed'])} raw source file(s) older than {engine.RAW_KEEP.days} days")
+    # Old raw source files and their reports (design 12), on the first run of a UTC day only: logged only;
+    # gate.json keeps its five keys.
+    if _raw_prune_due(data, now):
+        raw = engine.prune_raw(data, now, store.list)
+        if raw["link"]:
+            log(f"prune raw: {raw['link']} is a link; raw source files are not pruned")
+        for e in raw["errors"]:
+            errors.append(e)
+            log(f"prune raw: error: {e['error']}")
+        if raw["removed"]:
+            log(f"pruned {len(raw['removed'])} raw source file(s) older than {engine.RAW_KEEP.days} days")
 
     errors = [{k: _safe(v) for k, v in e.items()} for e in errors]  # e.g. a file name that is not UTF-8
     out = {"last_run_at": cards.stamp(now), "routines": found, "watches_due": due_names, "pruned": pruned,

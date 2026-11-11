@@ -865,7 +865,11 @@ Calls the author made without asking (check them):
     with 3: it went wrong (the output was not saved: cannot save the raw output in <folder>: [Errno 28] No space
     left on device)`, or `(the partial output was not saved: ...)` for a stopped read. A read whose command
     worked fails with the save error itself.
-  - Old raw files. Each gate run calls `engine.prune_raw(data, now, store.list)`. A raw file is a regular file
+  - Old raw files. The first gate run of each UTC day calls `engine.prune_raw(data, now, store.list)`: a run
+    whose UTC date differs from that of the previous run's `last_run_at` in `<data>/gate.json`, read before this
+    run writes its own. A gate.json that is missing, cannot be read, is not a JSON object or has no valid UTC
+    `last_run_at`, and a `last_run_at` later than now (the clock went back), make the run prune too, with no
+    error or log line of their own. No new state: the date comes from the heartbeat. A raw file is a regular file
     directly in `<data>/sources/.raw/<source>/` named `<YYYYMMDDTHHMMSSZ>-<6 lowercase hex>.json`; its age is the
     UTC stamp in its name, not its mtime, so a copy or a restored backup does not make it young again. It is
     removed when it is more than `engine.RAW_KEEP` (30 days, a constant like restore points' `restore.KEEP`, not
@@ -873,15 +877,16 @@ Calls the author made without asking (check them):
     other name (a scan session's own file, `notes.txt`), a hidden entry, a stamp that cannot be read (month 13) and
     a stamp later than now are kept. Its `<stem>.report.json` goes with it: kept while the raw file is there, and
     judged by the stamp in its own name once the raw file is gone. A file named in any card's `source.raw` (a
-    card keeps its first raw path), and its report, are kept however old. The cards are read once per run, only
+    card keeps its first raw path), and its report, are kept however old. The cards are read once per prune, only
     when a file is old enough to remove; when they cannot be read (a damaged card file) nothing is removed and
-    the run has one error, `{"prune_raw": true, "error": ...}`. So once a card's first raw file is older than 30
-    days, that file stays, and every run reads the cards. No link is followed or removed: when
-    `sources` or `sources/.raw` is a link (the user's setup) nothing is pruned and gate.log says so in one line,
-    not an error; a `<source>` folder or file that is a link is skipped. Each folder is opened once without
-    following a link and every remove is relative to it (`dir_fd`), so a folder swapped for a link meanwhile
-    cannot send a remove elsewhere. A file that cannot be removed is one `{"prune_raw": <path>, "error": ...}`
-    and one gate.log line; the rest still go.
+    the run has one error, `{"prune_raw": true, "error": ...}`. A card's first raw file older than 30 days stays,
+    so it is old on every prune; pruning once a day means the cards are read at most once a day, not every run.
+    The cost: an old file is removed up to a day after its 30 days (never early). No link is followed or
+    removed: when `sources` or `sources/.raw` is a link (the user's setup) nothing is pruned and gate.log says so
+    in one line, not an error; a `<source>` folder or file that is a link is skipped. Each folder is opened once
+    without following a link and every remove is relative to it (`dir_fd`), so a folder swapped for a link
+    meanwhile cannot send a remove elsewhere. A file that cannot be removed is one
+    `{"prune_raw": <path>, "error": ...}` and one gate.log line; the rest still go.
   - A read handles at most `engine.MAX_ITEMS` (10,000) items: a reply with more items, or a scan session with
     more `fill: ai` records, fails the read, and the error names the raw file it was saved as (a dry run saves
     none). No card is made or changed. This is the simplest limit to raise later; it keeps one read's time,
@@ -940,9 +945,10 @@ Calls the author made without asking (check them):
     ids], "errors": [...]}`; text in `errors` that UTF-8 cannot write (a file name that is not UTF-8) is written with
     backslash escapes. Every line of `<data>/gate.log` starts with the run's UTC time
     (`2026-11-10T14:30:05Z run: ...`), one line per routine action or error and one summary line; past 1 MB it is
-    renamed `gate.log.1` (one old file is kept). Each run calls `Store.prune()`, then prunes old raw source files
-    (see the source engine above): `pruned <N> raw source file(s) older than 30 days` in gate.log when N > 0
-    (N counts raw files and reports), not in `gate.json`, which keeps its five keys; its errors go in `errors`.
+    renamed `gate.log.1` (one old file is kept). Each run calls `Store.prune()`, then, on the first run of a UTC
+    day, prunes old raw source files (see the source engine above): `pruned <N> raw source file(s) older than 30
+    days` in gate.log when N > 0 (N counts raw files and reports), not in `gate.json`, which keeps its five keys;
+    its errors go in `errors`. A later run the same UTC day does not prune and writes no line for it.
   - One run at a time: `<data>/.gate.lock` is taken with a non-blocking `flock`; a run that finds it held prints
     `{"locked": true, "lock": <path>}`, writes nothing and exits 0. A lock that cannot be taken for any other reason
     (`ENOLCK` on a network share) is a config error: one `ap2: cannot lock the gate ...` line and exit 1. The gate
