@@ -1360,15 +1360,19 @@ Calls the author made without asking (check them):
     `<data>`, then the home folder's (`Path.home()`, as given and resolved) becomes `~`, so
     `/Users/x/worktrees/a` reads `~/worktrees/a`; the file's name and the reason stay. The store and the local
     page (`GET /api/cards/<id>`, `/api/state`) keep the full paths.
-    - **[decided by the builder]** A path outside the data and home folders (`/private/var/...`, `/tmp/...`)
-      stays as it is: it names neither the user nor the data folder's place. Easy to add later.
-    - **[decided by the builder]** A folder's path is replaced only as a whole name on its right side: no
-      ASCII name character (a letter, digit, `_ - + @ ~ $ % # =`, or a dot and one) may come next, so home
-      `/Users/x` does not change `/Users/xy/...` or `/Users/x.old/...`. Text in another script (Chinese) right
-      next to a path does not stop it, so a folder `/Users/xé` would read `~é`: a wrong name, never a leak. An
-      ask text that is not a string (an object per language, a list) has each of its strings scrubbed, an
-      object's keys and values alike. A home of `/` (or none found) changes nothing. The data folder goes
-      first, so a data folder under home reads `<data>`, not `~/...`.
+    - **[decided by the builder]** A path that does not contain the data or home folder's path
+      (`/private/var/...`, `/tmp/...`) stays as it is: it names neither the user nor the data folder's place. Easy
+      to add later.
+    - **[decided by the builder]** A folder's path is replaced only as a whole name on its right side: a run of
+      ASCII name characters (`_ - + @ ~ $ % # =`) right after the folder makes it a longer name only when the run
+      holds a letter or digit, and so does a dot and one name character, so home `/Users/x` does not change
+      `/Users/xy/...`, `/Users/x-old/...` or `/Users/x.old/...`, while markdown marks like `_/Users/x_` or
+      `~~/Users/x~~` read `_~_` and `~~~~~`; a folder literally named `/Users/x_` would read `~_`: a wrong label,
+      never a leak. Text in another script (Chinese) right next to a path does not stop it, so a folder
+      `/Users/xé` would read `~é`: a wrong name, never a leak. An ask text that is not a string (an object per
+      language, a list) has each of its strings scrubbed, an object's keys and values alike. A home of `/` (or
+      none found) changes nothing. The data folder goes first, so a data folder under home reads `<data>`, not
+      `~/...`.
     - **[decided by the builder]** On its left side there is no exception: a folder's path is replaced wherever
       it sits, also inside a longer path, so `/mnt/backup/Users/x/a` reads `/mnt/backup~/a` and
       `/Users/x/repo/Users/x/repo/a` reads `~/repo~/repo/a`. The folder's path in any spot still names the user or the data folder's place; a path

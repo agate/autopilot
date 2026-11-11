@@ -15,12 +15,14 @@ secondary_language, languages, settings, lanes, projects, heartbeat, cards, full
 - Local paths: in three texts that can name a file on this Mac, `full[id].template_error`, `heartbeat.error` and
   `full[id].card.ask.text`, the data folder (as given and resolved) becomes `<data>` and then the home folder (as
   given and resolved) becomes `~`; the rest of each text stays. A folder's path is replaced wherever it sits, also
-  inside a longer path (`/mnt/backup/Users/x/a` reads `/mnt/backup~/a`: a wrong label, never a leak), but only as
-  a whole name on its right side: no ASCII name character (a letter, digit, `_ - + @ ~ $ % # =`, or a dot and one)
-  may come next (not `/Users/xy` or `/Users/x.old` for home `/Users/x`). Another script next to a path (Chinese)
-  does not stop it, so a folder `/Users/xé` reads `~é`: a wrong name, never a leak. An ask text that is not a
-  string (an object per language, a list) has each of its strings scrubbed, an object's keys and values alike. A
-  home of `/` is left alone. Other paths (`/private/var/...`) stay.
+  inside a longer path (`/mnt/backup/Users/x/a` reads `/mnt/backup~/a`: a wrong label, never a leak), but only as a
+  whole name on its right side: a run of ASCII name characters (`_ - + @ ~ $ % # =`) right after it makes it a longer
+  name only when the run holds a letter or digit, and so does a dot and one name character (`/Users/xy`,
+  `/Users/x-old` and `/Users/x.old` stay for home `/Users/x`), so markdown marks like `_/Users/x_` or `~~/Users/x~~`
+  read `_~_` and `~~~~~` (a folder literally named `/Users/x_` would read `~_`: a wrong label, never a leak). Another
+  script next to a path (Chinese) does not stop it, so a folder `/Users/xé` reads `~é`: a wrong name, never a leak. An
+  ask text that is not a string (an object per language, a list) has each of its strings scrubbed, an object's keys
+  and values alike. A home of `/` is left alone. Other paths (`/private/var/...`) stay.
 
 Building writes nothing (the store is read without its lock file, as the local page's GETs do), starts no process
 and opens no connection. Publishing the data is a later dispatcher step, live mode only.
@@ -57,12 +59,13 @@ class _Scrub:
     def _pattern(forms: list) -> Optional["re.Pattern"]:
         if not forms:
             return None
-        # Longest first, so `/private/var/x` wins over `/var/x`; wherever it sits, but a whole path name only, not a
-        # longer name's start: no ASCII name character (or a dot and one) may come next. ASCII only, so Chinese next
-        # to a path still ends it.
+        # Longest first, so `/a/b/c` wins over `/a/b` when both forms start at the same spot; wherever it sits, but a
+        # whole path name only, not a longer name's start: a run of ASCII name characters that holds a letter or
+        # digit (or a dot and one name character) may not come next, so markdown marks (`_`, `~~`) still end it.
+        # ASCII only, so Chinese next to a path still ends it.
         alts = "|".join(re.escape(f) for f in sorted(forms, key=len, reverse=True))
         name = r"[\w+@~$%#=-]"
-        return re.compile(rf"(?:{alts})(?!{name}|\.{name})", re.ASCII)
+        return re.compile(rf"(?:{alts})(?!{name}*[A-Za-z0-9]|\.{name})", re.ASCII)
 
     def __call__(self, text):
         if isinstance(text, dict):  # an ask text that is not a string: each of its strings is scrubbed, keys too

@@ -340,6 +340,10 @@ class ScrubTest(PhoneCase):
         self.assertEqual(full[inside["id"]]["card"]["ask"]["text"], "copied to /Volumes/Backup+<data>/g")
         self.assertEqual(full[two["id"]]["card"]["ask"]["text"], "看<data>/a和<data>/b")
 
+    def test_a_data_path_inside_markdown_marks_becomes_data(self):
+        asked = self.ask(f"_{self.data}_ is full")
+        self.assertEqual(self.build()["full"][asked["id"]]["card"]["ask"]["text"], "_<data>_ is full")
+
     def test_an_ask_text_that_is_not_a_string_has_each_string_scrubbed(self):
         per_lang = self.ask({"en": f"see {self.data}/x", "zh": f"看 {self.data}/x",
                              f"{self.data}/runs/c1/out.txt": "is this right?"})
@@ -367,7 +371,10 @@ class ScrubTest(PhoneCase):
                 f"已把{home}/a改成{home}/b": "已把~/a改成~/b", f"{home}/a、{home}/b": "~/a、~/b",
                 f"cd {home}/w&&{home}/bin/run": "cd ~/w&&~/bin/run", f"mv /tmp/a {home}/b": "mv /tmp/a ~/b",
                 f"PATH=/usr/bin:{home}/bin": "PATH=/usr/bin:~/bin", f"/opt/a,{home}/b;{home}/c": "/opt/a,~/b;~/c",
-                f"{real}/repo{real}/repo/a": "~/repo~/repo/a", f"file://localhost{real}/a": "file://localhost~/a"}
+                f"{real}/repo{real}/repo/a": "~/repo~/repo/a", f"file://localhost{real}/a": "file://localhost~/a",
+                f"see _{real}_ or": "see _~_ or", f"~~{real}~~ was wrong": "~~~~~ was wrong",
+                f"{real}-a {real}@a {real}~a {real}$a {real}%a {real}#a {real}=a":
+                    f"{real}-a {real}@a {real}~a {real}$a {real}%a {real}#a {real}=a"}
         rows = {text: self.ask(text) for text in kept}
         with mock.patch.dict(os.environ, {"HOME": str(home)}):
             full = self.build()["full"]
