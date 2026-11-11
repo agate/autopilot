@@ -9,9 +9,9 @@ Keys (every one optional):
 - `health_checks`: `[{name, command, fix?}]`, checks of the project's own access (v1 `access.py`).
 - `extra_hosts`: host names a worker may reach besides the usual ones.
 - `mcp_servers`: MCP server names the project's workers use.
-- `tools`: the MCP tool names a session in the repo has; the outward ones are denied in the worker's permission
-  floor. When none are listed, every floor a worker gets finds them the way v1's `ap perms write` does
-  (`perms.discover_tools`, in `workers.py`): in `repo` when it is a folder, else in a fresh empty folder.
+- `tools`: the MCP tool names a worker's session has; the outward ones are denied in the worker's permission
+  floor. When none are listed, every floor a worker gets finds the exact set its session loads, in the worker's
+  own folder, by a `claude -p` session killed at its init event (`Workers._discover` in `workers.py`).
 
 Nothing here writes; a missing file is the defaults.
 """

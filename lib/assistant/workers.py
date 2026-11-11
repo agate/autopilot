@@ -25,7 +25,7 @@ import os
 import re
 import shutil
 import subprocess
-import tempfile
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
@@ -55,6 +55,9 @@ PARK_RULES = dict(v1_config.DEFAULT_GLOBAL["budget"])  # park at 90%, resume 5 m
 INTERRUPTED = ("You were interrupted. Check your worktree and run files first, then continue the task from where "
                "you stopped.")
 BY = "ap2 worker"
+# The longest the tool discovery may take to reach its init event (seconds; v1's `perms.discover` allows 180).
+DISCOVER_TIMEOUT = 180
+DISCOVER_PROMPT = "Reply with the single word OK."
 ATTACH = "permission_prompt"  # the `reason` of the ask a worker at a permission prompt raises
 DIED = "died_twice"  # the `reason` of the ask a worker that died twice raises; only the user closes it
 # The worker asks a role can have on its card, by kind (see `_worker_ask_kind`):
@@ -177,32 +180,58 @@ class Workers:
         text = "\n".join(lines)
         return PR_COMMAND + text if role not in AGENTS else text
 
-    @staticmethod
-    def _repo(project: dict) -> str:
-        """The project's `repo`, absolute, when it is a folder; else ""."""
-        repo = project.get("repo")
-        return str(Path(repo).resolve()) if repo and Path(repo).is_dir() else ""
+    def _discover(self, cwd: str, env: dict) -> list:
+        """The tools a session in `cwd` with `env` loads: one `claude -p ... --output-format stream-json`, read line
+        by line and killed at its first init event, before the model runs, so nothing in the folder can make it
+        call a tool. Raises RuntimeError (no init event, also past DISCOVER_TIMEOUT) or OSError."""
+        argv = [self.claude, "-p", DISCOVER_PROMPT, "--output-format", "stream-json", "--verbose"]
+        proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, text=True, env=self._process_env(env))
+        late = threading.Event()
 
-    def _tools(self, project: dict) -> dict:
-        """The project with the session's tools, for the permission floor. Only places no worker can change: the
-        tools the project file lists (`projects/**` is Edit-denied), as they are; else the ones a session starts
-        with, found the way v1 does (`perms.discover_tools`, one `claude -p` call with no floor) on every floor
-        written, in the project's `repo` when it is a folder (v1's `ap perms write` lists them in the main
-        checkout, and no worker runs there: `start()` refuses it), else in a fresh empty folder made for that one
-        call (the user-scope tools). Never in the worker's folder or the data folder, and never from a card. A
-        worker never starts without its outward tools denied: no list, no start."""
+        def deadline():
+            late.set()
+            proc.kill()
+
+        timeout = DISCOVER_TIMEOUT
+        timer = threading.Timer(timeout, deadline)
+        timer.daemon = True
+        timer.start()
+        try:
+            for line in iter(proc.stdout.readline, ""):
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(event, dict) and event.get("type") == "system" and event.get("subtype") == "init":
+                    proc.kill()  # stopped at its first event: no model reply, so no tool call, ever happens
+                    proc.wait()
+                    return list(v1_perms.parse_discovery(line))
+            code = proc.wait()
+            if late.is_set():
+                raise RuntimeError(f"no init event within {timeout} s")
+            raise RuntimeError(f"no init event (claude exited {code}; is claude logged in?)")
+        finally:
+            timer.cancel()
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
+            proc.stdout.close()
+
+    def _tools(self, project: dict, cwd: str, env: dict) -> dict:
+        """The project with the exact tools the worker's own session will load, for the permission floor. The
+        tools the project file lists (`projects/**` is Edit-denied) are used as they are, always first. Otherwise
+        they are found on every floor written, in the worker's own folder `cwd` with its env (so the folder's
+        local-scope and `.mcp.json` servers and the plugins are seen), by a session killed at its init event
+        (`_discover`). Never from a card. A worker never starts without its outward tools denied: no list, no
+        start."""
         if project.get("tools"):
             return project
         name = project.get("name")
         where = f"projects/{name}.yaml `tools`" if name else "its projects/<name>.yaml `tools`"
         ask = "" if name else "give the card a project and "
-        repo = self._repo(project)
         try:
-            if repo:
-                tools = list(v1_perms.discover_tools(self.claude, repo))
-            else:
-                with tempfile.TemporaryDirectory(prefix="ap2-tools-") as empty:
-                    tools = list(v1_perms.discover_tools(self.claude, empty))
+            tools = self._discover(cwd, env)
         except (OSError, RuntimeError, subprocess.SubprocessError) as e:
             raise WorkerError(f"cannot list the session's tools for the permission floor: {e}; {ask}list them in "
                               f"{where}") from e
@@ -318,9 +347,6 @@ class Workers:
             cwd = str(Path(cwd).resolve()) if cwd else ""  # absolute, so later checks from any folder find it
             if not cwd or not Path(cwd).is_dir():
                 raise WorkerError(f"the worker's folder {cwd or '(none given)'} is not a folder; pass --cwd")
-            repo = self._repo(project)
-            if repo and cwd == repo:  # the tools are found there with no floor, so no worker may write it
-                raise WorkerError(f"a worker runs in a worktree, not in the project's repo {repo}")
             branch = card.get("branch") or projects.branch(project, card.get("key") or card_id,
                                                            _slug(card.get("title")))
             env = self._env(card, role, project, port_range, branch)
@@ -328,7 +354,7 @@ class Workers:
             settings = self.run_dir(card_id) / f"settings-{role}.json"
             argv = self._argv(role, name, settings, self._prompt(prompt, card, role, project, port_range, branch),
                               sid)
-            write_json(settings, floor(role, self._tools(project), self.data, env))
+            write_json(settings, floor(role, self._tools(project, cwd, env), self.data, env))
             if parked:
                 self._stop(card_id, role, parked.get("short_id"), by)  # the parked session sits idle; the copy
                 # takes its place
@@ -444,7 +470,7 @@ class Workers:
         env = self._env(card, rec["role"], project, rec["ports"], rec.get("branch") or "")
         if not (rec.get("cwd") and Path(rec["cwd"]).is_dir()):  # checked first, so a gone worktree says so
             raise WorkerError(f"cannot start the session: the worker's folder {rec.get('cwd') or '(none)'} is gone")
-        write_json(settings, floor(rec["role"], self._tools(project), self.data, env))
+        write_json(settings, floor(rec["role"], self._tools(project, rec["cwd"], env), self.data, env))
         argv = self._argv(rec["role"], rec["session_name"], settings, prompt, rec["session_id"] or rec["short_id"])
         if rec.get("parked"):
             self._stop(rec["card"], rec["role"], rec.get("short_id"), BY)

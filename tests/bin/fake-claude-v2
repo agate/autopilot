@@ -9,16 +9,21 @@ FAKE_RM_FAIL      when set, `rm` prints an error and exits 1
 FAKE_TOOLS        the tools `-p ... --output-format stream-json` reports in its init event, comma-separated (default:
                   Read, Bash, mcp__slack__slack_send_message, mcp__slack__slack_read_channel)
 FAKE_TOOLS_FAIL   when set, `-p` prints nothing and exits 1 (as when claude is not logged in)
+FAKE_TOOLS_AFTER_INIT  `wait`: after the init event `-p` sleeps FAKE_TOOLS_SLEEP seconds (default 30) and then
+                  writes `model-ran` in FAKE_CLAUDE_HOME, standing in for a model turn that acts
+FAKE_TOOLS_HANG   when set, `-p` prints nothing and sleeps FAKE_TOOLS_SLEEP seconds (default 30)
 
 `--bg` starts a session: it gets the next short id (s0001, s0002, ...) and session id, is listed as working, and
 writes a one-line transcript. `--resume <id>` copies the old transcript under the new id, as claude does.
 `stop <short id>` takes the session off the listing; `rm <session id>` deletes its transcript. `-p` with
-`--output-format stream-json` prints the init event v1's tool discovery reads (`lib/autopilot/perms.py`).
+`--output-format stream-json` writes its pid to `discover.pid` in FAKE_CLAUDE_HOME, then prints the init event
+(flushed at once) that the tool discovery reads, then a result line.
 """
 import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 argv = sys.argv[1:]
@@ -64,13 +69,23 @@ elif cmd == "rm" and len(argv) > 1:
     for p in transcripts(argv[1]):
         p.unlink()
 elif cmd == "-p" and flag("--output-format") == "stream-json":
+    if home is not None:  # before any output, so a caller that kills it at its first line still finds the pid
+        (home / "discover.pid").write_text(str(os.getpid()))
+    pause = float(os.environ.get("FAKE_TOOLS_SLEEP") or 30)
     if os.environ.get("FAKE_TOOLS_FAIL"):
+        sys.exit(1)
+    if os.environ.get("FAKE_TOOLS_HANG"):
+        time.sleep(pause)
         sys.exit(1)
     given = os.environ.get("FAKE_TOOLS")
     tools = [t for t in given.split(",") if t] if given is not None else [
         "Read", "Bash", "mcp__slack__slack_send_message", "mcp__slack__slack_read_channel"]
-    print(json.dumps({"type": "system", "subtype": "init", "tools": tools}))
-    print(json.dumps({"type": "result", "result": "OK"}))
+    print(json.dumps({"type": "system", "subtype": "init", "tools": tools}), flush=True)
+    if os.environ.get("FAKE_TOOLS_AFTER_INIT") == "wait":
+        time.sleep(pause)
+        if home is not None:
+            (home / "model-ran").write_text("the model turn ran\n")
+    print(json.dumps({"type": "result", "result": "OK"}), flush=True)
 elif cmd == "--bg":
     if os.environ.get("FAKE_BG_FAIL"):
         print("error: could not start", file=sys.stderr)
