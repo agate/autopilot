@@ -1117,7 +1117,7 @@ const out = [
   titleIn({en: 'English only'}),
   titleIn({en: 'English only', zh: '  '}),
   titleIn('One text from an older reply'),
-  titleIn(null), titleIn(undefined), titleIn(''), titleIn({}), titleIn({ja: 'x'}), titleIn(3),
+  titleIn(null), titleIn(undefined), titleIn(''), titleIn('   '), titleIn({}), titleIn({ja: 'x'}), titleIn(3),
   titleIn(null, 'c-id'), titleIn({en: 'E'}, 'c-id'),
 ];
 S.lang = 'en';
@@ -1131,7 +1131,7 @@ console.log(JSON.stringify(out));
         self.assertEqual(json.loads(out.stdout), [
             "重试付款", "English only", "English only", "One text from an older reply",
             "[card.untitled]", "[card.untitled]", "[card.untitled]", "[card.untitled]", "[card.untitled]",
-            "[card.untitled]", "c-id", "E", "Retry payments", "[card.untitled]", "J"])
+            "[card.untitled]", "[card.untitled]", "c-id", "E", "Retry payments", "[card.untitled]", "J"])
 
     def test_the_pages_search_caps_match_the_servers(self):
         text = PAGE.read_text(encoding="utf-8")
