@@ -331,12 +331,20 @@ class ScrubTest(PhoneCase):
         asked = self.ask(f"看{self.data}里的日志")
         self.assertEqual(self.build()["full"][asked["id"]]["card"]["ask"]["text"], "看<data>里的日志")
 
+    def test_a_data_path_after_a_flag_becomes_data_but_not_inside_a_longer_path(self):
+        flag = self.ask(f"ld: -L{self.data}/runs not found")
+        inside = self.ask(f"copied to /Volumes/Backup+{self.data}/g")
+        full = self.build()["full"]
+        self.assertEqual(full[flag["id"]]["card"]["ask"]["text"], "ld: -L<data>/runs not found")
+        self.assertEqual(full[inside["id"]]["card"]["ask"]["text"], f"copied to /Volumes/Backup+{self.data}/g")
+
     def test_an_ask_text_that_is_not_a_string_has_each_string_scrubbed(self):
-        per_lang = self.ask({"en": f"see {self.data}/x", "zh": f"看 {self.data}/x"})
+        per_lang = self.ask({"en": f"see {self.data}/x", "zh": f"看 {self.data}/x",
+                             f"{self.data}/runs/c1/out.txt": "is this right?"})
         listed = self.ask([f"see {self.data}/y", 3, None])
         data = self.build()
         self.assertEqual(data["full"][per_lang["id"]]["card"]["ask"]["text"],
-                         {"en": "see <data>/x", "zh": "看 <data>/x"})
+                         {"en": "see <data>/x", "zh": "看 <data>/x", "<data>/runs/c1/out.txt": "is this right?"})
         self.assertEqual(data["full"][listed["id"]]["card"]["ask"]["text"], ["see <data>/y", 3, None])
         self.assertNotIn(str(self.data), json.dumps(data, ensure_ascii=False))
 
@@ -351,7 +359,9 @@ class ScrubTest(PhoneCase):
         sibling = self.ask(f"{real}y/worktrees/c is not under home")
         kept = {f"{real}.old/a": f"{real}.old/a", f"{real}+old/a": f"{real}+old/a",
                 f"/mnt/backup{real}/a": f"/mnt/backup{real}/a", f"see {real}.": "see ~.",
-                f"请看{home}/worktrees/c 的日志": "请看~/worktrees/c 的日志"}
+                f"请看{home}/worktrees/c 的日志": "请看~/worktrees/c 的日志",
+                f"clang -I{home}/a/include": "clang -I~/a/include", f"see _{real}/a_": "see _~/a_",
+                f"file://{real}/a": "file://~/a", f"HOME={home}/a": "HOME=~/a"}
         rows = {text: self.ask(text) for text in kept}
         with mock.patch.dict(os.environ, {"HOME": str(home)}):
             full = self.build()["full"]

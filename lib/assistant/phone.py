@@ -15,11 +15,13 @@ secondary_language, languages, settings, lanes, projects, heartbeat, cards, full
 - Local paths: in three texts that can name a file on this Mac, `full[id].template_error`, `heartbeat.error` and
   `full[id].card.ask.text`, the data folder (as given and resolved) becomes `<data>` and then the home folder (as
   given and resolved) becomes `~`; the rest of each text stays. A prefix counts only as a whole path name: no ASCII
-  name character (a letter, digit, `_ - + @ ~ $ % # =`, or a dot and one) may come next, and no ASCII letter, digit,
-  `_`, `.` or `-` before (not `/Users/xy` or `/Users/x.old` for home `/Users/x`). Another script next to a path
-  (Chinese) does not stop it, so a folder `/Users/xé` reads `~é`: a wrong name, never a leak. An ask text that is not
-  a string (an object per language, a list) has each of its strings scrubbed. A home of `/` is left alone. Other
-  paths (`/private/var/...`) stay.
+  name character (a letter, digit, `_ - + @ ~ $ % # =`, or a dot and one) may come next (not `/Users/xy` or
+  `/Users/x.old` for home `/Users/x`). It is left alone only when it continues a longer path, that is the text just
+  before it is a `/` and a name (`/mnt/backup/Users/x`); after a flag or a word (`-I/Users/x/a`, `请看/Users/x`) it
+  is replaced. Another script next to a path (Chinese) does not stop it, so a folder `/Users/xé` reads `~é`: a
+  wrong name, never a leak. An ask text that is not a string (an object per language, a list) has each of its
+  strings scrubbed, an object's keys and values alike. A home of `/` is left alone. Other paths
+  (`/private/var/...`) stay.
 
 Building writes nothing (the store is read without its lock file, as the local page's GETs do), starts no process
 and opens no connection. Publishing the data is a later dispatcher step, live mode only.
@@ -38,6 +40,8 @@ from assistant.config import ConfigError
 from assistant.sources import Loader, SourceError
 
 MAC_ONLY = ("sessions",)  # card fields that stay on the Mac (and `source.raw`, a path to a file on it)
+# The text before a match ends with a path component (a `/` and a name): the match continues a longer path.
+_CONTINUES = re.compile(r"/[^\s/'\"`(\[<{=:,;]+\Z")
 
 
 class _Scrub:
@@ -60,19 +64,24 @@ class _Scrub:
         # no ASCII name character (or a dot and one) may come next. ASCII only, so Chinese next to a path still ends it.
         alts = "|".join(re.escape(f) for f in sorted(forms, key=len, reverse=True))
         name = r"[\w+@~$%#=-]"
-        return re.compile(rf"(?<![\w.-])(?:{alts})(?!{name}|\.{name})", re.ASCII)
+        return re.compile(rf"(?:{alts})(?!{name}|\.{name})", re.ASCII)
 
     def __call__(self, text):
-        if isinstance(text, dict):  # an ask text that is not a string: each of its strings is scrubbed
-            return {k: self(v) for k, v in text.items()}
+        if isinstance(text, dict):  # an ask text that is not a string: each of its strings is scrubbed, keys too
+            return {self(k): self(v) for k, v in text.items()}
         if isinstance(text, list):
             return [self(v) for v in text]
         if not isinstance(text, str):
             return text
         for pattern, by in self.steps:
             if pattern is not None:
-                text = pattern.sub(by, text)
+                text = pattern.sub(lambda m, by=by: _replace(m, by), text)
         return text
+
+
+def _replace(m: "re.Match", by: str) -> str:
+    """`by`, unless the match continues a longer path (`/mnt/backup/Users/x`): then the match as it is."""
+    return m.group(0) if _CONTINUES.search(m.string, 0, m.start()) else by
 
 
 def _forms(path: Path) -> list:
