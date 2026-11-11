@@ -224,7 +224,7 @@ class PointTooDeepTest(DeepCase):
         saved = json.loads(point_path.read_text(encoding="utf-8"))
         saved["card_id"] = saved["card"]["id"] = "ID"
         template = json.dumps(saved)
-        depth = 20_000  # parses on 3.14, where comparing two such lists overflows the C stack
+        depth = 20_000  # too deep to parse on 3.9-3.13; parses on 3.14, where comparing it can overflow a small stack
         shapes = {"short list": ("[[1]]", "not a card restore point"),
                   "deep list": ("[" * depth + "]" * depth, "")}
         for name, (value, message) in shapes.items():
