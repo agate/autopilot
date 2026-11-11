@@ -414,11 +414,15 @@ class LayerTest(AngleCase):
         with self.subTest(case="a git that does not know GIT_NO_LAZY_FETCH"):
             # An older git ignores the variable and starts the fetch; with no transport allowed it cannot reach the
             # remote, so nothing is fetched and the read still fails loud.
+            # No transport at all, not only file://, since a real remote is https or ssh.
+            self.assertEqual(angles._GIT_ENV["GIT_ALLOW_PROTOCOL"], "")
             env = {k: v for k, v in angles._GIT_ENV.items() if k != "GIT_NO_LAZY_FETCH"}
-            with mock.patch.object(angles, "_GIT_ENV", env):
+            with mock.patch.object(angles, "_GIT_ENV", env), mock.patch.dict(os.environ):
+                os.environ.pop("GIT_NO_LAZY_FETCH", None)   # the runner's own env must not hide the fetch
                 with self.assertRaises(AngleError) as e:
                     self.load(repo=clone, commit=commit)
             self.assertTrue(str(e.exception).startswith(where), str(e.exception))
+            self.assertIn("promisor remote", str(e.exception))
             self.assertEqual(store(), before)
 
     def test_present_blob_git_cannot_read_is_not_called_missing(self):

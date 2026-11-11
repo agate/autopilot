@@ -395,8 +395,9 @@ How it is built (`lib/assistant/angles.py`, the table in `review/angles.yaml`):
   `AngleError`. Every git call runs with `GIT_NO_LAZY_FETCH=1` (git 2.44 and later; an older git ignores it and
   starts the fetch), `GIT_ALLOW_PROTOCOL=` (no transport at all, git 2.12 and later, so a fetch an older git starts
   cannot reach the remote) and `GIT_TERMINAL_PROMPT=0`, so a partial clone does not get the file's blob from its
-  remote, and a blob the clone lacks is refused as "not in this clone (a partial clone)"; one that is there but
-  that git lists with no size is refused as "may be corrupt". A missing user file is no layer; an empty file holds no angles. Each file is a YAML list of maps of
+  remote. A blob the clone lacks is refused as "not in this clone (a partial clone)" (on an older git, whose fetch
+  fails inside `ls-tree`, as "cannot list the commit's files" with git's "could not fetch ... from promisor
+  remote"); one that is there but that git lists with no size is refused as "may be corrupt". A missing user file is no layer; an empty file holds no angles. Each file is a YAML list of maps of
   at most `sources.MAX_SOURCE` bytes (a leading BOM is dropped), read with `yamlish` (as the list under one wrapper
   key, so line numbers stay the file's own). A file that is not a list (a map, a flow list such as `[]`, a bare
   word, or a top-level `angles:` beside its items) is refused as "must be a list of angles".
