@@ -848,12 +848,10 @@ class Workers:
             if p:
                 archived.append(p)
         # What an earlier finish already removed is never `claude rm`-ed again (a second rm of a gone original can
-        # fail and would keep the role from ever being marked removed): a role marked `removed`, and each id in its
-        # `removed_ids`.
-        gone = {role: set() if (sessions[role] or {}).get("removed") is True
-                else set((sessions[role] or {}).get("removed_ids") or []) for role in roles}
-        todo = [(role, sid) for role, sid in ids
-                if (sessions[role] or {}).get("removed") is not True and sid not in gone[role]]
+        # fail and would keep the role from ever being marked removed): each id in the role's `removed_ids`, and,
+        # for a role marked `removed` by an older finish that kept no `removed_ids`, every id it lists.
+        gone = {role: self._gone(sessions[role] or {}) for role in roles}
+        todo = [(role, sid) for role, sid in ids if sid not in gone[role]]
         failed = []
         try:
             for role, sid in todo:
@@ -870,11 +868,13 @@ class Workers:
             done = dict(sessions)  # any other key, and a role with no ids, is kept as it is
             for role in roles:
                 entry = sessions[role] or {}
-                if entry.get("removed") is True or not entry.get("ids"):
+                if not entry.get("ids"):
                     continue
                 entry = dict(entry, removed_ids=[sid for sid in entry["ids"] if sid in gone[role]])
                 if set(entry["ids"]) <= gone[role]:  # every original of the role is gone
                     entry.update(state="finished", removed=True)
+                else:  # a session started after an older finish: not every original is gone
+                    entry.pop("removed", None)
                 done[role] = entry
             self.store.update(card_id, {"sessions": done}, by=by, did="worker sessions removed")
         out = {"card": card_id, "archived": archived, "removed": removed}
@@ -883,6 +883,16 @@ class Workers:
         if note:
             out["note"] = note
         return out
+
+    @staticmethod
+    def _gone(entry: dict) -> set:
+        """The role's originals an earlier finish already removed: its `removed_ids`, or, for a role marked
+        `removed` by an older finish that kept no `removed_ids`, every id it lists."""
+        if "removed_ids" in entry:
+            return set(entry["removed_ids"] or [])
+        if entry.get("removed") is True:
+            return set(entry.get("ids") or [])
+        return set()
 
     def prune(self) -> list:
         return [str(p) for p in transcripts.prune(self.data, self.cfg, self.clock())]

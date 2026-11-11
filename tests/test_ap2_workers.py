@@ -12,6 +12,7 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import types
@@ -2530,6 +2531,23 @@ class FinishRetryTest(WorkerCase):
         self.assertEqual(w.finish(a["card"])["removed"], [])
         self.assertEqual(self.rm_calls(), [])
 
+    def test_a_session_started_after_a_finish_is_removed_by_the_next_finish(self):
+        w = self.workers()
+        a = self.start(w)
+        w.end(a["card"], "implement")
+        self.assertEqual(w.finish(a["card"])["removed"], [a["session_id"]])
+        b = self.start(w, card_id=a["card"])  # the same role again, under a new id
+        self.assertNotEqual(b["session_id"], a["session_id"])
+        w.end(a["card"], "implement")
+        before = len(self.rm_calls())
+        out = w.finish(a["card"])
+        self.assertEqual(self.rm_calls()[before:], [b["session_id"]])  # once, and never the id already removed
+        self.assertEqual(out["removed"], [b["session_id"]])
+        self.assertNotIn("failed", out)
+        entry = self.get(a["card"])["sessions"]["implement"]
+        self.assertTrue(entry["removed"])
+        self.assertEqual(entry["removed_ids"], [a["session_id"], b["session_id"]])
+
 
 class ResumeAuditTest(WorkerCase):
     def test_a_resume_writes_the_card_as_the_checks_caller(self):
@@ -2541,6 +2559,24 @@ class ResumeAuditTest(WorkerCase):
         new = self.get(a["card"])["audit"][n:]
         self.assertTrue(new)
         self.assertEqual({e["by"] for e in new}, {"tester"})
+
+    def resume_closes(self, ask: dict):
+        w = self.workers()
+        a = self.start(w)
+        self.assertTrue(w._set_ask(a["card"], ask, "ap2 worker"))
+        n = len(self.get(a["card"])["audit"])
+        self.drop_agent(a["short_id"])
+        self.assertEqual(w.check(by="tester")[0]["did"], "resumed")
+        self.assertIsNone(self.get(a["card"]).get("ask"))
+        new = self.get(a["card"])["audit"][n:]
+        self.assertTrue(new)
+        self.assertEqual({e["by"] for e in new}, {"tester"})
+
+    def test_the_stop_before_a_resume_closes_the_attach_ask_as_the_checks_caller(self):
+        self.resume_closes({"type": "fix", "role": "implement", "reason": workers_mod.ATTACH, "text": "attach"})
+
+    def test_a_resume_closes_the_question_ask_as_the_checks_caller(self):
+        self.resume_closes({"type": "answer", "role": "implement", "text": "which?"})
 
     def test_a_parked_resume_writes_the_card_as_the_checks_caller(self):
         w = self.workers()
@@ -2566,8 +2602,9 @@ class WriteBackErrorTest(WorkerCase):
                 with reg.locked() as records:
                     records.append({"card": "c1", "role": "implement"})
                     raise WorkerError("first")
-        notes = getattr(caught.exception, "__notes__", [])
-        self.assertTrue(any("disk full" in n for n in notes), notes)
+        if sys.version_info >= (3, 11):  # add_note is new in 3.11; older Python drops the write error
+            notes = getattr(caught.exception, "__notes__", [])
+            self.assertTrue(any("disk full" in n for n in notes), notes)
 
     def test_a_ctrl_c_wins_over_the_write_error(self):
         reg = resources.Registry(self.data)

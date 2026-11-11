@@ -1454,7 +1454,7 @@ Calls the author made without asking (check them):
     back however its locked block ends, normally or by any exception (Ctrl-C included), so every change already made
     reaches disk (an interrupted end keeps its `closing` mark or has dropped its record; an interrupted pass stops at
     that worker), and the exception is then re-raised. **[decided by the builder]** When the block raised and
-    the write fails too, the block's own exception is the one raised, with the write error added to it as a note;
+    the write fails too, the block's own exception is the one raised, with the write error added to it as a note (Python 3.11 or later; older Python drops the write error);
     the write error is raised only when the block itself succeeded. A worker with a started
     close (`closing`) still has that close finished when its state cannot be read: the mark says what to do. A
     result or question file that is gone between its two looks is not newer. The listing is taken
@@ -1531,9 +1531,11 @@ Calls the author made without asking (check them):
     live mode only, runs `claude rm` on each. A `claude rm` that exits non-zero raises with claude's message; `finish` lists
     it under `failed`, keeps that original (the next `finish` tries again) and marks a role `removed` only when
     every one of its originals is gone. **[decided by the builder]** It remembers each original it removed
-    in `sessions.<role>.removed_ids`, and a later `finish` never runs `claude rm` again on those ids nor on any id
-    of a role already marked `removed` (a second `claude rm` of a gone original can fail, and the role would then
-    never be marked); the role is marked `removed` once every id of it is in `removed_ids`. `finish` acts only on
+    in `sessions.<role>.removed_ids`, and a later `finish` never runs `claude rm` again on those ids (a second
+    `claude rm` of a gone original can fail, and the role would then never be marked); a role marked `removed` by
+    an older `finish` that kept no `removed_ids` counts every id it lists as gone. A session of the role started
+    after a `finish` is removed by the next `finish`. The role is marked `removed` once every id of it is in
+    `removed_ids`. `finish` acts only on
     the known roles (`implement`, `review`, `pr`) in
     the card's `sessions`; any other key, and a role with no ids, is left as it is on the card. An archive's role must be lowercase letters, else it is
     refused, so a card's keys never make a path outside the data folder.
