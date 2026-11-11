@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+"""Test stand-in for the claude CLI, for v2 (ap2) tests only. Standard library only.
+
+FAKE_CLAUDE_LOG   one JSON line per call: {"argv", "cwd", "env"} (env: the AP2_* and AUTOPILOT_* variables only)
+FAKE_CLAUDE_HOME  a temp folder holding the fake's state: `count` (the last session number), `agents.json`
+                  (what `claude agents --json --all` prints) and `projects/<cwd>/<session id>.jsonl` (transcripts)
+FAKE_BG_FAIL      when set, `--bg` prints an error and exits 1
+FAKE_RM_FAIL      when set, `rm` prints an error and exits 1
+FAKE_TOOLS        the tools `-p ... --output-format stream-json` reports in its init event, comma-separated (default:
+                  Read, Bash, mcp__slack__slack_send_message, mcp__slack__slack_read_channel)
+FAKE_TOOLS_FAIL   when set, `-p` prints nothing and exits 1 (as when claude is not logged in)
+FAKE_TOOLS_AFTER_INIT  `wait`: after the init event `-p` sleeps FAKE_TOOLS_SLEEP seconds (default 30) and then
+                  writes `model-ran` in FAKE_CLAUDE_HOME, standing in for a model turn that acts
+FAKE_TOOLS_HANG   when set, `-p` prints nothing and sleeps FAKE_TOOLS_SLEEP seconds (default 30)
+FAKE_TOOLS_WRAPPER  when set, `-p` is a launcher that does not exec: it runs a child copy of itself with the same
+                  argv and stdout (without this flag and without logging) and waits for it; the child does the rest
+FAKE_TOOLS_BEFORE_INIT  when set, `-p` prints `not json`, `1` and a SessionStart `hook_response` event before init
+FAKE_MCP_SERVERS  the init event's `mcp_servers` as `name:status`, comma-separated (default: no `mcp_servers` key);
+                  a bare `name` has no `status` key
+
+`--bg` starts a session: it gets the next short id (s0001, s0002, ...) and session id, is listed as working, and
+writes a one-line transcript. `--resume <id>` copies the old transcript under the new id, as claude does.
+`stop <short id>` takes the session off the listing; `rm <session id>` deletes its transcript. `-p` with
+`--output-format stream-json` writes its pid to `discover.pid` in FAKE_CLAUDE_HOME, then prints the init event
+(flushed at once) that the tool discovery reads, then a result line.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+argv = sys.argv[1:]
+log = os.environ.get("FAKE_CLAUDE_LOG")
+if log:
+    with open(log, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"argv": argv, "cwd": os.getcwd(),
+                            "env": {k: v for k, v in os.environ.items() if k.startswith(("AP2_", "AUTOPILOT_"))}}) + "\n")
+
+home = Path(os.environ["FAKE_CLAUDE_HOME"]) if os.environ.get("FAKE_CLAUDE_HOME") else None
+agents_file = home / "agents.json" if home else None
+
+
+def agents() -> list:
+    try:
+        return json.loads(agents_file.read_text(encoding="utf-8"))
+    except (AttributeError, OSError, ValueError):
+        return []
+
+
+def save(rows: list) -> None:
+    if agents_file is not None:
+        agents_file.write_text(json.dumps(rows, indent=1), encoding="utf-8")
+
+
+def transcripts(sid: str) -> list:
+    return sorted((home / "projects").glob(f"*/{sid}.jsonl")) if home else []
+
+
+def flag(name: str):
+    return argv[argv.index(name) + 1] if name in argv and argv.index(name) + 1 < len(argv) else None
+
+
+cmd = argv[0] if argv else ""
+if cmd == "agents":
+    print(json.dumps(agents()))
+elif cmd == "stop" and len(argv) > 1:
+    save([a for a in agents() if a.get("id") != argv[1]])
+elif cmd == "rm" and len(argv) > 1:
+    if os.environ.get("FAKE_RM_FAIL"):
+        print("error: no such session", file=sys.stderr)
+        sys.exit(1)
+    for p in transcripts(argv[1]):
+        p.unlink()
+elif cmd == "-p" and flag("--output-format") == "stream-json" and os.environ.get("FAKE_TOOLS_WRAPPER"):
+    child = {k: v for k, v in os.environ.items() if k not in ("FAKE_TOOLS_WRAPPER", "FAKE_CLAUDE_LOG")}
+    sys.exit(subprocess.call([sys.executable, os.path.abspath(__file__)] + argv, env=child))
+elif cmd == "-p" and flag("--output-format") == "stream-json":
+    if home is not None:  # before any output, so a caller that kills it at its first line still finds the pid
+        (home / "discover.pid").write_text(str(os.getpid()))
+    pause = float(os.environ.get("FAKE_TOOLS_SLEEP") or 30)
+    if os.environ.get("FAKE_TOOLS_FAIL"):
+        sys.exit(1)
+    if os.environ.get("FAKE_TOOLS_HANG"):
+        time.sleep(pause)
+        sys.exit(1)
+    given = os.environ.get("FAKE_TOOLS")
+    tools = [t for t in given.split(",") if t] if given is not None else [
+        "Read", "Bash", "mcp__slack__slack_send_message", "mcp__slack__slack_read_channel"]
+    if os.environ.get("FAKE_TOOLS_BEFORE_INIT"):
+        for line in ("not json", "1", json.dumps({"type": "system", "subtype": "hook_response", "tools": []})):
+            print(line, flush=True)
+    init = {"type": "system", "subtype": "init", "tools": tools}
+    servers = os.environ.get("FAKE_MCP_SERVERS")
+    if servers is not None:
+        init["mcp_servers"] = [dict(zip(("name", "status"), s.rsplit(":", 1))) for s in servers.split(",") if s]
+    print(json.dumps(init), flush=True)
+    if os.environ.get("FAKE_TOOLS_AFTER_INIT") == "wait":
+        time.sleep(pause)
+        if home is not None:
+            (home / "model-ran").write_text("the model turn ran\n")
+    print(json.dumps({"type": "result", "result": "OK"}), flush=True)
+elif cmd == "--bg":
+    if os.environ.get("FAKE_BG_FAIL"):
+        print("error: could not start", file=sys.stderr)
+        sys.exit(1)
+    n = 1
+    if home is not None:
+        try:
+            n = int((home / "count").read_text()) + 1
+        except (OSError, ValueError):
+            n = 1
+        (home / "count").write_text(str(n))
+    short, sid = f"s{n:04d}", f"00000000-0000-4000-8000-{n:012d}"
+    name = flag("-n") or ""
+    if home is not None:
+        folder = home / "projects" / re.sub(r"[^A-Za-z0-9]", "-", os.getcwd())
+        folder.mkdir(parents=True, exist_ok=True)
+        old = flag("--resume")
+        before = "".join(p.read_text(encoding="utf-8") for p in transcripts(old)) if old else ""
+        (folder / f"{sid}.jsonl").write_text(before + json.dumps({"type": "user", "prompt": argv[-1]}) + "\n",
+                                             encoding="utf-8")
+        save(agents() + [{"id": short, "sessionId": sid, "name": name, "kind": "background", "state": "working",
+                          "status": "busy", "cwd": os.getcwd(), "startedAt": n}])
+    print(f"backgrounded · {short} · {name or 'resumed'}")
+sys.exit(0)
