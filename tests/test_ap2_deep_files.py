@@ -218,6 +218,27 @@ class PointTooDeepTest(DeepCase):
         self.assertEqual(self.files(), before)
         self.assertEqual(self.store.get(card_id)["lane"], "done")
 
+    def test_a_point_whose_card_id_is_not_text_is_refused_without_comparing_it(self):
+        card_id, point, _ = self.card_with_point()
+        point_path = restore.path(self.data, point)
+        saved = json.loads(point_path.read_text(encoding="utf-8"))
+        saved["card_id"] = saved["card"]["id"] = "ID"
+        template = json.dumps(saved)
+        depth = 20_000  # parses on 3.14, where comparing two such lists overflows the C stack
+        shapes = {"short list": ("[[1]]", "not a card restore point"),
+                  "deep list": ("[" * depth + "]" * depth, "")}
+        for name, (value, message) in shapes.items():
+            with self.subTest(name):
+                point_path.write_text(template.replace('"ID"', value), encoding="utf-8")
+                want = r"\A" + re.escape(f"{point_path}: {message}")
+                with self.assertRaisesRegex(CardError, want):
+                    restore.load(self.data, point)
+                before = self.files()
+                with self.assertRaisesRegex(CardError, want):
+                    self.store.restore(point, by="user")
+                self.assertEqual(self.files(), before)
+                self.assertEqual(self.store.get(card_id)["lane"], "done")
+
     def test_prune_keeps_it_and_still_removes_the_other_old_points(self):
         card_id, first, _ = self.card_with_point()
         self.clock.tick(minutes=1)

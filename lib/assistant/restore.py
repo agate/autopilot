@@ -56,7 +56,9 @@ def load(data: Path, point_id: str) -> dict:
         raise CardError(f"{p}: cannot read the restore point: {e}") from e
     if not (isinstance(point, dict) and point.get("kind") == "card" and isinstance(point.get("card"), dict)):
         raise CardError(f"{p}: not a card restore point")
-    if point.get("id") != point_id or point.get("card_id") != point["card"].get("id"):
+    # card_id is compared only when it is text: `!=` between two lists nested too deeply overflows the stack
+    if (point.get("id") != point_id or not isinstance(point.get("card_id"), str)
+            or point.get("card_id") != point["card"].get("id")):
         raise CardError(f"{p}: not a card restore point (its id must be its file name and its card_id its "
                         f"card's id)")
     return point
