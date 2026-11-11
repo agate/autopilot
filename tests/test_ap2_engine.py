@@ -587,6 +587,90 @@ class CommandReadTest(EngineCase):
         pid = int(pid_file.read_text())
         self.assertGone(pid, f"the command {pid} is still running after the cap")
 
+    def test_output_of_exactly_the_cap_is_read(self):
+        cap = 64 * 1024
+        script = self.tmp / "full.py"
+        script.write_text(f"import sys; sys.stdout.write('[' + ' ' * {cap - 2} + ']')\n")
+        self.user_source("full", f"""\
+            source: full
+            brings: messages
+            read: {{ via: command, run: '{sys.executable} {script}', timeout: 5 }}
+            fill: paths
+            form: {{ id: .id, at: .at, text: .text }}
+            link: none
+            sort: {{ all: alert }}
+            """)
+        with mock.patch("assistant.engine.MAX_OUTPUT", cap):
+            result = self.engine().read("full")
+        self.assertEqual((result["items"], result["dropped"]), ([], []))
+        self.assertEqual(len((self.data / result["raw"]).read_bytes()), cap)
+
+    def test_a_child_forked_while_the_group_is_killed_is_stopped_too(self):
+        # On macOS a child that is being forked when its group is killed can miss the kill and live on in the group.
+        groups = self.tmp / "forker.groups"
+        script = self.tmp / "forker.sh"
+        script.write_text(textwrap.dedent("""\
+            echo $$ >> "$1"
+            (while :; do sleep 30 & kill $! 2>/dev/null; done) &
+            sleep 0.1
+            head -c 100000 /dev/zero
+            wait
+            """))
+
+        def kill_left_over():
+            for pgid in map(int, groups.read_text().split()) if groups.exists() else ():
+                for _ in range(1000):
+                    try:
+                        os.killpg(pgid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        break
+                    time.sleep(0.001)
+
+        self.addCleanup(kill_left_over)
+        self.user_source("forker", f"""\
+            source: forker
+            brings: messages
+            read: {{ via: command, run: '/bin/sh {script} {groups}', timeout: 5 }}
+            fill: paths
+            form: {{ id: .id, at: .at, text: .text }}
+            link: none
+            sort: {{ all: alert }}
+            """)
+        with mock.patch("assistant.engine.MAX_OUTPUT", 64 * 1024):
+            for _ in range(12):
+                with self.assertRaisesRegex(SourceError, "^forker: read.run printed more than 65536 bytes; stopped$"):
+                    self.engine().read("forker", dry_run=True)
+        pgids = [int(p) for p in groups.read_text().split()]
+        self.assertEqual(len(pgids), 12)
+        left = []
+        for pgid in pgids:
+            deadline = time.monotonic() + 1
+            while True:
+                try:
+                    os.killpg(pgid, 0)
+                except ProcessLookupError:
+                    break
+                except PermissionError:
+                    pass
+                if time.monotonic() > deadline:
+                    left.append(pgid)
+                    break
+                time.sleep(0.05)
+        self.assertEqual(left, [], "a process is still running in these command groups after the cap")
+
+    def test_a_nul_in_the_command_is_one_error(self):
+        self.user_source("nul", """\
+            source: nul
+            brings: messages
+            read: { via: command, run: "true a\\0b" }
+            fill: paths
+            form: { id: .id, at: .at, text: .text }
+            link: none
+            sort: { all: alert }
+            """)
+        with self.assertRaisesRegex(SourceError, "^nul: cannot run 'true': embedded null byte$"):
+            self.engine().read("nul")
+
     def test_only_the_end_of_stderr_is_kept(self):
         script = self.tmp / "noisy.py"
         script.write_text("import sys; sys.stderr.write('e' * 300000 + '\\nthe last line\\n'); print('[]')\n")
@@ -762,6 +846,29 @@ class SavedReadTest(EngineCase):
     def test_a_missing_saved_file(self):
         with self.assertRaisesRegex(SourceError, "^gh-mine: cannot read the saved output"):
             self.engine().read_saved("gh-mine", self.tmp / "nope.json")
+
+    def test_a_saved_file_past_the_cap_is_refused_before_it_is_read(self):
+        self.user_source("plain", """\
+            source: plain
+            brings: messages
+            read: { via: mcp, server: plain, tool: list }
+            fill: paths
+            form: { id: .id, at: .at, text: .text }
+            link: none
+            sort: { all: alert }
+            """)
+        cap = 16
+        saved = self.tmp / "saved.json"
+        saved.write_text("[" + " " * (cap - 1) + "]")
+        with mock.patch("assistant.engine.MAX_OUTPUT", cap):
+            with self.assertRaisesRegex(SourceError, rf"^plain: the saved output {saved} is larger than {cap} "
+                                                     r"bytes$"):
+                self.engine().read_saved("plain", saved)
+            self.assertFalse((self.data / "sources" / ".raw").exists())  # nothing copied
+            saved.write_text("[" + " " * (cap - 2) + "]")
+            result = self.engine().read_saved("plain", saved)
+        self.assertEqual((result["items"], result["dropped"]), ([], []))
+        self.assertEqual((self.data / result["raw"]).read_bytes(), saved.read_bytes())
 
 
 class SortToCardTest(EngineCase):
@@ -1062,6 +1169,49 @@ class ReplyShapeTest(EngineCase):
                 with self.assertRaisesRegex(SourceError, r"^vendor-status: the reply has no list at \.incidents$"):
                     self.engine().read("vendor-status", dry_run=True)
         self.assertEqual(self.store().list(), [])
+
+    def test_a_read_past_the_item_limit_is_refused(self):
+        reply = self.tmp / "many.json"
+        self.user_source("many", f"""\
+            source: many
+            brings: messages
+            read: {{ via: command, run: '{self.command(reply)}' }}
+            fill: paths
+            form: {{ id: .id, at: .at, text: .text }}
+            link: none
+            key: "{{id}}"
+            sort: {{ all: alert }}
+            """)
+        item = {"at": "2026-11-10T14:00:00Z", "text": "Hello"}
+        with mock.patch("assistant.engine.MAX_ITEMS", 3):
+            reply.write_text(json.dumps([{"id": str(n), **item} for n in range(4)]))
+            with self.assertRaisesRegex(SourceError, r"^many: the reply has 4 items; at most 3 are read \(saved as "
+                                                     r"sources/\.raw/many/[0-9TZ]+-[0-9a-f]{6}\.json\)$"):
+                self.engine().read("many")
+            with self.assertRaisesRegex(SourceError, r"^many: the reply has 4 items; at most 3 are read$"):
+                self.engine().read("many", dry_run=True)
+            self.assertEqual(self.store().list(), [])
+            reply.write_text(json.dumps([{"id": str(n), **item} for n in range(3)]))
+            result = self.engine().read("many")
+        self.assertEqual([i["action"] for i in result["items"]], ["add"] * 3)
+        self.assertEqual(len(self.store().list()), 3)
+
+    def test_fill_ai_records_past_the_item_limit_are_refused(self):
+        raw = self.tmp / "slack.txt"
+        raw.write_text(SavedReadTest.SLACK_RAW)
+        good = {"id": "1730000000.123456", "thread_id": "1729999000.000100", "at": "1730000000.123456",
+                "text": "Can you look at the retry change?", "place": "C0123ABCD", "category": "question"}
+        with mock.patch("assistant.engine.MAX_ITEMS", 3):
+            with self.assertRaisesRegex(SourceError, r"^slack-mentions: the reply has 4 items; at most 3 are read "
+                                                     r"\(saved as sources/\.raw/slack-mentions/[0-9TZ]+-[0-9a-f]{6}"
+                                                     r"\.json\)$"):
+                self.engine().read_saved("slack-mentions", raw, records=[good] * 4)
+            with self.assertRaisesRegex(SourceError, r"^slack-mentions: the reply has 4 items; at most 3 are read$"):
+                self.engine().read_saved("slack-mentions", raw, records=[good] * 4, dry_run=True)
+            self.assertEqual(self.store().list(), [])
+            result = self.engine().read_saved("slack-mentions", raw, records=[good] * 3)
+        self.assertEqual([i["action"] for i in result["items"]], ["add", "unchanged", "unchanged"])
+        self.assertEqual(len(self.store().list()), 1)
 
     def test_an_empty_list_is_zero_items(self):
         empty = self.tmp / "empty.json"

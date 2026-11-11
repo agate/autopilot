@@ -45,6 +45,10 @@ DRAIN = 5
 # The most stdout a read keeps; past it the command is stopped. Only the end of its stderr is kept.
 MAX_OUTPUT = 64 * 1024 * 1024
 ERR_TAIL = 64 * 1024
+# The most items one read handles; a reply (or a scan session's records) with more fails the read.
+MAX_ITEMS = 10_000
+# How many times a stop kills the command's group before it gives up on emptying it.
+STOP_TRIES = 100
 # The catchable signals whose default action ends the process and that a terminal, shell, supervisor or user may
 # send. While a read waits, those still at their default stop the command's group too (SIGINT does it through
 # KeyboardInterrupt). A missing one is skipped.
@@ -150,6 +154,8 @@ class Engine:
         _check_fill(src, records)
         path = Path(raw_path)
         try:
+            if path.stat().st_size > MAX_OUTPUT:
+                raise SourceError(f"{src.name}: the saved output {path} is larger than {MAX_OUTPUT} bytes")
             raw_bytes = path.read_bytes()
         except OSError as e:
             raise SourceError(f"{src.name}: cannot read the saved output {path}: {e}") from e
@@ -190,8 +196,8 @@ class Engine:
                     proc = subprocess.Popen(argv, cwd=str(self.data), stdin=subprocess.DEVNULL,
                                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False,
                                             start_new_session=True)
-                except OSError as e:
-                    failed = SourceError(f"{src.name}: cannot run {argv[0]!r}: {e.strerror or e}")
+                except (OSError, ValueError) as e:  # ValueError: a NUL in an argument
+                    failed = SourceError(f"{src.name}: cannot run {argv[0]!r}: {getattr(e, 'strerror', None) or e}")
                     failed.__cause__ = e
                 guard.start()  # a signal that came while the command started acts now
                 if failed is not None:
@@ -272,7 +278,7 @@ class Engine:
                 raise SourceError(f"{src.name}: the output is not JSON{where}: {why}") from e
             entries, dropped = self.fill(src, reply, raw=raw)
         else:
-            entries, dropped = self.check_records(src, records, raw_bytes.decode("utf-8", errors="replace"))
+            entries, dropped = self.check_records(src, records, raw_bytes.decode("utf-8", errors="replace"), raw=raw)
         result = self.build(src, entries, dropped, raw, dry_run)
         if raw is not None:
             p = PurePosixPath(raw)
@@ -294,6 +300,7 @@ class Engine:
         except ValueError as e:
             where = f" (saved as {raw})" if raw else ""
             raise SourceError(f"{src.name}: {e}{where}") from None
+        _check_count(src, len(found), raw)
         entries, dropped = [], []
         for n, item in enumerate(found):
             try:
@@ -311,12 +318,14 @@ class Engine:
         return entries, dropped
 
     @staticmethod
-    def check_records(src: sources.Source, records, raw_text: str) -> tuple:
+    def check_records(src: sources.Source, records, raw_text: str, raw: Optional[str] = None) -> tuple:
         """`fill: ai`: check the records a scan session filled (design 5.3). Each record's `id`, and its `thread_id`
         and `at` when present, must appear word for word in `raw_text`, the tool's raw output, so a model cannot
-        invent them. Each record carries its `category`, one of `sort`'s."""
+        invent them. Each record carries its `category`, one of `sort`'s. Too many records is refused (SourceError,
+        naming `raw`, where the raw output was saved)."""
         if not isinstance(records, list):
             raise SourceError(f"{src.name}: records must be a list, not {type(records).__name__}")
+        _check_count(src, len(records), raw)
         entries, dropped = [], []
         for n, rec in enumerate(records):
             try:
@@ -540,11 +549,15 @@ def _pump(proc: subprocess.Popen, out: bytearray, err: bytearray, seconds: float
 
 
 def _stop(proc: subprocess.Popen) -> None:
-    """Kill a read's whole process group; a group that is already gone is fine."""
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        pass
+    """Kill a read's whole process group, again until it is empty (at most STOP_TRIES times): on macOS a child
+    that is being forked when its group is killed can miss the kill. A group that is already gone is fine."""
+    for _ in range(STOP_TRIES):
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            return
+        proc.poll()  # reap the command, so its zombie does not keep the group alive
+        time.sleep(0.001)
 
 
 def _check_fill(src: sources.Source, records) -> None:
@@ -553,6 +566,13 @@ def _check_fill(src: sources.Source, records) -> None:
         raise SourceError(f"{src.name}: fill: paths fills its own records; give only the raw output")
     if src.fill == "ai" and records is None:
         raise SourceError(f"{src.name}: fill: ai records are filled by a scan session; give them with the raw output")
+
+
+def _check_count(src: sources.Source, n: int, raw: Optional[str]) -> None:
+    """Refuse a read with more than MAX_ITEMS items, naming `raw`, where its output was saved."""
+    if n > MAX_ITEMS:
+        where = f" (saved as {raw})" if raw else ""
+        raise SourceError(f"{src.name}: the reply has {n} items; at most {MAX_ITEMS} are read{where}")
 
 
 def required(src: sources.Source) -> tuple:

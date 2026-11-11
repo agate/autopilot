@@ -825,7 +825,9 @@ Calls the author made without asking (check them):
     error names the file, as it does for a nonzero exit; a dry run keeps nothing). At most `engine.MAX_OUTPUT`
     (64 MiB) of stdout is kept: a command that prints more is stopped, and the first 64 MiB is saved as partial
     output the same way; only the last 64 KiB of stderr is kept. The command runs in its own
-    process group, and the whole group is killed on timeout, so the children it started stop too. An
+    process group, and the whole group is killed on timeout, so the children it started stop too. A stop sends
+    SIGKILL to the group again and again (at most `engine.STOP_TRIES`, 100, times, 1 ms apart) until the group is
+    empty: on macOS a child that is being forked at the first kill can miss it and live on in the group. An
     interrupted read (Ctrl-C, or any error while waiting) kills the command's group too. While a read waits (in
     the main thread), every signal in `engine.STOP_SIGNALS` (SIGHUP, SIGQUIT, SIGTERM, SIGUSR1, SIGUSR2, SIGALRM,
     SIGVTALRM, SIGPROF, SIGXCPU) that is at its default action kills the command's group too, then ap2 exits with
@@ -839,7 +841,12 @@ Calls the author made without asking (check them):
     `mcp`, `connector` and `skill` reads are not run here: `Engine.read_saved(source, raw_path, records=None)`
     takes a scan session's saved output (copied under `.raw/<source>/` unless it is there already) and, for
     `fill: ai`, its records. Records with `fill: paths`, or none with `fill: ai`, are refused before anything
-    is run or saved. Old raw files are not pruned yet.
+    is run or saved. A saved file larger than `engine.MAX_OUTPUT` (64 MiB) is refused before it is read or
+    copied, as a command's output past it would be. Old raw files are not pruned yet.
+  - A read handles at most `engine.MAX_ITEMS` (10,000) items: a reply with more items, or a scan session with
+    more `fill: ai` records, fails the read, and the error names the raw file it was saved as (a dry run saves
+    none). No card is made or changed. This is the simplest limit to raise later; it keeps one read's time,
+    memory and report small.
   - Shadow mode: a source's `writes` are never run. `Engine.apply_writes(source, event)` calls
     `config.require_live` first (shadow mode raises `ShadowModeError`), and in live mode still runs nothing and
     says so; a later slice runs the writes.
