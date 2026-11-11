@@ -1018,6 +1018,27 @@ class PickerTest(AngleCase):
         self.assertIn("kind data", picked["Billing data"]["why"])
         self.assertNotIn("paths", picked["Billing data"]["why"])
 
+    def test_a_later_kind_glob_or_file_matches(self):
+        # The picker decides a match before it writes a why, so a match through a later kind, a later glob or a
+        # later changed file must count there too.
+        table = angles.Table([
+            angles.Angle("Correctness", "q", "always", "b", "built-in", "f", 0, 0),
+            angles.Angle("Multi kinds", "q", {"kinds": ["ui", "data"]}, "b", "user", "f", 1, 0),
+            angles.Angle("Multi globs", "q", {"paths": ["web/**", "billing/**"]}, "b", "user", "f", 1, 1),
+        ])
+        for files, name in ((["schema.sql"], "Multi kinds"), (["billing/x.py"], "Multi globs"),
+                            (["README.txt", "billing/x.py"], "Multi globs")):
+            with self.subTest(files=files):
+                self.assertIn(name, self.names(angles.pick(table, files, "loop")))
+
+    def test_layer_comes_before_place_in_the_file(self):
+        # A user angle low in its file still beats a built-in angle higher in the built-in file.
+        self.user('- name: U0\n  question: "q?"\n  when: { paths: ["nowhere/**"] }\n  brief: "b"\n'
+                  '- name: U1\n  question: "q?"\n  when: { kinds: [data] }\n  brief: "b"\n'
+                  '- name: U2\n  question: "q?"\n  when: always\n  brief: "b"\n')
+        picked = angles.pick(self.load(), ["schema.sql"], "loop")
+        self.assertEqual(self.names(picked), ["Correctness", "U1", "U2", "Data correctness & backfill"])
+
     def test_builtin_order_is_riskiest_first(self):
         table = self.load()
         picked = angles.pick(table, ["web/a.tsx", "schema.sql", "proto/x.proto"], "loop")

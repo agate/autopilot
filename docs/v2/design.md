@@ -404,14 +404,15 @@ How it is built (`lib/assistant/angles.py`, the table in `review/angles.yaml`):
   at the entry that passes it); at most 256 characters in one glob (`MAX_GLOB`); no glob or kind twice in one
   `when`. The picker's time is then linear in the total length of the changed paths times the number of globs, plus
   a cost per angle that does not grow with path length, whatever the globs: it reads each path once per glob, a few
-  integer steps per character, so a repo file adds at most 200 such reads per changed file (the globs of the angles
-  it picks are read once more, to write their `why`). It decides every match first, without writing anything, then
+  integer steps per character, so a repo file adds at most 200 such reads per changed file, and up to 200 more for
+  the globs of the angles it picks, which are read once more to write their `why`. It decides every match first, without writing anything, then
   writes a `why` only for the at most `count() - 1` angles it picks, and each PR kind's example files once per pick.
   So its memory is linear in the total length of the changed paths plus a cost per angle that does not grow with
   path length, and kinds-only angles, which no cap bounds, add only that per-angle cost each. Measured with 200
-  globs each kept alive to the end of every path (the worst case for this matcher): about 50 to 65 microseconds per
+  globs each kept alive to the end of every path and matching nothing: about 50 to 65 microseconds per
   character of changed paths, so 0.5 s for four crafted files of 2,559 characters, 3 s for twenty,
-  and 13 s for one path of 256,000 characters. Changed paths are the caller's data and are not capped; their total
+  and 13 s for one path of 256,000 characters; a picked angle whose globs match only at the very end reads the
+  paths a second time, so the worst case is about twice these. Changed paths are the caller's data and are not capped; their total
   length sets the cost. A `why` writes out at most three reasons and only counts the rest. Brackets are counted as
   `yamlish` reads them (its comment scan: a comment ends the line, a quote opens a string only where a value starts,
   a bracket opens a collection only where a value starts or inside an open one), so brackets it reads as text are
