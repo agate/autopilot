@@ -254,22 +254,24 @@ class DailyCommandTest(unittest.TestCase):
                               capture_output=True, text=True, env=env, errors="replace", timeout=30)
 
     def test_ap2_gate_with_a_damaged_gate_json_prunes_and_exits_0(self):
-        now = datetime(2025, 11, 11, 17, 1, 30, tzinfo=UTC)  # in the past, so --now is valid
+        now = datetime(2025, 11, 11, 9, 59, 30, tzinfo=UTC)  # in the past, so --now is valid
         folder = self.data / RAW / "chat"
         folder.mkdir(parents=True)
         old = name(now - timedelta(days=31))
         (folder / old).write_text("{}", encoding="utf-8")
         (self.data / gate.HEARTBEAT).write_text("{nope", encoding="utf-8")
-        r = self.run_gate("2025-11-11T17:01:30Z")
+        r = self.run_gate("2025-11-11T09:59:30Z")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stderr, "")
         self.assertEqual(json.loads(r.stdout)["errors"], [])
         self.assertFalse((folder / old).exists())
         self.assertEqual(sorted(json.loads((self.data / gate.HEARTBEAT).read_text(encoding="utf-8"))), KEYS)
-        # A second run a minute later, the same UTC day: an old file put meanwhile stays until the next day.
+        # A second run a minute later, the same UTC day though the next day in Kiritimati (the TZ the command
+        # runs under), so a check on the machine's local date would prune it: an old file put meanwhile stays
+        # until the next UTC day.
         later = name(now - timedelta(days=40), "bbbbbb")
         (folder / later).write_text("{}", encoding="utf-8")
-        r = self.run_gate("2025-11-11T17:02:30Z")
+        r = self.run_gate("2025-11-11T10:00:30Z")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue((folder / later).exists())
 
