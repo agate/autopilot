@@ -154,6 +154,15 @@ class CommandReadTest(EngineCase):
                                             f"{raw.relative_to(self.data).as_posix()})")
         self.assertEqual(self.store().list(), [])
 
+    def test_a_failing_command_in_a_dry_run_saves_nothing(self):
+        reply = self.reply_copy("status-incidents.json")
+        self.status_source(reply, self.tmp / "cwd.txt", 3)
+        with self.assertRaisesRegex(SourceError, r"^vendor-status: read\.run exited with 3: it went wrong$"):
+            self.engine().read("vendor-status", dry_run=True)
+        raw_dir = self.data / "sources" / ".raw" / "vendor-status"
+        self.assertEqual(list(raw_dir.glob("*")) if raw_dir.exists() else [], [])
+        self.assertEqual(self.store().list(), [])
+
     def test_no_shell_runs_the_command(self):
         marker = self.tmp / "shell-ran"
         self.user_source("echo", f"""\

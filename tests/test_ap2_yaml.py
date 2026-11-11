@@ -200,6 +200,12 @@ class StructureTest(unittest.TestCase):
         self.assertEqual(load('k: {"a"\t:"b # c"}\n'), {"k": {"a": "b # c"}})  # a tab before the ':' after a quote
         self.assertEqual(load("k: [x:'y, z]  # it's here\n"), {"k": ["x:'y", "z"]})  # a quote after 'x:' is plain
 
+    def test_a_quote_after_a_word_inside_flow_collections_is_plain_text(self):
+        # Inside brackets a quote right after a word (not '[', '{', ',' or ':') opens no string.
+        self.assertEqual(load('k: [a "b] # c"]\n'), {"k": ['a "b']})
+        with self.assertRaisesRegex(YamlError, r"^line 1: unclosed bracket: expected '\]' before the end of the line$"):
+            load('k: [x, a "b # c"]\n')
+
     def test_tab_after_a_colon_in_a_flow_map(self):
         self.assertEqual(load("a: {k:\tv}\n"), {"a": {"k": "v"}})
 
@@ -342,6 +348,9 @@ class ErrorTest(unittest.TestCase):
             load("k:\n  -\t 'b\n")
         with self.assertRaisesRegex(YamlError, r"^line 2: expected 'key: value' at this indent$"):
             load("k:\n  -- 'b\n")
+        with self.assertRaisesRegex(YamlError,
+                                    r"^line 1: unclosed quote \('\); quoted strings must end on the same line$"):
+            load("? 'a\n")  # '? ' is a block indicator too, so the quote after it opens a string
 
     def test_one_error_class(self):
         self.assertTrue(issubclass(YamlError, ValueError))
