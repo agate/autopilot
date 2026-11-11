@@ -67,6 +67,13 @@ DIED = "died_twice"  # the `reason` of the ask a worker that died twice raises; 
 #   question - the worker's question (type answer). Closed by every start and finish; never by a stop, since the
 #              question path stops the session first and then raises it.
 WORKER_ASKS = ("attach", "paused", "question")
+# Every way a worker is closed (`Workers._finish_close`): path -> (the state saved on the card, the line's `did`,
+# drop_on_error). drop_on_error drops the record when a step after the stop fails, where a kept record would be
+# misread as dead and resumed (end and both pauses); the other paths keep it, so the next check closes it again.
+CLOSES = {"end": ("ended", "ended", True), "done": ("ended", "ended", False),
+          "question": ("asked", "asked", False), "died": ("stopped", "stopped", False),
+          "idle": ("paused", "paused", True), "blocked": ("paused", "paused", True),
+          "parked_failed": ("stopped", "stopped", False)}
 # Files a worker may not edit in the data folder. Every card's run directory stays writable except its settings
 # files: a deny rule cannot keep one worker out of another card's result files. The user's templates and sources
 # are here as well (the worker floor in roles.py).
@@ -193,8 +200,9 @@ class Workers:
         return next((r for r in records if r["card"] == card_id and r["role"] == role), None)
 
     def _kill(self, short: str) -> None:
-        """Run `claude stop` on a worker's session. Every stop goes through here; it raises only when the call
-        timed out or could not run, and then the session was never stopped."""
+        """Run `claude stop` on a worker's session. Every stop goes through here; it raises when the call timed
+        out or could not run. A timeout kills only the `claude stop` client: the stop it sent may still land, so
+        after a raise the session may be stopped or still running."""
         if short:
             subprocess.run([self.claude, "stop", short], capture_output=True, timeout=60, stdin=subprocess.DEVNULL)
 
@@ -433,24 +441,33 @@ class Workers:
 
     # -- end, park ---------------------------------------------------------------------------------------------------
 
-    def _close(self, rec: dict, records: list, state: str, why: Optional[str], by: str, drop_on_error: bool,
-               **extra) -> dict:
-        """Stop the worker's process, drop its record from `records`, save its session on the card (with `extra`
-        fields) and archive its transcript. The record leaves the list only once `claude stop` has returned: when
-        the stop raises, the session may still run, so its record stays and the next check tries again. After the
-        stop, a failed step drops the record only with `drop_on_error` (end and both pauses: a kept record would be
-        seen as dead and resumed); the other paths keep it, so the next check closes it again and raises its ask.
-        The archive copy is best-effort (`archive` None and `archive_error`): `finish` copies every id again."""
+    @staticmethod
+    def _mark(path: str, why: Optional[str] = None, note: Optional[str] = None, **extra) -> dict:
+        """What a close is for (`CLOSES`), kept on the worker's record as `closing` before its stop is sent."""
+        state, _did, drop_on_error = CLOSES[path]
+        return {"path": path, "state": state, "why": why, "extra": extra, "drop_on_error": drop_on_error,
+                "note": note}
+
+    def _close(self, rec: dict, records: list, mark: dict, by: str) -> dict:
+        """Stop the worker's process, drop its record from `records`, save its session on the card (with the
+        mark's `state`, `why` and `extra` fields) and archive its transcript. The mark goes on the record as
+        `closing` before `claude stop` is sent: a stop that raised may still land, so the record stays with its
+        mark and the next check finishes this same close (`_finish_close`), whatever the session's state is then.
+        The record leaves the list only once the stop has returned. After the stop, a failed step drops the record
+        only with the mark's `drop_on_error` (`CLOSES`). The archive copy is best-effort (`archive` None and
+        `archive_error`): `finish` copies every id again."""
         sid = rec.get("session_id") or ""
+        rec["closing"] = mark
         self._kill(rec.get("short_id"))  # outside the try: a stop that raised keeps the record on every path
         saved = False
         try:
             self._close_worker_asks(rec["card"], rec["role"], by, kinds=("attach",))
             self._save_session(rec["card"], rec["role"], by, id=sid, cwd=rec.get("cwd"),
-                               needs=rec.get("needs") or [], state=state, why=why, **extra)
+                               needs=rec.get("needs") or [], state=mark["state"], why=mark["why"],
+                               **(mark.get("extra") or {}))
             saved = True
         finally:
-            if saved or drop_on_error:
+            if saved or mark["drop_on_error"]:
                 records[:] = [r for r in records if r is not rec]
         out = {"card": rec["card"], "role": rec["role"], "session_id": sid, "archive": None}
         try:
@@ -458,6 +475,40 @@ class Workers:
         except OSError as e:
             out["archive_error"] = (f"the transcript copy failed ({str(e) or type(e).__name__}); "
                                     "`ap2 worker finish` copies it again")
+        return out
+
+    def _finish_close(self, rec: dict, records: list, mark: dict, by: str) -> dict:
+        """Close the worker for `mark` (`_mark`) and do that close's follow-up; return the fields for its line.
+        Each close lives here only: its first try and the retry of a close that was started (the record's
+        `closing`) both run it. Follow-ups: the question's `answer` ask, the `fix` ask of a worker that died twice
+        or cannot resume after parking, and the blocked pause's resume hint."""
+        card_id, role, path = rec["card"], rec["role"], mark["path"]
+        if path == "blocked":
+            try:
+                closed = self._close(rec, records, mark, by)
+            finally:
+                # Once the stop returned (with drop_on_error, its record has left the list), the session to attach
+                # to is gone: say how to go on instead, also when saving it failed. A stop that raised keeps the
+                # record, its mark and the attach ask: the next check finishes this pause.
+                if not any(r is rec for r in records):
+                    self._set_ask(card_id, {"type": "fix", "role": role, "reason": ATTACH, "stage": "paused",
+                                            "text": f"Stopped after {BLOCKED_MIN} minutes at a permission prompt. "
+                                                    f"Resume it with `ap2 worker start {card_id} {role} --resume`."},
+                                  by)
+            return dict(closed, did=CLOSES[path][1])
+        closed = self._close(rec, records, mark, by)
+        if path == "question":
+            text = (mark.get("extra") or {}).get("question")
+            set_ = self._set_ask(card_id, {"type": "answer", "text": text, "role": role,
+                                           "session_id": closed["session_id"]}, by)
+            return dict(closed, did="asked" if set_ else "ended",
+                        **({} if set_ else {"note": "the card already has an open ask; the question is kept on "
+                                                    f"sessions.{role}.question, and `ap2 worker answer` answers it"}))
+        if path in ("died", "parked_failed"):
+            self._set_ask(card_id, {"type": "fix", "text": mark["why"], "role": role, "reason": DIED}, by)
+        out = dict(closed, did=CLOSES[path][1])
+        if mark.get("note"):
+            out["note"] = mark["note"]
         return out
 
     def end(self, card_id: str, role: str, by: str = BY) -> dict:
@@ -468,7 +519,8 @@ class Workers:
             if rec is None:
                 raise WorkerError(f"no {role} worker on card {card_id}")
             try:
-                out = self._close(rec, records, "ended", None, by, drop_on_error=True)
+                # A close that was started is finished first (its mark); otherwise this is an end.
+                out = self._finish_close(rec, records, rec.get("closing") or self._mark("end"), by)
             except Exception as e:  # noqa: BLE001 - raised below, once the list without the record is written back
                 failed = e
         if failed is not None:
@@ -545,8 +597,9 @@ class Workers:
 
     def _resume_dead(self, rec: dict, prompt: str, count: bool = True) -> None:
         """Resume a worker's own session in place (same slot, same ports). Live mode only. `count` adds one to
-        `resumes` (a dead worker's resume; a parked worker's is not counted). A parked session sits idle, so it
-        is stopped first: the copy that continues takes its place, as in `start()`."""
+        `resumes` (a dead worker's resume; a parked worker's is not counted). The old session is always stopped
+        first (a parked one sits idle; a failed one may keep its process): the copy that continues takes its place,
+        as in `start()`."""
         config.require_live(self.cfg, f"resume the {rec['role']} worker on card {rec['card']}")
         card = self._card(rec["card"])
         project = self._project(card)
@@ -557,8 +610,10 @@ class Workers:
         require_literal(self.data)  # before the tool discovery runs a session
         write_json(settings, floor(rec["role"], self._tools(project, rec["cwd"], env), self.data, env))
         argv = self._argv(rec["role"], rec["session_name"], settings, prompt, rec["session_id"] or rec["short_id"])
-        if rec.get("parked"):
-            self._stop(rec["card"], rec["role"], rec.get("short_id"), BY)
+        # Whatever its state (parked, failed with its process alive, or gone: a stop of a gone session is harmless),
+        # the old session is stopped first, so it never runs on untracked next to the copy. A stop that raises
+        # leaves the record as it is.
+        self._stop(rec["card"], rec["role"], rec.get("short_id"), BY)
         short, sid = self._launch(argv, rec["cwd"], env)
         # The new session runs now: record it before anything else can fail, so the registry never points at the
         # old one. Its id is the copy's, or "" when the listing does not show the copy yet: the next check fills it
@@ -608,6 +663,11 @@ class Workers:
 
     def _act(self, rec: dict, state: str, records: list, entry: dict, by: str, b, now: datetime) -> None:
         card_id, role = rec["card"], rec["role"]
+        if rec.get("closing"):
+            # A close that was started is finished before anything else: its stop may have landed after it timed
+            # out, so the session's state now (dead, most likely) says nothing about what to do.
+            entry.update(self._finish_close(rec, records, rec["closing"], by))
+            return
         # Each clock runs only while its state is seen without a break; "unknown" (the listing failed) says nothing,
         # so it keeps them. A prompt that is gone takes its attach ask with it.
         if state not in ("blocked", "unknown") and rec.get("blocked_since"):
@@ -616,18 +676,12 @@ class Workers:
         if state not in ("idle", "unknown"):
             rec["idle_since"] = None
         if state == "done":
-            entry.update(self._close(rec, records, "ended", None, by, drop_on_error=False), did="ended")
+            entry.update(self._finish_close(rec, records, self._mark("done"), by))
         elif state == "question":
-            text = self._read_question(card_id)
-            # Kept on the card too, so `answer` works even when the ask below cannot be raised (the user's own ask
-            # is open).
-            closed = self._close(rec, records, "asked", "waiting for the user's answer", by, drop_on_error=False,
-                                 question=text)
-            set_ = self._set_ask(card_id, {"type": "answer", "text": text, "role": role,
-                                           "session_id": closed["session_id"]}, by)
-            entry.update(closed, did="asked" if set_ else "ended",
-                         **({} if set_ else {"note": "the card already has an open ask; the question is kept on "
-                                                     f"sessions.{role}.question, and `ap2 worker answer` answers it"}))
+            # Kept on the card too, so `answer` works even when the ask cannot be raised (the user's own ask is
+            # open).
+            entry.update(self._finish_close(rec, records, self._mark("question", "waiting for the user's answer",
+                                                                     question=self._read_question(card_id)), by))
         elif state == "dead":
             if rec.get("resumes", 0) < 1:
                 try:
@@ -640,25 +694,14 @@ class Workers:
                 entry["did"] = "resumed"
             else:
                 why = "the worker died twice; look at its run files and its worktree, then start it again"
-                entry.update(self._close(rec, records, "stopped", why, by, drop_on_error=False), did="stopped")
-                self._set_ask(card_id, {"type": "fix", "text": why, "role": role, "reason": DIED}, by)
+                entry.update(self._finish_close(rec, records, self._mark("died", why), by))
         elif state == "blocked":
             first = not rec.get("blocked_since")
             if first:
                 rec["blocked_since"] = cards.stamp(now)
             if not first and self._minutes_since(rec["blocked_since"]) >= BLOCKED_MIN:
                 why = f"stopped after {BLOCKED_MIN} minutes at a permission prompt; paused, can resume"
-                try:
-                    entry.update(self._close(rec, records, "paused", why, by, drop_on_error=True), did="paused")
-                finally:
-                    # Once the stop returned (with drop_on_error, its record has left the list), the session to
-                    # attach to is gone: say how to go on instead, also when saving it failed. A stop that raised
-                    # keeps the record and the attach ask: nothing was stopped.
-                    if not any(r is rec for r in records):
-                        self._set_ask(card_id, {"type": "fix", "role": role, "reason": ATTACH, "stage": "paused",
-                                                "text": f"Stopped after {BLOCKED_MIN} minutes at a permission "
-                                                        f"prompt. Resume it with "
-                                                        f"`ap2 worker start {card_id} {role} --resume`."}, by)
+                entry.update(self._finish_close(rec, records, self._mark("blocked", why), by))
             elif first or self._card(card_id).get("ask") is None:
                 # The first sight of the prompt, or a later one once the card has room (the user's own ask that was
                 # in the way is closed): raise the attach ask. The 30-minute clock keeps running from the first.
@@ -674,7 +717,7 @@ class Workers:
                 rec["idle_since"] = cards.stamp(now)
             elif self._minutes_since(rec["idle_since"]) >= IDLE_MIN:
                 why = f"idle {IDLE_MIN} minutes with no result file; paused, can resume"
-                entry.update(self._close(rec, records, "paused", why, by, drop_on_error=True), did="paused")
+                entry.update(self._finish_close(rec, records, self._mark("idle", why), by))
         elif state == "parked":
             if b is not None and v1_park.resume_due(rec, now, {"budget": PARK_RULES}, b):
                 try:
@@ -684,9 +727,7 @@ class Workers:
                     # The resume cannot start (e.g. its worktree is gone): stop it as a worker that died twice, so
                     # it never holds its slot forever. A shadow-mode refusal is not a WorkerError: it waits.
                     why = f"could not resume after parking ({e}); look at its worktree, then start it again"
-                    entry.update(self._close(rec, records, "stopped", why, by, drop_on_error=False), did="stopped",
-                                 note=str(e))
-                    self._set_ask(card_id, {"type": "fix", "text": why, "role": role, "reason": DIED}, by)
+                    entry.update(self._finish_close(rec, records, self._mark("parked_failed", why, note=str(e)), by))
                     return
                 entry["did"] = "resumed"
 

@@ -1115,14 +1115,18 @@ Calls the author made without asking (check them):
     newer than its start), parked, unknown (the listing failed: nothing is done), dead (no session, its process
     gone, or state failed), blocked (status waiting), idle (state blocked or done, or status idle), running. Done:
     stop, save the session on the card, archive. A worker's record leaves the list only once `claude stop` has
-    returned. After that, a failed step drops it only where a kept record would be misread as dead and resumed
+    returned. A close that was started is finished before anything else: before it sends `claude stop` it records
+    on the worker's record what it closes for (`closing`: end, done, question, died twice, idle, blocked, or a
+    parked worker that cannot resume), and the next check (or `end`) that finds that mark completes the same close
+    (stop again, save, drop, raise the same ask or hint) instead of acting on the session's state, since a stop that
+    timed out may still have landed. Once the stop has returned, a failed step drops it only where a kept record would be misread as dead and resumed
     (end, the idle pause, the blocked pause); done, question, died twice and a parked worker that cannot resume
     keep it, so the next check closes it again and raises its ask. The blocked pause raises its resume hint only
     once the stop has returned. The archive copy is best-effort (`archive: null` and `archive_error` on the line;
     `finish` copies every id again). Dead once: resume in place (same slot) with "You were
     interrupted. Check your worktree and run files first..."; dead twice: stop and set a `fix` ask. Parked: with
-    `--usage`, resume once v1's `park.resume_due` allows: the parked session is stopped first and the copy takes
-    its place, on the same ports. One worker's error (a bad project file, a failed call) never stops the pass:
+    `--usage`, resume once v1's `park.resume_due` allows, on the same ports. Every in-place resume stops the old
+    session first, whatever its state (a failed one may keep its process), and the copy takes its place. One worker's error (a bad project file, a failed call) never stops the pass:
     it goes on that worker's line as `note` (and `error`, the exception's name, when it is not one of v2's own
     errors), the other workers are still acted on, and the worker list is written back. The listing is taken
     under the worker list's lock, so a start that lands during a check is never judged against a listing from

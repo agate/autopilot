@@ -863,6 +863,17 @@ class LifecycleTest(WorkerCase):
         self.set_agent(a["short_id"], state="failed", status="idle")
         self.assertEqual(w.list()[0]["state"], "dead")
 
+    def test_a_failed_session_with_a_live_process_is_stopped_before_its_resume(self):
+        w = self.workers()
+        a = self.start(w)
+        self.set_agent(a["short_id"], state="failed", status="idle", pid=os.getpid())  # its process sits idle
+        self.assertEqual(w.check()[0]["did"], "resumed")
+        argvs = [c["argv"] for c in self.calls()]
+        resume = next(i for i, v in enumerate(argvs) if v[:2] == ["--bg", "--resume"])
+        self.assertIn(["stop", a["short_id"]], argvs[:resume])
+        w.end(a["card"], "implement")
+        self.assertEqual([x for x in self.agents() if x["name"].startswith(a["card"])], [])
+
     def test_a_saved_session_id_that_is_a_flag_is_refused(self):
         cid = self.add_card(sessions={"implement": {"id": "--allowedTools=Bash", "cwd": str(self.wt)}})
         with self.assertRaisesRegex(WorkerError, "is not a session id"):
@@ -1409,7 +1420,8 @@ class StoppedLeavesTheListTest(WorkerCase):
     """A worker's record leaves the list only once `claude stop` has returned (design 12). After that, a failed step
     drops it only where a kept record would be misread as dead and resumed (end, the idle pause, the blocked pause);
     done, question, died twice and a parked worker that cannot resume keep it, so the next check closes it again
-    and raises its ask."""
+    and raises its ask. A stop that raised keeps the record with its `closing` mark, and the next check finishes
+    that same close whatever the session's state is then."""
     FULL = OSError(errno.ENOSPC, "No space left on device")
 
     @staticmethod
@@ -1421,6 +1433,19 @@ class StoppedLeavesTheListTest(WorkerCase):
             if list(argv[1:2]) == ["stop"]:
                 raise subprocess.TimeoutExpired(argv, 60)
             return real(argv, *a, **kw)
+        return mock.patch.object(subprocess, "run", side_effect=run)
+
+    @staticmethod
+    def stop_lands_late():
+        """`claude stop` reaches the session and stops it, but the call times out (a slow shutdown); every other
+        claude call runs as usual."""
+        real = subprocess.run
+
+        def run(argv, *a, **kw):
+            done = real(argv, *a, **kw)
+            if list(argv[1:2]) == ["stop"]:
+                raise subprocess.TimeoutExpired(argv, 60)
+            return done
         return mock.patch.object(subprocess, "run", side_effect=run)
 
     @staticmethod
@@ -1519,6 +1544,80 @@ class StoppedLeavesTheListTest(WorkerCase):
         self.assertNotIn("--resume", ask["text"])
         self.assertEqual(w.check()[0]["did"], "paused")
         self.assertIn(f"ap2 worker start {a['card']} implement --resume", self.get(a["card"])["ask"]["text"])
+
+    def test_an_end_whose_stop_lands_late_is_finished_by_the_next_check(self):
+        w = self.workers()
+        a = self.start(w)
+        with self.stop_lands_late():
+            with self.assertRaises(subprocess.TimeoutExpired):
+                w.end(a["card"], "implement")
+        recs = resources.Registry(self.data).read()
+        self.assertEqual([(r["short_id"], r["closing"]["path"]) for r in recs], [(a["short_id"], "end")])
+        self.assertNotIn(a["short_id"], [x["id"] for x in self.agents()])  # the stop landed
+        out = w.check()[0]
+        self.assertEqual(out["did"], "ended")
+        self.assertEqual(resources.Registry(self.data).read(), [])
+        self.assertEqual(self.get(a["card"])["sessions"]["implement"]["state"], "ended")
+        self.assertEqual(self.resumes(), [])
+
+    def test_an_idle_pause_whose_stop_lands_late_is_finished_by_the_next_check(self):
+        w = self.workers()
+        a = self.idle_for_an_hour(w)
+        with self.stop_lands_late():
+            self.assertEqual(w.check()[0]["error"], "TimeoutExpired")
+        self.assertEqual(resources.Registry(self.data).read()[0]["closing"]["path"], "idle")
+        self.assertEqual(w.check()[0]["did"], "paused")
+        self.assertEqual(resources.Registry(self.data).read(), [])
+        self.assertEqual(self.get(a["card"])["sessions"]["implement"]["state"], "paused")
+        self.assertEqual(self.resumes(), [])
+
+    def test_a_blocked_pause_whose_stop_lands_late_is_finished_by_the_next_check(self):
+        w = self.workers()
+        a = self.start(w)
+        self.set_agent(a["short_id"], status="waiting")
+        w.check()
+        self.clock.advance(30)
+        with self.stop_lands_late():
+            self.assertEqual(w.check()[0]["error"], "TimeoutExpired")
+        self.assertEqual(resources.Registry(self.data).read()[0]["closing"]["path"], "blocked")
+        self.assertNotIn("--resume", self.get(a["card"])["ask"]["text"])
+        self.assertEqual(w.check()[0]["did"], "paused")
+        self.assertEqual(resources.Registry(self.data).read(), [])
+        c = self.get(a["card"])
+        self.assertEqual(c["sessions"]["implement"]["state"], "paused")
+        self.assertEqual((c["ask"]["reason"], c["ask"]["stage"]), ("permission_prompt", "paused"))
+        self.assertIn(f"ap2 worker start {a['card']} implement --resume", c["ask"]["text"])
+        self.assertEqual(self.resumes(), [])
+
+    def test_a_question_whose_stop_lands_late_is_asked_by_the_next_check(self):
+        w = self.workers()
+        a = self.start(w)
+        self.write_result(a["card"], "question.json", {"text": "Which port?"})
+        with self.stop_lands_late():
+            self.assertEqual(w.check()[0]["error"], "TimeoutExpired")
+        self.assertEqual(resources.Registry(self.data).read()[0]["closing"]["path"], "question")
+        self.assertEqual(w.check()[0]["did"], "asked")
+        self.assertEqual(resources.Registry(self.data).read(), [])
+        ask = self.get(a["card"])["ask"]
+        self.assertEqual((ask["type"], ask["text"]), ("answer", "Which port?"))
+        self.assertEqual(self.get(a["card"])["sessions"]["implement"]["state"], "asked")
+        self.assertEqual(self.resumes(), [])
+
+    def test_a_failed_save_keeps_the_parked_worker_that_cannot_resume_until_its_ask_is_raised(self):
+        w = self.workers()
+        a = self.start(w)
+        w.park(a["card"], "implement", "x", usage_file=usage_file(self.tmp / "u.json", 95))
+        shutil.rmtree(self.wt)  # its worktree is gone, so its resume cannot start
+        self.clock.advance(4 * 60)
+        fresh = usage_file(self.tmp / "fresh.json", 3, resets_at="2026-01-05T17:00:00+00:00", fetched=self.clock())
+        with self.save_fails_once(w):
+            self.assertEqual(w.check(usage_file=fresh)[0]["error"], "OSError")
+        self.assertEqual(len(resources.Registry(self.data).read()), 1)
+        self.assertEqual(w.check(usage_file=fresh)[0]["did"], "stopped")
+        ask = self.get(a["card"])["ask"]
+        self.assertEqual(ask["reason"], DIED)
+        self.assertIn("could not resume after parking", ask["text"])
+        self.assertEqual(resources.Registry(self.data).read(), [])
 
     def test_a_failed_save_after_the_stop_keeps_the_question_until_the_next_check_asks_it(self):
         w = self.workers()
