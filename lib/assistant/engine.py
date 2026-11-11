@@ -15,18 +15,21 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import os
+import posixpath
 import re
 import secrets
 import selectors
 import shlex
 import signal
 import sqlite3
+import stat
 import subprocess
 import threading
 import time
-from datetime import timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Callable, Optional
 
@@ -620,3 +623,159 @@ def _same(key: str, old, new) -> bool:
     if key == "source" and isinstance(old, dict) and isinstance(new, dict):
         return {k: v for k, v in old.items() if k != "raw"} == {k: v for k, v in new.items() if k != "raw"}
     return old == new
+
+
+# -- old raw files (each gate run prunes them) --------------------------------------------------------------------
+
+# A read's raw file and its report are kept this long, counted from the UTC stamp in their names, the same boundary
+# as restore points. A constant, not a config.yaml key: a new key would change `ap2 config`'s output.
+RAW_KEEP = timedelta(days=30)
+RAW_NAME = re.compile(r"([0-9]{8}T[0-9]{6}Z)-[0-9a-f]{6}(\.report)?\.json\Z", re.ASCII)
+REPORT = ".report.json"
+_OPEN_DIR = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+
+
+def prune_raw(data, now: datetime, list_cards: Callable[[], list]) -> dict:
+    """Remove the raw files and reports under `<data>/sources/.raw/<source>/` whose name stamp is more than
+    RAW_KEEP before `now` (kept at exactly RAW_KEEP). Returns `{"removed": [paths relative to data], "errors":
+    [{"prune_raw": <path or true>, "error": ...}], "link": None or the folder that is a link}`.
+
+    - A file's age comes from its name, `<YYYYMMDDTHHMMSSZ>-<6 hex>.json` (its report: `.report.json`), not from its
+      mtime. Any other name, a hidden one, a stamp that cannot be read and a stamp later than `now` are kept.
+    - A report goes with its raw file: it is kept while the raw file is there, and judged by its own name once the
+      raw file is gone.
+    - `list_cards()` (the store's `list`) is called once, only when a file is old enough to remove. A file named in
+      a card's `source.raw`, and its report, are kept. When the cards cannot be read nothing is removed.
+    - No link is followed or removed: when `sources` or `sources/.raw` is a link nothing is pruned (`link` names
+      it); a source folder or file that is a link, and a hidden entry, are skipped. Each folder is opened once
+      without following a link, and every remove is relative to it, so a folder swapped for a link meanwhile does
+      not send a remove elsewhere. Never raises OSError: a folder that cannot be read or a file that cannot be
+      removed is one entry in `errors`, and the rest still go."""
+    out = {"removed": [], "errors": [], "link": None}
+    fds = []
+    try:
+        top = _open_raw_folder(Path(data), fds, out)
+        if top is None:
+            return out
+        old = []  # (source, folder fd, names in the folder, [(old name, is a report)])
+        try:
+            folders = sorted(e.name for e in os.scandir(top)
+                             if not e.name.startswith(".") and e.is_dir(follow_symlinks=False))
+        except OSError as e:
+            out["errors"].append({"prune_raw": RAW.as_posix(), "error": f"{RAW}: cannot list the raw folder: {e}"})
+            return out
+        for source in folders:
+            where = (RAW / source).as_posix()
+            try:
+                fd = _open_dir(source, top)
+                if fd is None:  # no longer a folder
+                    continue
+                fds.append(fd)
+                entries = list(os.scandir(fd))
+            except _Link:  # it became a link after the listing: skipped
+                continue
+            except OSError as e:
+                out["errors"].append({"prune_raw": where, "error": f"{where}: cannot list the raw files: {e}"})
+                continue
+            names = {e.name for e in entries}
+            found = []
+            try:
+                for e in sorted(entries, key=lambda e: e.name):
+                    m = RAW_NAME.match(e.name)
+                    if m is None or not e.is_file(follow_symlinks=False):  # may lstat, so may raise
+                        continue
+                    try:
+                        at = datetime.strptime(m.group(1), STAMP).replace(tzinfo=timezone.utc)
+                    except ValueError:  # e.g. month 13: its age cannot be read, so it is kept
+                        continue
+                    if now - at > RAW_KEEP:
+                        found.append((e.name, m.group(2) is not None))
+            except OSError as e:
+                out["errors"].append({"prune_raw": where, "error": f"{where}: cannot list the raw files: {e}"})
+                continue
+            if found:
+                old.append((source, fd, names, found))
+        if not old:
+            return out
+        try:
+            linked = {posixpath.normpath(c["source"]["raw"]) for c in list_cards()
+                      if isinstance(c, dict) and isinstance(c.get("source"), dict)
+                      and isinstance(c["source"].get("raw"), str)}
+        except (CardError, OSError, RecursionError) as e:  # RecursionError: a card file nested too deeply
+            why = "nested too deeply" if isinstance(e, RecursionError) else e
+            out["errors"].append({"prune_raw": True,
+                                  "error": f"cannot read the cards, so no raw file is pruned: {why}"})
+            return out
+        for source, fd, names, found in old:
+            gone = set()
+            # Raw files first, so a report knows whether its raw file is still there.
+            for n, is_report in sorted(found, key=lambda f: f[1]):
+                raw_name = n[:-len(REPORT)] + ".json" if is_report else n
+                if (RAW / source / raw_name).as_posix() in linked or (RAW / source / n).as_posix() in linked:
+                    continue
+                if is_report and raw_name in names and raw_name not in gone:
+                    continue
+                where = (RAW / source / n).as_posix()
+                try:
+                    if not stat.S_ISREG(os.stat(n, dir_fd=fd, follow_symlinks=False).st_mode):
+                        continue  # it became something else meanwhile
+                    os.unlink(n, dir_fd=fd)
+                except FileNotFoundError:
+                    gone.add(n)
+                    continue
+                except OSError as e:
+                    out["errors"].append({"prune_raw": where, "error": f"{where}: cannot remove the old raw file: "
+                                                                      f"{e}"})
+                    continue
+                gone.add(n)
+                out["removed"].append(where)
+        return out
+    finally:
+        for fd in fds:
+            os.close(fd)
+
+
+def _open_raw_folder(data: Path, fds: list, out: dict) -> Optional[int]:
+    """The fd of `<data>/sources/.raw`, opened without following a link below the data folder; None when there
+    is nothing to prune (no folder, or a link, which `out["link"]` then names)."""
+    try:
+        fd = os.open(data, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))  # the data folder itself may be a link
+        fds.append(fd)
+        for part in (Path(sources.FOLDER), RAW):
+            try:
+                fd = _open_dir(part.name, fd)
+            except _Link:
+                out["link"] = part.as_posix()
+                return None
+            if fd is None:
+                return None
+            fds.append(fd)
+        return fd
+    except OSError as e:
+        out["errors"].append({"prune_raw": RAW.as_posix(), "error": f"{RAW}: cannot open the raw folder: {e}"})
+        return None
+
+
+class _Link(Exception):
+    pass
+
+
+def _open_dir(name: str, dir_fd: int) -> Optional[int]:
+    """Open the folder `name` in `dir_fd` without following a link. None when it is missing or not a folder;
+    _Link when it is a link."""
+    try:
+        st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(st.st_mode):
+        raise _Link(name)
+    if not stat.S_ISDIR(st.st_mode):
+        return None
+    try:
+        return os.open(name, _OPEN_DIR, dir_fd=dir_fd)
+    except OSError as e:  # it changed after the stat
+        if e.errno == errno.ELOOP:
+            raise _Link(name) from None
+        if e.errno in (errno.ENOENT, errno.ENOTDIR):
+            return None
+        raise
