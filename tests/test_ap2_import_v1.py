@@ -718,7 +718,7 @@ class ImportV1Test(unittest.TestCase):
         self.assertIn("projects folder", line)
         self.assertFalse(self.data.exists())
 
-    def test_a_symlinked_project_folder_inside_an_unreadable_folder_is_refused_and_the_others_still_import(self):
+    def test_a_symlinked_project_folder_inside_an_unreadable_folder_stops_the_import_with_one_line(self):
         if not hasattr(os, "symlink"):
             self.skipTest("no symlinks here")
         if os.geteuid() == 0:
@@ -732,13 +732,61 @@ class ImportV1Test(unittest.TestCase):
             self.skipTest(f"cannot make a symlink: {e}")
         os.chmod(locked, 0)
         self.addCleanup(os.chmod, locked, 0o755)
-        code, out, err = self.run_cli()
-        self.assertEqual(code, 1, err)
-        report = json.loads(out)
-        self.assertEqual([r["name"] for r in report["refused"]], ["shop"])
-        self.assertIn("config.json", report["refused"][0]["reason"])
-        self.assertEqual([p["name"] for p in report["projects"]], ["notes"])
-        self.assertIn("v1:notes", self.by_key())
+        line = self.fails()
+        self.assertIn("v1 project shop's folder", line)
+        self.assertFalse(self.data.exists())  # nothing imported, not even notes
+
+    def test_a_project_folder_reached_through_an_unreadable_folder_is_not_written_into(self):
+        if not hasattr(os, "symlink"):
+            self.skipTest("no symlinks here")
+        if os.geteuid() == 0:
+            self.skipTest("root reads a folder whatever its mode")
+        # P is project p's real folder; the import reaches it as projects/p -> B/locked/sym -> P, and the data
+        # folder is P/data: resolve() stops at the locked folder, so only the stat of its answer shows the overlap.
+        real = self.tmp / "P"
+        shutil.copytree(self.v1 / "projects" / "shop", real)
+        locked = self.tmp / "B" / "locked"
+        locked.mkdir(parents=True)
+        try:
+            (locked / "sym").symlink_to(real, target_is_directory=True)
+            (self.v1 / "projects" / "p").symlink_to(locked / "sym", target_is_directory=True)
+        except (OSError, NotImplementedError) as e:
+            self.skipTest(f"cannot make a symlink: {e}")
+        self.data = real / "data"
+        before = snapshot(real)
+        os.chmod(locked, 0)
+        self.addCleanup(os.chmod, locked, 0o755)
+        line = self.fails()
+        # A Python whose exists() says False for such a path, instead of raising, gets the same line.
+        def quiet(path, *args, **kw):
+            try:
+                return exists(path, *args, **kw)
+            except OSError:
+                return False
+        exists = Path.exists
+        with mock.patch.object(Path, "exists", quiet):
+            quiet_line = self.fails()
+        os.chmod(locked, 0o755)
+        self.assertIn("v1 project p's folder", line)
+        self.assertIn("v1 project p's folder", quiet_line)
+        self.assertFalse(self.data.exists())
+        self.assertEqual(snapshot(real), before)
+
+    def test_a_v1_folder_inside_an_unreadable_folder_is_one_line(self):
+        if os.geteuid() == 0:
+            self.skipTest("root reads a folder whatever its mode")
+        locked = self.tmp / "locked"
+        shutil.copytree(FIXTURE, locked / "v1")
+        os.chmod(locked, 0)
+        self.addCleanup(os.chmod, locked, 0o755)
+        line = self.fails("--from", str(locked / "v1"), source=False)
+        self.assertIn("v1 data folder", line)
+        self.assertFalse(self.data.exists())
+
+    def test_a_v1_folder_with_a_name_too_long_is_one_line(self):
+        line = self.fails("--from", str(self.tmp / ("v" * 300)), source=False)
+        self.assertIn("v1 data folder", line)
+        self.assertFalse(self.data.exists())
 
     def test_a_symlinked_projects_folder_inside_an_unreadable_folder_is_one_line(self):
         if not hasattr(os, "symlink"):

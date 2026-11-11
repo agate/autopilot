@@ -1527,7 +1527,9 @@ Calls the author made without asking (check them):
     v1's own data root (`AUTOPILOT_DATA`, else `~/.claude/autopilot-data`, v1's `paths.data_root()`). A project is
     every `<from>/projects/<name>/` holding `config.json`, plus a legacy `<from>/<name>/config.json` whose
     `projects/<name>/config.json` does not exist (v1's `ap_dir` rule); `<name>` must pass v1's `valid_name`; a
-    folder that cannot be looked into counts as found, so it is refused alone. `--project` (repeatable) limits
+    folder that cannot be looked into counts as found, so it is refused alone; a project folder whose real place
+    cannot be found (a link through a folder the import cannot look into) stops the import with one line, nothing
+    written, because an overlap with the data folder cannot be ruled out. `--project` (repeatable) limits
     it; a name not found, a missing `--from` folder, or a data folder and `--from` (and its projects folder and
     each project folder found, `--project` or not, symlinks followed) where either is inside the other (compared
     as `datadir` does: letter case folded, then by file identity) is one `ap2: ...` line, exit 1, nothing written.

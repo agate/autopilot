@@ -185,9 +185,11 @@ def source_root(given: Optional[str]) -> Path:
     raw = Path(given).expanduser() if given is not None else v1_paths.data_root()
     try:
         root = raw.resolve()
+        # Inside the try: a folder that cannot be looked into or a name too long raises here, not in resolve().
+        is_dir = root.is_dir()
     except (OSError, RuntimeError) as e:
         raise V1ImportError(f"cannot use the v1 data folder {raw}: {e}") from e
-    if not root.is_dir():
+    if not is_dir:
         raise V1ImportError(f"no v1 data folder at {root} (give it with --from DIR)")
     return root
 
@@ -433,14 +435,15 @@ def run(data: Path, source: Optional[str] = None, names: Optional[list] = None, 
     found = find(root)
     # A project folder may be a symlink to a folder outside --from: the data folder must not overlap that either,
     # for every project found, not only the ones --project names (an unnamed one is still a v1 folder).
+    # A folder whose real place cannot be found (a link through a folder the import cannot look into, where resolve()
+    # stops early) stops the import: an overlap cannot be ruled out. os.stat checks resolve() did reach a real place.
     for name, folder in found.items():
         try:
             real = folder.resolve()
+            os.stat(real)
             overlap = datadir._inside(data, real) or datadir._inside(real, data)
-        except (OSError, RuntimeError):
-            # Safe to skip: the data folder cannot be made or written inside a folder the import cannot look into,
-            # and the store never writes a locked folder inside the data folder; read_project refuses it alone.
-            continue
+        except (OSError, RuntimeError) as e:
+            raise V1ImportError(f"cannot use the v1 project {name}'s folder {folder}: {e}") from e
         if overlap:
             raise V1ImportError(f"data folder {data} and the v1 project {name}'s folder {real} overlap (one is "
                                 f"inside the other); the import never writes under a v1 project")
