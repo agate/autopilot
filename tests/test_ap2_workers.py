@@ -329,6 +329,7 @@ class ProjectSetupTest(WorkerCase):
         self.assertEqual(call["cwd"], str(self.wt))
         self.assertEqual(argv[argv.index("-n") + 1], f"{cid} · implement")
         self.assertEqual(argv[argv.index("--agent") + 1], "autopilot:implementer")
+        self.assertEqual(argv[argv.index("--effort") + 1], "xhigh")  # a fresh session's effort (design 8.2)
         self.assertEqual(argv[argv.index("--permission-mode") + 1], "auto")
         self.assertEqual(env["AP2_BRANCH"], "me.PROJ-123.retry-failed-payments")
         self.assertEqual(rec["branch"], "me.PROJ-123.retry-failed-payments")
@@ -844,6 +845,9 @@ class LifecycleTest(WorkerCase):
         self.assertEqual(w.check()[0]["did"], "resumed")
         last = self.bg_calls()[-1]
         self.assertEqual(last["argv"][1:3], ["--resume", a["session_id"]])
+        # A resume continues the session as it was started: no agent or effort flag of its own (design 8.2).
+        self.assertNotIn("--agent", last["argv"])
+        self.assertNotIn("--effort", last["argv"])
         self.assertIn("You were interrupted", last["argv"][-1])
         rec = resources.Registry(self.data).read()[0]
         self.assertEqual((rec["resumes"], rec["ports"]), (1, a["ports"]))
@@ -970,6 +974,42 @@ class LifecycleTest(WorkerCase):
         self.assertNotEqual(recs[a["card"]]["short_id"], a["short_id"])
         self.assertEqual(recs[a["card"]]["resumes"], 1)
         self.assertEqual((recs[b["card"]]["short_id"], recs[b["card"]]["resumes"]), (b["short_id"], 0))
+
+    def test_one_workers_classify_error_does_not_cost_the_others_their_changes(self):
+        w = self.workers()
+        a = self.start(w)
+        b = self.start(w)
+        self.drop_agent(a["short_id"])  # dead, with its one resume left
+        real = Workers._newer
+        b_run = transcripts.run_dir(self.data, b["card"])
+
+        def newer(self_, path, rec):
+            if Path(path).parent == b_run:
+                raise PermissionError(errno.EACCES, "Permission denied", str(path))
+            return real(self_, path, rec)
+        with mock.patch.object(Workers, "_newer", newer):
+            out = {o["card"]: o for o in w.check()}
+        self.assertEqual(out[a["card"]]["did"], "resumed")
+        self.assertEqual((out[b["card"]]["did"], out[b["card"]]["error"]), ("nothing", "PermissionError"))
+        self.assertIn("Permission denied", out[b["card"]]["note"])
+        recs = {r["card"]: r for r in resources.Registry(self.data).read()}
+        self.assertNotEqual(recs[a["card"]]["short_id"], a["short_id"])  # the copy that runs now is on record
+        self.assertEqual(recs[a["card"]]["resumes"], 1)
+        self.assertEqual((recs[b["card"]]["short_id"], recs[b["card"]]["resumes"]), (b["short_id"], 0))
+
+    def test_a_result_file_that_vanishes_before_its_stat_is_not_newer(self):
+        w = self.workers()
+        a = self.start(w)
+        f = self.write_result(a["card"])
+        real, real_is_file = Path.stat, Path.is_file
+
+        def stat(self_, *args, **kw):
+            if self_ == f:  # is_file() saw it; it is gone by the stat() right after
+                raise FileNotFoundError(errno.ENOENT, "No such file or directory", str(self_))
+            return real(self_, *args, **kw)
+        with mock.patch.object(Path, "is_file", lambda self_: self_ == f or real_is_file(self_)), \
+                mock.patch.object(Path, "stat", stat):
+            self.assertFalse(w._newer(f, a))
 
     def test_an_unexpected_error_is_named_on_its_line(self):
         w = self.workers()
@@ -1559,6 +1599,18 @@ class StoppedLeavesTheListTest(WorkerCase):
         self.assertEqual(resources.Registry(self.data).read(), [])
         self.assertEqual(self.get(a["card"])["sessions"]["implement"]["state"], "ended")
         self.assertEqual(self.resumes(), [])
+
+    def test_a_started_close_is_finished_even_when_its_state_cannot_be_read(self):
+        w = self.workers()
+        a = self.start(w)
+        with self.stop_lands_late():
+            with self.assertRaises(subprocess.TimeoutExpired):
+                w.end(a["card"], "implement")
+        with mock.patch.object(Workers, "_newer", side_effect=PermissionError(errno.EACCES, "Permission denied")):
+            out = w.check()[0]
+        self.assertEqual(out["did"], "ended")  # its mark says what to do; the state is not needed
+        self.assertEqual(resources.Registry(self.data).read(), [])
+        self.assertEqual(self.get(a["card"])["sessions"]["implement"]["state"], "ended")
 
     def test_an_idle_pause_whose_stop_lands_late_is_finished_by_the_next_check(self):
         w = self.workers()

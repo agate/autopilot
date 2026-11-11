@@ -554,7 +554,10 @@ class Workers:
             started = cards.parse_stamp(rec["started_at"]).timestamp()
         except (KeyError, TypeError, ValueError):
             started = 0.0
-        return path.is_file() and path.stat().st_mtime >= started
+        try:
+            return path.is_file() and path.stat().st_mtime >= started
+        except FileNotFoundError:
+            return False  # gone between is_file() and stat() (e.g. `answer` moved question.json away): not newer
 
     def classify(self, rec: dict, listing) -> str:
         """done | question | parked | unknown | dead | blocked | idle | running. `listing` is
@@ -641,9 +644,16 @@ class Workers:
             # before that start, seen as dead and resumed next to itself.
             listing = v1_sessions.list_all(self.claude)
             for rec in list(records):
-                state = self.classify(rec, listing)
-                entry = {"card": rec["card"], "role": rec["role"], "state": state, "did": "nothing"}
+                entry = {"card": rec["card"], "role": rec["role"], "state": "unknown", "did": "nothing"}
                 try:
+                    # In the try: a run folder that cannot be read fails this worker's line only, and the earlier
+                    # workers' changes are still written back.
+                    try:
+                        entry["state"] = state = self.classify(rec, listing)
+                    except Exception:  # noqa: BLE001 - a started close does not need the state
+                        if not rec.get("closing"):
+                            raise
+                        state = "unknown"  # its mark says what to do: `_act` finishes that close
                     if not rec.get("session_id"):
                         self._fill_session_id(rec, listing, by)
                     self._act(rec, state, records, entry, by, b, now)

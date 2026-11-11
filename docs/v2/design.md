@@ -1128,9 +1128,11 @@ Calls the author made without asking (check them):
     `finish` copies every id again). Dead once: resume in place (same slot) with "You were
     interrupted. Check your worktree and run files first..."; dead twice: stop and set a `fix` ask. Parked: with
     `--usage`, resume once v1's `park.resume_due` allows, on the same ports. Every in-place resume stops the old
-    session first, whatever its state (a failed one may keep its process), and the copy takes its place. One worker's error (a bad project file, a failed call) never stops the pass:
-    it goes on that worker's line as `note` (and `error`, the exception's name, when it is not one of v2's own
-    errors), the other workers are still acted on, and the worker list is written back. The listing is taken
+    session first, whatever its state (a failed one may keep its process), and the copy takes its place. One worker's error (a bad project file, a failed call, a run folder that cannot
+    be read while it is classified) never stops the pass: it goes on that worker's line as `note` (and `error`, the exception's name, when it is not one of v2's own
+    errors), the other workers are still acted on, and the worker list is written back. A worker with a started
+    close (`closing`) still has that close finished when its state cannot be read: the mark says what to do. A
+    result or question file that is gone between its two looks is not newer. The listing is taken
     under the worker list's lock, so a start that lands during a check is never judged against a listing from
     before it. A dead worker whose resume cannot start (e.g. its worktree is gone) counts that try: the next
     check stops it as died twice and raises the `fix` ask, so it never holds its slot forever. A shadow-mode
