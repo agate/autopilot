@@ -675,6 +675,11 @@ class OversizedPayloadTest(ScanCase):
             "not an object": (('x"tool_name": "Read"' + tail).encode(), None),
             "bad UTF-8 before the name": (b'{"session_id": "\xff", "tool_name": "Read"' + tail.encode(), None),
             "the name cut off": (('{"session_id": "s", "tool_name": "Re' + "a" * 10_000 + '"}').encode(), None),
+            "cut after a key": (('{"session_id": "s", "tool_name": "Read"' + tail).encode(), len('{"session_id"')),
+            "cut after a value": (('{"session_id": "s", "tool_name": "Read"' + tail).encode(),
+                                  len('{"session_id": "s"')),
+            "cut after a comma": (('{"session_id": "s", "tool_name": "Read"' + tail).encode(),
+                                  len('{"session_id": "s", ')),
         }
         for name, (data, lookahead) in cases.items():
             with self.subTest(name):

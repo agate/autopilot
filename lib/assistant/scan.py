@@ -387,8 +387,8 @@ def _leading_tool_name(payload: bytes) -> Optional[str]:
     """The top-level `tool_name` of a payload too large to parse whole (it arrives cut off), or None when it cannot
     be read. Only the first NAME_LOOKAHEAD bytes are looked at: the object's keys are read in order, one key and one
     value at a time, until the `tool_name` key, whose value must be a non-empty text; nothing after that value is
-    decoded. Not a JSON object, bad UTF-8, a bad or cut-off key or value before it, or a name that is not a text is
-    None."""
+    parsed (the whole look-ahead must be valid UTF-8). Not a JSON object, bad UTF-8, a bad or cut-off key or value
+    before it, or a name that is not a text is None."""
     try:
         # Strict, but holds back a character cut in two at the limit instead of failing on it.
         text = codecs.getincrementaldecoder("utf-8")().decode(payload[:NAME_LOOKAHEAD], final=False)

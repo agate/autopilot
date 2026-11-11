@@ -1015,10 +1015,10 @@ Calls the author made without asking (check them):
     tools printed, so its ids are only as trustworthy as the tools the launch slice allows for a skill scan. Past
     `MAX_OUTPUT` in total (or a larger payload) the log gets one `{"cut_short": true}` line and nothing more. A
     larger payload arrives cut off, so only its top-level `tool_name` is read, key by key from its start, within its
-    first 1 MiB and decoding nothing after that name: when the plan runs no skill and that name is no planned call's
-    tool, the call is skipped (`{"kept": false, "tool_name": ..., "too_large": true}`, exit 0, the log as it is), so
-    one huge `Read` does not cost the whole scan; any other larger payload (a planned tool, a skill plan, a name it
-    cannot read) still marks the log cut short. A bad
+    first 1 MiB (which must be valid UTF-8) and parsing nothing after that name: when the plan runs no skill and that
+    name is no planned call's tool, the call is skipped (`{"kept": false, "tool_name": ..., "too_large": true}`, exit
+    0, the log as it is), so one huge `Read` does not cost the whole scan; any other larger payload (a planned tool, a
+    skill plan, a name it cannot read) still marks the log cut short. A bad
     payload is one `ap2:` line, exit 1, the log unchanged. The plan must be a `plan.json` inside a `.scan/<scan>/`
     folder; the hook writes only there, and a `calls.jsonl` that is a symbolic link is refused (one `ap2:` line).
   - Take: `ap2 scan take PLAN [--dry-run] [--data PATH]` (`scan.take`) builds each call's raw file in the scan
