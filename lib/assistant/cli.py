@@ -232,6 +232,9 @@ def cmd_source(args) -> int:
 
     path = datadir.resolve(args.data)
     dry_run = getattr(args, "dry_run", False)
+    if args.source_command == "read" and args.raw is None and args.records is not None:
+        # First, so the refused command reads nothing (a --records /dev/stdin would wait) and creates nothing.
+        raise SourceError("--records needs --raw FILE, the output the records were filled from")
     if not dry_run:  # a dry run saves nothing, the data folder's layout included
         datadir.ensure(path)
     if args.source_command == "list":
@@ -250,8 +253,6 @@ def cmd_source(args) -> int:
             except (OSError, UnicodeDecodeError, ValueError, RecursionError) as e:
                 why = "nested too deeply" if isinstance(e, RecursionError) else e
                 raise SourceError(f"cannot read the records {args.records!r}: {why}") from e
-        if args.raw is None and args.records is not None:
-            raise SourceError("--records needs --raw FILE, the output the records were filled from")
         if args.records is not None and not isinstance(records, list):
             raise SourceError(f"the records file {args.records!r} must hold a JSON list")
         if args.raw is not None:

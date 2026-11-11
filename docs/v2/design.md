@@ -661,6 +661,10 @@ Calls the author made without asking (check them):
       (`"k" : v`), a `- ` list item inside a flow collection, a plain value holding `: ` (quote it), a plain value
       starting with `@`, `` ` ``, `%`, `]`, `}`, `,` or `? ` (quote it), hex, octal, `.inf` and `.nan` numbers
       (write a decimal number or quote it), and nesting too deep to read. The top level must be a map. Refusing is safer than guessing: a file either reads exactly as written or names its bad line.
+    - Its time grows in step with a line's length: the comment scan decides where a quote may open a string from
+      what it keeps while it scans (where the leading `- ` / `? ` indicators end, and the last two characters
+      that are not a space or tab), never by copying or searching the text before it again. A 1 MiB line
+      (`sources.MAX_SOURCE`) of quote characters reads in well under a second.
 - **[decided by the builder]** The data folder and its lookup. The folder is `--data <path>` if given, else the
   environment variable `AP2_DATA`, else `~/Documents/Assistant`. A folder inside `~/.claude` is refused (3.4),
   symlinks followed (by `resolve()`) and in any letter case (the name check ignores case, so `~/.CLAUDE` is
@@ -816,7 +820,11 @@ Calls the author made without asking (check them):
     add or update (a stored card edited by hand into a bad one) drops only that item, naming the card or key,
     and a dry run drops it the same way; a failure of the store itself (a file or index error) still stops the
     read with one `ap2:` line, and so does a card file the store cannot read at all (not JSON, or not a card),
-    as `ap2 card list` does.
+    as `ap2 card list` does. Since the read report is then not written, that line is the store's own message
+    followed by what the read already did: `(already written by this read: <card ids, in item order, each
+    once>; raw output saved as <raw file>)`, or `(no card written yet; raw output saved as <raw file>)` when the
+    store failed before any card (finding the cards by key included). It is still a `CardError` whose cause is
+    the store's error. A dry run writes nothing and saves no raw file, so its message is the store's alone.
   - Code-made plain words (no AI), per language, in `engine.PHRASES` (`en` and `zh`; a code like `zh-Hans`
     uses `zh`): what, "New from <source> by <author> in <place>: <first line of the text>"; where, "It was
     written at <at>. [Its status there is "<status>".] Nothing has been done with it yet."; do, "Read it at the
@@ -850,7 +858,12 @@ Calls the author made without asking (check them):
     is copied or parsed when it is larger than `engine.MAX_OUTPUT` (64 MiB), as a command's output past it would
     be. The `--records` file must hold a JSON list (`null` is refused, not read as no records). A saved file
     already in `.raw/<source>/` is named by that folder's path even when `.raw` is a link to another folder. A raw
-    save that fails (a full disk) removes the file it started. Old raw files are not pruned yet.
+    save that fails (a full disk) removes the file it started. When the read fails anyway (a nonzero exit, a
+    timeout, output past the cap, or output held open after the exit), a failed save keeps the read's own error
+    and says why the output was not kept in place of the file it was saved as: `vendor-status: read.run exited
+    with 3: it went wrong (the output was not saved: cannot save the raw output in <folder>: [Errno 28] No space
+    left on device)`, or `(the partial output was not saved: ...)` for a stopped read. A read whose command
+    worked fails with the save error itself. Old raw files are not pruned yet.
   - A read handles at most `engine.MAX_ITEMS` (10,000) items: a reply with more items, or a scan session with
     more `fill: ai` records, fails the read, and the error names the raw file it was saved as (a dry run saves
     none). No card is made or changed. This is the simplest limit to raise later; it keeps one read's time,
@@ -862,7 +875,9 @@ Calls the author made without asking (check them):
     `ap2 source list`, `ap2 source show <name>` (the merged file), `ap2 source read <name> [--raw FILE]
     [--records FILE] [--dry-run]`. `--dry-run` runs the read and prints each item with `action` (`add`,
     `update`, `unchanged`, `none`) and the card it would add (`would_add`) or the fields it would change
-    (`would_change`), and writes nothing, not even the data folder's layout.
+    (`would_change`), and writes nothing, not even the data folder's layout. `--records` without `--raw` is
+    refused first, before any file is read or the data folder is set up, so `--records /dev/stdin` does not
+    wait for input.
 - **[decided by the builder]** The gate and routines (slice 5, design 4.3 and 7.1 to 7.4). Modules:
   `lib/assistant/routines.py` (routine files, slots, missed runs) and `lib/assistant/gate.py` (one run).
   - Routine files are JSON, `<data>/routines/<name>.json`, not YAML: the gate writes `last_slot` back, and a JSON

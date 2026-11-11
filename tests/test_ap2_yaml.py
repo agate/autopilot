@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import json
+import os
 import re
+import subprocess
+import sys
 import unittest
 
-from tests.helpers import ROOT
+from tests.helpers import LIB, ROOT
 from assistant import yamlish
 from assistant.yamlish import YamlError, load
 
@@ -327,6 +331,35 @@ class ErrorTest(unittest.TestCase):
 
     def test_one_error_class(self):
         self.assertTrue(issubclass(YamlError, ValueError))
+
+
+class LongLineTest(unittest.TestCase):
+    """The reader's time grows in step with a line's length: a 1 MiB line of quote characters reads in a second or
+    two. Each runs in a child process, so a slow reader fails at the timeout instead of holding the suite."""
+
+    N = 1024 * 1024  # sources.MAX_SOURCE
+    CHILD = "import json, sys; from assistant import yamlish; print(json.dumps(yamlish.load(sys.stdin.read())))"
+
+    def load_in_a_child(self, text: str):
+        env = {k: v for k, v in os.environ.items() if k != "LC_ALL"}
+        env.update(PYTHONPATH=str(LIB), PYTHON_COLORS="0", PYTHONIOENCODING="utf-8")
+        r = subprocess.run([sys.executable, "-c", self.CHILD], input=text, capture_output=True, text=True,
+                           encoding="utf-8", env=env, timeout=15)
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        return json.loads(r.stdout)
+
+    def test_a_long_line_of_quotes_reads_in_linear_time(self):
+        n = self.N
+        cases = [
+            ("single quotes", "k: x" + "'" * n, {"k": "x" + "'" * n}),
+            ("double quotes", "k: x" + '"' * n, {"k": "x" + '"' * n}),
+            ("quote and space", "k: x" + "' " * (n // 2), {"k": "x" + ("' " * (n // 2)).rstrip(" ")}),
+            ("in a flow list", "k: [a" + '"' * n + "]", {"k": ["a" + '"' * n]}),
+            ("in a block list item", "k:\n  - x" + "'" * n, {"k": ["x" + "'" * n]}),
+        ]
+        for name, text, want in cases:
+            with self.subTest(name):
+                self.assertEqual(self.load_in_a_child(text), want)
 
 
 if __name__ == "__main__":

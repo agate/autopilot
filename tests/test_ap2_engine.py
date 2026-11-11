@@ -205,6 +205,66 @@ class CommandReadTest(EngineCase):
         [raw] = (self.data / "sources" / ".raw" / "slow").glob("*.json")
         self.assertEqual(raw.read_text(), "[1, 2")
 
+    @staticmethod
+    def full(fd):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    def test_a_failed_command_whose_raw_save_fails_keeps_its_own_error(self):
+        self.status_source(self.reply_copy("status-incidents.json"), self.tmp / "cwd.txt", 3)
+        with mock.patch("assistant.engine.os.fsync", self.full):
+            with self.assertRaisesRegex(SourceError, r"^vendor-status: read.run exited with 3: it went wrong \(the "
+                                                     r"output was not saved: .*No space left on device\)$") as cm:
+                self.engine().read("vendor-status")
+        self.assertIsInstance(cm.exception.__cause__, SourceError)  # the save failure, which names the folder
+        self.assertEqual(list((self.data / "sources" / ".raw" / "vendor-status").iterdir()), [])
+        self.assertEqual(self.store().list(), [])
+
+    def test_a_timeout_whose_partial_save_fails_keeps_its_own_error(self):
+        slow = self.tmp / "slow.py"
+        slow.write_text("import sys, time; sys.stdout.write('[1, 2'); sys.stdout.flush(); time.sleep(30)\n")
+        self.user_source("slow", f"""\
+            source: slow
+            brings: messages
+            read: {{ via: command, run: '{sys.executable} {slow}', timeout: 1 }}
+            fill: paths
+            form: {{ id: .id, at: .at, text: .text }}
+            link: none
+            sort: {{ all: alert }}
+            """)
+        with mock.patch("assistant.engine.os.fsync", self.full):
+            with self.assertRaisesRegex(SourceError, r"^slow: read.run took longer than 1 seconds; stopped \(the "
+                                                     r"partial output was not saved: .*No space left on device\)$"):
+                self.engine().read("slow")
+        self.assertEqual(list((self.data / "sources" / ".raw" / "slow").iterdir()), [])
+
+    def test_the_other_stopped_reads_keep_their_own_error_when_the_save_fails(self):
+        # Output past the cap, and a command that exited while something it started held its output open.
+        self.status_source(self.reply_copy("status-incidents.json"))
+        for ended, code, words in (("full", None, r"printed more than \d+ bytes; stopped \(the partial output"),
+                                   ("late", 0, r"exited with 0, but something it started still held its output "
+                                               r"open after \d+ seconds; stopped \(the output")):
+            with self.subTest(ended):
+                def pump(proc, out, err, seconds, ended=ended):
+                    out.extend(b"[1, 2")
+                    return ended
+
+                with mock.patch("assistant.engine.subprocess.Popen") as popen, \
+                        mock.patch("assistant.engine._pump", pump), mock.patch("assistant.engine._stop"), \
+                        mock.patch("assistant.engine.os.fsync", self.full):
+                    popen.return_value.poll.return_value = code
+                    with self.assertRaisesRegex(SourceError, rf"^vendor-status: read.run {words} was not saved: "
+                                                             r".*No space left on device\)$"):
+                        self.engine().read("vendor-status")
+                self.assertEqual(list((self.data / "sources" / ".raw" / "vendor-status").iterdir()), [])
+
+    def test_a_command_that_worked_still_fails_with_the_save_error(self):
+        self.status_source(self.reply_copy("status-incidents.json"))
+        with mock.patch("assistant.engine.os.fsync", self.full):
+            with self.assertRaisesRegex(SourceError, r"^vendor-status: cannot save the raw output in .*No space left "
+                                                     r"on device$"):
+                self.engine().read("vendor-status")
+        self.assertEqual(self.store().list(), [])
+
     def test_a_source_without_a_timeout_gets_the_default(self):
         self.status_source(self.reply_copy("status-incidents.json"))
         waits = []
@@ -1054,7 +1114,8 @@ class SortToCardTest(EngineCase):
                     raise CardError("cannot use the card store in X: failed") from cause
 
                 with mock.patch.object(Store, "add", side_effect=fail):
-                    with self.assertRaisesRegex(CardError, "^cannot use the card store in X: failed$"):
+                    with self.assertRaisesRegex(CardError, r"^cannot use the card store in X: failed "
+                                                           r"\(no card written yet; "):
                         self.engine().read("vendor-status")
 
     def test_a_card_store_that_cannot_update_at_all_stops_the_read(self):
@@ -1074,8 +1135,107 @@ class SortToCardTest(EngineCase):
                     raise CardError("search index X: failed") from cause
 
                 with mock.patch.object(Store, "update", side_effect=fail):
-                    with self.assertRaisesRegex(CardError, "^search index X: failed$"):
+                    with self.assertRaisesRegex(CardError, r"^search index X: failed \(no card written yet; "):
                         self.engine().read("vendor-status")
+
+    def raws(self) -> set:
+        """The raw files saved for vendor-status (not their reports), relative to the data folder."""
+        folder = self.data / "sources" / ".raw" / "vendor-status"
+        return {p.relative_to(self.data).as_posix() for p in folder.glob("*.json")
+                if not p.name.endswith(".report.json")}
+
+    def fail_second(self, method: str, cause: BaseException):
+        """A patch of `Store.<method>` that does the real work the first time and fails as the store itself the
+        second time."""
+        real = getattr(Store, method)
+        calls = []
+
+        def second_fails(store, *args, **kwargs):
+            calls.append(args)
+            if len(calls) == 1:
+                return real(store, *args, **kwargs)
+            raise CardError("cannot use the card store in X: failed") from cause
+
+        return mock.patch.object(Store, method, autospec=True, side_effect=second_fails)
+
+    def test_a_store_failure_mid_add_names_the_cards_already_added_and_the_raw_file(self):
+        for n, cause in enumerate(self.STORE_FAILURES):
+            with self.subTest(type(cause).__name__):
+                self.data = datadir.ensure(self.tmp / f"data-mid-add-{n}")
+                self.status_source(self.reply_copy("status-incidents.json"))
+                with self.fail_second("add", cause), self.assertRaises(CardError) as cm:
+                    self.engine().read("vendor-status")
+                [card] = self.store().list()
+                [raw] = self.raws()
+                self.assertEqual(str(cm.exception), f"cannot use the card store in X: failed (already written by "
+                                                    f"this read: {card['id']}; raw output saved as {raw})")
+                self.assertIs(cm.exception.__cause__.__cause__, cause)  # the chain still reaches the store's error
+                self.assertFalse((self.data / raw).with_suffix(".report.json").exists())
+
+    def test_a_store_failure_mid_update_names_the_cards_already_updated_and_the_raw_file(self):
+        for n, cause in enumerate(self.STORE_FAILURES):
+            with self.subTest(type(cause).__name__):
+                self.data = datadir.ensure(self.tmp / f"data-mid-update-{n}")
+                reply = self.reply_copy("status-incidents.json")
+                self.status_source(reply)
+                self.engine().read("vendor-status")
+                ids = {c["key"]: c["id"] for c in self.store().list()}
+                first = self.raws()
+                incidents = json.loads(reply.read_text())
+                for inc in incidents["incidents"]:
+                    inc["name"] = f"Renamed {inc['id']}"
+                reply.write_text(json.dumps(incidents))
+                self.clock.tick()
+                with self.fail_second("update", cause), self.assertRaises(CardError) as cm:
+                    self.engine().read("vendor-status")
+                [raw] = self.raws() - first
+                self.assertEqual(str(cm.exception), f"cannot use the card store in X: failed (already written by "
+                                                    f"this read: {ids['inc01abcd']}; raw output saved as {raw})")
+                self.assertIs(cm.exception.__cause__.__cause__, cause)
+                titles = {c["key"]: c["title"] for c in self.store().list()}
+                self.assertEqual(titles, {"inc01abcd": "Renamed inc01abcd", "inc02efgh": mock.ANY})
+                self.assertNotEqual(titles["inc02efgh"], "Renamed inc02efgh")
+
+    def test_a_store_failure_on_the_first_card_says_none_was_written_and_names_the_raw_file(self):
+        for n, cause in enumerate(self.STORE_FAILURES):
+            with self.subTest(type(cause).__name__):
+                self.data = datadir.ensure(self.tmp / f"data-first-add-{n}")
+                self.status_source(self.reply_copy("status-incidents.json"))
+
+                def fail(*args, **kwargs):
+                    raise CardError("cannot use the card store in X: failed") from cause
+
+                with mock.patch.object(Store, "add", side_effect=fail), self.assertRaises(CardError) as cm:
+                    self.engine().read("vendor-status")
+                [raw] = self.raws()
+                self.assertEqual(str(cm.exception), "cannot use the card store in X: failed (no card written yet; "
+                                                    f"raw output saved as {raw})")
+                self.assertIs(cm.exception.__cause__.__cause__, cause)
+                self.assertEqual(self.store().list(), [])
+
+    def test_a_store_that_cannot_list_its_cards_names_the_raw_file(self):
+        self.status_source(self.reply_copy("status-incidents.json"))
+
+        def fail(*args, **kwargs):
+            raise CardError("cannot use the card store in X: failed") from OSError("boom")
+
+        with mock.patch.object(Store, "list", side_effect=fail), self.assertRaises(CardError) as cm:
+            self.engine().read("vendor-status")
+        [raw] = self.raws()
+        self.assertEqual(str(cm.exception), f"cannot use the card store in X: failed (no card written yet; raw output "
+                                            f"saved as {raw})")
+        self.assertIsInstance(cm.exception.__cause__.__cause__, OSError)
+
+    def test_a_store_failure_in_a_dry_run_keeps_the_store_message(self):
+        self.status_source(self.reply_copy("status-incidents.json"))
+        self.engine().read("vendor-status")  # a card file, so the dry run lists the store
+
+        def fail(*args, **kwargs):
+            raise CardError("cannot use the card store in X: failed") from OSError("boom")
+
+        with mock.patch.object(Store, "list", side_effect=fail):
+            with self.assertRaisesRegex(CardError, r"^cannot use the card store in X: failed$"):
+                self.engine().read("vendor-status", dry_run=True)
 
     def test_update_card_only_updates_and_none_makes_nothing(self):
         reply = self.reply_copy("status-incidents.json")
