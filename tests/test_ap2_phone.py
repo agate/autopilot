@@ -134,6 +134,7 @@ class WindowTest(PhoneCase):
         old = self.add(age=timedelta(days=10), lane="done")
         self.assertNotIn(old["id"], self.ids(self.build()))
         self.assertIn(old["id"], self.ids(self.build(phone_history_days=30)))
+        self.assertEqual(self.build(phone_history_days=30)["settings"]["history_days"], 30)
 
     def test_lanes_setting_picks_the_lanes(self):
         needs = self.add(lane="needs")
@@ -177,6 +178,15 @@ class WindowTest(PhoneCase):
         self.assertEqual(data["heartbeat"], server.heartbeat(self.data, NOW))
         self.assertEqual(data["heartbeat"]["age_seconds"], 25)
         self.assertEqual(set(data["full"]), {r["id"] for r in data["cards"]})
+
+    def test_a_project_off_the_phone_is_not_in_the_projects_list(self):
+        project = self.add(kind="project", lane="running", title="Move the shop")
+        old = self.add(kind="project", lane="done", age=timedelta(days=10), title="old project")
+        data = self.build()
+        self.assertEqual([p["id"] for p in data["projects"]], [project["id"]])
+        self.assertNotIn(old["id"], [p["id"] for p in data["projects"]])
+        self.assertNotIn("old project", json.dumps(data, ensure_ascii=False))
+        self.assertEqual(self.build(phone_lanes=("needs",))["projects"], [])
 
     def test_rows_are_the_servers_rows_in_the_servers_order(self):
         for lane, pri, age in (("done", "P2", 1), ("needs", "P3", 2), ("needs", "P0", 3), ("running", "P1", 4),
@@ -334,6 +344,8 @@ class HideTest(PhoneCase):
         cfg = Config(secondary_language="zh", phone_hide_quotes=True)
         card = self.pr42(cfg=cfg)
         data = self.build(cfg=cfg)
+        self.assertEqual(data["secondary_language"], "zh")
+        self.assertEqual(data["languages"], ["en", "zh"])
         self.assertNotIn(MARKER, json.dumps(data, ensure_ascii=False))
         row = next(r for r in data["cards"] if r["id"] == card["id"])
         self.assertEqual(row["title_hidden"], {"en": "octo-dev wrote a message in widgets",
@@ -373,6 +385,35 @@ class HideTest(PhoneCase):
         self.assertIn("phone_hide_quotes", msg)
         self.assertEqual(len(msg.splitlines()), 1)
         self.build(cfg=Config(primary_language="fr"))  # with hiding off, no phrases are needed
+
+    def test_a_secondary_language_with_no_phrases_is_refused(self):
+        self.pr42()  # read in English: the engine itself refuses a language it has no plain words for
+        cfg = Config(secondary_language="fr", phone_hide_quotes=True)
+        with self.assertRaises(ConfigError) as caught:
+            self.build(cfg=cfg)
+        msg = str(caught.exception)
+        self.assertIn("fr", msg)
+        self.assertIn("phone_hide_quotes", msg)
+        self.assertEqual(len(msg.splitlines()), 1)
+
+    def test_a_key_made_from_the_text_is_hidden_too(self):
+        source = (self.plugin / "gh-mine.yaml").read_text(encoding="utf-8")
+        source = source.replace("source: gh-mine", "source: gh-text").replace('key: "{place}#{id}"', 'key: "{text}"')
+        self.assertIn('key: "{text}"', source)
+        (self.plugin / "gh-text.yaml").write_text(source, encoding="utf-8")
+        reply = self.tmp / "gh-text-reply.json"
+        items = json.loads((FIXTURES / "sources" / "replies" / "gh-pr-list.json").read_text(encoding="utf-8"))
+        items[0]["title"] = f"Retry the {MARKER} payments once"
+        reply.write_text(json.dumps(items), encoding="utf-8")
+        at = NOW - timedelta(hours=1)
+        Engine(self.data, cfg=self.cfg, plugin_dir=self.plugin, clock=lambda: at).read_saved("gh-text", reply)
+        card = next(c for c in Store(self.data, cfg=self.cfg).list()
+                    if c.get("feed") == "gh-text" and c["source"]["record"]["id"] == "42")
+        self.assertIn(MARKER, card["key"])  # the store keeps the key made from the text
+        self.assertIn(MARKER, json.dumps(self.build(), ensure_ascii=False))
+        data = self.build(phone_hide_quotes=True)
+        self.assertNotIn(MARKER, json.dumps(data, ensure_ascii=False))
+        self.assertNotIn("key", data["full"][card["id"]]["card"])
 
     def test_a_hidden_project_title_is_hidden_in_the_projects_list(self):
         card = self.add(kind="project", title=f"{MARKER} project",

@@ -125,6 +125,7 @@ def build(data, cfg: Optional[config.Config] = None, now: Optional[datetime] = N
             texts = hidden[c["id"]]
             card["title"] = texts[langs[0]]
             card["plain"]["what"] = dict(texts)
+            card.pop("key", None)  # a source's key may be made from the record's text; the phone does not use it
             record = {k: v for k, v in card["source"]["record"].items() if k != "text"}
             card["source"]["record"] = record
             out["source_block"]["text"] = None
