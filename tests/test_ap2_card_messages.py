@@ -76,6 +76,7 @@ SITES = {
     "links: a link": lambda v: shape(links=[[v]]),
     "parent": lambda v: shape(parent=[v]),
     "title": lambda v: shape(title=[v]),
+    "title.<lang>": lambda v: shape(title={"en": [v]}),
     "ask": lambda v: shape(ask=[v]),
     "ask.type": lambda v: shape(ask={"type": [v]}),
     "plain": lambda v: shape(plain=[v]),
@@ -98,6 +99,7 @@ def before(site: str, v) -> str:
         "links: a link": f"links: not a card id: {[v]!r}",
         "parent": f"parent must be a card id or null, not {[v]!r}",
         "title": f"title must be a text, an object of one text per language, or null, not {[v]!r}",
+        "title.<lang>": f"title.en must be a text, not {[v]!r}",
         "ask": f"ask must be an object with a type, or null, not {[v]!r}",
         "ask.type": f"ask.type must be one of {', '.join(ASK_TYPES)}, not {[v]!r}",
         "plain": f"plain must be an object with what, where and do, not {[v]!r}",
@@ -220,7 +222,7 @@ class TooDeepToPrintTest(unittest.TestCase):
 
     def test_every_message_on_a_value_too_deep_to_print_is_a_too_deep_error_naming_its_field(self):
         names = {"card id": "not a card id", "links: a link": "links", "stored audit": "audit",
-                 "stored plain": "plain", "stored ask": "ask"}
+                 "stored plain": "plain", "stored ask": "ask", "title.<lang>": "title.en"}
         for site, recipe in SITES.items():  # the value sits in a list or dict, whose repr fails with it
             with self.subTest(site):
                 with self.assertRaises(cards.TooDeepError) as caught:

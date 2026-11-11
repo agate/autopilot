@@ -1192,7 +1192,8 @@ Calls the author made without asking (check them):
     from the card (`{a.b}` reads a field inside a field; `{{` and `}}` are literal braces). A placeholder the
     card lacks, or holds as null or blank text, is an error (`BriefError`) naming every such field; a value must
     be text or a number. A filled value is not read again. Built-in briefs use only `{id}`, a field every
-    stored card has, because `title` is optional.
+    stored card has, because `title` is optional. `{title}` fills the primary language's title
+    (`cards.title_for`), so a brief names the same words for a text or a per-language title.
   - No added tools or permissions: a key that would widen a role is refused anywhere in the file (top level,
     a `roles` entry, a button), before any other check, with one error class `TemplateWidenError` naming the
     file, line and key. The keys, compared without letter case, `-`, `_` or spaces: `tools`, `tool`,
