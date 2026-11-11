@@ -89,6 +89,33 @@ def phrases(lang: str) -> Optional[dict]:
     return PHRASES.get(lang) or PHRASES.get(lang.split("-")[0])
 
 
+# What the phone page shows instead of a record's words when `phone_hide_quotes` is on (design 9.2): who and where
+# only, never the text. `{thing}` is the kind of record, by the source's `brings` (`other` when it is not known).
+# Matched like PHRASES.
+HIDDEN_PHRASES = {
+    "en": {"both": "{author} wrote {thing} in {place}", "author": "{author} wrote {thing}",
+           "place": "Someone wrote {thing} in {place}", "none": "Someone wrote {thing}",
+           "messages": "a message", "work": "an item", "other": "something"},
+    "zh": {"both": "{author} 在 {place} 写了{thing}", "author": "{author} 写了{thing}",
+           "place": "有人在 {place} 写了{thing}", "none": "有人写了{thing}",
+           "messages": "一条消息", "work": "一个条目", "other": "一些内容"},
+}
+
+
+def hidden_phrases(lang: str) -> Optional[dict]:
+    return HIDDEN_PHRASES.get(lang) or HIDDEN_PHRASES.get(lang.split("-")[0])
+
+
+def hidden_text(lang: str, record: dict, brings: Optional[str]) -> str:
+    """The phrase that stands for `record` in `lang`: "Ana wrote a message in #team", or the shorter form without
+    an author or a place. Never holds the record's text."""
+    p = hidden_phrases(lang)
+    author, place = (record.get(k) if isinstance(record.get(k), str) and record[k].strip() else None
+                     for k in ("author", "place"))
+    form = "both" if author and place else "author" if author else "place" if place else "none"
+    return p[form].format(author=author, place=place, thing=p[brings if brings in ("messages", "work") else "other"])
+
+
 def snippet(text: str, limit: int = SNIPPET) -> str:
     """The first non-blank line of `text`, white space collapsed, cut to `limit` characters with an ellipsis."""
     line = next((ln for ln in text.splitlines() if ln.strip()), text)

@@ -589,6 +589,7 @@ assistant's main loop. To make the split reliable:
   source block with its Open-in-source button, findings, plan, merge checks, children, questions and activity.
   Only transcripts and history older than the window stay off the phone. "Hide what people wrote" also hides
   their words in the full card.
+- The settings are `phone_history_days`, `phone_lanes` and `phone_hide_quotes` in `config.yaml` (see 12).
 - New requests go through the page's chat.
 
 ### 9.3 Chat box **[decided]**
@@ -689,8 +690,9 @@ Calls the author made without asking (check them):
   and writes `config.yaml` with the defaults and a comment per key; it never overwrites an existing
   `config.yaml`. The search index is left to the card store. Config keys and defaults:
   `primary_language: en`, `secondary_language:` (empty = none; it may not equal the primary),
-  `mode: shadow` (`shadow | live`), `keep_transcripts: always` (`always | never | <N>d`, N at least 1). A
-  language is a short code: 2-3 lowercase letters, then an optional script (`zh-Hans`) and/or an uppercase
+  `mode: shadow` (`shadow | live`), `keep_transcripts: always` (`always | never | <N>d`, N at least 1), and the
+  phone page's `phone_history_days: 3`, `phone_lanes: [needs, running, planned, done]` and
+  `phone_hide_quotes: false` (see the phone page data entry). A language is a short code: 2-3 lowercase letters, then an optional script (`zh-Hans`) and/or an uppercase
   region (`pt-BR`, `es-419`). An unknown key is refused with its name and line.
 - **[decided by the builder]** Module layout so far, in `lib/assistant/`: `yamlish.py` (the subset reader),
   `config.py` (defaults, validation, and `require_live(cfg, what)`, which every write outside the data folder
@@ -705,7 +707,8 @@ Calls the author made without asking (check them):
   save-raw hook and the take); for workers, `workers.py`, `resources.py`, `transcripts.py` and `projects.py`
   (see the workers entry below); and the local page: `server.py` (the server, its JSON routes and the request
   guard, run by `ap2 serve`) and `builtin/page/local.html` (the one page, inline CSS and JS, found from
-  `server.py`'s own path). `ap2 config [--data PATH]` prints the effective config and `data_dir` as JSON.
+  `server.py`'s own path); and the phone page's data: `phone.py` (`build`, run by `ap2 phone build`).
+  `ap2 config [--data PATH]` prints the effective config and `data_dir` as JSON.
   With stdout
   closed, `ap2 config` sets up the folder, prints nothing and exits 0; when its reader goes away
   (`ap2 config | true`) it exits 1 with nothing on stderr; when a write fails (a full disk) it prints one line,
@@ -1294,8 +1297,50 @@ Calls the author made without asking (check them):
     remembered in the browser. Labels are a table per language in the page, `en` and `zh` so far (a code such as `zh-Hans` uses `zh`);
     a text that is missing in the chosen language says so instead of showing another language.
   - Later work: template buttons (lane change, restore, child), the chat box (9.3), the Restore points screen,
-    usage, real worker counts, answering questions (the workers slice), "started at login" (launchd), the phone
-    page data (the next slice, which reuses these JSON shapes), and labels for languages other than `en` and `zh`.
+    usage, real worker counts, answering questions (the workers slice), "started at login" (launchd), and labels for languages other than `en` and `zh`.
+- **[decided by the builder]** The phone page data (design 9.2, 9.4, 10). `phone.build(data, cfg=None, now=None,
+  plugin_dir=None)` in `lib/assistant/phone.py` turns the card store into one JSON document; `ap2 phone build
+  [--data PATH] [--out PATH]` prints it (UTF-8, sorted keys, one line) or writes it to `--out` through a temp file
+  next to it and a rename, so a reader never sees half a file. It sets up the data folder as `ap2 serve` does;
+  a bad config, a damaged card file or an `--out` folder that does not exist is one `ap2:` line and exit 1.
+  - Settings, in `config.yaml`: `phone_history_days` (a whole number from 0 to 365, default 3; `true` is not a
+    number), `phone_lanes` (a list of lanes, each at most once, at least one; default all four) and
+    `phone_hide_quotes` (true or false, default false). A bad value is refused with its line. `Config.as_dict()`
+    leaves these three out, so `ap2 config` and the local page's Settings show the same keys as before; the
+    phone data names them in its own `settings`.
+  - The window: a card is on the phone when its lane is in `phone_lanes` and it is open (not `done`), or it is
+    `done` and its `updated_at` is at or after `now` minus `phone_history_days` days. `0` shows no History; a
+    `done` card with no readable `updated_at` stays off. A project's children count the same way.
+  - The document: `{generated_at, mode, primary_language, secondary_language, languages, settings:
+    {history_days, lanes, hide_quotes}, lanes, projects, heartbeat, cards, full}`. `lanes` (all four keys) counts
+    only the cards on the phone; `projects` is the local page's project list over those cards, `done`/`total`
+    from the children on the phone; `heartbeat` is the local page's; `cards` are the local page's rows in its
+    order. These are the JSON shapes of the local page entry above.
+  - `full` maps each card id in `cards` to the local page's full card (`GET /api/cards/<id>`), built by the
+    same function, `server.full_card`, with two changes only: the card's `sessions` and `source.raw` (a path to
+    a file on this Mac) are removed, and a child or link that is not on the phone (outside the window or the
+    lanes) is `{id, off_phone: true}` with no title or words, so old history does not reach the phone through a
+    link. A link to a card that is gone stays `{id, missing: true}`. Questions and their answers stay (9.4).
+  - Hiding what people wrote (`phone_hide_quotes: true`), for every card with a source record: the row has
+    `title: null` and `title_hidden: {<language>: text}` for each configured language, so the page shows the
+    chosen language only (anti-goal 1); the full card's `title` is the primary language's text, `plain.what` is
+    the text per language, `key` is removed (a source's key may be made from the text), `source.record` loses
+    `text`, and the source block's `text` is null and its `record` has no `text`. The source block keeps `name`,
+    `author`, `place`, `at` and the http(s) `link`, so Open in source still works. The text names who and where
+    only: `{author} wrote {thing} in {place}` (`Ana wrote a message in #team`), or without an author `Someone
+    wrote ...`, or without a place no `in ...`; `{thing}` is `a message` for a `brings: messages` source, `an
+    item` for `brings: work`, `something` when the source cannot be loaded. The phrases sit next to the engine's
+    plain-words phrases (`engine.HIDDEN_PHRASES`, `en` and `zh`, matched the same way); hiding in a language with
+    none is one ConfigError line. A project's entry in `projects` is hidden the same way. Cards without a source
+    record are unchanged.
+  - Read-only, in shadow and live mode alike: building writes nothing in the data folder (it reads the store
+    without its lock file, as the local page's GETs do, and never builds `index.sqlite`), starts no process and
+    opens no connection. The command writes only to stdout or `--out` (inside the data folder is allowed, since
+    shadow mode allows writes there).
+  - **Publishing is not part of this.** It is a later dispatcher step, live mode only and off in shadow mode;
+    `ap2 phone build` has no `--publish` and its help says so. Later work: publishing to claude.ai, the phone
+    page's own HTML, questions asked on the phone (saved in the page's database, 9.4 point 1), the chat box, and
+    a size cap on the published data.
 - **[decided by the builder]** Workers and sessions (8.1, 8.2, 8.5, 3.5), carried over from v1 by import
   (`lib/autopilot/workers.py`, `sessions.py`, `nextwork.py`, `budget.py`, `park.py`, `perms.py`; none changed).
   - Modules: `workers.py` (the `Workers` API: start, end, park, classify, list, check, answer, finish),
