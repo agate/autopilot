@@ -339,6 +339,46 @@ class SymlinkTest(RawCase):
         self.assertFalse((self.tmp / "moved" / raw.name).exists())  # removed in the folder that was listed
 
 
+    def test_a_source_folder_swapped_for_a_link_between_its_stat_and_its_open_is_not_followed(self):
+        # The stat sees a folder; by the open it is a link. Opening without following a link (ELOOP) skips it.
+        out = self.outside()
+        source = self.data / RAW / "linked-source"
+        source.mkdir(parents=True)
+        real_stat = os.stat
+        swapped = []
+
+        def stat_then_swap(path, *a, **k):
+            st = real_stat(path, *a, **k)
+            if os.fspath(path) == "linked-source" and k.get("dir_fd") is not None and not swapped:
+                swapped.append(True)
+                os.rmdir(source)
+                os.symlink(out, source)
+            return st
+
+        with mock.patch.object(os, "stat", stat_then_swap):
+            result = self.prune()
+        self.assertEqual(swapped, [True])
+        self.assert_outside_intact(out)
+        self.assertTrue(source.is_symlink())
+        self.assertEqual(result, {"removed": [], "errors": [], "link": None})
+
+    def test_an_old_file_swapped_for_a_link_before_its_remove_is_kept(self):
+        out = self.outside()
+        raw = self.put("chat", NOW - timedelta(days=90), "cccccc", report=False)
+        target = out / name(NOW - timedelta(days=90))
+
+        def swap_then_list():  # called after every folder is listed and before any remove
+            raw.unlink()
+            os.symlink(target, raw)
+            return []
+
+        result = self.prune(linked=swap_then_list)
+        self.assertTrue(raw.is_symlink())
+        self.assertTrue(target.exists())
+        self.assert_outside_intact(out)
+        self.assertNotIn(self.rel(raw), result["removed"])
+        self.assertEqual(result["errors"], [])
+
 # -- criterion 5: wired into every gate run -----------------------------------------------------------------------
 
 class GateRunTest(RawCase):
@@ -439,6 +479,33 @@ class GateRunTest(RawCase):
         self.assertEqual(out["errors"], [{"prune_raw": f"{RAW}/chat", "error": mock.ANY}])
 
 
+    def test_an_entry_whose_type_cannot_be_read_is_one_error_for_its_folder_and_the_others_still_go(self):
+        locked = self.put("chat", NOW - timedelta(days=40), "aaaaaa", report=False)
+        other = self.put("mail", NOW - timedelta(days=40), "bbbbbb", report=False)
+        real_scandir = os.scandir
+
+        class NoType:
+            def __init__(self, entry):
+                self.name = entry.name
+
+            def is_file(self, follow_symlinks=True):
+                raise PermissionError(13, "Permission denied", self.name)
+
+        def deny_type(target):
+            entries = list(real_scandir(target))
+            if isinstance(target, int) and any(e.name == locked.name for e in entries):
+                return iter([NoType(e) for e in entries])
+            return iter(entries)
+
+        with mock.patch.object(os, "scandir", deny_type):
+            out = self.prune()
+        self.assertTrue(locked.exists())
+        self.assertFalse(other.exists())
+        self.assertEqual(out["removed"], [self.rel(other)])
+        self.assertEqual(out["errors"], [{"prune_raw": f"{RAW}/chat", "error": mock.ANY}])
+        self.assertIn(f"{RAW}/chat: cannot list the raw files:", out["errors"][0]["error"])
+        self.assertIn("Permission denied", out["errors"][0]["error"])
+
 # -- criterion 6: still no outside effects -----------------------------------------------------------------------
 
 class NoOutsideEffectsTest(RawCase):
@@ -519,7 +586,10 @@ class GateCommandTest(unittest.TestCase):
         folder = self.data / RAW / "chat"
         folder.mkdir(parents=True)
         old, young = name(now - timedelta(days=31)), name(now - timedelta(days=1), "bbbbbb")
-        for n in (old, young, name(now - timedelta(days=31), report=True)):
+        # The boundary, read as UTC whatever the TZ: exactly 30 days stays, one second more goes.
+        at_30 = name(now - timedelta(days=30), "cccccc")
+        past_30 = name(now - timedelta(days=30, seconds=1), "dddddd")
+        for n in (old, young, name(now - timedelta(days=31), report=True), at_30, past_30):
             (folder / n).write_text("{}", encoding="utf-8")
         env = {k: v for k, v in os.environ.items() if k not in ("AP2_DATA", "LC_ALL")}
         env.update(HOME=str(self.home), AP2_DATA=str(self.data), PYTHON_COLORS="0", TZ="Pacific/Kiritimati")
@@ -528,8 +598,8 @@ class GateCommandTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stderr, "")
         self.assertEqual(json.loads(r.stdout)["errors"], [])
-        self.assertEqual(sorted(p.name for p in folder.iterdir()), [young])
-        self.assertIn("2025-11-11T17:01:30Z pruned 2 raw source file(s) older than 30 days",
+        self.assertEqual(sorted(p.name for p in folder.iterdir()), sorted([young, at_30]))
+        self.assertIn("2025-11-11T17:01:30Z pruned 3 raw source file(s) older than 30 days",
                       (self.data / "gate.log").read_text(encoding="utf-8"))
 
 

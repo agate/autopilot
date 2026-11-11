@@ -862,7 +862,8 @@ Calls the author made without asking (check them):
     judged by the stamp in its own name once the raw file is gone. A file named in any card's `source.raw` (a
     card keeps its first raw path), and its report, are kept however old. The cards are read once per run, only
     when a file is old enough to remove; when they cannot be read (a damaged card file) nothing is removed and
-    the run has one error, `{"prune_raw": true, "error": ...}`. No link is followed or removed: when
+    the run has one error, `{"prune_raw": true, "error": ...}`. So once a card's first raw file is older than 30
+    days, that file stays, and every run reads the cards. No link is followed or removed: when
     `sources` or `sources/.raw` is a link (the user's setup) nothing is pruned and gate.log says so in one line,
     not an error; a `<source>` folder or file that is a link is skipped. Each folder is opened once without
     following a link and every remove is relative to it (`dir_fd`), so a folder swapped for a link meanwhile

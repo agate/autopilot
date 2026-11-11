@@ -652,16 +652,20 @@ def prune_raw(data, now: datetime, list_cards: Callable[[], list]) -> dict:
                 continue
             names = {e.name for e in entries}
             found = []
-            for e in sorted(entries, key=lambda e: e.name):
-                m = RAW_NAME.match(e.name)
-                if m is None or not e.is_file(follow_symlinks=False):
-                    continue
-                try:
-                    at = datetime.strptime(m.group(1), STAMP).replace(tzinfo=timezone.utc)
-                except ValueError:  # e.g. month 13: its age cannot be read, so it is kept
-                    continue
-                if now - at > RAW_KEEP:
-                    found.append((e.name, m.group(2) is not None))
+            try:
+                for e in sorted(entries, key=lambda e: e.name):
+                    m = RAW_NAME.match(e.name)
+                    if m is None or not e.is_file(follow_symlinks=False):  # may lstat, so may raise
+                        continue
+                    try:
+                        at = datetime.strptime(m.group(1), STAMP).replace(tzinfo=timezone.utc)
+                    except ValueError:  # e.g. month 13: its age cannot be read, so it is kept
+                        continue
+                    if now - at > RAW_KEEP:
+                        found.append((e.name, m.group(2) is not None))
+            except OSError as e:
+                out["errors"].append({"prune_raw": where, "error": f"{where}: cannot list the raw files: {e}"})
+                continue
             if found:
                 old.append((source, fd, names, found))
         if not old:
