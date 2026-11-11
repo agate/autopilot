@@ -674,9 +674,10 @@ def prune_raw(data, now: datetime, list_cards: Callable[[], list]) -> dict:
             linked = {posixpath.normpath(c["source"]["raw"]) for c in list_cards()
                       if isinstance(c, dict) and isinstance(c.get("source"), dict)
                       and isinstance(c["source"].get("raw"), str)}
-        except (CardError, OSError) as e:
+        except (CardError, OSError, RecursionError) as e:  # RecursionError: a card file nested too deeply
+            why = "nested too deeply" if isinstance(e, RecursionError) else e
             out["errors"].append({"prune_raw": True,
-                                  "error": f"cannot read the cards, so no raw file is pruned: {e}"})
+                                  "error": f"cannot read the cards, so no raw file is pruned: {why}"})
             return out
         for source, fd, names, found in old:
             gone = set()

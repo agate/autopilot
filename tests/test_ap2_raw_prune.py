@@ -72,9 +72,9 @@ class RawCase(unittest.TestCase):
         p = self.data / "gate.log"
         return p.read_text(encoding="utf-8").splitlines() if p.exists() else []
 
-    def source_card(self, raw_rel: str) -> dict:
+    def source_card(self, raw_rel: str, lane: str = "needs", kind: str = "message") -> dict:
         s = Store(self.data, clock=lambda: NOW)
-        return s.add({"kind": "message", "lane": "needs", "feed": "chat", "links": [], "pri": "P2",
+        return s.add({"kind": kind, "lane": lane, "feed": "chat", "links": [], "pri": "P2",
                       "origin": "source", "plain": {k: {"en": "words"} for k in cards.PLAIN_LINES},
                       "key": "chat#1", "source": {"name": "chat", "record": {"id": "1"}, "link": None,
                                                   "raw": raw_rel}}, by="test")
@@ -115,6 +115,7 @@ class WhatIsOldTest(RawCase):
             f"{old}-a1b2c3.json.bak",
             f"{old}-a1b2c3.txt",
             f"{old}-a1b2c3.report.json.tmp",
+            f"{old}-a1b2c3.json\n",                    # ends in a newline: `$` would match before it, `\Z` does not
             "20261340T000000Z-a1b2c3.json",            # month 13: its age cannot be read
             "20260230T000000Z-a1b2c3.json",            # 30 February
             f"{old[:-1]}-a1b2c3.json",                 # no Z
@@ -212,11 +213,15 @@ class LinkedTest(RawCase):
         self.assertEqual(sorted(out["removed"]), sorted([self.rel(unlinked), self.rel(self.report(unlinked))]))
 
     def test_a_real_card_keeps_its_old_raw_file_through_a_gate_run(self):
+        # Cards in every lane and of every kind count, so a filter on the card list would show here.
         linked = self.put("chat", NOW - timedelta(days=45), "aaaaaa")
+        done = self.put("chat", NOW - timedelta(days=45), "dddddd")
         unlinked = self.put("chat", NOW - timedelta(days=45), "bbbbbb")
         self.source_card(self.rel(linked))
+        self.source_card(self.rel(done), lane="done", kind="task")
         self.gate()
         self.assertTrue(linked.exists() and self.report(linked).exists())
+        self.assertTrue(done.exists() and self.report(done).exists())
         self.assertFalse(unlinked.exists())
 
     def test_the_cards_are_not_read_when_every_file_is_young(self):
@@ -259,6 +264,17 @@ class LinkedTest(RawCase):
         self.assertIs(raw_errors[0]["prune_raw"], True)
         self.assertEqual(len([line for line in self.log() if "prune raw: error:" in line]), 1)
         self.assertFalse(any(line.split(" ", 1)[1].startswith("pruned") and "raw" in line for line in self.log()))
+
+    def test_a_card_file_nested_too_deeply_means_nothing_is_removed_and_one_error(self):
+        old = self.put("chat", NOW - timedelta(days=40))
+        card = self.source_card("sources/.raw/chat/elsewhere.json")
+        Store(self.data).path(card["id"]).write_text("[" * 200000 + "]" * 200000, encoding="utf-8")
+        out = self.gate()
+        self.assertEqual(json.loads((self.data / "gate.json").read_text(encoding="utf-8")), out)
+        self.assertTrue(old.exists() and self.report(old).exists())
+        raw_errors = [e for e in out["errors"] if "prune_raw" in e]
+        self.assertEqual(raw_errors, [{"prune_raw": True,
+                                       "error": "cannot read the cards, so no raw file is pruned: nested too deeply"}])
 
 
 # -- criterion 4: only inside the raw folder, no symlink followed -------------------------------------------------
@@ -318,6 +334,23 @@ class SymlinkTest(RawCase):
         self.assert_outside_intact(out)
         self.assertTrue((self.data / RAW / "linked-source").is_symlink())
         self.assertTrue(link_file.is_symlink() and link_report.is_symlink())
+
+    def test_a_report_beside_a_linked_raw_file_is_kept(self):
+        # The raw file's name is a link (to a file outside), so it is skipped; it is still there, so its regular
+        # report stays with it.
+        out = self.outside()
+        target = out / name(NOW - timedelta(days=90))
+        folder = self.data / RAW / "chat"
+        folder.mkdir(parents=True)
+        link_raw = folder / name(NOW - timedelta(days=90))
+        os.symlink(target, link_raw)
+        report = folder / name(NOW - timedelta(days=90), report=True)
+        report.write_text("{}", encoding="utf-8")
+        result = self.prune()
+        self.assertEqual(result, {"removed": [], "errors": [], "link": None})
+        self.assertTrue(link_raw.is_symlink())
+        self.assertTrue(report.is_file() and not report.is_symlink())
+        self.assert_outside_intact(out)
 
     def test_a_folder_swapped_for_a_link_after_the_listing_is_not_followed(self):
         # The source folder is opened once, without following a link, and every remove is relative to it: a
