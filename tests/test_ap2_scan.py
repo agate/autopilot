@@ -599,6 +599,125 @@ class SaveRawTest(ScanCase):
         self.assertEqual(changed, [str(self.log.relative_to(self.data))])
 
 
+class OversizedPayloadTest(ScanCase):
+    """A payload past engine.MAX_OUTPUT arrives cut off: only its top-level tool_name is read, from the start."""
+
+    CAP = 200
+
+    def setUp(self):
+        super().setUp()
+        self.settings("slack-mentions", "jira-epic")
+        self.p = self.plan("slack-mentions", "jira-epic")
+
+    @staticmethod
+    def big_read() -> bytes:
+        hook = {"session_id": "s", "hook_event_name": "PostToolUse", "tool_name": "Read",
+                "tool_input": {"file_path": "/tmp/big.log"}, "tool_response": "x" * 10_000}
+        return json.dumps(hook).encode()
+
+    def save(self, plan_file, data: bytes):
+        with mock.patch("assistant.engine.MAX_OUTPUT", self.CAP):
+            return scan.save_raw(plan_file, data[:self.CAP + 1])
+
+    def test_an_unkept_tools_oversized_reply_is_skipped(self):
+        out = self.save(self.p["plan"], self.big_read())
+        self.assertEqual(out, {"kept": False, "tool_name": "Read", "too_large": True})
+        self.assertEqual(scan.read_log(Path(self.p["folder"])), ([], False))
+
+    def test_a_later_normal_call_still_logs(self):
+        self.save(self.p["plan"], self.big_read())
+        self.assertTrue(scan.save_raw(self.p["plan"], payload("hook-slack-search.json"))["kept"])
+        logged, cut = scan.read_log(Path(self.p["folder"]))
+        self.assertEqual((len(logged), cut), (1, False))
+
+    def test_the_command_prints_the_skip_and_exits_0(self):
+        from assistant import cli
+        stdin = io.TextIOWrapper(io.BytesIO(self.big_read()), encoding="utf-8")
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch("assistant.engine.MAX_OUTPUT", self.CAP), mock.patch.object(sys, "stdin", stdin), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli.main(["scan", "save-raw", "--plan", self.p["plan"]])
+        self.assertEqual((code, err.getvalue()), (0, ""))
+        self.assertEqual(json.loads(out.getvalue()), {"kept": False, "tool_name": "Read", "too_large": True})
+        self.assertEqual(scan.read_log(Path(self.p["folder"])), ([], False))
+
+    def test_a_planned_tools_oversized_reply_marks_the_log_cut_short(self):
+        hook = json.loads(payload("hook-slack-search.json"))
+        hook["tool_response"] = "x" * 10_000
+        with self.assertRaisesRegex(ScanError, rf"larger than {self.CAP} bytes; the scan log .* is marked cut short"):
+            self.save(self.p["plan"], json.dumps(hook).encode())
+        self.assertEqual(scan.read_log(Path(self.p["folder"])), ([], True))
+
+    def test_a_skill_plan_marks_the_log_cut_short(self):
+        self.user("standup", SaveRawTest.STANDUP)
+        p = self.plan("standup")
+        for name in ("Read", "Write"):  # a tool the skill would keep, and one it would not
+            with self.subTest(name):
+                with self.assertRaisesRegex(ScanError,
+                                            rf"larger than {self.CAP} bytes; the scan log .* is marked cut short"):
+                    self.save(p["plan"], self.big_read().replace(b'"Read"', json.dumps(name).encode()))
+                self.assertEqual(scan.read_log(Path(p["folder"])), ([], True))
+
+    def test_an_unreadable_name_marks_the_log_cut_short(self):
+        tail = ', "tool_input": {}, "tool_response": "' + "x" * 10_000 + '"}'
+        cases = {
+            "x bytes": (b"x" * 10_000, None),
+            "a JSON list": (('["tool_name", "Read", "' + "x" * 10_000 + '"]').encode(), None),
+            "a number": (('{"session_id": "s", "tool_name": 5' + tail).encode(), None),
+            "an empty name": (('{"session_id": "s", "tool_name": ""' + tail).encode(), None),
+            "a list name": (('{"session_id": "s", "tool_name": ["Read"]' + tail).encode(), None),
+            "past the look-ahead": (('{"session_id": "' + "s" * 100 + '", "tool_name": "Read"' + tail).encode(), 64),
+            "only inside tool_input": (('{"tool_input": {"tool_name": "Read"}, "tool_response": "'
+                                        + "x" * 10_000 + '", "tool_name": "Read"}').encode(), None),
+            "a bad key": (('{"session_id" "s", "tool_name": "Read"' + tail).encode(), None),
+            "bad UTF-8 before the name": (b'{"session_id": "\xff", "tool_name": "Read"' + tail.encode(), None),
+            "the name cut off": (('{"session_id": "s", "tool_name": "Re' + "a" * 10_000 + '"}').encode(), None),
+        }
+        for name, (data, lookahead) in cases.items():
+            with self.subTest(name):
+                p = self.plan("slack-mentions", "jira-epic")
+                patch = mock.patch.object(scan, "NAME_LOOKAHEAD", lookahead) if lookahead else \
+                    contextlib.nullcontext()
+                with patch, self.assertRaisesRegex(
+                        ScanError, rf"\Athe hook payload is larger than {self.CAP} bytes; the scan log .* is marked "
+                                   rf"cut short\Z"):
+                    self.save(p["plan"], data)
+                self.assertEqual(scan.read_log(Path(p["folder"])), ([], True))
+
+    def test_a_cut_multibyte_character_at_the_look_ahead_is_not_an_error(self):
+        data = ('{"session_id": "s", "tool_name": "Read", "tool_response": "' + "é" * 5_000 + '"}').encode()
+        with mock.patch.object(scan, "NAME_LOOKAHEAD", 60):  # inside a two-byte character
+            self.assertEqual(data[59:61], "é".encode())
+            self.assertEqual(self.save(self.p["plan"], data),
+                             {"kept": False, "tool_name": "Read", "too_large": True})
+
+    def test_the_look_ahead_stops_at_tool_name_and_at_its_byte_limit(self):
+        real = json.JSONDecoder.raw_decode
+        seen = []
+
+        def spy(self, s, idx=0):
+            seen.append((s, idx))
+            return real(self, s, idx)
+
+        with mock.patch.object(json.JSONDecoder, "raw_decode", spy):
+            self.save(self.p["plan"], self.big_read())
+        text = self.big_read()[:self.CAP + 1].decode()
+        offsets = [idx for s, idx in seen if text.startswith(s) and s.startswith('{"session_id"')]
+        name_value = text.index('"Read"')
+        self.assertEqual(offsets, [text.index('"session_id"'), text.index('"s"'), text.index('"hook_event_name"'),
+                                   text.index('"PostToolUse"'), text.index('"tool_name"'), name_value])
+        self.assertLess(max(offsets), text.index('"tool_input"'))  # tool_input and tool_response never decoded
+
+        seen.clear()
+        big = ('{"session_id": "' + "s" * 10_000 + '", "tool_name": "Read"}').encode()
+        with mock.patch.object(json.JSONDecoder, "raw_decode", spy), mock.patch.object(scan, "NAME_LOOKAHEAD", 100), \
+                self.assertRaises(ScanError):
+            self.save(self.plan("slack-mentions")["plan"], big)
+        mine = [s for s, idx in seen if s.startswith('{"session_id"')]
+        self.assertTrue(mine)
+        self.assertTrue(all(len(s) <= 100 for s in mine))  # nothing past the byte limit is handed to the decoder
+
+
 class TakeTest(ScanCase):
     """From a recorded session: a Slack search, a thread read and a Jira search, plus the records the model
     wrote, one of them forged."""
