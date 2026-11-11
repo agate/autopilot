@@ -1,0 +1,22 @@
+{
+  "key": "PROJ-7",
+  "fields": {
+    "summary": "Split the retry work into PR-sized tasks",
+    "status": {
+      "name": "In Review"
+    },
+    "updated": "2026-11-10T09:00:00.000+0000",
+    "issuelinks": [
+      {
+        "type": {
+          "name": "Blocks",
+          "inward": "is blocked by",
+          "outward": "blocks"
+        },
+        "inwardIssue": {
+          "key": "PROJ-5"
+        }
+      }
+    ]
+  }
+}

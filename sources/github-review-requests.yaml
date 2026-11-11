@@ -1,0 +1,18 @@
+# GitHub review requests: the open PRs that ask you for a review, read with gh (no AI, no tokens). Each becomes a
+# PR review card (design 6.2), keyed on <owner>/<repo>#<number>.
+source: github-review-requests
+brings: messages
+read:
+  via: command
+  run: gh search prs --review-requested=@me --state=open --json number,title,url,author,createdAt,repository
+  every: 5m
+fill: paths
+form:
+  id: .number
+  at: .createdAt
+  text: .title
+  author: .author.login
+  place: .repository.nameWithOwner
+link: .url
+key: "{place}#{id}"
+sort: { all: pr-review }

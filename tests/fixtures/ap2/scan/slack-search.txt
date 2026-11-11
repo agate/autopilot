@@ -1,0 +1,17 @@
+# Search results for "<@U0EXAMPLE1>"
+
+## Channel: #payments (C0123ABCD)
+From: U0EXAMPLE2
+Message_ts: 1730000000.123456
+Text: <@U0EXAMPLE1> can you look at the retry change?
+
+## Channel: #payments (C0123ABCD)
+From: U0EXAMPLE3
+Message_ts: 1730000100.000200
+thread_ts: 1730000000.123456
+Text: <@U0EXAMPLE1> the retry test also fails on main.
+
+## Channel: #random (C0999RAND)
+From: U0EXAMPLE2
+Message_ts: 1730000200.000300
+Text: <@U0EXAMPLE1> lunch?
