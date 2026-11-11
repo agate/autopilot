@@ -577,6 +577,9 @@ class TitleBriefTest(TempFolder):
             templates.fill_brief("In {title}.", {"title": {"zh": "Z"}})
         self.assertEqual(e.exception.missing, ["title"])
         self.assertIn("the card has no {title}", str(e.exception))
+        with self.assertRaises(BriefError) as e:
+            templates.fill_brief("In {title}.", {"title": {"en": "E"}}, primary="zh")
+        self.assertEqual(e.exception.missing, ["title"])
 
     def test_a_dotted_title_slot_still_reads_the_field(self):
         self.assertEqual(templates.fill_brief("{title.zh}", {"title": {"en": "E", "zh": "Z"}}), "Z")
@@ -585,6 +588,9 @@ class TitleBriefTest(TempFolder):
         shutil.copy(FIXTURES / "question.yaml", self.data / "templates" / "question.yaml")
         runs = templates.catalog(self.data)["question"].runs({"id": "c-1", "title": {"en": "t"}})
         self.assertEqual(runs[0]["brief"], "Answer the question in t. Draft a short reply; never send it.")
+        card = {"id": "c-1", "title": {"en": "t", "zh": "z"}}
+        runs = templates.catalog(self.data)["question"].runs(card, primary="zh")
+        self.assertEqual(runs[0]["brief"], "Answer the question in z. Draft a short reply; never send it.")
 
 
 class CheckTest(TempFolder):
