@@ -1402,7 +1402,7 @@ Calls the author made without asking (check them):
     three words of its title. The session gets them the way v1 passes setup: `--settings <run dir>/settings-<role>.json`
     (the permission floor: v1's outward-tool and Bash denials, plus `Edit` denials on the data folder's own files
     (including the user's `templates/**` and `sources/**`, the rules the worker floor in `roles.py` promises; every
-    card's run directory stays writable except its settings files) and the package, and one allow rule, `Bash(<package>/bin/ap2 worker park:*)`, as v1 allows its park command; the floor refuses a data folder or package path that a gitignore pattern cannot
+    card's run directory stays writable except its settings files) and the package, and one allow rule, `Bash(<package>/bin/ap2 worker park:*)`, as v1 allows its park command, and the park hook, `hooks.PreToolUse` `[{"matcher": "*", "hooks": [{"type": "command", "command": "\"<package>/bin/ap2\" hook-park", "timeout": 5}]}]` (v1's `perms.park_hook()` shape), so the worker and its subagents run it before each tool call; the floor refuses a data folder or package path that a gitignore pattern cannot
     name literally (one holding `[ ] * ? \ ! #` or ending in a space), before any session starts) and env `AP2_ROLE`, `AP2_DATA`, `AP2_CARD`, `AP2_PROJECT`, `AP2_RUN_DIR`, `AP2_PORTS`,
     `AP2_BRANCH`, `AP2_EXTRA_HOSTS`, `AP2_MCP_SERVERS`, `AP2_HEALTH_CHECKS` (JSON), in both the process env and the
     settings' `env`. v1's `AUTOPILOT_*` variables are dropped, so v1's park hook never takes a v2 worker for its
@@ -1473,7 +1473,33 @@ Calls the author made without asking (check them):
     When the user's own ask is open, a permission prompt is reported on the check's line (`did: nothing`, the
     attach text in `note`); once the card has no open ask and the prompt is still there, the attach ask is
     raised, and the 30 minutes still count from the first sight of the prompt. Parking (`ap2 worker park`) reuses `budget.parking`
-    with v1's default rules (park at 90%, resume 5 minutes after the reset).
+    with v1's default rules (park at 90%, resume 5 minutes after the reset). The prompt asks the worker to park;
+    the park hook `ap2 hook-park` (`lib/assistant/parkhook.py`) makes it stop **[decided by the builder]**:
+    - It acts only on a v2 worker: `AP2_ROLE` one of the roles and `AP2_CARD` set in its env. The user's own
+      sessions, v1 workers (`AUTOPILOT_ROLE=worker`, which v1's own hook keeps) and dispatchers get no opinion (no
+      output, exit 0), so the two hooks never overlap.
+    - It denies every tool call (PreToolUse `deny`) while `budget.parking` with the same rules returns a window;
+      under the line, stale or unreadable usage is no opinion, as in v1. Usage is `budget.read` of `~/.claude.json`
+      (`--usage PATH` for tests), the same read `ap2 worker park` makes, so whenever the hook denies, the park
+      command it names succeeds. Not v1's `read_fast`: that keeps a side cache in v1's data folder, and this hook
+      writes nothing (the file is small enough to parse on every call).
+    - The one call it lets through is Bash running exactly `<package>/bin/ap2 worker park <AP2_CARD> <AP2_ROLE>
+      [--note TEXT]` on one line, the program quoted or not, with v1's tokenizer rules (no newline, backtick, `$`
+      or `{`, no chaining/redirect token, at most 4096 characters) and `#` read as a plain character, as bash reads one inside a word, so it hides
+      nothing. Any other flag (`--usage`, `--data`, `--by`, `--note=`), card, role or program (v1's `bin/ap`,
+      another `ap2`) is denied.
+    - The deny reason names that command with the worker's own card and role filled in, and the window and its
+      percent. A subagent's call (payload `agent_id`) is told to stop and reply to its parent with exactly
+      `parked for quota`.
+    - Any error (bad or non-object JSON, empty or closed stdin, stdin past 1 MiB, an unknown argument, unreadable
+      usage) is no output and exit 0; JSON nested too deep to parse is read as an empty payload, so it is denied at
+      the line and gets no opinion under it. It writes nothing, needs no data folder and works the same in shadow
+      mode.
+    - It runs before every tool call, so `bin/ap2` routes `hook-park` to `parkhook.main` before it imports `cli`
+      (and `cli.main` routes it before it builds the parser, for a caller that imports `cli`), and `parkhook`
+      imports only `json`, `os`, `shlex`, `pathlib` and v1's `budget`: not `workers`, `store` or
+      `config`. Its copies of the park rules and roles are kept equal to `workers.PARK_RULES` and `workers.ROLES`
+      by a test.
   - Shadow mode: starting a worker, resuming one (dead, parked, answered) and `claude rm` call
     `config.require_live` first and raise `ShadowModeError` before anything runs. Listing, classifying, `check`,
     `end` (stopping is local), parking and archiving copies work in shadow mode; `finish` then makes the copies,

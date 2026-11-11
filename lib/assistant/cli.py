@@ -82,6 +82,7 @@ def _parser() -> argparse.ArgumentParser:
     _worker_parser(sub)
     _serve_parser(sub)
     _phone_parser(sub)
+    sub.add_parser("hook-park", help="a worker's PreToolUse hook: at the usage line, deny all but its park")
     return p
 
 
@@ -630,6 +631,9 @@ COMMANDS["phone"] = cmd_phone
 
 
 def main(argv: list) -> int:
+    if argv[:1] == ["hook-park"]:  # runs before every worker tool call: skip the parser
+        from assistant import parkhook
+        return parkhook.main(argv[1:], sys.stdin)
     # sys.stderr is None when stderr is closed; print(file=None) would then write to stdout, so say nothing.
     parser = _parser()
     try:
