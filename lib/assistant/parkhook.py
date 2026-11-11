@@ -91,7 +91,8 @@ def decide(payload: dict, env, usage: dict, rules: dict = None):
 
 
 def _read(stdin):
-    """The payload on stdin, or None when stdin is closed, past MAX_STDIN, or not a JSON object."""
+    """The payload on stdin, or None when stdin is closed, past MAX_STDIN, or not a JSON object. JSON nested too deep
+    to parse is `{}`, not None, so it cannot fail open at the line."""
     if stdin is None:
         return None
     src = getattr(stdin, "buffer", stdin)
@@ -100,7 +101,10 @@ def _read(stdin):
         return None
     if isinstance(raw, bytes):
         raw = raw.decode("utf-8")
-    payload = json.loads(raw)
+    try:
+        payload = json.loads(raw)
+    except RecursionError:  # too deep to be the flat Bash park call; with no `tool_name` it is denied at the line
+        return {}  # and still gets no opinion under it
     return payload if isinstance(payload, dict) else None
 
 

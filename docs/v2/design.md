@@ -1436,7 +1436,9 @@ Calls the author made without asking (check them):
       percent. A subagent's call (payload `agent_id`) is told to stop and reply to its parent with exactly
       `parked for quota`.
     - Any error (bad or non-object JSON, empty or closed stdin, stdin past 1 MiB, an unknown argument, unreadable
-      usage) is no output and exit 0. It writes nothing, needs no data folder and works the same in shadow mode.
+      usage) is no output and exit 0; JSON nested too deep to parse is read as an empty payload, so it is denied at
+      the line and gets no opinion under it. It writes nothing, needs no data folder and works the same in shadow
+      mode.
     - It runs before every tool call, so `bin/ap2` routes `hook-park` to `parkhook.main` before it imports `cli`
       (and `cli.main` routes it before it builds the parser, for a caller that imports `cli`), and `parkhook`
       imports only `json`, `os`, `shlex`, `pathlib` and v1's `budget`: not `workers`, `store` or

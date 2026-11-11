@@ -13,6 +13,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests.helpers import LIB, ROOT
 from assistant import parkhook
@@ -117,10 +118,11 @@ class DecideTest(unittest.TestCase):
 
     def test_a_long_command_is_refused_before_it_is_tokenized(self):
         own = f"{AP2} worker park C1 implement"
-        cmd = own + " --note " + "a" * parkhook.MAX_COMMAND
-        start = time.monotonic()
-        self.assertFalse(parkhook.is_park_command(cmd, "C1", "implement"))
-        self.assertLess(time.monotonic() - start, 0.5)
+        # shlex is quadratic on one long token: 64K characters take about 0.13 s, far under the 5 s hook timeout.
+        self.assertLessEqual(parkhook.MAX_COMMAND, 1 << 16)
+        cmd = own + " --note " + "a" * (1 << 18)
+        with mock.patch.object(parkhook.shlex, "shlex", side_effect=AssertionError("tokenized")):
+            self.assertFalse(parkhook.is_park_command(cmd, "C1", "implement"))
         self.assertTrue(denied(parkhook.decide(bash(cmd), WORKER, usage(95), RULES)))
         note = own + ' --note "' + "halfway, next: tests " * 10 + '"'
         self.assertTrue(parkhook.is_park_command(note, "C1", "implement"))
@@ -239,6 +241,18 @@ class HookCommandTest(unittest.TestCase):
             with self.subTest(name):
                 r = self.run_hook(**kw)
                 self.assertEqual((r.returncode, r.stdout), (0, b""), r.stderr)
+
+    def test_a_payload_too_deep_to_parse_is_denied_at_the_line(self):
+        """JSON nested past the parser's recursion limit, well under 1 MiB, cannot slip through as an error."""
+        deep = ('{"tool_name": "mcp__x__y", "tool_input": {"payload": ' + "[" * 100000 + "]" * 100000
+                + "}}").encode()
+        self.assertLess(len(deep), parkhook.MAX_STDIN)
+        r = self.run_hook(deep)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotEqual(r.stdout, b"", "no verdict: the call would be let through")
+        self.assertTrue(denied(json.loads(r.stdout)))
+        r = self.run_hook(deep, usage=self.usage_file(50, "low.json"))
+        self.assertEqual((r.returncode, r.stdout), (0, b""), r.stderr)
 
     def test_it_writes_nothing(self):
         data = self.tmp / "no-such-data"
