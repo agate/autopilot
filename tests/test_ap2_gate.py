@@ -5,6 +5,7 @@ Every test injects the time; none sleeps or reads the machine's time zone (each 
 from __future__ import annotations
 
 import builtins
+import dataclasses
 import errno
 import json
 import os
@@ -695,6 +696,458 @@ class NoOutsideEffectsTest(GateCase):
     def test_now_must_be_aware(self):
         with self.assertRaises(ValueError):
             self.gate(datetime(2026, 11, 10, 9))
+
+
+# -- follow-ups: a clock that went back, a changed routine tz, fatal errors in gate.log ----------------------------
+
+class ClockWentBackTest(GateCase):
+    NOW = utc(2026, 11, 10, 9, 1)
+
+    def test_a_routine_last_slot_later_than_now_is_reported_and_the_file_kept(self):
+        p = self.put(last_slot="2026-11-11T09:01")  # one day after now (the routine's tz is UTC)
+        before = p.read_bytes()
+        out = self.gate(self.NOW)
+        self.assertEqual(out["routines"], [])
+        msg = (f"{p}: last_slot 2026-11-11T09:01 is later than now (2026-11-10T09:01:00Z); the clock may have gone "
+               f"back. Set last_slot to null or an earlier slot to run it again.")
+        self.assertEqual(out["errors"], [{"routine": "digest", "file": str(p), "error": msg}])
+        self.assertEqual(json.loads((self.data / "gate.json").read_text(encoding="utf-8")), out)
+        log = (self.data / "gate.log").read_text(encoding="utf-8").splitlines()
+        self.assertEqual([line for line in log if "digest" in line],
+                         [f"2026-11-10T09:01:00Z routine digest: error: {msg}"])
+        self.assertEqual(p.read_bytes(), before)
+        self.assertEqual(self.routine_cards(), [])
+
+    def test_the_slot_is_read_in_the_routines_tz(self):
+        # 2026-11-10T06:00 in Los Angeles is 14:00 UTC, five hours after now.
+        p = self.put(tz=LA, last_slot="2026-11-10T06:00", last_slot_tz=LA)
+        out = self.gate(self.NOW)
+        self.assertEqual(len(out["errors"]), 1)
+        self.assertIn(f"{p}: last_slot 2026-11-10T06:00 is later than now", out["errors"][0]["error"])
+
+    def test_a_last_slot_at_now_or_inside_the_grace_is_no_error(self):
+        for slot in ("2026-11-10T09:01", "2026-11-10T09:06"):
+            with self.subTest(last_slot=slot):
+                p = self.put(last_slot=slot)
+                before = p.read_bytes()
+                out = self.gate(self.NOW)
+                self.assertEqual((out["routines"], out["errors"]), ([], []))
+                self.assertEqual(p.read_bytes(), before)
+        self.put(last_slot="2026-11-10T09:07")  # past the 5-minute grace
+        self.assertEqual(len(self.gate(self.NOW)["errors"]), 1)
+
+    def test_a_slot_at_the_ends_of_the_calendar_never_stops_the_run(self):
+        # Year 9999 in Los Angeles and year 1 in Tokyo have no UTC time (Python cannot hold it).
+        far = self.put("far", tz=LA, last_slot="9999-12-31T23:59")
+        self.put("old", tz="Asia/Tokyo", last_slot="0001-01-01T00:00")
+        self.put("ok", last_slot="2026-11-09T09:00")
+        out = self.gate(self.NOW)
+        self.assertEqual([e["routine"] for e in out["errors"]], ["far"])
+        self.assertIn(f"{far}: last_slot 9999-12-31T23:59 is later than now", out["errors"][0]["error"])
+        self.assertEqual(sorted(f["routine"] for f in out["routines"]), ["ok", "old"])
+
+    def test_a_watch_time_later_than_now_is_reported_and_repaired(self):
+        T = utc(2026, 11, 10, 14, 0)
+        write_json(self.data / "watches.json", {"slack": {"last_check_at": "2026-11-11T14:00:00Z"}})
+        out = self.gate(T, watches=[{"name": "slack", "every": "5m"}])
+        self.assertEqual(out["watches_due"], ["slack"])
+        self.assertEqual(out["errors"], [{"watch": "slack", "error": "last_check_at 2026-11-11T14:00:00Z is later "
+                                          "than now (2026-11-10T14:00:00Z); the clock may have gone back"}])
+        self.assertEqual(json.loads((self.data / "watches.json").read_text()),
+                         {"slack": {"last_check_at": "2026-11-10T14:00:00Z"}})
+        self.assertIn("watch slack: error: last_check_at 2026-11-11T14:00:00Z is later than now",
+                      (self.data / "gate.log").read_text())
+        again = self.gate(T + timedelta(minutes=1), watches=[{"name": "slack", "every": "5m"}])
+        self.assertEqual((again["watches_due"], again["errors"]), ([], []))  # recovered on its own
+
+    def test_a_given_watch_time_later_than_now_is_reported_too(self):
+        T = utc(2026, 11, 10, 14, 0)
+        out = self.gate(T, watches=[{"name": "slack", "every": "5m", "last_check_at": "2026-11-10T15:00:00Z"}])
+        self.assertEqual(out["watches_due"], ["slack"])
+        self.assertEqual([e["watch"] for e in out["errors"]], ["slack"])
+        self.assertIn("the clock may have gone back", out["errors"][0]["error"])
+
+    def test_a_watch_time_inside_the_grace_is_no_error(self):
+        T = utc(2026, 11, 10, 14, 0)
+        out = self.gate(T, watches=[{"name": "slack", "every": "5m", "last_check_at": "2026-11-10T14:05:00Z"}])
+        self.assertEqual((out["watches_due"], out["errors"]), ([], []))
+
+    def test_a_saved_watch_time_inside_the_grace_is_no_error(self):
+        T = utc(2026, 11, 10, 14, 0)
+        for saved in ("2026-11-10T14:03:00Z", "2026-11-10T14:05:00Z"):
+            with self.subTest(saved=saved):
+                write_json(self.data / "watches.json", {"slack": {"last_check_at": saved}})
+                out = self.gate(T, watches=[{"name": "slack", "every": "5m"}])
+                self.assertEqual((out["watches_due"], out["errors"]), ([], []))
+                self.assertEqual(json.loads((self.data / "watches.json").read_text()),
+                                 {"slack": {"last_check_at": saved}})
+
+    def test_after_a_tz_change_the_error_quotes_the_files_slot_and_its_old_zone(self):
+        # Tokyo 09:00 on Nov 11 is 00:00 UTC, which is 19:00 on Nov 10 in New York: later than now.
+        p = self.put(tz="America/New_York", last_slot="2026-11-11T09:00", last_slot_tz="Asia/Tokyo")
+        before = p.read_bytes()
+        out = self.gate(self.NOW)
+        msg = (f"{p}: last_slot 2026-11-11T09:00 in Asia/Tokyo (2026-11-10T19:00 in America/New_York) is later than "
+               f"now (2026-11-10T09:01:00Z); the clock may have gone back. Set last_slot to null or an earlier slot "
+               f"to run it again.")
+        self.assertEqual(out["errors"], [{"routine": "digest", "file": str(p), "error": msg}])
+        self.assertIn(f"routine digest: error: {msg}", (self.data / "gate.log").read_text(encoding="utf-8"))
+        self.assertEqual(p.read_bytes(), before)
+
+    def test_a_given_watch_time_ahead_on_every_run_still_waits_for_every(self):
+        watches = [{"name": "slack", "every": "1h", "last_check_at": "2026-11-11T17:00:00Z"}]
+        error = {"watch": "slack", "error": "last_check_at 2026-11-11T17:00:00Z is later than now "
+                                            "(2026-11-10T17:01:00Z); the clock may have gone back"}
+        T = utc(2026, 11, 10, 17, 1)
+        out = self.gate(T, watches=watches)
+        self.assertEqual((out["watches_due"], out["errors"]), (["slack"], [error]))
+        for later in (T + timedelta(minutes=5), T + timedelta(minutes=10)):
+            with self.subTest(now=later):
+                out = self.gate(later, watches=watches)
+                self.assertEqual(out["watches_due"], [])  # the saved time counts, and 1h has not passed
+                self.assertEqual(out["errors"], [{"watch": "slack", "error": "last_check_at 2026-11-11T17:00:00Z is "
+                                                  f"later than now ({cards.stamp(later)}); the clock may have gone "
+                                                  "back"}])
+                self.assertEqual(json.loads((self.data / "watches.json").read_text()),
+                                 {"slack": {"last_check_at": "2026-11-10T17:01:00Z"}})
+        self.assertEqual(self.gate(T + timedelta(hours=1), watches=watches)["watches_due"], ["slack"])
+
+    def test_a_saved_watch_time_ahead_is_repaired_even_when_a_given_time_counts(self):
+        T = utc(2026, 11, 10, 14, 0)
+        write_json(self.data / "watches.json", {"w": {"last_check_at": "2026-11-10T16:00:00Z"}})  # 2h ahead
+        watches = [{"name": "w", "every": "24h", "last_check_at": "2026-11-10T13:00:00Z"}]
+        out = self.gate(T, watches=watches)
+        self.assertEqual(out["watches_due"], ["w"])
+        self.assertEqual(out["errors"], [{"watch": "w", "error": "last_check_at 2026-11-10T16:00:00Z is later than "
+                                          "now (2026-11-10T14:00:00Z); the clock may have gone back"}])
+        self.assertEqual(json.loads((self.data / "watches.json").read_text()),
+                         {"w": {"last_check_at": "2026-11-10T14:00:00Z"}})
+        again = self.gate(T + timedelta(hours=1), watches=watches)
+        self.assertEqual((again["watches_due"], again["errors"]), ([], []))
+
+    def test_a_saved_and_a_given_time_both_ahead_are_one_error_quoting_the_later(self):
+        write_json(self.data / "watches.json", {"slack": {"last_check_at": "2026-11-11T14:00:00Z"}})
+        out = self.gate(utc(2026, 11, 10, 14, 0),
+                        watches=[{"name": "slack", "every": "5m", "last_check_at": "2026-11-12T00:00:00Z"}])
+        self.assertEqual(out["errors"], [{"watch": "slack", "error": "last_check_at 2026-11-12T00:00:00Z is later "
+                                          "than now (2026-11-10T14:00:00Z); the clock may have gone back"}])
+        self.assertEqual(out["watches_due"], ["slack"])
+
+    def test_a_now_at_the_end_of_the_calendar_does_not_overflow(self):
+        end = datetime(9999, 12, 31, 23, 58, tzinfo=UTC)
+        names, errors = gate.due_watches(
+            self.data, [{"name": "w", "every": "1h", "last_check_at": "9999-12-31T23:00:00Z"}], end)
+        self.assertEqual((names, errors), ([], []))  # 58 minutes is not 1h
+        self.put(last_slot="2026-11-10T09:00")
+        out = self.gate(end)
+        self.assertEqual([e for e in out["errors"] if "routine" in e], [])
+
+    def test_a_refused_watch_is_logged_refused_when_another_watch_of_its_name_runs(self):
+        T = utc(2026, 11, 10, 14, 0)
+        out = self.gate(T, watches=[{"name": "a", "every": "5x"}, {"name": "a", "every": "1h"}])
+        self.assertEqual(out["watches_due"], ["a"])
+        self.assertEqual(len(out["errors"]), 1)
+        log = (self.data / "gate.log").read_text(encoding="utf-8").splitlines()
+        self.assertEqual([line for line in log if line.startswith("2026-11-10T14:00:00Z watch a:")],
+                         [f"2026-11-10T14:00:00Z watch a: refused: {out['errors'][0]['error']}"])
+
+
+class ZoneNextToLastSlotTest(GateCase):
+    def test_a_run_writes_last_slot_and_its_zone(self):
+        for name, tz, now in (("utc", "UTC", utc(2026, 11, 10, 9, 1)), ("pacific", LA, utc(2026, 11, 10, 17, 1))):
+            with self.subTest(tz=tz):
+                self.put(name, tz=tz, last_slot="2026-11-09T09:00")
+                out = self.gate(now)
+                self.assertEqual([(f["routine"], f["action"]) for f in out["routines"]], [(name, "run")])
+                obj = self.file(name)
+                slot = "2026-11-10T09:00"
+                self.assertEqual((obj["last_slot"], obj["last_slot_tz"]), (slot, tz))
+
+    def test_a_new_routine_start_writes_the_zone_too(self):
+        self.put(tz=LA, last_slot=None)
+        out = self.gate(utc(2026, 11, 10, 20, 0))  # 12:00 in Los Angeles: the 09:00 slot is older than the routine
+        self.assertEqual([f["action"] for f in out["routines"]], ["start"])
+        self.assertEqual((self.file()["last_slot"], self.file()["last_slot_tz"]), ("2026-11-10T09:00", LA))
+
+    def test_an_old_file_without_the_zone_loads_and_behaves_as_before(self):
+        p = self.put(tz=LA, last_slot="2026-11-09T09:00")
+        self.assertNotIn("last_slot_tz", self.file())
+        r = routines.load(p)
+        self.assertEqual(r.last_slot, "2026-11-09T09:00")
+        self.assertIsNone(routines.due(r, utc(2026, 11, 10, 16, 59)))
+        self.assertEqual(routines.due(r, utc(2026, 11, 10, 17, 1)).action, "run")
+        out = self.gate(utc(2026, 11, 10, 17, 1))
+        self.assertEqual([(f["slot"], f["action"]) for f in out["routines"]], [("2026-11-10T09:00", "run")])
+        self.assertEqual(out["errors"], [])
+
+    def test_the_zone_is_text_or_null(self):
+        p = self.put(last_slot_tz=None)
+        self.assertIsNone(routines.load(p).last_slot)
+        for bad in (7, ["UTC"], True):
+            with self.subTest(last_slot_tz=bad):
+                p = self.put(last_slot="2026-11-09T09:00", last_slot_tz=bad)
+                with self.assertRaises(routines.RoutineError) as cm:
+                    routines.load(p)
+                self.assertIn(f"{p}: last_slot_tz:", str(cm.exception))
+
+
+class ChangedZoneTest(GateCase):
+    def test_a_changed_tz_converts_last_slot_so_no_slot_is_skipped(self):
+        # Eastern 09:00 is Pacific 06:00, so the Pacific 09:00 slot has not run yet.
+        p = self.put(tz=LA, last_slot="2026-11-10T09:00", last_slot_tz="America/New_York")
+        self.assertEqual(routines.load(p).last_slot, "2026-11-10T06:00")
+        before = p.read_bytes()
+        routines.load(p)
+        self.assertEqual(p.read_bytes(), before)  # only write_last_slot rewrites the file
+        now = datetime(2026, 11, 10, 9, 1, tzinfo=routines.ZoneInfo(LA))
+        out = self.gate(now)
+        self.assertEqual([(f["slot"], f["action"]) for f in out["routines"]], [("2026-11-10T09:00", "run")])
+        self.assertEqual([c["key"] for c in self.routine_cards()], ["digest@2026-11-10T09:00"])
+        obj = self.file()
+        self.assertEqual((obj["last_slot"], obj["last_slot_tz"]), ("2026-11-10T09:00", LA))
+        self.assertEqual(self.gate(now + timedelta(minutes=1))["routines"], [])
+
+    def test_the_same_zone_changes_nothing(self):
+        p = self.put(tz=LA, last_slot="2026-11-10T09:00", last_slot_tz=LA)
+        self.assertEqual(routines.load(p).last_slot, "2026-11-10T09:00")
+        out = self.gate(datetime(2026, 11, 10, 9, 1, tzinfo=routines.ZoneInfo(LA)))
+        self.assertEqual((out["routines"], out["errors"]), ([], []))
+
+    def test_a_slot_that_cannot_be_moved_to_the_new_zone_is_one_error(self):
+        # The old zone's time is past the calendar's end, the new zone's time is, and the old one is before its start.
+        for last, old, tz in (("9999-12-31T23:59", LA, "Asia/Tokyo"), ("9999-12-31T20:00", "UTC", "Asia/Tokyo"),
+                              ("0001-01-01T00:00", "Asia/Tokyo", LA)):
+            with self.subTest(last_slot=last, last_slot_tz=old, tz=tz):
+                p = self.put(tz=tz, last_slot=last, last_slot_tz=old)
+                with self.assertRaises(routines.RoutineError) as cm:
+                    routines.load(p)
+                self.assertIn(f"{p}: last_slot:", str(cm.exception))
+        self.put("ok", last_slot="2026-11-09T09:00")
+        out = self.gate(utc(2026, 11, 10, 9, 1))
+        self.assertEqual([f["routine"] for f in out["routines"]], ["ok"])
+        self.assertEqual([e["routine"] for e in out["errors"]], ["digest"])
+
+    def test_an_unknown_old_zone_is_refused_on_last_slot_tz(self):
+        for bad in ("Mars/Olympus_Mons", "", "../../etc/passwd"):
+            with self.subTest(last_slot_tz=bad):
+                p = self.put(tz=LA, last_slot="2026-11-10T09:00", last_slot_tz=bad)
+                with self.assertRaises(routines.RoutineError) as cm:
+                    routines.load(p)
+                self.assertIn(f"{p}: last_slot_tz:", str(cm.exception))
+                self.assertEqual(len(str(cm.exception).splitlines()), 1)
+
+    def test_an_unknown_old_zone_is_refused_with_no_last_slot_too(self):
+        p = self.put(tz=LA, last_slot=None, last_slot_tz="Mars/Olympus_Mons")
+        with self.assertRaises(routines.RoutineError) as cm:
+            routines.load(p)
+        self.assertTrue(str(cm.exception).startswith(f"{p}: last_slot_tz:"), str(cm.exception))
+
+
+class MovedIntoRepeatedHourTest(GateCase):
+    """A `tz` change whose moved slot lands in the second pass of the hour the clocks go back. Chicago 01:30 (CDT)
+    on 2026-11-01 is 06:30 UTC, which is New York 01:30 (EST), the second time New York reads 01:30 that night.
+    The 01:45 slot first happens at 05:45 UTC, before that run, so it must not run; 02:00 (07:00 UTC) must."""
+    NY = "America/New_York"
+    AT = ["01:30", "01:45", "02:00"]
+    MOMENT = utc(2026, 11, 1, 6, 30)
+
+    def put_moved(self, name="digest", **over) -> Path:
+        fields = dict(tz=self.NY, schedule={"days": "daily", "at": self.AT}, last_slot="2026-11-01T01:30",
+                      last_slot_tz="America/Chicago")
+        fields.update(over)
+        return self.put(name, **fields)
+
+    # criterion 1: the moved moment is kept
+
+    def test_a_moved_slot_keeps_its_exact_moment(self):
+        r = routines.load(self.put_moved())
+        self.assertEqual(r.last_slot, "2026-11-01T01:30")
+        self.assertEqual(r.moved_at, self.MOMENT)
+        self.assertEqual(r.moved_at.utcoffset(), timedelta(0))
+        self.assertEqual(r.moved_from, "2026-11-01T01:30 in America/Chicago")
+        west = routines.load(self.put("west", tz=LA, last_slot="2026-11-10T09:00", last_slot_tz=self.NY))
+        self.assertEqual((west.last_slot, west.moved_at), ("2026-11-10T06:00", utc(2026, 11, 10, 14, 0)))
+
+    def test_a_move_into_the_first_pass_keeps_the_first_pass_moment(self):
+        # Chicago 00:30 (CDT) is 05:30 UTC, which is New York 01:30 (EDT), the first pass. The moved text reads the
+        # same as on the second pass, so the moment must come from the old zone, not from the text. The 01:45 slot
+        # (05:45 UTC) came after that run, so it must still run.
+        r = routines.load(self.put_moved(last_slot="2026-11-01T00:30"))
+        self.assertEqual((r.last_slot, r.moved_at), ("2026-11-01T01:30", utc(2026, 11, 1, 5, 30)))
+        d = routines.due(r, utc(2026, 11, 1, 6, 46))
+        self.assertEqual((d.slot, d.action), ("2026-11-01T01:45", "late"))
+
+    def test_a_move_from_the_old_zones_skipped_hour_keeps_the_jump_moment(self):
+        # New York 02:30 on 2026-03-08 does not happen: the clocks jump from 02:00 to 03:00 (EDT), 07:00 UTC. The old
+        # slot is in the hour New York skips, so its moment is the jump, London 07:00 (GMT). The London 07:15 slot
+        # after it must still run on time.
+        r = routines.load(self.put(tz="Europe/London", schedule={"days": "daily", "at": ["07:15"]},
+                                   last_slot="2026-03-08T02:30", last_slot_tz=self.NY))
+        self.assertEqual((r.last_slot, r.moved_at), ("2026-03-08T07:00", utc(2026, 3, 8, 7, 0)))
+        d = routines.due(r, utc(2026, 3, 8, 7, 16))
+        self.assertEqual((d.slot, d.action), ("2026-03-08T07:15", "run"))
+
+    def test_a_slot_that_was_not_moved_has_no_moment(self):
+        for label, over in (("no last_slot_tz", {"last_slot_tz": None}), ("no key", {}),
+                            ("same zone", {"last_slot_tz": self.NY}),
+                            ("no last_slot", {"last_slot": None})):
+            with self.subTest(label):
+                fields = dict(tz=self.NY, schedule={"days": "daily", "at": self.AT}, last_slot="2026-11-01T01:30")
+                if label == "no last_slot":
+                    fields["last_slot_tz"] = "America/Chicago"
+                fields.update(over)
+                r = routines.load(self.put(**fields))
+                self.assertIsNone(r.moved_at)
+                self.assertIsNone(r.moved_from)
+
+    # criterion 2: due skips a slot whose moment is not after the moved moment
+
+    def test_a_slot_whose_first_pass_came_before_the_move_is_not_due(self):
+        r = routines.load(self.put_moved())
+        self.assertIsNone(routines.due(r, utc(2026, 11, 1, 6, 46)))
+        d = routines.due(r, utc(2026, 11, 1, 7, 1))
+        self.assertEqual((d.slot, d.at, d.action, d.late_by),
+                         ("2026-11-01T02:00", utc(2026, 11, 1, 7, 0), "run", timedelta(minutes=1)))
+
+    def test_a_slot_at_the_moved_moment_is_not_due_and_one_after_it_is(self):
+        # The 01:45 slot is 05:45 UTC. A moment at it means the slot ran; a moment a minute before it means it did not.
+        r = routines.load(self.put_moved())
+        now = utc(2026, 11, 1, 6, 46)
+        self.assertIsNone(routines.due(dataclasses.replace(r, moved_at=utc(2026, 11, 1, 5, 45)), now))
+        d = routines.due(dataclasses.replace(r, moved_at=utc(2026, 11, 1, 5, 44)), now)
+        self.assertEqual((d.slot, d.action), ("2026-11-01T01:45", "late"))
+
+    def test_an_on_time_slot_that_came_before_the_move_is_not_due(self):
+        # Chicago 01:01 (CDT) is 06:01 UTC, which is New York 01:01 (EST), the second pass. At 06:02 UTC the latest
+        # slot is 01:57, whose first pass was 05:57 UTC: 5 minutes ago, inside the grace, so it reads as on time.
+        # It came before the run, so it must not run.
+        p = self.put_moved(schedule={"days": "daily", "at": ["01:01", "01:57", "02:30"]},
+                           last_slot="2026-11-01T01:01")
+        r = routines.load(p)
+        self.assertEqual((r.last_slot, r.moved_at), ("2026-11-01T01:01", utc(2026, 11, 1, 6, 1)))
+        self.assertIsNone(routines.due(r, utc(2026, 11, 1, 6, 2)))
+        before = p.read_bytes()
+        out = self.gate(utc(2026, 11, 1, 6, 2))
+        self.assertEqual((out["routines"], out["errors"]), ([], []))
+        self.assertEqual(self.routine_cards(), [])
+        self.assertEqual(p.read_bytes(), before)
+
+    # criterion 3: nothing changes without a move
+
+    def test_the_same_schedule_with_no_move_gives_the_base_result(self):
+        want = routines.Due("2026-11-01T01:45", utc(2026, 11, 1, 5, 45), "late", timedelta(minutes=61))
+        for label, over in (("no last_slot_tz", {"last_slot_tz": None}), ("same zone", {"last_slot_tz": self.NY})):
+            with self.subTest(label):
+                r = routines.load(self.put_moved(**over))
+                self.assertEqual(routines.due(r, utc(2026, 11, 1, 6, 46)), want)
+                self.assertEqual(routines.slot_at(r), utc(2026, 11, 1, 5, 30))  # fold 0, as before
+
+    def test_a_move_west_still_runs_the_new_zones_slot(self):
+        # Eastern 09:00 is Pacific 06:00: the moment is 14:00 UTC and the Pacific 09:00 slot (17:00 UTC) is after it.
+        r = routines.load(self.put(tz=LA, last_slot="2026-11-10T09:00", last_slot_tz=self.NY))
+        self.assertEqual(routines.due(r, utc(2026, 11, 10, 17, 1)).action, "run")
+
+    # criterion 4: the clock-went-back check uses the real moment
+
+    def test_slot_at_is_the_moved_moment(self):
+        self.assertEqual(routines.slot_at(routines.load(self.put_moved())), self.MOMENT)
+
+    def test_the_clock_went_back_check_compares_the_moved_moment(self):
+        p = self.put_moved()
+        before = p.read_bytes()
+        out = self.gate(utc(2026, 11, 1, 6, 28))  # the moment is 2 minutes ahead: inside the grace
+        self.assertEqual((out["routines"], out["errors"]), ([], []))
+        self.assertEqual(p.read_bytes(), before)
+        for now in (utc(2026, 11, 1, 5, 30), utc(2026, 11, 1, 5, 0)):  # 60 and 90 minutes ahead
+            with self.subTest(now=now):
+                out = self.gate(now)
+                self.assertEqual(out["routines"], [])
+                msg = (f"{p}: last_slot 2026-11-01T01:30 in America/Chicago (2026-11-01T01:30 in {self.NY}) is "
+                       f"later than now ({cards.stamp(now)}); the clock may have gone back. Set last_slot to null "
+                       f"or an earlier slot to run it again.")
+                self.assertEqual(out["errors"], [{"routine": "digest", "file": str(p), "error": msg}])
+                self.assertEqual(p.read_bytes(), before)
+
+    # criterion 5: the gate run agrees
+
+    def test_the_gate_runs_no_slot_twice_across_the_move(self):
+        p = self.put_moved()
+        before = p.read_bytes()
+        out = self.gate(utc(2026, 11, 1, 6, 46))
+        self.assertEqual((out["routines"], out["errors"]), ([], []))
+        self.assertEqual(self.routine_cards(), [])
+        self.assertEqual(p.read_bytes(), before)
+        out = self.gate(utc(2026, 11, 1, 7, 1))
+        self.assertEqual([(f["slot"], f["action"]) for f in out["routines"]], [("2026-11-01T02:00", "run")])
+        self.assertEqual(out["errors"], [])
+        self.assertEqual([c["key"] for c in self.routine_cards()], ["digest@2026-11-01T02:00"])
+        obj = self.file()
+        self.assertEqual((obj["last_slot"], obj["last_slot_tz"]), ("2026-11-01T02:00", self.NY))
+        self.assertEqual(self.gate(utc(2026, 11, 1, 7, 2))["routines"], [])
+
+
+class FatalLineTest(GateCase):
+    def test_a_config_that_does_not_parse_writes_a_fatal_line_and_raises(self):
+        (self.data / "config.yaml").write_text("mode: [\n", encoding="utf-8")
+        with self.assertRaises(ConfigError) as cm:
+            self.gate(utc(2026, 11, 10, 9, 1))
+        lines = (self.data / "gate.log").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(lines[-1], f"2026-11-10T09:01:00Z fatal: {cm.exception}")
+        self.assertIn("config.yaml", str(cm.exception))
+
+    def test_an_unwritable_log_gives_the_same_error_and_nothing_else(self):
+        (self.data / "config.yaml").write_text("mode: [\n", encoding="utf-8")
+        with self.assertRaises(ConfigError) as first:
+            self.gate(utc(2026, 11, 10, 9, 1))
+        (self.data / "gate.log").unlink()
+        (self.data / "gate.log").mkdir()  # a folder where the log should be
+        with self.assertRaises(ConfigError) as cm:
+            self.gate(utc(2026, 11, 10, 9, 1))
+        self.assertIs(type(cm.exception), ConfigError)
+        self.assertEqual(str(cm.exception), str(first.exception))
+        self.assertNotIsInstance(cm.exception.__context__, OSError)
+        self.assertEqual(list((self.data / "gate.log").iterdir()), [])
+
+    def test_a_lock_that_cannot_be_taken_writes_a_fatal_line(self):
+        no_locks = OSError(errno.ENOLCK, "No locks available")
+        with mock.patch.object(gate.fcntl, "flock", side_effect=no_locks):
+            with self.assertRaises(ConfigError) as cm:
+                self.gate(utc(2026, 11, 10, 9, 1))
+        self.assertEqual((self.data / "gate.log").read_text(encoding="utf-8"),
+                         f"2026-11-10T09:01:00Z fatal: {cm.exception}\n")
+
+    def test_a_now_with_no_utc_stamp_still_gives_the_same_config_error(self):
+        # Year 1, 00:30 at UTC+1 is before the start of the calendar in UTC, so the log line has no time stamp.
+        (self.data / ".gate.lock").mkdir()  # the lock cannot be opened: a ConfigError
+        now = datetime(1, 1, 1, 0, 30, tzinfo=timezone(timedelta(hours=1)))
+        with self.assertRaises(ConfigError) as cm:
+            self.gate(now)
+        self.assertIs(type(cm.exception), ConfigError)
+        self.assertIn("cannot open the gate lock", str(cm.exception))
+        self.assertFalse((self.data / "gate.log").exists())
+
+    def test_no_data_folder_writes_nothing(self):
+        missing = self.data / "nowhere"
+        with self.assertRaises(ConfigError):
+            gate.run(missing, utc(2026, 11, 10, 9, 1))
+        self.assertFalse(missing.exists())
+
+    def test_an_os_error_from_the_data_folder_writes_a_fatal_line(self):
+        (self.data / "gate.json").mkdir()  # a folder where the heartbeat should be: writing it fails
+        with self.assertRaises(ConfigError) as cm:
+            self.gate(utc(2026, 11, 10, 9, 1))
+        self.assertIsInstance(cm.exception.__cause__, OSError)
+        self.assertIn("cannot use the data folder", str(cm.exception))
+        lines = (self.data / "gate.log").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(lines[-1], f"2026-11-10T09:01:00Z fatal: {cm.exception}")
+
+    def test_a_held_lock_is_not_fatal(self):
+        import fcntl
+        fd = os.open(str(self.data / ".gate.lock"), os.O_CREAT | os.O_RDWR, 0o644)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        self.assertTrue(self.gate(utc(2026, 11, 10, 9, 1))["locked"])
+        self.assertFalse((self.data / "gate.log").exists())
 
 
 if __name__ == "__main__":

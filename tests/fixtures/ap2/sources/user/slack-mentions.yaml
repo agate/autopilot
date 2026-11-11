@@ -1,0 +1,5 @@
+# Appendix A of docs/v2/design.md: the user's change to the built-in Slack mentions source.
+extends: slack-mentions
+read:
+  every: 10m
+  skip_channels: ["#random", "#social"]
