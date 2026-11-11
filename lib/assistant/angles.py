@@ -605,9 +605,18 @@ def _examples(files: list) -> str:
     return shown + (" (+%d more)" % (len(files) - 3) if len(files) > 3 else "")
 
 
+def _matches(angle: Angle, files: list, found: dict) -> bool:
+    """Whether `angle` matches a PR that changes `files`, whose PR kinds are `found`, without writing why."""
+    if angle.when == "always":
+        return True
+    return (any(kind in found for kind in angle.when.get("kinds", []))
+            or any(glob_match(pattern, f) for pattern in angle.when.get("paths", []) for f in files))
+
+
 def _why(angle: Angle, files: list, shown: dict) -> Optional[str]:
     """Why `angle` matches the PR, in one line, or None when it does not. `shown` is each PR kind's examples, as
-    `_examples` writes them: written once per pick, since a table may hold any number of kinds-only angles."""
+    `_examples` writes them: written once per pick, and a why only for the angles picked, since a table may hold
+    any number of kinds-only angles and each why holds up to three kinds' examples."""
     if angle.when == "always":
         return "always"
     # At most three reasons are written out; the rest are only counted.
@@ -654,16 +663,11 @@ def pick(table: Table, files: list, mode: str, changed_lines: Optional[int] = No
     most = count(files, mode, changed_lines)
     first = table.get(CORRECTNESS)
     out = [_picked(first, "always")]
-    shown = {k: _examples(v) for k, v in kinds(files).items()}
-    matched = []
-    for a in table.angles:
-        if a.name == CORRECTNESS:
-            continue
-        why = _why(a, files, shown)
-        if why:
-            matched.append((-a.layer, a.pos, a, why))
+    found = kinds(files)
+    matched = [(-a.layer, a.pos, a) for a in table.angles if a.name != CORRECTNESS and _matches(a, files, found)]
     matched.sort(key=lambda m: (m[0], m[1]))
-    out += [_picked(a, why) for _, _, a, why in matched[:most - 1]]
+    shown = {k: _examples(v) for k, v in found.items()}
+    out += [_picked(a, _why(a, files, shown)) for _, _, a in matched[:most - 1]]
     for name in FALLBACK:
         if len(out) >= MIN_COUNT:
             break

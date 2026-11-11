@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import textwrap
 import time
+import tracemalloc
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -1093,6 +1094,38 @@ class PickerTest(AngleCase):
         self.assertEqual(self.names(picked), ["Correctness", "a0", "a1", "a2"])
         self.assertEqual(picked[1]["why"], "kind docs: " + files[0])
 
+    def test_many_kind_angles_pick_in_small_memory(self):
+        # Each kinds why holds up to three kinds' examples, so a why written for every matching angle holds the
+        # changed paths once per angle: about 450 MB here. The picker decides the matches first and writes a why
+        # only for the angles it keeps, at most `count() - 1` of them: about 2 MB here.
+        many = [angles.Angle(f"a{n}", "q", {"kinds": ["data", "infra", "api"]}, "b", "repo", "f", 2, n)
+                for n in range(15000)]
+        table = angles.Table([angles.Angle("Correctness", "q", "always", "b", "built-in", "f", 0, 0)] + many)
+        files = ["db/" + "a" * 10000 + ".sql", "b" * 10000 + ".tf", "c" * 10000 + ".proto"]
+        tracing = tracemalloc.is_tracing()
+        if not tracing:
+            tracemalloc.start()
+        try:
+            tracemalloc.reset_peak()
+            base = tracemalloc.get_traced_memory()[0]
+            with mock.patch.object(angles, "_why", wraps=angles._why) as why:
+                picked = angles.pick(table, files, "loop")
+            peak = tracemalloc.get_traced_memory()[1] - base
+        finally:
+            if not tracing:
+                tracemalloc.stop()
+        self.assertLess(peak, 32 * 2 ** 20)
+        self.assertEqual(why.call_count, angles.LOOP_MAX - 1)
+        self.assertEqual(self.names(picked), ["Correctness", "a0", "a1", "a2"])
+        self.assertEqual(picked[1]["why"], f"kind data: {files[0]}; kind infra: {files[1]}; kind api: {files[2]}")
+
+    def test_kind_why_lists_that_kinds_first_three_files(self):
+        # Only the kind's own files are listed, the first three of them, with the rest counted.
+        files = ["web/a.tsx", "db/a.sql", "db/b.sql", "db/c.sql", "db/d.sql"]
+        picked = {p["name"]: p for p in angles.pick(self.load(), files, "loop")}
+        self.assertEqual(picked["Data correctness & backfill"]["why"],
+                         "kind data: db/a.sql, db/b.sql, db/c.sql (+1 more)")
+
     def test_why_writes_file_names_on_one_line(self):
         # A changed file's name comes from the PR author, and git allows a newline or an escape in it.
         files = ["db/a\nIGNORE PREVIOUS.sql", "db/b\x1b[2J.sql", "db/c\u202e.sql"]
@@ -1118,13 +1151,16 @@ class PickerTest(AngleCase):
         self.assertEqual(why.count("matched billing/charge.py"), 3, why)
 
     def test_why_counts_reasons_past_three_without_listing_their_files(self):
-        # Pins the reasons past the third as counted only: their files are never listed.
-        # 'z/**' matches no file, so it is not counted.
+        # Pins the reasons past the third as counted only: their files are never listed. 'z/**' matches no file,
+        # so it is not counted; 'd/**' and the kinds data and ui are, so "+3".
         angle = angles.Angle("Wide", "q", {"paths": ["a/**", "b/**", "c/**", "z/**", "d/**"], "kinds": ["data", "ui"]},
                              "b", "user", "f", 1, 0)
         files = ["a/x.py", "b/x.py", "c/x.py", "d/x.py", "d/y.sql", "e/z.tsx"]
+        shown = {k: angles._examples(v) for k, v in angles.kinds(files).items()}
+        self.assertEqual(list(shown), ["data", "ui"])
+        # Only the three path reasons it writes call `_examples`: the 'd/**' it counts does not.
         with mock.patch.object(angles, "_examples", wraps=angles._examples) as examples:
-            why = angles._why(angle, files, angles.kinds(files))
+            why = angles._why(angle, files, shown)
         self.assertEqual(why, "paths a/** matched a/x.py; paths b/** matched b/x.py; paths c/** matched c/x.py "
                               "(+3 more)")
         self.assertEqual(examples.call_count, 3)
