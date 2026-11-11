@@ -142,11 +142,11 @@ class Engine:
         self._check_languages(src)
         _check_fill(src, None)
         done = self._run(src, dry_run)
-        raw = None if dry_run else self._save_raw(src, done.stdout)
         if done.returncode != 0:
             last = done.stderr.decode("utf-8", "replace").strip().splitlines()[-1:] or ["no output on stderr"]
-            saved = f" (output saved as {raw})" if raw else ""
-            raise SourceError(f"{src.name}: read.run exited with {done.returncode}: {last[0]}{saved}")
+            saved, failed = ("", None) if dry_run else self._keep_raw(src, done.stdout, "output")
+            raise SourceError(f"{src.name}: read.run exited with {done.returncode}: {last[0]}{saved}") from failed
+        raw = None if dry_run else self._save_raw(src, done.stdout)  # nothing else failed: a save error is the error
         return self._process(src, done.stdout, raw, dry_run, None)
 
     def read_saved(self, name: str, raw_path, records: Optional[list] = None, dry_run: bool = False) -> dict:
@@ -229,16 +229,16 @@ class Engine:
                 proc.stderr.close()
                 proc.wait()
                 del out[MAX_OUTPUT:]
-                part = "" if dry_run else self._save_raw(src, bytes(out))
+                what = "output" if code is not None else "partial output"
+                saved, failed = ("", None) if dry_run else self._keep_raw(src, bytes(out), what)
                 if ended == "full":
-                    saved = f" (partial output saved as {part})" if part else ""
-                    raise SourceError(f"{src.name}: read.run printed more than {MAX_OUTPUT} bytes; stopped{saved}")
+                    raise SourceError(f"{src.name}: read.run printed more than {MAX_OUTPUT} bytes; "
+                                      f"stopped{saved}") from failed
                 if code is not None:
-                    saved = f" (output saved as {part})" if part else ""
                     raise SourceError(f"{src.name}: read.run exited with {code}, but something it started still "
-                                      f"held its output open after {timeout} seconds; stopped{saved}")
-                saved = f" (partial output saved as {part})" if part else ""
-                raise SourceError(f"{src.name}: read.run took longer than {timeout} seconds; stopped{saved}")
+                                      f"held its output open after {timeout} seconds; stopped{saved}") from failed
+                raise SourceError(f"{src.name}: read.run took longer than {timeout} seconds; stopped{saved}") \
+                    from failed
         finally:
             # Ctrl-C last, so a new one cannot cut the others short; a failed restore never hides the read's error.
             for signum, handler in reversed(list(previous.items())):
@@ -276,6 +276,17 @@ class Engine:
         except OSError as e:
             raise SourceError(f"{src.name}: cannot save the raw output in {folder}: {e}") from e
         return path.relative_to(self.data).as_posix()
+
+    def _keep_raw(self, src: sources.Source, raw: bytes, what: str) -> tuple:
+        """Save the raw output of a read that fails anyway. Return (the note for the read's own error, the save
+        failure or None): the note names the file `what` was saved as, or says why it was not, so a failed save
+        (a full disk) never hides why the read failed."""
+        try:
+            path = self._save_raw(src, raw)
+        except SourceError as e:
+            why = str(e).split(": ", 1)[1]  # without the source's name, which the read's error starts with
+            return f" (the {what} was not saved: {why})", e
+        return f" ({what} saved as {path})", None
 
     def _process(self, src, raw_bytes: bytes, raw: Optional[str], dry_run: bool, records) -> dict:
         _check_fill(src, records)
@@ -384,7 +395,13 @@ class Engine:
         self._check_languages(src)
         dropped = list(dropped or [])
         store = Store(self.data, cfg=self.cfg, clock=self.clock)
-        existing = self._cards_by_key(store, dry_run)
+        written = {}  # the ids of the cards this read added or updated, in item order (a dict keeps one of each)
+        try:
+            existing = self._cards_by_key(store, dry_run)
+        except CardError as err:
+            if dry_run:
+                raise  # it wrote nothing and saved no raw file: there is nothing more to say
+            raise self._store_failed(err, written, raw) from err
         items = []
         for e in entries:
             record = e["record"]
@@ -421,10 +438,11 @@ class Engine:
                     try:
                         added = store.add(new, by=f"source:{src.name}")
                     except CardError as err:
-                        if isinstance(err.__cause__, (OSError, sqlite3.Error)):
-                            raise  # the store itself failed, not this one card
+                        if isinstance(err.__cause__, (OSError, sqlite3.Error)):  # the store, not this one card
+                            raise self._store_failed(err, written, raw) from err
                         dropped.append({"item": e["item"], "reason": f"new card with key {key}: {err}"})
                         continue
+                    written.setdefault(added["id"])
                     out["card"] = added["id"]
                     existing[key] = added
             else:
@@ -437,10 +455,11 @@ class Engine:
                         existing[key] = store.update(old["id"], changes, by=f"source:{src.name}",
                                                      did=f"read {src.name}")
                     except CardError as err:
-                        if isinstance(err.__cause__, (OSError, sqlite3.Error)):
-                            raise  # the store itself failed, not this one card
+                        if isinstance(err.__cause__, (OSError, sqlite3.Error)):  # the store, not this one card
+                            raise self._store_failed(err, written, raw) from err
                         dropped.append({"item": e["item"], "reason": f"card {old['id']}: {err}"})
                         continue
+                    written.setdefault(old["id"])
                 elif not same:
                     try:
                         cards.validate({**old, **changes}, self.languages)  # as store.update checks it
@@ -452,6 +471,14 @@ class Engine:
             items.append(out)
         return {"source": src.name, "dry_run": dry_run, "raw": raw, "read_at": cards.stamp(self.clock()),
                 "items": items, "dropped": dropped}
+
+    @staticmethod
+    def _store_failed(err: CardError, written: dict, raw: Optional[str]) -> CardError:
+        """The error of a card store that failed mid-read (a file or index error): the store's own message, then
+        the cards this read already added or updated and the raw file, since the read report is not written."""
+        done = f"already written by this read: {', '.join(written)}" if written else "no card written yet"
+        where = f"raw output saved as {raw}" if raw else "no raw output saved"
+        return CardError(f"{err} ({done}; {where})")
 
     @staticmethod
     def _cards_by_key(store: Store, dry_run: bool) -> dict:

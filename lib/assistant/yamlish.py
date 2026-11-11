@@ -103,36 +103,66 @@ def _lines(text: str) -> list:
 
 def _strip_comment(s: str, no: int) -> str:
     """Cut a trailing comment. A quote opens a string only where a value or key starts (see `_value_start`), so the
-    quote in `don't`, `rock 'n roll`, `well-'known` or `Bob, 'the builder` stays plain text."""
+    quote in `don't`, `rock 'n roll`, `well-'known` or `Bob, 'the builder` stays plain text.
+
+    One pass: what `_value_start` needs about the text before `i` is kept as the scan goes (where the leading `- ` /
+    `? ` indicators end, and the last two characters that are not a space or tab), so a long line costs time in
+    step with its length, not with its length squared."""
     i, n, depth, quote_end = 0, len(s), 0, -1
+    lead = _lead_end(s)
+    last = before_last = -1  # the index of the last character before `i` that is not a space or tab, and the one before
     while i < n:
         c = s[i]
         if c == "#" and (i == 0 or s[i - 1] in " \t"):
             return s[:i]
-        if c in "\"'" and _value_start(s[:i], depth, quote_end):
+        if c in "\"'" and _value_start(s, i, depth, quote_end, lead, last, before_last):
             i = quote_end = _quote_end(s, i, no)
-        elif c in "[{" and (depth or _value_start(s[:i], 0, quote_end)):
+        elif c in "[{" and (depth or _value_start(s, i, 0, quote_end, lead, last, before_last)):
             depth += 1
         elif c in "]}" and depth:
             depth -= 1
+        if s[i] not in " \t":  # s[i] is the closing quote when a string was skipped
+            last, before_last = i, last
         i += 1
     return s
 
 
-def _value_start(before: str, depth: int, quote_end: int) -> bool:
-    """True when a value or key may start after the text `before`. Outside brackets (`depth` 0): at the line's
-    start, after only the leading block indicators `- ` / `? `, or after `:` and a space or tab. Inside a flow collection: after
-    `[`, `{`, `,`, or a `:` followed by a space or tab, or a `:` that follows the closing quote at `quote_end`
-    with only spaces or tabs between (JSON style `"a":"b"`, `"a" :"b"`)."""
+def _lead_end(s: str) -> int:
+    """How far the leading block indicators go: the length of the longest start of `s` that is `- ` / `? ` groups
+    (each an indicator and one or more spaces), or the start of one."""
+    j, n = 0, len(s)
+    while j < n:
+        c = s[j]
+        if c in "-?" and (j == 0 or s[j - 1] == " "):
+            j += 1
+        elif c == " " and j > 0:
+            j += 1
+        else:
+            break
+    return j
+
+
+def _value_start(s: str, i: int, depth: int, quote_end: int, lead: int, last: int, before_last: int) -> bool:
+    """True when a value or key may start at s[i], from the text before it. Outside brackets (`depth` 0): at the
+    line's start, after only the leading block indicators `- ` / `? `, or after `:` and a space or tab. Inside a flow
+    collection: after `[`, `{`, `,`, or a `:` followed by a space or tab, or a `:` that follows the closing quote at
+    `quote_end` with only spaces or tabs between (JSON style `"a":"b"`, `"a" :"b"`).
+
+    `lead` is where the leading indicators end (`_lead_end`); `last` and `before_last` are the indexes of the last
+    two characters before `i` that are not a space or tab (-1 when there is none). Nothing before `i` is copied or
+    scanned again."""
+    spaced = last < i - 1  # spaces or tabs come between the last such character and s[i]
     if not depth:
-        return re.fullmatch(r"(?:[-?] +)*", before) is not None or re.search(r":[ \t]+\Z", before) is not None
-    stripped = before.rstrip(" \t")
-    last = stripped[-1:]
-    if last in ("[", "{", ","):
-        return True
-    if last != ":":
+        if i <= lead and (i == 0 or s[i - 1] == " "):
+            return True  # the text before is only `- ` / `? ` groups (or nothing)
+        return last >= 0 and s[last] == ":" and spaced
+    if last < 0:
         return False
-    return stripped != before or len(stripped[:-1].rstrip(" \t")) - 1 == quote_end
+    if s[last] in "[{,":
+        return True
+    if s[last] != ":":
+        return False
+    return spaced or before_last == quote_end
 
 
 def _quote_end(s: str, i: int, no: int) -> int:
