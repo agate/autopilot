@@ -1425,7 +1425,22 @@ Calls the author made without asking (check them):
     ports picked under the lock (when another start took the planned range meanwhile, the next free one; the tools
     found are kept, since the ports do not change which tools a folder loads). A folder that changed meanwhile (a
     parked record that moved) refuses the start ("start it again"): its tools were found elsewhere. An in-place
-    resume of a dead or parked worker still discovers under the lock, since `check` holds it for the whole pass.
+    resume of a dead or parked worker discovers outside the lock too: `check` runs in three steps. Under the lock
+    it classifies and acts on every worker as before, except that a resume (dead with its one resume left, or
+    parked and due) is only planned, after the shadow-mode check; with the lock free it checks each planned
+    resume's folder and data folder and lists its tools (a failure is kept, not raised); under the lock again it
+    finds each record by card and role and resumes it (floor, stop, launch, record), or runs today's failure path
+    (a dead worker's one resume counted, a parked worker stopped). A record that changed meanwhile (gone, a new
+    short id or folder, a close started, or a classification that no longer says dead with its resume left or
+    parked and due) is not touched: its line says it changed while its tools were listed, its floor is not
+    rewritten, and the next check looks at it again. A Ctrl-C while the tools are listed starts no resume; the
+    first step's changes are already written back.
+    **[decided by the builder]** The re-check classifies the record as it is under the second lock (its fields,
+    result and question files are read again) with the session listing of the first step, not a new one: a dead
+    session does not come back, and any new session puts a new short id on the record, which the re-check
+    compares. This saves one `claude agents` call per pass that resumes.
+    **[decided by the builder]** A changed record is skipped with a note and no count, also when its discovery
+    failed: the failure belonged to the old record, so the new one's `resumes` and slot are left alone.
     The outward MCP tools are always denied. If they cannot be listed (no init event, claude failed, could not
     start or timed out), nothing starts: the `WorkerError` says to list them in `projects/<name>.yaml` `tools`. On a dead
     worker's resume that counts as its one resume; a parked worker is stopped as when its resume cannot start. An in-place resume first

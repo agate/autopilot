@@ -1046,7 +1046,8 @@ class LifecycleTest(WorkerCase):
         self.assertEqual((recs[b["card"]]["short_id"], recs[b["card"]]["resumes"]), (b["short_id"], 0))
 
     def test_an_interrupted_check_still_writes_back_what_it_already_did(self):
-        # Neither project lists tools, so each in-place resume runs a discovery; B's is interrupted (Ctrl-C).
+        # Neither project lists tools, so each in-place resume runs a discovery, with the worker list unlocked,
+        # after every worker is looked at; B's is interrupted (Ctrl-C).
         w = self.workers()
         a = self.start(w)
         b_wt = self.tmp / "worktree-b"
@@ -1065,12 +1066,13 @@ class LifecycleTest(WorkerCase):
             with self.assertRaises(KeyboardInterrupt):
                 w.check()
         recs = {r["card"]: r for r in resources.Registry(self.data).read()}
-        self.assertNotEqual(recs[a["card"]]["short_id"], a["short_id"])  # A's copy, already launched, is on record
-        self.assertEqual(recs[a["card"]]["resumes"], 1)
-        self.assertEqual((recs[b["card"]]["short_id"], recs[b["card"]]["resumes"]), (b["short_id"], 0))
-        # The pass stops at the interrupt: C, after B, is not resumed.
-        self.assertEqual((recs[c["card"]]["short_id"], recs[c["card"]]["resumes"]), (c["short_id"], 0))
-        self.assertEqual(len(self.bg_calls()), 4)  # the three starts and A's resume only
+        # The pass stops at the interrupt, before any resume starts: A, whose tools were already listed, is not
+        # resumed either, and C, after B, runs no discovery. Every record is written back as it was.
+        for x in (a, b, c):
+            self.assertEqual((recs[x["card"]]["short_id"], recs[x["card"]]["resumes"]), (x["short_id"], 0))
+        self.assertEqual(len(self.bg_calls()), 3)  # the three starts only
+        self.assertEqual(len(self.discovery_calls()), 4)  # the three starts' and A's
+        self.assertEqual([o["did"] for o in w.check()], ["resumed"] * 3)  # the next check resumes all three
 
     def test_a_result_file_that_vanishes_before_its_stat_is_not_newer(self):
         w = self.workers()
@@ -2430,6 +2432,162 @@ class DiscoveryOutsideTheLockTest(WorkerCase):
         f = transcripts.run_dir(self.data, cid) / "settings-implement.json"
         self.assertEqual(json.loads(f.read_text())["env"]["AP2_PORTS"], "7210-7219")
         self.assertIn("Your port range: 7210-7219.", self.bg_calls()[0]["argv"][-1])
+
+    # An in-place resume inside `check()` (a dead worker, or a parked one whose window reset) finds its tools with
+    # the lock free too, then checks its record again under the lock before it writes the floor and launches.
+
+    def dead(self, w):
+        a = self.start(w)  # no project: its tools are discovered on every floor written
+        self.drop_agent(a["short_id"])
+        return a
+
+    def parked_and_due(self, w):
+        a = self.start(w)
+        w.park(a["card"], "implement", "x", usage_file=usage_file(self.tmp / "u.json", 95))
+        self.clock.advance(4 * 60)  # past the 12:00 reset and its 5 minutes
+        return a, usage_file(self.tmp / "fresh.json", 3, resets_at="2026-01-05T17:00:00+00:00", fetched=self.clock())
+
+    def test_a_dead_workers_resume_discovers_with_the_worker_list_unlocked(self):
+        w = self.workers()
+        a = self.dead(w)
+        seen = []
+
+        def discover(cwd, env):
+            seen.append(self.lock_is_free())
+            return ["mcp__Tracker__send_message"], []
+
+        with mock.patch.object(w, "_discover", side_effect=discover):
+            out = w.check()
+        self.assertEqual(seen, [True])
+        self.assertEqual((out[0]["state"], out[0]["did"]), ("dead", "resumed"))
+        self.assertIn("mcp__Tracker__send_message", self.deny(a["card"]))
+        rec = resources.Registry(self.data).read()[0]
+        self.assertEqual((rec["resumes"], rec["ports"]), (1, a["ports"]))
+        self.assertEqual(self.bg_calls()[-1]["argv"][1:3], ["--resume", a["session_id"]])
+
+    def test_a_parked_workers_resume_discovers_with_the_worker_list_unlocked(self):
+        w = self.workers()
+        a, fresh = self.parked_and_due(w)
+        seen = []
+
+        def discover(cwd, env):
+            seen.append(self.lock_is_free())
+            return ["mcp__Tracker__send_message"], []
+
+        with mock.patch.object(w, "_discover", side_effect=discover):
+            out = w.check(usage_file=fresh)
+        self.assertEqual(seen, [True])
+        self.assertEqual((out[0]["state"], out[0]["did"]), ("parked", "resumed"))
+        self.assertIn("mcp__Tracker__send_message", self.deny(a["card"]))
+        rec = resources.Registry(self.data).read()[0]
+        self.assertEqual((rec["resumes"], rec["parked"], rec["ports"]), (0, None, a["ports"]))
+
+    def replaced_during_the_discovery(self, w, a, fail=False, **check):
+        """Another writer replaces `a`'s record (a new session, as a `start --resume` makes) and its floor while
+        `check()` lists the resume's tools; return check's line and that writer's record."""
+        settings = transcripts.run_dir(self.data, a["card"]) / "settings-implement.json"
+        theirs = {}
+
+        def discover(cwd, env):
+            self.assertTrue(self.lock_is_free())  # else the lock below would wait forever
+            with resources.Registry(self.data).locked() as records:
+                rec = next(r for r in records if r["card"] == a["card"])
+                rec.update(short_id="other1", session_id="", parked=None, resumes=0)
+                theirs.update(rec)
+            settings.write_text('{"theirs": true}')  # the other writer's floor for its running session
+            if fail:
+                raise RuntimeError("no init event (claude exited 1; is claude logged in?)")
+            return [], []
+
+        n = len(self.bg_calls())
+        with mock.patch.object(w, "_discover", side_effect=discover):
+            out = w.check(**check)[0]
+        self.assertEqual(len(self.bg_calls()), n)  # no launch
+        self.assertNotIn(["stop", "other1"], [c["argv"] for c in self.calls()])  # the other session keeps running
+        self.assertEqual(settings.read_text(), '{"theirs": true}')  # its floor is not rewritten
+        self.assertIn("changed while its tools were listed", out["note"])
+        self.assertEqual(resources.Registry(self.data).read(), [theirs])
+        return out
+
+    def test_a_dead_workers_record_replaced_during_the_discovery_is_not_resumed(self):
+        w = self.workers()
+        out = self.replaced_during_the_discovery(w, self.dead(w))
+        self.assertEqual((out["state"], out["did"]), ("dead", "nothing"))
+
+    def test_a_parked_workers_record_replaced_during_the_discovery_is_not_resumed(self):
+        w = self.workers()
+        a, fresh = self.parked_and_due(w)
+        out = self.replaced_during_the_discovery(w, a, usage_file=fresh)
+        self.assertEqual((out["state"], out["did"]), ("parked", "nothing"))
+        self.assertIsNone(self.get(a["card"]).get("ask"))  # not stopped as a worker that cannot resume
+
+    def test_a_failed_discovery_for_a_record_replaced_meanwhile_counts_nothing_on_the_new_record(self):
+        w = self.workers()
+        out = self.replaced_during_the_discovery(w, self.dead(w), fail=True)
+        self.assertNotIn("cannot list the session's tools", out["note"])
+        self.assertEqual(resources.Registry(self.data).read()[0]["resumes"], 0)
+
+    def test_a_record_ended_during_the_discovery_is_not_resumed(self):
+        w = self.workers()
+        a = self.dead(w)
+
+        def discover(cwd, env):
+            self.assertTrue(self.lock_is_free())
+            w.end(a["card"], "implement")  # another process ends the worker meanwhile
+            return [], []
+
+        n = len(self.bg_calls())
+        with mock.patch.object(w, "_discover", side_effect=discover):
+            out = w.check()[0]
+        self.assertEqual((out["state"], out["did"]), ("dead", "nothing"))
+        self.assertIn("changed while its tools were listed", out["note"])
+        self.assertEqual(len(self.bg_calls()), n)
+        self.assertEqual(resources.Registry(self.data).read(), [])
+        self.assertEqual(self.get(a["card"])["sessions"]["implement"]["state"], "ended")
+
+    def test_a_start_that_lands_during_the_discovery_is_kept(self):
+        w = self.workers()
+        a = self.dead(w)
+        other = self.add_card()
+        started = {}
+
+        def discover(cwd, env):
+            self.assertTrue(self.lock_is_free())
+            if not started:
+                started["rec"] = None
+                started["rec"] = w.start(other, "implement", cwd=self.wt)  # its own discovery runs here too
+            return [], []
+
+        with mock.patch.object(w, "_discover", side_effect=discover):
+            out = w.check()
+        self.assertEqual([o["did"] for o in out], ["resumed"])
+        recs = {r["card"]: r for r in resources.Registry(self.data).read()}
+        self.assertEqual(set(recs), {a["card"], other})
+        self.assertEqual(recs[a["card"]]["ports"], a["ports"])  # the resumed worker keeps its own ports
+        self.assertEqual(recs[other], started["rec"])
+        self.assertNotEqual(recs[other]["ports"], a["ports"])
+        resumed = self.bg_calls()[-1]
+        self.assertEqual(resumed["argv"][1:3], ["--resume", a["session_id"]])
+        self.assertEqual(resumed["env"]["AP2_PORTS"], f"{a['ports'][0]}-{a['ports'][1]}")
+
+    def test_a_ctrl_c_during_the_discovery_starts_no_resume_and_writes_every_record_back(self):
+        w = self.workers()
+        a, b = self.dead(w), self.start(w)
+        self.set_agent(b["short_id"], status="idle")  # its idle clock starts in the first locked step
+
+        def discover(cwd, env):
+            raise KeyboardInterrupt
+
+        n = len(self.bg_calls())
+        with mock.patch.object(w, "_discover", side_effect=discover):
+            with self.assertRaises(KeyboardInterrupt):
+                w.check()
+        self.assertEqual(len(self.bg_calls()), n)
+        self.assertNotIn(["stop", a["short_id"]], [c["argv"] for c in self.calls()])
+        recs = {r["card"]: r for r in resources.Registry(self.data).read()}
+        self.assertEqual((recs[a["card"]]["short_id"], recs[a["card"]]["resumes"]), (a["short_id"], 0))
+        self.assertEqual(recs[b["card"]]["idle_since"], "2026-01-05T09:00:00Z")
+        self.assertEqual(w.check()[0]["did"], "resumed")  # the next check resumes it
 
 
 class ShortIdOnRecordTest(WorkerCase):
