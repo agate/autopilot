@@ -1,14 +1,15 @@
-"""Card files, restore points and input that parse and check but are too deep for the store to copy or write.
+"""Card files, restore points and input nested too deeply for the store to copy or write.
 
 `json.loads` and the check's `json.dumps` (no indent) run in C and follow a value much deeper than `copy.deepcopy`
-and `json.dump(..., indent=2)`, which are pure Python on 3.12 and 3.13 and stop at the recursion limit. So a card
-can be read and checked, and then break the store's copy or its writer with a bare RecursionError. The store now
-refuses such a card where it first meets it, with a TooDeepError naming its file, before anything is written.
+and `json.dump(..., indent=2)`, which are pure Python on 3.12 and 3.13 and stop at the recursion limit. Where they
+stop depends on how deep the caller's stack already is, so the store does not try them: it refuses any card, card
+file, restore point or `changes` whose dicts and lists nest past MAX_DEPTH (the card itself is depth 1), with a
+TooDeepError naming its file, before anything is written. That bound is far under where the copy and the writer
+stop, so what one call writes every other call reads, however deep its stack.
 
 DEPTH parses and checks on 3.9-3.14 and breaks `copy.deepcopy` on each (about 500 levels at the default recursion
-limit). No depth breaks only the indented writer (the copy always stops first), so that half is proven by making
-`json.dumps` in the store raise the RecursionError it raises there. Each deep value is built as text (never by
-recursion here), the recursion limit is never changed, and every test uses a temp folder and an injected clock.
+limit). Each deep value is built as text (never by recursion here), the recursion limit is never changed, and every
+test uses a temp folder and an injected clock. Extra stack is added by calling through plain frames.
 """
 from __future__ import annotations
 
@@ -20,18 +21,22 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest import mock
 
 from tests.helpers import ROOT  # noqa: F401  (puts lib/ on sys.path)
 from tests.test_ap2_deep_files import DeepCase, card
 from assistant import cards, gate, restore
 from assistant.cards import CardError
+from assistant.store import MAX_DEPTH, check_writable
 
 UTC = timezone.utc
 DEPTH = 800
 DEEP = "[" * DEPTH + "]" * DEPTH
-MARK = "too deep to copy or write"  # the field value the patched copy or writer refuses
-TOO_DEEP = RecursionError("maximum recursion depth exceeded")
+FRAMES = 300  # extra stack a deeper caller has
+
+
+def lists(n: int) -> str:
+    """JSON text of `n` lists, each inside the one before."""
+    return "[" * n + "]" * n
 
 
 def deep_value():
@@ -43,36 +48,14 @@ def with_x(c: dict, text: str) -> str:
     return json.dumps(c)[:-1] + ', "x": ' + text + "}"
 
 
-def marked(obj) -> bool:
-    return isinstance(obj, dict) and obj.get("x") == MARK
+def deeper(frames: int, call):
+    """`call()`, run `frames` Python frames deeper than the caller."""
+    return call() if frames <= 0 else deeper(frames - 1, call)
 
 
-def copy_breaks():
-    """`copy.deepcopy` raises the RecursionError a value too deep raises, for a dict whose `x` is MARK."""
-    real = copy.deepcopy
-
-    def deepcopy(obj, *a, **kw):
-        if marked(obj):
-            raise TOO_DEEP
-        return real(obj, *a, **kw)
-
-    return mock.patch("assistant.store.copy.deepcopy", side_effect=deepcopy)
-
-
-def writer_breaks():
-    """The indented `json.dumps` raises the RecursionError a value too deep raises, for a dict whose `x` is MARK;
-    the checks' unindented dumps still run as usual."""
-    real = json.dumps
-
-    def dumps(obj, *a, **kw):
-        if kw.get("indent") is not None and marked(obj):
-            raise TOO_DEEP
-        return real(obj, *a, **kw)
-
-    return mock.patch("assistant.store.json.dumps", side_effect=dumps)
-
-
-BREAKS = {"copy": copy_breaks, "indented writer": writer_breaks}
+# The card and the `changes` holding `x` are depth 1, so `x` holds one level fewer than the bound.
+AT_BOUND = lists(MAX_DEPTH - 1)
+PAST_BOUND = lists(MAX_DEPTH)
 
 
 class DepthTest(unittest.TestCase):
@@ -90,6 +73,15 @@ class WriterCase(DeepCase):
         card_id, point, path = self.card_with_point()
         path.write_text(with_x(self.store.get(card_id), DEEP), encoding="utf-8")
         return card_id, point, path
+
+    def point_with_x(self, point, text):
+        """Put a field `x` holding the JSON `text` into the card of restore point `point`; returns its file."""
+        point_path = restore.path(self.data, point)
+        saved = json.loads(point_path.read_text(encoding="utf-8"))
+        point_path.write_text(json.dumps(saved).replace('"card": {', '"card": {"x": ' + text + ", ", 1),
+                              encoding="utf-8")
+        self.assertIn("x", restore.load(self.data, point)["card"])  # the point still loads
+        return point_path
 
     def calls(self, card_id):
         return {"get": lambda: self.store.get(card_id),
@@ -120,28 +112,10 @@ class ReadTest(WriterCase):
             (self.data / "index.sqlite").unlink()
             self.assert_refused(lambda: self.store.search("vendor"), want)  # met by the rebuild
 
-    def test_every_read_refuses_a_card_file_the_copy_or_the_indented_writer_breaks_on(self):
-        card_id, _, path = self.card_with_point()
-        path.write_text(with_x(self.store.get(card_id), json.dumps(MARK)), encoding="utf-8")
-        want = f"{path}: not a card file: card is nested too deeply to copy or write"
-        for broken, breaks in BREAKS.items():
-            for name, call in self.calls(card_id).items():
-                with self.subTest(broken=broken, call=name):
-                    with breaks():
-                        self.assert_refused(call, want)
-
 
 # -- criteria 2 and 3: restore writes no orphan point --------------------------------------------------------------
 
 class RestoreTest(WriterCase):
-    def point_with_x(self, point, text):
-        point_path = restore.path(self.data, point)
-        saved = json.loads(point_path.read_text(encoding="utf-8"))
-        point_path.write_text(json.dumps(saved).replace('"card": {', '"card": {"x": ' + text + ", ", 1),
-                              encoding="utf-8")
-        self.assertIn("x", restore.load(self.data, point)["card"])  # the point still loads
-        return point_path
-
     def test_a_point_whose_card_is_too_deep_to_copy_is_refused_naming_the_point(self):
         card_id, point, path = self.card_with_point()
         point_path = self.point_with_x(point, DEEP)
@@ -151,16 +125,6 @@ class RestoreTest(WriterCase):
         self.assertEqual(self.points(), points)  # no orphan point in restore/
         self.assertEqual(path.read_bytes(), card_file)
         self.assertEqual(self.store.get(card_id)["lane"], "done")
-
-    def test_a_point_the_copy_or_the_indented_writer_breaks_on_is_refused_naming_the_point(self):
-        _, point, _ = self.card_with_point()
-        point_path = self.point_with_x(point, json.dumps(MARK))
-        for broken, breaks in BREAKS.items():
-            with self.subTest(broken):
-                with breaks():
-                    self.assert_refused(lambda: self.store.restore(point, by="user"),
-                                        f"{point_path}: not a card restore point: card is nested too deeply to copy "
-                                        f"or write")
 
     def test_restore_over_a_current_card_too_deep_to_copy_writes_no_point(self):
         _, point, path = self.deep_card_file()
@@ -184,23 +148,124 @@ class InputTest(WriterCase):
                             "changes are nested too deeply to copy or write")
         self.assertEqual(self.store.get(card_id)["lane"], "done")
 
-    def test_add_and_update_refuse_input_the_copy_or_the_indented_writer_breaks_on(self):
-        card_id, _, _ = self.card_with_point()
-        for broken, breaks in BREAKS.items():
-            with self.subTest(broken=broken, call="add"):
-                with breaks():
-                    self.assert_refused(lambda: self.store.add(card(x=MARK), by="w"),
-                                        "card is nested too deeply to copy or write")
-            with self.subTest(broken=broken, call="update"):
-                with breaks():
-                    self.assert_refused(lambda: self.store.update(card_id, {"x": MARK}, by="w"),
-                                        "changes are nested too deeply to copy or write")
-
     def test_changes_json_cannot_write_are_still_refused_by_the_card_check(self):
         card_id, _, _ = self.card_with_point()
         before = self.files()
         with self.assertRaisesRegex(CardError, r"\Atext is not JSON: "):
             self.store.update(card_id, {"x": {1, 2}}, by="w")
+        self.assertEqual(self.files(), before)
+
+
+# -- the bound: MAX_DEPTH is written and read, one level more is refused ------------------------------------------
+
+class BoundTest(WriterCase):
+    def test_a_card_at_the_bound_is_written_and_read_by_every_call(self):
+        added = self.store.add(card(x=json.loads(AT_BOUND)), by="w")
+        self.assertEqual(self.store.get(added["id"]), added)
+        self.assertEqual(self.store.list(), [added])
+        self.assertEqual(self.store.search("vendor"), [added])
+        (self.data / "index.sqlite").unlink()
+        self.assertEqual(self.store.search("vendor"), [added])  # the rebuild reads it too
+        self.clock.tick(minutes=1)
+        changed = self.store.update(added["id"], {"lane": "done"}, by="w")
+        self.assertEqual(changed["x"], added["x"])
+        self.clock.tick(minutes=1)
+        back = self.store.restore(changed["audit"][-1]["restore"], by="user")
+        self.assertEqual((back["lane"], back["x"]), ("planned", added["x"]))
+        self.assertEqual(self.store.get(added["id"]), back)
+
+    def test_changes_at_the_bound_are_written(self):
+        card_id, _, _ = self.card_with_point()
+        self.clock.tick(minutes=1)
+        changed = self.store.update(card_id, {"x": json.loads(AT_BOUND)}, by="w")
+        self.assertEqual(changed["x"], json.loads(AT_BOUND))
+        self.assertEqual(self.store.get(card_id), changed)
+
+    def test_a_point_at_the_bound_is_restored(self):
+        card_id, point, _ = self.card_with_point()
+        self.point_with_x(point, AT_BOUND)
+        self.clock.tick(minutes=1)
+        back = self.store.restore(point, by="user")
+        self.assertEqual(back["x"], json.loads(AT_BOUND))
+        self.assertEqual(self.store.get(card_id), back)
+
+    def test_one_level_past_the_bound_is_refused_and_writes_nothing(self):
+        card_id, point, path = self.card_with_point()
+        with self.subTest("add"):
+            self.assert_refused(lambda: self.store.add(card(x=json.loads(PAST_BOUND)), by="w"),
+                                "card is nested too deeply to copy or write")
+        with self.subTest("update"):
+            self.assert_refused(lambda: self.store.update(card_id, {"x": json.loads(PAST_BOUND)}, by="w"),
+                                "changes are nested too deeply to copy or write")
+        with self.subTest("restore point"):
+            point_path = self.point_with_x(point, PAST_BOUND)
+            self.assert_refused(lambda: self.store.restore(point, by="user"),
+                                f"{point_path}: not a card restore point: card is nested too deeply to copy or "
+                                f"write")
+        path.write_text(with_x(self.store.get(card_id), PAST_BOUND), encoding="utf-8")
+        want = f"{path}: not a card file: card is nested too deeply to copy or write"
+        for name, call in self.calls(card_id).items():
+            with self.subTest(f"card file, {name}"):
+                self.assert_refused(call, want)
+        with self.subTest("card file, search after index.sqlite is deleted"):
+            (self.data / "index.sqlite").unlink()
+            self.assert_refused(lambda: self.store.search("vendor"), want)
+
+
+# -- the same answer whatever the caller's stack -------------------------------------------------------------------
+
+class StackTest(WriterCase):
+    def test_what_add_writes_every_read_reads_from_a_deeper_stack(self):
+        added = self.store.add(card(x=json.loads(AT_BOUND)), by="w")
+        reads = {"get": lambda: [self.store.get(added["id"])],
+                 "list": lambda: self.store.list(),
+                 "search": lambda: self.store.search("vendor")}
+        for name, call in reads.items():
+            with self.subTest(name):
+                self.assertEqual(deeper(FRAMES, call), [added])
+        with self.subTest("search after index.sqlite is deleted"):
+            (self.data / "index.sqlite").unlink()
+            self.assertEqual(deeper(FRAMES, reads["search"]), [added])
+
+    def test_the_check_gives_the_same_answer_at_any_stack(self):
+        at, past = json.loads(with_x(card(), AT_BOUND)), json.loads(with_x(card(), PAST_BOUND))
+        for frames in (0, FRAMES):
+            with self.subTest(frames=frames, depth=MAX_DEPTH):
+                self.assertIsNone(deeper(frames, lambda: check_writable(at)))
+            with self.subTest(frames=frames, depth=MAX_DEPTH + 1):
+                with self.assertRaisesRegex(cards.TooDeepError, r"\Acard is nested too deeply to copy or write\Z"):
+                    deeper(frames, lambda: check_writable(past))
+
+
+# -- propose_opposite and cycles go through the same check ---------------------------------------------------------
+
+class ProposeTest(WriterCase):
+    def test_propose_opposite_refuses_a_text_too_deep(self):
+        card_id, _, _ = self.card_with_point()
+        # `changes` is {"ask": {..., "text": <text>}}, two levels above the text.
+        for name, text in {"one level past the bound": lists(MAX_DEPTH - 1), "too deep to copy": DEEP}.items():
+            with self.subTest(name):
+                self.assert_refused(
+                    lambda: self.store.propose_opposite(card_id, "close_pr", ["gh", "pr", "close"], by="w",
+                                                        text=json.loads(text)),
+                    "changes are nested too deeply to copy or write")
+        self.assertIsNone(self.store.get(card_id).get("ask"))
+
+
+class CycleTest(WriterCase):
+    def test_cyclic_changes_are_left_to_the_card_check_as_before(self):
+        card_id, _, _ = self.card_with_point()
+        d = {}
+        d["x"] = d
+        loop = []
+        loop.append(loop)
+        self.assertIsNone(check_writable({"x": d}))
+        self.assertIsNone(check_writable(loop))
+        before = self.files()
+        with self.assertRaises(CardError) as cm:
+            self.store.update(card_id, {"x": d}, by="w")
+        self.assertNotIsInstance(cm.exception, RecursionError)
+        self.assertEqual(str(cm.exception), "text is not valid JSON: NaN or Infinity")  # the check's words, as before
         self.assertEqual(self.files(), before)
 
 

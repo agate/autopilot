@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import itertools
 import json
 import os
 import sqlite3
@@ -48,19 +49,40 @@ def write_json(path: Path, obj) -> None:
         raise
 
 
+# The deepest dict / list nesting a card or its changes may hold; far under where the copy or the writer stop.
+MAX_DEPTH = 200
+
+
 def check_writable(value, what: str = "card is") -> None:
-    """Prove the store can copy `value` and write it the way `write_json` does. `json.loads` and the checks'
-    unindented `json.dumps` run in C and follow a value much deeper than `copy.deepcopy` and the indented dump,
-    which stop at the recursion limit; so a value can parse and check and still break the copy or the writer. Raises
-    TooDeepError `<what> nested too deeply to copy or write`. Any other fault (a value JSON cannot write) is left to
-    the card checks, which name it."""
-    try:
-        copy.deepcopy(value)
-        json.dumps(value, sort_keys=True, indent=2, ensure_ascii=False)
-    except RecursionError:
-        raise cards.TooDeepError(f"{what} nested too deeply to copy or write") from None
-    except (TypeError, ValueError):
-        pass
+    """Refuse `value` when its dicts, lists and tuples nest more than MAX_DEPTH deep (the top one is depth 1).
+    `json.loads` and the checks' unindented `json.dumps` run in C and follow a value much deeper than
+    `copy.deepcopy` and the indented writer, which stop at the recursion limit. Where they stop depends on how deep
+    the caller's stack already is, so trying the copy gives one answer on write and another on read (a card the
+    store wrote and then could not read). A fixed bound well under that limit gives the same answer everywhere, and
+    walking the value (with a list, not recursion; nothing copied, no text built) is cheap on every read. Raises
+    TooDeepError `<what> nested too deeply to copy or write` at the first level past the bound. Anything else (a
+    value JSON cannot write, a container already on the path, i.e. a cycle) is left to the card checks."""
+    kinds = (dict, list, tuple)
+    if not isinstance(value, kinds):
+        return
+
+    def inside(node):
+        return itertools.chain.from_iterable(node.items()) if isinstance(node, dict) else iter(node)
+
+    path = [(value, inside(value))]
+    on_path = {id(value)}
+    while path:
+        node, rest = path[-1]
+        for child in rest:
+            if isinstance(child, kinds) and id(child) not in on_path:
+                if len(path) >= MAX_DEPTH:
+                    raise cards.TooDeepError(f"{what} nested too deeply to copy or write")
+                path.append((child, inside(child)))
+                on_path.add(id(child))
+                break
+        else:
+            path.pop()
+            on_path.discard(id(node))
 
 
 class Store:
@@ -200,7 +222,6 @@ class Store:
         if given:
             pronoun = "it" if len(given) == 1 else "them"
             raise CardError(f"{', '.join(given)} cannot be changed; the store sets {pronoun}")
-        check_writable(changes, "changes are")
         with self._guard():
             return self._update(card_id, changes, by, did)
 
@@ -209,6 +230,7 @@ class Store:
         old = self._load(card_id)
         if check is not None:
             check(old)
+        check_writable(changes, "changes are")
         new = copy.deepcopy(old)
         new.update(copy.deepcopy(changes))
         cards.validate(new, self.languages)
