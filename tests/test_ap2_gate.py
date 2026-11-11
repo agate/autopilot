@@ -968,6 +968,15 @@ class MovedIntoRepeatedHourTest(GateCase):
         west = routines.load(self.put("west", tz=LA, last_slot="2026-11-10T09:00", last_slot_tz=self.NY))
         self.assertEqual((west.last_slot, west.moved_at), ("2026-11-10T06:00", utc(2026, 11, 10, 14, 0)))
 
+    def test_a_move_into_the_first_pass_keeps_the_first_pass_moment(self):
+        # Chicago 00:30 (CDT) is 05:30 UTC, which is New York 01:30 (EDT), the first pass. The moved text reads the
+        # same as on the second pass, so the moment must come from the old zone, not from the text. The 01:45 slot
+        # (05:45 UTC) came after that run, so it must still run.
+        r = routines.load(self.put_moved(last_slot="2026-11-01T00:30"))
+        self.assertEqual((r.last_slot, r.moved_at), ("2026-11-01T01:30", utc(2026, 11, 1, 5, 30)))
+        d = routines.due(r, utc(2026, 11, 1, 6, 46))
+        self.assertEqual((d.slot, d.action), ("2026-11-01T01:45", "late"))
+
     def test_a_slot_that_was_not_moved_has_no_moment(self):
         for label, over in (("no last_slot_tz", {"last_slot_tz": None}), ("no key", {}),
                             ("same zone", {"last_slot_tz": self.NY}),
