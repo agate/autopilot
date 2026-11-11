@@ -138,6 +138,19 @@ class Ap2ServeCommandTest(unittest.TestCase):
         self.assertEqual(len(lines), 1, r.stderr)
         self.assertTrue(lines[0].startswith(f"ap2: cannot listen on 127.0.0.1:{port}: "), lines[0])
 
+    def test_a_port_bound_but_not_listening_is_one_line_and_exit_1(self):
+        # Nothing answers the probe there, so the bind itself fails (no SO_REUSEADDR on the held socket).
+        held = socket.socket()
+        self.addCleanup(held.close)
+        held.bind(("127.0.0.1", 0))
+        port = held.getsockname()[1]
+        r = self.run_ap2("serve", "--port", str(port))
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.stdout, "")
+        lines = r.stderr.splitlines()
+        self.assertEqual(len(lines), 1, r.stderr)
+        self.assertTrue(lines[0].startswith(f"ap2: cannot listen on 127.0.0.1:{port}: "), lines[0])
+
     def test_a_port_another_program_holds_on_all_addresses_is_one_line_and_exit_1(self):
         held = socket.socket()
         self.addCleanup(held.close)

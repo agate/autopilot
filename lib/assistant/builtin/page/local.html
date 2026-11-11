@@ -246,6 +246,7 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     "manage.settings": "Settings",
     "list.search": "Search: {q}",
     "list.search_hint": "Cards whose plain words, title, kind or source hold every word.",
+    "search.too_long": "A search can have at most 500 characters and 50 words.",
     "list.project": "Project: {title}",
     "list.project_hint": "The child cards of this project.",
     "list.count": "{shown} of {total}",
@@ -373,6 +374,7 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     "manage.settings": "设置",
     "list.search": "搜索：{q}",
     "list.search_hint": "大白话、标题、类型或来源里包含每个词的卡片。",
+    "search.too_long": "搜索最多 500 个字符、50 个词。",
     "list.project": "项目：{title}",
     "list.project_hint": "这个项目的子卡片。",
     "list.count": "{total} 张中的 {shown} 张",
@@ -477,6 +479,8 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
   const POLL_MS = 10000;       // design 12: the page polls /api/state every 10 seconds
   const LATE_SECONDS = 180;    // design 7.4: red after 3 minutes without a gate run
   const QUESTION_MAX = 2000;
+  const SEARCH_MAX_CHARS = 500;  // the server's caps on a search: a longer one is refused (400), so it is never sent
+  const SEARCH_MAX_WORDS = 50;
   const PANES = ['list', 'card', 'sources', 'source', 'templates', 'template', 'settings'];
   const S = {state: null, fetchedAt: 0, lang: null, route: {name: 'lane', arg: 'needs'}, list: {name: 'lane', arg: 'needs'},
              listData: null, cardId: null};
@@ -649,6 +653,11 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     if (l.name === 'project') return '/api/cards?parent=' + encodeURIComponent(l.arg);
     return '/api/cards?lane=' + encodeURIComponent(l.arg);
   }
+  function searchTooLong(l) {
+    if (l.name !== 'search') return false;
+    const t = l.arg.trim();
+    return [...l.arg].length > SEARCH_MAX_CHARS || (t ? t.split(/\s+/).length : 0) > SEARCH_MAX_WORDS;
+  }
   function rowEl(r) {
     if (r.missing) {
       return h('div', {class: 'row'}, h('span', {class: 'dot done'}),
@@ -682,12 +691,16 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     $('list-count').textContent = d ? L('list.count', {shown: d.cards.length, total: d.total}) : '';
     const body = $('list-body');
     body.replaceChildren();
-    if (!d) return;
+    if (!d) {
+      if (searchTooLong(l)) body.append(h('div', {class: 'note', text: L('search.too_long')}));
+      return;
+    }
     if (!d.cards.length) body.append(h('div', {class: 'note', text: L('list.empty')}));
     for (const r of d.cards) body.append(rowEl(r));
   }
   async function loadList() {
     const want = S.list;  // a reply for a list the page has since left is dropped, not drawn under the new title
+    if (searchTooLong(want)) { S.listData = null; showError(null); drawList(); return; }  // no request: it would be 400
     try {
       const data = await api(listQuery(want));
       if (S.list !== want) return;
@@ -761,7 +774,8 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
         await api('/api/cards/' + encodeURIComponent(card.id) + '/questions',
                   {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({text: value})});
         input.value = '';
-        await loadCard(card.id);
+        // Only while the page still shows this card: a reply after the reader moved on must not draw it there.
+        if (S.route && S.route.name === 'card' && S.route.arg === card.id) await loadCard(card.id);
       } catch (e) {
         status.textContent = L('q.failed') + ' ' + e.message;
         status.hidden = false;
@@ -990,6 +1004,7 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     if (r.name === 'lane' || r.name === 'search' || r.name === 'project' || r.name === 'card') await loadList();
   }
 
+  $('search').maxLength = SEARCH_MAX_CHARS;
   $('search').addEventListener('keydown', e => {
     if (e.isComposing || e.keyCode === 229) return;  // the Enter that ends an IME composition
     if (e.key !== 'Enter') return;

@@ -157,6 +157,15 @@ class GuardTest(ServerCase):
         with self.assertRaisesRegex(ConfigError, rf"^cannot listen on 127\.0\.0\.1:{port}: "):
             server.make_server(self.data, port=port)
 
+    def test_a_port_bound_but_not_listening_is_a_config_error_from_the_bind(self):
+        # Nothing answers the probe there, so the bind itself fails (no SO_REUSEADDR on the held socket).
+        held = socket.socket()
+        self.addCleanup(held.close)
+        held.bind(("127.0.0.1", 0))
+        port = held.getsockname()[1]
+        with self.assertRaisesRegex(ConfigError, rf"^cannot listen on 127\.0\.0\.1:{port}: "):
+            server.make_server(self.data, port=port)
+
     def test_a_port_another_program_holds_on_all_addresses_is_a_config_error(self):
         # macOS lets SO_REUSEADDR bind 127.0.0.1:<port> while 0.0.0.0:<port> listens; Linux refuses the bind.
         held = socket.socket()
@@ -207,9 +216,13 @@ class GuardTest(ServerCase):
 
     def test_two_host_headers_are_refused(self):
         self.start()
-        reply = self.raw(f"GET /api/state HTTP/1.0\r\nHost: 127.0.0.1:{self.port}\r\n"
-                         "Host: cards.example.com\r\n\r\n".encode("ascii"))
-        self.assertTrue(reply.startswith(b"HTTP/1.0 403"), reply[:80])
+        mine, foreign = f"127.0.0.1:{self.port}", "cards.example.com"
+        for name, first, second in (("valid then foreign", mine, foreign), ("foreign then valid", foreign, mine),
+                                    ("the same valid one twice", mine, mine)):
+            with self.subTest(name):
+                reply = self.raw(f"GET /api/state HTTP/1.0\r\nHost: {first}\r\nHost: {second}\r\n\r\n"
+                                 .encode("ascii"))
+                self.assertTrue(reply.startswith(b"HTTP/1.0 403"), reply[:80])
 
     def assert_status_line_and_safe_headers(self, reply: bytes):
         self.assertTrue(reply.startswith(b"HTTP/1.0 "), reply[:80])
@@ -355,7 +368,8 @@ class ListTest(ServerCase):
         self.assertEqual(self.ok("/api/cards?q=pelican")["total"], 2)  # the index is built
         self.assertTrue((self.data / "index.sqlite").exists())
         for name, q in (("51 words", "+".join(["a"] * 51)), ("501 characters", "a" * 501)):
-            with self.subTest(name):
+            ran = AssertionError("the search ran")  # the cap is checked before any search
+            with self.subTest(name), mock.patch("assistant.store.Store.search", side_effect=ran):
                 before = tree(self.data)
                 status, body = self.get(f"/api/cards?q={q}")
                 self.assertEqual(status, 400, body)
@@ -921,6 +935,11 @@ class PageTest(ServerCase):
         self.assertEqual(sorted(used - set(labels["en"])), [])
         for lane in cards.LANES:
             self.assertIn(f"lane.{lane}", labels["en"])
+
+    def test_the_pages_search_caps_match_the_servers(self):
+        text = PAGE.read_text(encoding="utf-8")
+        self.assertIn(f"const SEARCH_MAX_CHARS = {server.SEARCH_MAX_CHARS};", text)
+        self.assertIn(f"const SEARCH_MAX_WORDS = {server.SEARCH_MAX_WORDS};", text)
 
 
 if __name__ == "__main__":
