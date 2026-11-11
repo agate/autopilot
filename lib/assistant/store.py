@@ -53,7 +53,7 @@ def write_json(path: Path, obj) -> None:
 MAX_DEPTH = 200
 
 
-def check_writable(value, what: str = "card is") -> None:
+def check_writable(value, what: str = "card is", *, shared: bool = True) -> None:
     """Refuse `value` when its dicts, lists and tuples nest more than MAX_DEPTH deep (the top one is depth 1).
     `json.loads` and the checks' unindented `json.dumps` run in C and follow a value much deeper than
     `copy.deepcopy` and the indented writer, which stop at the recursion limit. Where they stop depends on how deep
@@ -62,7 +62,8 @@ def check_writable(value, what: str = "card is") -> None:
     walking the value (with a list, not recursion; nothing copied, no text built; a shared value walked again only
     when met deeper) is cheap on every read. Raises TooDeepError `<what> nested too deeply to copy or write` at the
     first level past the bound. Anything else (a value JSON cannot write, a container already on the path, i.e. a
-    cycle) is left to the card checks."""
+    cycle) is left to the card checks. `shared=False` is for a value fresh from `json.loads`, a tree with no shared
+    containers: the memo of what was walked would then skip nothing and only hold one entry per container."""
     kinds = (dict, list, tuple)
     if not isinstance(value, kinds):
         return
@@ -72,7 +73,7 @@ def check_writable(value, what: str = "card is") -> None:
 
     path = [(value, inside(value))]
     on_path = {id(value)}
-    walked = {id(value): 1}  # id -> the deepest depth a container was already walked from
+    walked = {id(value): 1} if shared else None  # id -> the deepest depth a container was already walked from
     while path:
         node, rest = path[-1]
         for child in rest:
@@ -82,8 +83,9 @@ def check_writable(value, what: str = "card is") -> None:
                 depth = len(path) + 1
                 # an empty one holds nothing deeper: counted above, never walked into; one already walked from as
                 # deep or deeper holds nothing new (so each is walked at most MAX_DEPTH times, not once per path)
-                if child and walked.get(id(child), 0) < depth:
-                    walked[id(child)] = depth
+                if child and (walked is None or walked.get(id(child), 0) < depth):
+                    if walked is not None:
+                        walked[id(child)] = depth
                     path.append((child, inside(child)))
                     on_path.add(id(child))
                     break
@@ -131,7 +133,7 @@ class Store:
             raise CardError(f"{path}: not a card file (its id is not its file name)")
         try:
             cards.check_stored(card)
-            check_writable(card)
+            check_writable(card, shared=False)  # fresh from json.loads: a tree
         except CardError as e:
             raise (cards.TooDeepError if isinstance(e, cards.TooDeepError) else CardError)(
                 f"{path}: not a card file: {e}") from None
@@ -262,7 +264,7 @@ class Store:
             # hand edit too), and the languages may have changed since. Any point the store saved can be put back.
             try:
                 cards.check_stored(old)
-                check_writable(old)  # before restore.save, so a point too deep leaves no orphan point
+                check_writable(old, shared=False)  # before restore.save, so a point too deep leaves no orphan point
             except CardError as e:
                 raise (cards.TooDeepError if isinstance(e, cards.TooDeepError) else CardError)(
                     f"{restore.path(self.data, point_id)}: not a card restore point: {e}") from None

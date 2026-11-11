@@ -22,10 +22,11 @@ import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 from tests.helpers import ROOT  # noqa: F401  (puts lib/ on sys.path)
 from tests.test_ap2_deep_files import DeepCase, card
-from assistant import cards, gate, restore
+from assistant import cards, gate, restore, store
 from assistant.cards import CardError
 from assistant.store import MAX_DEPTH, check_writable
 
@@ -321,6 +322,36 @@ class SharedTest(WriterCase):
         self.assertLess(time.monotonic() - start, 2)  # walking every path would not end
         self.assertNotIsInstance(cm.exception, cards.TooDeepError)
         self.assertEqual(self.files(), before)
+
+    def test_a_shared_value_one_level_deeper_the_second_time_is_refused(self):
+        shared = json.loads(lists(MAX_DEPTH - 2))  # 3 levels deep in the card first (deepest list 200), then 4
+        self.assert_refused(lambda: self.store.add(card(x=[shared, [shared]]), by="w"),
+                            "card is nested too deeply to copy or write")
+        self.assertEqual(self.files(), {})
+
+    def test_a_shared_value_met_twice_at_the_same_depth_is_written_and_read(self):
+        shared = json.loads(lists(MAX_DEPTH - 2))  # 3 levels deep in the card both times: deepest list 200
+        added = self.store.add(card(x=[shared, shared]), by="w")
+        self.assertEqual(self.store.get(added["id"])["x"], [shared, shared])
+
+    def test_only_values_from_python_callers_are_walked_with_the_memo(self):
+        card_id, point, _ = self.card_with_point()
+        self.clock.tick(minutes=1)
+        with mock.patch("assistant.store.check_writable", wraps=store.check_writable) as check:
+            self.store.get(card_id)
+            self.assertEqual([c.kwargs.get("shared", True) for c in check.call_args_list], [False])  # _read
+            check.reset_mock()
+            self.store.add(card(), by="w")
+            self.assertTrue(check.call_args_list)
+            self.assertTrue(all(c.kwargs.get("shared", True) for c in check.call_args_list))  # memo on
+            check.reset_mock()
+            self.store.update(card_id, {"lane": "running"}, by="w")
+            self.assertIn(mock.call({"lane": "running"}, "changes are"), check.call_args_list)  # memo on
+            check.reset_mock()
+            self.clock.tick(minutes=1)
+            self.store.restore(point, by="user")
+            self.assertTrue(check.call_args_list)
+            self.assertTrue(all(c.kwargs.get("shared") is False for c in check.call_args_list))  # the point, _read
 
 
 # -- criterion 5: the gate survives --------------------------------------------------------------------------------
