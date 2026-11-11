@@ -404,6 +404,15 @@ def run(data: Path, source: Optional[str] = None, names: Optional[list] = None, 
     if datadir._inside(data, root) or datadir._inside(root, data):
         raise V1ImportError(f"data folder {data} and the v1 data folder {root} overlap (one is inside the other); "
                             f"the import never writes under --from")
+    # The projects folder may be a symlink to a folder outside --from: the data folder must not overlap that either.
+    projects = root / "projects"
+    try:
+        real = projects.resolve() if projects.exists() else None
+    except (OSError, RuntimeError) as e:
+        raise V1ImportError(f"cannot use the v1 projects folder {projects}: {e}") from e
+    if real is not None and (datadir._inside(data, real) or datadir._inside(real, data)):
+        raise V1ImportError(f"data folder {data} and the v1 projects folder {real} overlap (one is inside the "
+                            f"other); the import never writes under --from")
     cfg = config.load(data)
     langs = cards.languages(cfg)
     missing = [lang for lang in langs if phrases(lang) is None]
@@ -411,13 +420,8 @@ def run(data: Path, source: Optional[str] = None, names: Optional[list] = None, 
         raise V1ImportError(f"no code-made plain words for {', '.join(missing)} yet (built in: {', '.join(PHRASES)}); "
                             f"the store would refuse every card")
     found = find(root)
-    if names:
-        unknown = [n for n in dict.fromkeys(names) if n not in found]
-        if unknown:
-            raise V1ImportError(f"no v1 project named {', '.join(unknown)} in {root} "
-                                f"(found: {', '.join(found) or 'none'})")
-        found = {n: f for n, f in found.items() if n in names}
-    # A project folder may be a symlink to a folder outside --from: the data folder must not overlap that either.
+    # A project folder may be a symlink to a folder outside --from: the data folder must not overlap that either,
+    # for every project found, not only the ones --project names (an unnamed one is still a v1 folder).
     for name, folder in found.items():
         try:
             real = folder.resolve()
@@ -426,6 +430,12 @@ def run(data: Path, source: Optional[str] = None, names: Optional[list] = None, 
         if datadir._inside(data, real) or datadir._inside(real, data):
             raise V1ImportError(f"data folder {data} and the v1 project {name}'s folder {real} overlap (one is "
                                 f"inside the other); the import never writes under a v1 project")
+    if names:
+        unknown = [n for n in dict.fromkeys(names) if n not in found]
+        if unknown:
+            raise V1ImportError(f"no v1 project named {', '.join(unknown)} in {root} "
+                                f"(found: {', '.join(found) or 'none'})")
+        found = {n: f for n, f in found.items() if n in names}
     if not dry_run:
         datadir.ensure(data)
     store = Store(data, cfg=cfg)

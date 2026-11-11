@@ -315,6 +315,10 @@ class ImportV1Test(unittest.TestCase):
                 self.read.append(key)
                 return dict.__getitem__(self, key)
 
+            def get(self, key, default=None):
+                self.read.append(key)
+                return dict.get(self, key, default)
+
             def items(self):
                 test.fail("the closing step walked every card")
             keys = values = __iter__ = items
@@ -671,6 +675,34 @@ class ImportV1Test(unittest.TestCase):
         line = self.fails()
         self.assertIn("shop", line)
         self.assertEqual(snapshot(self.data), before)
+
+    def test_a_data_folder_inside_an_unnamed_symlinked_project_folders_real_location_is_refused(self):
+        if not hasattr(os, "symlink"):
+            self.skipTest("no symlinks here")
+        real = self.tmp / "outside" / "other"
+        shutil.copytree(self.v1 / "notes", real)
+        try:
+            (self.v1 / "projects" / "other").symlink_to(real, target_is_directory=True)
+        except (OSError, NotImplementedError) as e:
+            self.skipTest(f"cannot make a symlink: {e}")
+        self.data = real / "v2"
+        line = self.fails("--project", "shop")
+        self.assertIn("other", line)
+        self.assertFalse(self.data.exists())
+
+    def test_a_data_folder_inside_a_symlinked_projects_folders_real_location_is_refused(self):
+        if not hasattr(os, "symlink"):
+            self.skipTest("no symlinks here")
+        real = self.tmp / "P"
+        shutil.move(str(self.v1 / "projects"), str(real))
+        try:
+            (self.v1 / "projects").symlink_to(real, target_is_directory=True)
+        except (OSError, NotImplementedError) as e:
+            self.skipTest(f"cannot make a symlink: {e}")
+        self.data = real / "v2"
+        line = self.fails()
+        self.assertIn("projects folder", line)
+        self.assertFalse(self.data.exists())
 
     def test_a_v1_folder_inside_the_data_folder_is_refused(self):
         self.data = self.tmp / "d"

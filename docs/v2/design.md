@@ -1528,9 +1528,9 @@ Calls the author made without asking (check them):
     every `<from>/projects/<name>/` holding `config.json`, plus a legacy `<from>/<name>/config.json` whose
     `projects/<name>/config.json` does not exist (v1's `ap_dir` rule); `<name>` must pass v1's `valid_name`; a
     folder that cannot be looked into counts as found, so it is refused alone. `--project` (repeatable) limits
-    it; a name not found, a missing `--from` folder, or a data folder and `--from` (and each project folder,
-    symlinks followed) where either is inside the other (compared as `datadir` does: letter case folded, then by
-    file identity) is one `ap2: ...` line, exit 1, nothing written.
+    it; a name not found, a missing `--from` folder, or a data folder and `--from` (and its projects folder and
+    each project folder found, `--project` or not, symlinks followed) where either is inside the other (compared
+    as `datadir` does: letter case folded, then by file identity) is one `ap2: ...` line, exit 1, nothing written.
   - Read-only for real: v1's files are read with `open(...).read()` and `json.loads`, never through v1's
     `state.load` or `mutate` (they take a lock file inside v1's folder). Nothing is created or changed under
     `--from`.
