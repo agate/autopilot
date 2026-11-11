@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -154,16 +155,16 @@ class Engine:
         _check_fill(src, records)
         path = Path(raw_path)
         try:
-            if path.stat().st_size > MAX_OUTPUT:
-                raise SourceError(f"{src.name}: the saved output {path} is larger than {MAX_OUTPUT} bytes")
-            raw_bytes = path.read_bytes()
+            raw_bytes = sources.read_capped(
+                path, MAX_OUTPUT, f"{src.name}: the saved output {path} is larger than {MAX_OUTPUT} bytes")
         except OSError as e:
             raise SourceError(f"{src.name}: cannot read the saved output {path}: {e}") from e
         raw = None
         if not dry_run:
             here = (self.data / RAW / src.name).resolve()
-            raw = (path.resolve().relative_to(self.data.resolve()).as_posix() if path.resolve().parent == here
-                   else self._save_raw(src, raw_bytes))
+            real = path.resolve()
+            # Named from the folder's own names, not the resolved ones: `.raw` may be a link to another folder.
+            raw = (RAW / src.name / real.name).as_posix() if real.parent == here else self._save_raw(src, raw_bytes)
         return self._process(src, raw_bytes, raw, dry_run, records)
 
     def _run(self, src: sources.Source, dry_run: bool = False) -> subprocess.CompletedProcess:
@@ -256,13 +257,19 @@ class Engine:
             while True:
                 path = folder / f"{at.astimezone(timezone.utc).strftime(STAMP)}-{secrets.token_hex(3)}.json"
                 try:
-                    with open(path, "xb") as f:
+                    f = open(path, "xb")
+                except FileExistsError:
+                    continue
+                try:
+                    with f:
                         f.write(raw)
                         f.flush()
                         os.fsync(f.fileno())
-                    break
-                except FileExistsError:
-                    continue
+                except OSError:
+                    with contextlib.suppress(OSError):  # a full disk would leave an empty or partial file
+                        path.unlink()
+                    raise
+                break
         except OSError as e:
             raise SourceError(f"{src.name}: cannot save the raw output in {folder}: {e}") from e
         return path.relative_to(self.data).as_posix()

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import shlex
@@ -7,8 +9,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests.helpers import ROOT
 from tests.test_ap2_cli import temp_inside_the_accounts_claude
@@ -44,11 +48,43 @@ class SourceCommandTest(unittest.TestCase):
             text.replace("source: vendor-status", "source: t-vendor-status"))
         (self.data / "sources" / "t-vendor-fast.yaml").write_text("extends: t-vendor-status\nread:\n  every: 1m\n")
 
-    def run_ap2(self, *args):
+    def env(self):
         env = {k: v for k, v in os.environ.items() if k not in ("AP2_DATA", "LC_ALL")}
         env.update(HOME=str(self.home), AP2_DATA=str(self.data), PYTHONIOENCODING="utf-8", PYTHON_COLORS="0")
-        return subprocess.run([sys.executable, str(AP2), *args], capture_output=True, text=True, env=env,
+        return env
+
+    def run_ap2(self, *args):
+        return subprocess.run([sys.executable, str(AP2), *args], capture_output=True, text=True, env=self.env(),
                               encoding="utf-8", errors="replace", timeout=60)
+
+    def run_ap2_fed(self, offered: int, *args):
+        """Run ap2 with `offered` bytes on a pipe to its stdin; return (the run, how many bytes it took in)."""
+        proc = subprocess.Popen([sys.executable, str(AP2), *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, env=self.env())
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        written = [0]
+
+        def feed():
+            chunk = b" " * (1024 * 1024)
+            try:
+                while written[0] < offered:
+                    proc.stdin.write(chunk)
+                    written[0] += len(chunk)
+            except OSError:  # ap2 closed its end: EPIPE
+                pass
+            finally:
+                with contextlib.suppress(OSError):
+                    proc.stdin.close()
+
+        writer = threading.Thread(target=feed, daemon=True)
+        writer.start()
+        with proc.stdout, proc.stderr:
+            out, err = proc.stdout.read(), proc.stderr.read()
+        proc.wait(timeout=60)
+        writer.join(60)
+        self.assertFalse(writer.is_alive())
+        return subprocess.CompletedProcess(args, proc.returncode, out.decode(), err.decode()), written[0]
 
     def ok(self, *args):
         r = self.run_ap2(*args)
@@ -138,15 +174,74 @@ class SourceCommandTest(unittest.TestCase):
         self.assertIn(f"cannot read the records {str(deep)!r}",
                       self.fails("source", "read", "t-tracker", "--raw", str(deep), "--records", str(deep)))
 
-    def test_a_records_file_past_the_output_cap_is_refused_before_it_is_read(self):
+    def test_a_records_file_past_the_output_cap_is_refused_after_one_byte_more_is_read(self):
         from assistant.engine import MAX_OUTPUT
         (self.data / "sources" / "t-tracker.yaml").write_text(self.TRACKER)
+        raw = str(FIXTURES / "replies" / "jira-search.json")
         records = self.tmp / "records.json"
         with open(records, "wb") as f:
             f.truncate(MAX_OUTPUT + 1)  # sparse: instant and takes no disk
-        line = self.fails("source", "read", "t-tracker", "--raw", str(FIXTURES / "replies" / "jira-search.json"),
-                          "--records", str(records))
+        line = self.fails("source", "read", "t-tracker", "--raw", raw, "--records", str(records))
         self.assertEqual(line, f"ap2: the records file {str(records)!r} is larger than {MAX_OUTPUT} bytes")
+        # A pipe's size from stat is 0, so only a read with a byte limit stops it: ap2 takes the cap and one byte
+        # more, of far more on offer, and stops.
+        r, written = self.run_ap2_fed(MAX_OUTPUT + 32 * 1024 * 1024, "source", "read", "t-tracker", "--raw", raw,
+                                      "--records", "/dev/stdin")
+        self.assertEqual((r.returncode, r.stdout), (1, ""))
+        self.assertEqual(r.stderr, f"ap2: the records file '/dev/stdin' is larger than {MAX_OUTPUT} bytes\n")
+        self.assertLess(written, MAX_OUTPUT + 16 * 1024 * 1024)
+        self.assertFalse((self.data / "sources" / ".raw").exists())
+
+    def test_a_raw_stream_past_the_output_cap_is_refused(self):
+        from assistant.engine import MAX_OUTPUT
+        (self.data / "sources" / "t-tracker.yaml").write_text(self.TRACKER)
+        r, written = self.run_ap2_fed(MAX_OUTPUT + 32 * 1024 * 1024, "source", "read", "t-tracker", "--raw",
+                                      "/dev/stdin")
+        self.assertEqual((r.returncode, r.stdout), (1, ""))
+        self.assertEqual(r.stderr, f"ap2: t-tracker: the saved output /dev/stdin is larger than {MAX_OUTPUT} "
+                                   "bytes\n")
+        self.assertLess(written, MAX_OUTPUT + 16 * 1024 * 1024)
+        self.assertFalse((self.data / "sources" / ".raw").exists())  # nothing copied
+
+    def test_a_records_file_of_exactly_the_cap_is_taken(self):
+        from assistant import cli
+        text = (FIXTURES / "plugin" / "slack-mentions.yaml").read_text()
+        (self.data / "sources" / "t-slack-mentions.yaml").write_text(
+            text.replace("source: slack-mentions", "source: t-slack-mentions"))
+        raw = self.tmp / "slack.txt"
+        raw.write_text("Message_ts: 1730000000.123456\n")
+        cap = 256
+        records = self.tmp / "records.json"
+        records.write_text("[" + " " * (cap - 2) + "]")
+        args = ["source", "read", "t-slack-mentions", "--raw", str(raw), "--records", str(records), "--dry-run",
+                "--data", str(self.data)]
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch("assistant.engine.MAX_OUTPUT", cap), contextlib.redirect_stdout(out), \
+                contextlib.redirect_stderr(err):
+            self.assertEqual(cli.main(args), 0, err.getvalue())
+            self.assertEqual((json.loads(out.getvalue())["items"], err.getvalue()), ([], ""))
+            records.write_text("[" + " " * (cap - 1) + "]")
+            self.assertEqual(cli.main(args), 1)
+        self.assertEqual(err.getvalue(), f"ap2: the records file {str(records)!r} is larger than {cap} bytes\n")
+
+    def test_a_records_file_that_is_not_a_list_is_refused_before_anything_runs(self):
+        marker = self.tmp / "ran"
+        script = self.tmp / "mark.py"
+        script.write_text("import sys\nopen(sys.argv[1], 'w').write('ran')\nprint('[]')\n")
+        run = " ".join(shlex.quote(str(a)) for a in (sys.executable, script, marker))
+        (self.data / "sources" / "t-marker.yaml").write_text(
+            f"source: t-marker\nbrings: messages\nread:\n  via: command\n  run: '{run}'\nfill: paths\n"
+            "form: { id: .id, at: .at, text: .text }\nlink: none\nsort: { all: alert }\n")
+        null = self.tmp / "null.json"
+        null.write_text("null")
+        for extra in ((), ("--dry-run",)):
+            with self.subTest(extra=extra):
+                self.assertEqual(self.fails("source", "read", "t-marker", "--records", str(null), *extra),
+                                 "ap2: --records needs --raw FILE, the output the records were filled from")
+                self.assertFalse(marker.exists())
+        self.assertEqual(self.fails("source", "read", "t-marker", "--raw", str(self.reply), "--records", str(null)),
+                         f"ap2: the records file {str(null)!r} must hold a JSON list")
+        self.assertFalse(marker.exists())
         self.assertFalse((self.data / "sources" / ".raw").exists())
 
     def test_a_reply_without_the_list_of_the_item_path_is_one_line(self):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
 import shlex
@@ -10,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import time
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -870,6 +872,56 @@ class SavedReadTest(EngineCase):
         self.assertEqual((result["items"], result["dropped"]), ([], []))
         self.assertEqual((self.data / result["raw"]).read_bytes(), saved.read_bytes())
 
+    def test_a_saved_stream_past_the_cap_is_refused_after_one_byte_more_is_read(self):
+        # A pipe's size from stat is 0, so only a read with a byte limit stops it. The writer offers far more than
+        # the cap; a read that took the whole stream first would take all of it.
+        self.user_source("plain", """\
+            source: plain
+            brings: messages
+            read: { via: mcp, server: plain, tool: list }
+            fill: paths
+            form: { id: .id, at: .at, text: .text }
+            link: none
+            sort: { all: alert }
+            """)
+        cap, offered = 16, 32 * 1024 * 1024
+        fifo = self.tmp / "stream.json"
+        os.mkfifo(fifo)
+        written = [0]
+
+        def feed():
+            try:
+                fd = os.open(fifo, os.O_WRONLY)  # waits for the reader
+            except OSError:
+                return
+            try:
+                chunk = b" " * 65536
+                while written[0] < offered:
+                    written[0] += os.write(fd, chunk)
+            except OSError:  # the reader closed it: EPIPE
+                pass
+            finally:
+                os.close(fd)
+
+        writer = threading.Thread(target=feed, daemon=True)
+        writer.start()
+
+        def unblock():
+            # A writer still waiting for a reader, or blocked on a full pipe, is let go: a reader that opens and
+            # closes the pipe ends its open, then its writes.
+            if writer.is_alive():
+                os.close(os.open(fifo, os.O_RDONLY | os.O_NONBLOCK))
+            writer.join(30)
+        self.addCleanup(unblock)
+        with mock.patch("assistant.engine.MAX_OUTPUT", cap):
+            with self.assertRaisesRegex(SourceError, rf"^plain: the saved output {fifo} is larger than {cap} "
+                                                     r"bytes$"):
+                self.engine().read_saved("plain", fifo)
+        writer.join(30)
+        self.assertFalse(writer.is_alive())
+        self.assertLess(written[0], 4 * 1024 * 1024)  # cap + 1 bytes, plus what the pipe holds
+        self.assertFalse((self.data / "sources" / ".raw").exists())  # nothing copied
+
 
 class SortToCardTest(EngineCase):
     def test_a_read_makes_cards_and_a_second_read_updates_them(self):
@@ -1319,6 +1371,25 @@ class SavedRawTest(EngineCase):
                 self.assertEqual(result["raw"], f"sources/.raw/gh-mine/{name}")
                 self.assertEqual(json.loads((folder / report).read_text()), result)
         self.assertFalse((self.data / "sources" / ".raw" / ".report.json").exists())
+
+    def test_a_raw_file_saved_through_a_linked_raw_folder_reads_again(self):
+        # <data>/sources/.raw may be a link to a folder elsewhere; its files are still named under sources/.raw.
+        elsewhere = self.tmp / "elsewhere"
+        elsewhere.mkdir()
+        (self.data / "sources" / ".raw").symlink_to(elsewhere)
+        first = self.engine().read_saved("gh-mine", self.reply_copy("gh-pr-list.json"))
+        self.assertTrue(first["raw"].startswith("sources/.raw/gh-mine/"))
+        again = self.engine().read_saved("gh-mine", self.data / first["raw"])
+        self.assertEqual(again["raw"], first["raw"])
+        self.assertEqual(len(list((elsewhere / "gh-mine").glob("*.json"))), 2)  # the raw file and its report
+
+    def test_a_raw_save_that_fails_leaves_no_file(self):
+        def full(fd):
+            raise OSError(errno.ENOSPC, "No space left on device")
+        with mock.patch("assistant.engine.os.fsync", full):
+            with self.assertRaisesRegex(SourceError, r"^gh-mine: cannot save the raw output in .*No space left"):
+                self.engine().read_saved("gh-mine", self.reply_copy("gh-pr-list.json"))
+        self.assertEqual(list((self.data / "sources" / ".raw" / "gh-mine").iterdir()), [])
 
     def test_a_dry_run_of_a_saved_reply_saves_nothing(self):
         saved = self.reply_copy("gh-pr-list.json")

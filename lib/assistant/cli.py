@@ -228,7 +228,7 @@ def _source_parser(sub) -> None:
 def cmd_source(args) -> int:
     from assistant import engine as engine_module
     from assistant.engine import Engine
-    from assistant.sources import Loader, SourceError
+    from assistant.sources import Loader, SourceError, read_capped
 
     path = datadir.resolve(args.data)
     dry_run = getattr(args, "dry_run", False)
@@ -243,18 +243,19 @@ def cmd_source(args) -> int:
         records = None
         if args.records is not None:
             try:
-                # Checked before it is read, as a --raw file is: json.loads of a huge file takes many times its size.
-                if Path(args.records).stat().st_size > engine_module.MAX_OUTPUT:
-                    raise SourceError(f"the records file {args.records!r} is larger than {engine_module.MAX_OUTPUT} "
-                                      "bytes")
-                records = json.loads(Path(args.records).read_text(encoding="utf-8"))
+                # Read with a byte limit, as a --raw file is: json.loads of a huge file takes many times its size.
+                cap = engine_module.MAX_OUTPUT
+                held = read_capped(args.records, cap, f"the records file {args.records!r} is larger than {cap} bytes")
+                records = json.loads(held.decode("utf-8"))
             except (OSError, UnicodeDecodeError, ValueError, RecursionError) as e:
                 why = "nested too deeply" if isinstance(e, RecursionError) else e
                 raise SourceError(f"cannot read the records {args.records!r}: {why}") from e
+        if args.raw is None and args.records is not None:
+            raise SourceError("--records needs --raw FILE, the output the records were filled from")
+        if args.records is not None and not isinstance(records, list):
+            raise SourceError(f"the records file {args.records!r} must hold a JSON list")
         if args.raw is not None:
             out = engine.read_saved(args.name, args.raw, records=records, dry_run=dry_run)
-        elif records is not None:
-            raise SourceError("--records needs --raw FILE, the output the records were filled from")
         else:
             out = engine.read(args.name, dry_run=dry_run)
     _print_json(out)

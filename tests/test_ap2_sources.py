@@ -5,6 +5,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests.helpers import ROOT
 from assistant import form, sources
@@ -61,6 +62,18 @@ class SourceCase(unittest.TestCase):
 
 
 class LoadingTest(SourceCase):
+    def test_a_source_file_past_the_size_limit_is_refused(self):
+        # Read with a byte limit, so a huge file (or a link to a device that never ends) costs no more than that.
+        good = GOOD.replace("\n", "\r\n")  # read with its line ends made \n, as before
+        cap = len(good.encode())
+        self.user("s", good)
+        with mock.patch("assistant.sources.MAX_SOURCE", cap):
+            self.assertEqual(self.loader().load("s").data["read"]["run"], "echo []")
+            big = self.user("s", good + "#")
+            with self.assertRaises(SourceError) as e:
+                self.loader().load("s")
+        self.assertEqual(str(e.exception), f"{big}: larger than {cap} bytes")
+
     def test_builtin_only(self):
         self.builtin("slack-mentions")
         self.builtin("gh-mine")

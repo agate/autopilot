@@ -767,7 +767,12 @@ Calls the author made without asking (check them):
     there is one), and the result takes the extending file's name. Maps merge key by key; lists, scalars and null
     replace. A missing base, a cycle, a bad name or a mismatched `source:` raise `SourceError` (a `ConfigError`,
     so `ap2` prints it as one `ap2: ...` line) naming the file. `load(name)` reads only the files it needs;
-    `load_all()` (and `ap2 source list`) fails on the first bad file, naming it.
+    `load_all()` (and `ap2 source list`) fails on the first bad file, naming it. A source file is at most
+    `sources.MAX_SOURCE` (1 MiB); a larger one is refused (`<file>: larger than 1048576 bytes`).
+  - Every file a read or the loader takes (a source file, the `--raw` output, the `--records` file) is read with a
+    byte limit, by `sources.read_capped`: at most the limit plus one byte is read, and a file with more than the limit
+    is refused. Its size from stat is not trusted, so a pipe (`/dev/stdin`, `<(...)`), a device or a file that
+    grows while it is read cannot pass the limit.
   - Checks (on the merged file): top-level keys `source`, `brings` (`messages | work`), `read` (a map; `via` is
     `command | mcp | connector | skill`; `command` needs `run`; optional `every`, text; optional `timeout`,
     1-600 seconds, default 60; other keys are the via's own and pass), `fill` (`paths | ai`), `form`, `link`,
@@ -842,7 +847,10 @@ Calls the author made without asking (check them):
     takes a scan session's saved output (copied under `.raw/<source>/` unless it is there already) and, for
     `fill: ai`, its records. Records with `fill: paths`, or none with `fill: ai`, are refused before anything
     is run or saved. Every file a read takes (the `--raw` output and the `--records` file) is refused before it
-    is read or copied when it is larger than `engine.MAX_OUTPUT` (64 MiB), as a command's output past it would be. Old raw files are not pruned yet.
+    is copied or parsed when it is larger than `engine.MAX_OUTPUT` (64 MiB), as a command's output past it would
+    be. The `--records` file must hold a JSON list (`null` is refused, not read as no records). A saved file
+    already in `.raw/<source>/` is named by that folder's path even when `.raw` is a link to another folder. A raw
+    save that fails (a full disk) removes the file it started. Old raw files are not pruned yet.
   - A read handles at most `engine.MAX_ITEMS` (10,000) items: a reply with more items, or a scan session with
     more `fill: ai` records, fails the read, and the error names the raw file it was saved as (a dry run saves
     none). No card is made or changed. This is the simplest limit to raise later; it keeps one read's time,

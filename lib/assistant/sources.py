@@ -37,10 +37,23 @@ TEMPLATE = re.compile(r"[a-z][a-z0-9_-]*\Z")
 DEFAULT_KEY = "{source}:{id}"
 DEFAULT_TIMEOUT = 60
 MAX_TIMEOUT = 600
+# The largest source file the loader reads.
+MAX_SOURCE = 1024 * 1024
 
 
 class SourceError(ConfigError):
     """A source file is not usable, or a read failed. The message names the file (or the source) and says why."""
+
+
+def read_capped(path, limit: int, too_large: str) -> bytes:
+    """The bytes of `path`, reading at most `limit` + 1 of them, so a pipe, a device or a file that grows cannot
+    pass the limit (its size from stat says nothing about them). More than `limit` raises SourceError(`too_large`);
+    an OSError is the caller's to wrap."""
+    with open(path, "rb") as f:
+        data = f.read(limit + 1)
+    if len(data) > limit:
+        raise SourceError(too_large)
+    return data
 
 
 @dataclass
@@ -120,7 +133,8 @@ class Loader:
                 raise SourceError(f"{path}: a source's file name must be lowercase letters, digits, '-' and '_' "
                                   f"(at most 64), then .yaml")
             try:
-                text = path.read_text(encoding="utf-8")
+                text = read_capped(path, MAX_SOURCE, f"{path}: larger than {MAX_SOURCE} bytes").decode("utf-8")
+                text = text.replace("\r\n", "\n").replace("\r", "\n")  # as read_text read it
             except (OSError, UnicodeDecodeError) as e:
                 raise SourceError(f"{path}: cannot read: {e}") from e
             try:
