@@ -416,6 +416,10 @@ class ListTest(ServerCase):
         self.assertEqual(sorted(self.ids(self.ok("/api/cards?q=PELICAN"))),
                          sorted([self.run1["id"], self.done_p3["id"]]))
         self.assertEqual(self.ids(self.ok("/api/cards?q=pelican&lane=done")), [self.done_p3["id"]])
+        self.assertEqual(self.ok("/api/cards?q=thing")["total"], 8)
+        self.assertEqual(self.ids(self.ok("/api/cards?q=thing&kind=project")), [self.proj["id"]])
+        self.assertEqual(sorted(self.ids(self.ok(f"/api/cards?q=thing&parent={self.proj['id']}"))),
+                         sorted(k["id"] for k in self.kids))
         self.assertEqual(self.ok("/api/cards?q=nothing+like+this")["total"], 0)
         self.assertEqual(self.ok("/api/cards?q=%20%20")["total"], 10)  # blank text is no filter
 
@@ -621,6 +625,7 @@ class ManageTest(ServerCase):
         gh = body[0]
         self.assertEqual(gh["cards"], made)
         self.assertEqual(body[1]["cards"], 0)
+        self.assertEqual(self.ok("/api/sources/gh-mine")["cards"], made)
         self.assertEqual({k: v for k, v in gh.items() if k != "cards"},
                          {"source": "gh-mine", "brings": "messages", "via": "command", "fill": "paths",
                           "every": "5m", "origin": "built-in", "file": str(self.plugin / "gh-mine.yaml")})
@@ -676,6 +681,10 @@ class ManageTest(ServerCase):
         outside = self.tmp / "big.bin"
         outside.write_bytes(b"y" * 50000)
         (self.data / "attachments" / "link.bin").symlink_to(outside)
+        far = self.tmp / "far"
+        far.mkdir()
+        (far / "c.bin").write_bytes(b"w" * 70000)
+        (self.data / "attachments" / "dirlink").symlink_to(far, target_is_directory=True)
         (self.data / "chat").rmdir()
         (self.data / "chat").symlink_to(self.tmp / "plugin")
         body = self.ok("/api/settings")
@@ -685,7 +694,7 @@ class ManageTest(ServerCase):
         self.assertEqual(set(body["disk"]), set(datadir.FOLDERS) | {"index.sqlite"})
         att = self.data / "attachments"
         expect = (os.lstat(att).st_size + 1000 + os.lstat(att / "link.bin").st_size
-                  + os.lstat(att / "sub").st_size + 2000)
+                  + os.lstat(att / "sub").st_size + 2000 + os.lstat(att / "dirlink").st_size)
         self.assertEqual(body["disk"]["attachments"], expect)
         self.assertLess(body["disk"]["attachments"], 50000)
         self.assertEqual(body["disk"]["chat"], os.lstat(self.data / "chat").st_size)
@@ -790,6 +799,9 @@ class QuestionTest(ServerCase):
     def test_each_refusal_writes_nothing(self):
         card = self.add()
         odd = self.add(questions={"not": "a list"})
+        broken = self.add()
+        broken_file = self.store().path(broken["id"])
+        broken_file.write_text("{", encoding="utf-8")
         self.start()
         path = f"/api/cards/{card['id']}/questions"
         cases = [
@@ -811,6 +823,7 @@ class QuestionTest(ServerCase):
             ("null origin", path, b'{"text": "hi"}', {"Origin": "null"}, 403),
             ("other port", path, b'{"text": "hi"}', {"Origin": "http://" + f"127.0.0.1:{self.port + 1}"}, 403),
             ("questions not a list", f"/api/cards/{odd['id']}/questions", b'{"text": "hi"}', {}, 409),
+            ("a damaged card", f"/api/cards/{broken['id']}/questions", b'{"text": "hi"}', {}, 500),
             ("no such card", "/api/cards/c-20250101-000000-abcdef/questions", b'{"text": "hi"}', {}, 404),
             ("bad id", "/api/cards/nope/questions", b'{"text": "hi"}', {}, 404),
         ]
@@ -820,6 +833,8 @@ class QuestionTest(ServerCase):
                 status, _, reply = self.call("POST", route, body, headers)
                 self.assertEqual(status, want, reply)
                 self.assertIn("error", reply)
+                if want == 500:
+                    self.assertIn(str(broken_file), reply["error"])
                 self.assertEqual(tree(self.data), before)
 
     def test_a_card_that_fails_the_stores_checks_is_409(self):
