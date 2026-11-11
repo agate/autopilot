@@ -159,7 +159,11 @@ def floor(role: str, project: dict, data: Path, env: dict) -> dict:
     # The park command is the one step a parking worker takes; the auto-mode classifier must not judge it (v1 does
     # the same for `ap worker park`).
     allow = [f"Bash({package_root() / 'bin' / 'ap2'} worker park:*)"]
-    return {"permissions": {"deny": deny, "allow": allow}, "env": dict(env)}
+    # The park hook (`ap2 hook-park`, parkhook.py) runs before every tool call of the worker and its subagents and
+    # denies all but that command while usage is at the park line (v1's `perms.park_hook` shape).
+    hooks = {"PreToolUse": [{"matcher": "*", "hooks": [
+        {"type": "command", "command": f"\"{package_root() / 'bin' / 'ap2'}\" hook-park", "timeout": 5}]}]}
+    return {"permissions": {"deny": deny, "allow": allow}, "env": dict(env), "hooks": hooks}
 
 
 class Workers:

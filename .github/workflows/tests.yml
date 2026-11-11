@@ -13,6 +13,8 @@ permissions:
 
 jobs:
   unittest:
+    # A hung test fails in 15 minutes (about 5x the slowest recent run) instead of GitHub's 6-hour default.
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
