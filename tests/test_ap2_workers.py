@@ -997,6 +997,33 @@ class LifecycleTest(WorkerCase):
         self.assertEqual(recs[a["card"]]["resumes"], 1)
         self.assertEqual((recs[b["card"]]["short_id"], recs[b["card"]]["resumes"]), (b["short_id"], 0))
 
+    def test_an_interrupted_check_still_writes_back_what_it_already_did(self):
+        # Neither project lists tools, so each in-place resume runs a discovery; B's is interrupted (Ctrl-C).
+        w = self.workers()
+        a = self.start(w)
+        b_wt = self.tmp / "worktree-b"
+        b_wt.mkdir()
+        b = w.start(self.add_card(), "implement", cwd=b_wt, prompt="Do the work.")
+        c = self.start(w)
+        for x in (a, b, c):
+            self.drop_agent(x["short_id"])  # all dead, each with its one resume left
+        real = Workers._discover
+
+        def discover(self_, cwd, env):
+            if Path(cwd) == b_wt:
+                raise KeyboardInterrupt
+            return real(self_, cwd, env)
+        with mock.patch.object(Workers, "_discover", discover):
+            with self.assertRaises(KeyboardInterrupt):
+                w.check()
+        recs = {r["card"]: r for r in resources.Registry(self.data).read()}
+        self.assertNotEqual(recs[a["card"]]["short_id"], a["short_id"])  # A's copy, already launched, is on record
+        self.assertEqual(recs[a["card"]]["resumes"], 1)
+        self.assertEqual((recs[b["card"]]["short_id"], recs[b["card"]]["resumes"]), (b["short_id"], 0))
+        # The pass stops at the interrupt: C, after B, is not resumed.
+        self.assertEqual((recs[c["card"]]["short_id"], recs[c["card"]]["resumes"]), (c["short_id"], 0))
+        self.assertEqual(len(self.bg_calls()), 4)  # the three starts and A's resume only
+
     def test_a_result_file_that_vanishes_before_its_stat_is_not_newer(self):
         w = self.workers()
         a = self.start(w)

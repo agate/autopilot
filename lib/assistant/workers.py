@@ -639,6 +639,7 @@ class Workers:
         if usage_file:
             b = v1_budget.read(Path(usage_file), now_ms=int(now.timestamp() * 1000), stale_min=PARK_RULES["stale_min"])
         out = []
+        stopped = None
         with self.registry.locked() as records:
             # Under the lock: a start that lands before it would otherwise be judged against a listing taken
             # before that start, seen as dead and resumed next to itself.
@@ -663,7 +664,14 @@ class Workers:
                     entry["note"] = str(e) or type(e).__name__
                     if not isinstance(e, (config.ShadowModeError, WorkerError, CardError, config.ConfigError)):
                         entry["error"] = type(e).__name__  # not one of ours: name it, so the gate can report it
+                except BaseException as e:  # noqa: BLE001 - raised below, once the list is written back
+                    # Ctrl-C (or another exit) mid-pass: stop here, but leave the block normally, so the changes
+                    # already made (an earlier worker's resume, its new short id) are written back first.
+                    stopped = e
+                    break
                 out.append(entry)
+        if stopped is not None:
+            raise stopped
         return out
 
     def _fill_session_id(self, rec: dict, listing, by: str) -> None:
