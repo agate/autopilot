@@ -53,6 +53,7 @@ EFFORT = "xhigh"  # v1's default `worker_effort`
 IDLE_MIN = 60  # a worker idle this long with no result file is stopped and marked paused, can resume
 BLOCKED_MIN = 30  # a worker waiting at a permission prompt this long is stopped, kept resumable
 PARK_RULES = dict(v1_config.DEFAULT_GLOBAL["budget"])  # park at 90%, resume 5 minutes after the reset
+PARKED_RESUME = "Usage is under the line again. Continue the task from where you parked."
 INTERRUPTED = ("You were interrupted. Check your worktree and run files first, then continue the task from where "
                "you stopped.")
 BY = "ap2 worker"
@@ -649,45 +650,109 @@ class Workers:
         text = q.get("text") if isinstance(q, dict) else q
         return text if text else "The worker asked a question but its question.json could not be read."
 
-    def _resume_dead(self, rec: dict, prompt: str, count: bool = True, by: str = BY) -> None:
-        """Resume a worker's own session in place (same slot, same ports). Live mode only. `count` adds one to
-        `resumes` (a dead worker's resume; a parked worker's is not counted). The old session is always stopped
-        first (a parked one sits idle; a failed one may keep its process): the copy that continues takes its place,
-        as in `start()`. `by` (the check's caller) is the name on the card's audit."""
+    # An in-place resume (a dead worker's, or a parked one's whose window reset) runs in three steps, so its tool
+    # discovery (up to DISCOVER_TIMEOUT seconds) never holds the worker list's lock: `_plan_resume` under the lock
+    # (what it needs, nothing started), `_resume_tools` with the lock free, then `_resume_dead` under the lock again
+    # once `_still_due` has checked the record on the list as it is then.
+
+    def _plan_resume(self, rec: dict, why: str, prompt: str) -> dict:
+        """Step 1, under the lock: what an in-place resume needs (`why` is "dead" or "parked"); nothing is started
+        or written. Live mode only: a shadow-mode refusal comes first, so it runs no discovery."""
         config.require_live(self.cfg, f"resume the {rec['role']} worker on card {rec['card']}")
         card = self._card(rec["card"])
         project = self._project(card)
-        settings = self.run_dir(rec["card"]) / f"settings-{rec['role']}.json"
-        env = self._env(card, rec["role"], project, rec["ports"], rec.get("branch") or "")
-        if not (rec.get("cwd") and Path(rec["cwd"]).is_dir()):  # checked first, so a gone worktree says so
-            raise WorkerError(f"cannot start the session: the worker's folder {rec.get('cwd') or '(none)'} is gone")
+        return {"card": rec["card"], "role": rec["role"], "short_id": rec.get("short_id"), "cwd": rec.get("cwd"),
+                "why": why, "prompt": prompt, "project": project,
+                "env": self._env(card, rec["role"], project, rec["ports"], rec.get("branch") or "")}
+
+    def _resume_tools(self, plan: dict) -> dict:
+        """Step 2, with the lock free: the tools the resumed session will load (`_tools`). Raises WorkerError."""
+        if not (plan["cwd"] and Path(plan["cwd"]).is_dir()):  # checked first, so a gone worktree says so
+            raise WorkerError(f"cannot start the session: the worker's folder {plan['cwd'] or '(none)'} is gone")
         require_literal(self.data)  # before the tool discovery runs a session
-        write_json(settings, floor(rec["role"], self._tools(project, rec["cwd"], env), self.data, env))
-        argv = self._argv(rec["role"], rec["session_name"], settings, prompt, rec["session_id"] or rec["short_id"])
+        return self._tools(plan["project"], plan["cwd"], plan["env"])
+
+    def _still_due(self, rec: Optional[dict], plan: dict, listing, b, now: datetime) -> bool:
+        """Step 3, under the lock: the planned resume still applies to `rec` (the card and role's record on the
+        list as it is now): the same session in the same folder, no close started, and a classification of the
+        record as it is now (with step 1's `listing`) that says the same state (dead with its one resume left, or
+        parked and still due)."""
+        if rec is None or rec.get("closing") or (rec.get("short_id"), rec.get("cwd")) != (plan["short_id"],
+                                                                                        plan["cwd"]):
+            return False
+        state = self.classify(rec, listing)
+        if plan["why"] == "dead":
+            return state == "dead" and rec.get("resumes", 0) < 1
+        return state == "parked" and b is not None and v1_park.resume_due(rec, now, {"budget": PARK_RULES}, b)
+
+    def _resume_dead(self, rec: dict, plan: dict, found: dict, by: str = BY) -> dict:
+        """Step 3, under the lock: resume a worker's own session in place (same slot, same ports) with the tools
+        `found` in step 2. A dead worker's resume adds one to `resumes`; a parked worker's is not counted. The
+        floor is written only here, after `_still_due`, so a skipped resume never rewrites a running worker's
+        settings. The old session is always stopped first (a parked one sits idle; a failed one may keep its
+        process): the copy that continues takes its place, as in `start()`. `by` (the check's caller) is the name
+        on the card's audit."""
+        settings = self.run_dir(rec["card"]) / f"settings-{rec['role']}.json"
+        write_json(settings, floor(rec["role"], found, self.data, plan["env"]))
+        argv = self._argv(rec["role"], rec["session_name"], settings, plan["prompt"],
+                          rec["session_id"] or rec["short_id"])
         # Whatever its state (parked, failed with its process alive, or gone: a stop of a gone session is harmless),
         # the old session is stopped first, so it never runs on untracked next to the copy. A stop that raises
         # leaves the record as it is.
         self._stop(rec["card"], rec["role"], rec.get("short_id"), by)
-        short = self._launch(argv, rec["cwd"], env)
+        short = self._launch(argv, rec["cwd"], plan["env"])
         # The new session runs now: record it before anything else can fail (the listing below included), so the
         # registry never points at the old one. Its id is the copy's, or "" when the listing does not show the copy
         # yet: the next check fills it in (`_fill_session_id`), as for `start()`.
         rec.update(short_id=short, session_id="", started_at=cards.stamp(self.clock()),
                    idle_since=None, blocked_since=None, parked=None,
-                   resumes=rec.get("resumes", 0) + (1 if count else 0))
+                   resumes=rec.get("resumes", 0) + (1 if plan["why"] == "dead" else 0))
         rec["session_id"] = self._session_id(short)
         # A resume runs under a new id; keep it on the card now, so no id is lost if the worker resumes again.
         self._save_session(rec["card"], rec["role"], by, id=rec["session_id"], state="running", why=None)
         self._close_worker_asks(rec["card"], rec["role"], by)  # a new session: its old prompt or pause is over
+        return rec
+
+    def _resume_step(self, rec: dict, why: str, records: list, entry: dict, by: str, step: Callable):
+        """Run one step of an in-place resume (`_plan_resume`, or step 3) with its failure path: a WorkerError
+        (the resume cannot start, e.g. its worktree is gone or its tools cannot be listed) on a dead worker counts
+        as its one resume, so the next check stops it as died twice instead of holding its slot forever, and is
+        raised for its line; on a parked worker it stops the worker as one that died twice (and returns None). A
+        shadow-mode refusal is not a WorkerError: it is not counted, and a parked worker waits."""
+        try:
+            return step()
+        except WorkerError as e:
+            if why == "dead":
+                rec["resumes"] = rec.get("resumes", 0) + 1
+                raise
+            text = f"could not resume after parking ({e}); look at its worktree, then start it again"
+            entry.update(self._finish_close(rec, records, self._mark("parked_failed", text, note=str(e)), by))
+            return None
+
+    @staticmethod
+    def _note_error(entry: dict, e: Exception) -> None:
+        # A shadow-mode refusal, a bad project file, a card or file error, a claude call that failed: say it on
+        # this worker's line and go on, so the registry is still written back.
+        entry["note"] = str(e) or type(e).__name__
+        if not isinstance(e, (config.ShadowModeError, WorkerError, CardError, config.ConfigError)):
+            entry["error"] = type(e).__name__  # not one of ours: name it, so the gate can report it
 
     def check(self, by: str = BY, usage_file=None) -> list:
         """Look at every worker and act on its state (see the module docstring); return one entry per worker:
-        `{card, role, state, did, ...}`. With `usage_file`, a parked worker whose window has reset resumes."""
+        `{card, role, state, did, ...}`. With `usage_file`, a parked worker whose window has reset resumes.
+
+        It runs in three steps, so no tool discovery (up to DISCOVER_TIMEOUT seconds) holds the worker list's lock:
+        (1) under the lock, every worker is classified and acted on, except that an in-place resume (a dead worker
+        with its one resume left, a parked worker that is due) is only planned; (2) with the lock free, each planned
+        resume's tools are listed; (3) under the lock again, each planned resume runs on the list as it is then,
+        or is skipped with a note when its record changed meanwhile (gone, another session or folder, or a fresh
+        classification that no longer says the same state): the next check looks at it again. A Ctrl-C (any
+        BaseException) stops the pass where it is; every change already made is written back."""
         now = self.clock()
         b = None
         if usage_file:
             b = v1_budget.read(Path(usage_file), now_ms=int(now.timestamp() * 1000), stale_min=PARK_RULES["stale_min"])
-        out = []
+        out, planned = [], []
         stopped = None
         with self.registry.locked() as records:
             # Under the lock: a start that lands before it would otherwise be judged against a listing taken
@@ -706,19 +771,53 @@ class Workers:
                         state = "unknown"  # its mark says what to do: `_act` finishes that close
                     if not rec.get("session_id"):
                         self._fill_session_id(rec, listing, by)
-                    self._act(rec, state, records, entry, by, b, now)
+                    plan = self._act(rec, state, records, entry, by, b, now)
+                    if plan is not None:
+                        planned.append(dict(plan, entry=entry))
                 except Exception as e:  # noqa: BLE001 - one worker's error must not cost the others their changes
-                    # A shadow-mode refusal, a bad project file, a card or file error, a claude call that failed:
-                    # say it on this worker's line and go on, so the registry is still written back below.
-                    entry["note"] = str(e) or type(e).__name__
-                    if not isinstance(e, (config.ShadowModeError, WorkerError, CardError, config.ConfigError)):
-                        entry["error"] = type(e).__name__  # not one of ours: name it, so the gate can report it
+                    self._note_error(entry, e)
                 except BaseException as e:  # noqa: BLE001 - raised below, once the list is written back
                     # Ctrl-C (or another exit) mid-pass: stop here, so no later worker is acted on. The changes
-                    # already made (an earlier worker's resume, its new short id) are written back either way.
+                    # already made (an earlier worker's close, its new session id) are written back either way.
                     stopped = e
                     break
                 out.append(entry)
+        if stopped is not None:
+            raise stopped
+        if not planned:
+            return out
+        # Step 2, with the lock free: a failure is kept for step 3, where the record is checked first. A Ctrl-C
+        # here leaves the pass: no resume starts, and step 1's changes are already written back.
+        for plan in planned:
+            try:
+                plan["found"] = self._resume_tools(plan)
+            except Exception as e:  # noqa: BLE001 - handled in step 3, on the record as it is then
+                plan["failed"] = e
+        with self.registry.locked() as records:
+            # Step 1's listing still holds for a record whose session (short id) is unchanged: a dead session does
+            # not come back, and any new session puts a new short id on record. Everything else `classify` reads
+            # (the record, its result and question files) is read again here.
+            for plan in planned:
+                entry = plan["entry"]
+                try:
+                    rec = self._find(records, plan["card"], plan["role"])
+                    if not self._still_due(rec, plan, listing, b, now):
+                        entry["note"] = ("its record changed while its tools were listed, so it was not resumed; "
+                                         "the next check looks at it again")
+                        continue
+
+                    def step(rec=rec, plan=plan):
+                        if "failed" in plan:
+                            raise plan["failed"]
+                        return self._resume_dead(rec, plan, plan["found"], by)
+
+                    if self._resume_step(rec, plan["why"], records, entry, by, step) is not None:
+                        entry["did"] = "resumed"
+                except Exception as e:  # noqa: BLE001 - one worker's error must not cost the others their changes
+                    self._note_error(entry, e)
+                except BaseException as e:  # noqa: BLE001 - raised below, once the list is written back
+                    stopped = e
+                    break
         if stopped is not None:
             raise stopped
         return out
@@ -731,7 +830,9 @@ class Workers:
             self._save_session(rec["card"], rec["role"], by, id=sid)
             rec["session_id"] = sid
 
-    def _act(self, rec: dict, state: str, records: list, entry: dict, by: str, b, now: datetime) -> None:
+    def _act(self, rec: dict, state: str, records: list, entry: dict, by: str, b, now: datetime) -> Optional[dict]:
+        """Act on one worker's state under the lock (`check`'s step 1). An in-place resume is only planned: its
+        plan (`_plan_resume`) is returned, and `check` runs it once its tools are listed; otherwise None."""
         card_id, role = rec["card"], rec["role"]
         if rec.get("closing"):
             # A close that was started is finished before anything else: its stop may have landed after it timed
@@ -754,14 +855,9 @@ class Workers:
                                                                      question=self._read_question(card_id)), by))
         elif state == "dead":
             if rec.get("resumes", 0) < 1:
-                try:
-                    self._resume_dead(rec, INTERRUPTED, by=by)
-                except WorkerError:
-                    # The resume cannot start (e.g. its worktree is gone): it counts, so the next check stops it as
-                    # died twice instead of holding its slot forever. A shadow-mode refusal is not counted.
-                    rec["resumes"] = rec.get("resumes", 0) + 1
-                    raise
-                entry["did"] = "resumed"
+                # Planned only: `check` lists its tools with the lock free, then resumes it (`_resume_step`).
+                return self._resume_step(rec, "dead", records, entry, by,
+                                         lambda: self._plan_resume(rec, "dead", INTERRUPTED))
             else:
                 why = "the worker died twice; look at its run files and its worktree, then start it again"
                 entry.update(self._finish_close(rec, records, self._mark("died", why), by))
@@ -790,16 +886,10 @@ class Workers:
                 entry.update(self._finish_close(rec, records, self._mark("idle", why), by))
         elif state == "parked":
             if b is not None and v1_park.resume_due(rec, now, {"budget": PARK_RULES}, b):
-                try:
-                    self._resume_dead(rec, "Usage is under the line again. Continue the task from where you "
-                                           "parked.", count=False, by=by)
-                except WorkerError as e:
-                    # The resume cannot start (e.g. its worktree is gone): stop it as a worker that died twice, so
-                    # it never holds its slot forever. A shadow-mode refusal is not a WorkerError: it waits.
-                    why = f"could not resume after parking ({e}); look at its worktree, then start it again"
-                    entry.update(self._finish_close(rec, records, self._mark("parked_failed", why, note=str(e)), by))
-                    return
-                entry["did"] = "resumed"
+                # Planned only, as for a dead worker; a parked worker that cannot resume is stopped.
+                return self._resume_step(rec, "parked", records, entry, by,
+                                         lambda: self._plan_resume(rec, "parked", PARKED_RESUME))
+        return None
 
     # -- answer, finish ------------------------------------------------------------------------------------------
 
