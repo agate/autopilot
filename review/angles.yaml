@@ -66,7 +66,7 @@
 - name: "Cross-platform parity"
   question: "Where does this change look or behave differently across the platforms, browsers and screen sizes it ships to (web and native, narrow and wide)?"
   when: { kinds: [ui] }
-  brief: "Compare web and native, narrow and wide screens, for every changed component. Look for a platform-only API, a style one platform ignores, and a layout that breaks at a size nobody tried."
+  brief: "Read each changed component's code for web and native, narrow and wide screens (in your head; do not run the app). Look for a platform-only API, a style one platform ignores, and a layout that would break at a size nobody tried."
 
 - name: "Accessibility & UX"
   question: "What can a keyboard-only, screen-reader or zoomed-in user no longer reach, read or operate after this change?"
