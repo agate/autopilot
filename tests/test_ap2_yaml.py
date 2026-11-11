@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import json
+import os
 import re
+import subprocess
+import sys
+import time
 import unittest
 
-from tests.helpers import ROOT
+from tests.helpers import LIB, ROOT
 from assistant import yamlish
 from assistant.yamlish import YamlError, load
 
@@ -107,6 +112,12 @@ class ScalarTest(unittest.TestCase):
         self.assertEqual(self.one("x - 'a # b'"), "x - 'a")
         self.assertEqual(self.one("x [y, 'z # w"), "x [y, 'z")  # a '[' mid-value opens no flow collection
 
+    def test_a_quote_right_after_a_colon_mid_value_stays_plain_text(self):
+        # Outside brackets a ':' opens a value only with a space or tab after it, so a quote right after it is text.
+        self.assertEqual(self.one("a:'b # c"), "a:'b")
+        self.assertEqual(self.one("a:'b"), "a:'b")
+        self.assertEqual(self.one('10:"30 # x'), '10:"30')
+
     def test_quoted_strings(self):
         self.assertEqual(self.one('"a # not a comment"'), "a # not a comment")
         self.assertEqual(self.one("'it''s'"), "it's")
@@ -188,6 +199,12 @@ class StructureTest(unittest.TestCase):
         self.assertEqual(load('k: {"a" :"b # c"}\n'), {"k": {"a": "b # c"}})  # spaces before the ':' after a quote
         self.assertEqual(load('k: {"a"\t:"b # c"}\n'), {"k": {"a": "b # c"}})  # a tab before the ':' after a quote
         self.assertEqual(load("k: [x:'y, z]  # it's here\n"), {"k": ["x:'y", "z"]})  # a quote after 'x:' is plain
+
+    def test_a_quote_after_a_word_inside_flow_collections_is_plain_text(self):
+        # Inside brackets a quote right after a word (not '[', '{', ',' or ':') opens no string.
+        self.assertEqual(load('k: [a "b] # c"]\n'), {"k": ['a "b']})
+        with self.assertRaisesRegex(YamlError, r"^line 1: unclosed bracket: expected '\]' before the end of the line$"):
+            load('k: [x, a "b # c"]\n')
 
     def test_tab_after_a_colon_in_a_flow_map(self):
         self.assertEqual(load("a: {k:\tv}\n"), {"a": {"k": "v"}})
@@ -325,8 +342,53 @@ class ErrorTest(unittest.TestCase):
                 self.assertIn(words, msg)
                 self.assertEqual(ctx.exception.line, line)
 
+    def test_a_quote_after_a_broken_block_indicator_is_refused(self):
+        # '-' then a tab, or '--', is not a '- ' block indicator, so the quote after it opens no string.
+        with self.assertRaisesRegex(YamlError, r"^line 2: a tab after '-' or '\?' is not supported; use a space$"):
+            load("k:\n  -\t 'b\n")
+        with self.assertRaisesRegex(YamlError, r"^line 2: expected 'key: value' at this indent$"):
+            load("k:\n  -- 'b\n")
+        with self.assertRaisesRegex(YamlError,
+                                    r"^line 1: unclosed quote \('\); quoted strings must end on the same line$"):
+            load("? 'a\n")  # '? ' is a block indicator too, so the quote after it opens a string
+
     def test_one_error_class(self):
         self.assertTrue(issubclass(YamlError, ValueError))
+
+
+class LongLineTest(unittest.TestCase):
+    """The reader's time grows in step with a line's length: a 1 MiB line of quote characters reads well under a
+    second. Each runs in a child process that must finish within LIMIT seconds; the timeout stops a reader that hangs
+    so it fails instead of holding the suite."""
+
+    N = 1024 * 1024  # sources.MAX_SOURCE
+    # The fixed reader takes well under a second; the quadratic one takes 8 s or more even on a fast machine.
+    LIMIT = 5
+    CHILD = "import json, sys; from assistant import yamlish; print(json.dumps(yamlish.load(sys.stdin.read())))"
+
+    def load_in_a_child(self, text: str):
+        env = {k: v for k, v in os.environ.items() if k != "LC_ALL"}
+        env.update(PYTHONPATH=str(LIB), PYTHON_COLORS="0", PYTHONIOENCODING="utf-8")
+        start = time.monotonic()
+        r = subprocess.run([sys.executable, "-c", self.CHILD], input=text, capture_output=True, text=True,
+                           encoding="utf-8", env=env, timeout=15)
+        elapsed = time.monotonic() - start
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        self.assertLess(elapsed, self.LIMIT)
+        return json.loads(r.stdout)
+
+    def test_a_long_line_of_quotes_reads_in_linear_time(self):
+        n = self.N
+        cases = [
+            ("single quotes", "k: x" + "'" * n, {"k": "x" + "'" * n}),
+            ("double quotes", "k: x" + '"' * n, {"k": "x" + '"' * n}),
+            ("quote and space", "k: x" + "' " * (n // 2), {"k": "x" + ("' " * (n // 2)).rstrip(" ")}),
+            ("in a flow list", "k: [a" + '"' * n + "]", {"k": ["a" + '"' * n]}),
+            ("in a block list item", "k:\n  - x" + "'" * n, {"k": ["x" + "'" * n]}),
+        ]
+        for name, text, want in cases:
+            with self.subTest(name):
+                self.assertEqual(self.load_in_a_child(text), want)
 
 
 if __name__ == "__main__":
