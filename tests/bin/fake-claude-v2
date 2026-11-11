@@ -15,7 +15,8 @@ FAKE_TOOLS_HANG   when set, `-p` prints nothing and sleeps FAKE_TOOLS_SLEEP seco
 FAKE_TOOLS_WRAPPER  when set, `-p` is a launcher that does not exec: it runs a child copy of itself with the same
                   argv and stdout (without this flag and without logging) and waits for it; the child does the rest
 FAKE_TOOLS_BEFORE_INIT  when set, `-p` prints `not json`, `1` and a SessionStart `hook_response` event before init
-FAKE_MCP_SERVERS  the init event's `mcp_servers` as `name:status`, comma-separated (default: no `mcp_servers` key)
+FAKE_MCP_SERVERS  the init event's `mcp_servers` as `name:status`, comma-separated (default: no `mcp_servers` key);
+                  a bare `name` has no `status` key
 
 `--bg` starts a session: it gets the next short id (s0001, s0002, ...) and session id, is listed as working, and
 writes a one-line transcript. `--resume <id>` copies the old transcript under the new id, as claude does.

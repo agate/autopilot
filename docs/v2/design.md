@@ -924,8 +924,10 @@ Calls the author made without asking (check them):
     group (a `claude` launcher that does not exec, the real claude under it, the MCP servers and hooks they
     started), and the child is reaped before the call returns. A server the init event's `mcp_servers` lists as
     not `connected` (pending, failed, needs-auth or anything else) has no tools in that event yet, so it is denied
-    whole (`mcp__<prefix>`, v1's `perms.tool_prefix` without the trailing `__`): a slow or not-yet-connected server
-    never goes out un-denied.
+    whole (`mcp__<server key>`, with the server name normalized the way Claude Code keys it: every character
+    outside `[A-Za-z0-9_-]` becomes `_`, and for a `claude.ai ` server runs of `_` are squeezed and the ends
+    trimmed, so `claude.ai Jira & Confluence` is `mcp__claude_ai_Jira_Confluence`): a slow or not-yet-connected
+    server never goes out un-denied.
     No tool list is read from or saved on a card: a card is not trusted storage (`ap2 card add`, workers and
     scans write cards).
     Why this is safe: the session is killed at its init event, which comes before the model's first reply, so the

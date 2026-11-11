@@ -101,14 +101,24 @@ def _kill_group(proc: subprocess.Popen) -> None:
         pass
 
 
+def _server_rule(name: str) -> str:
+    """The deny rule for a whole MCP server, keyed the way Claude Code keys it: every character outside
+    `[A-Za-z0-9_-]` becomes `_`; for a `claude.ai ` server the runs of `_` are then squeezed to one and a leading or
+    trailing `_` is dropped (`claude.ai Jira & Confluence` -> `mcp__claude_ai_Jira_Confluence`)."""
+    key = re.sub(r"[^A-Za-z0-9_-]", "_", name)
+    if name.startswith("claude.ai "):
+        key = re.sub(r"^_|_$", "", re.sub(r"_+", "_", key))
+    return f"mcp__{key}"
+
+
 def _not_connected(event: dict) -> list:
-    """The server-level deny rule (`mcp__<prefix>`) of every MCP server the init event lists with a status other
+    """The server-level deny rule (`_server_rule`) of every MCP server the init event lists with a status other
     than `connected`: its tools are not in the event yet, but the worker's session may connect it later."""
     servers = event.get("mcp_servers")
     rules = []
     for s in servers if isinstance(servers, list) else []:
         if isinstance(s, dict) and s.get("name") and s.get("status") != "connected":
-            rules.append(v1_perms.tool_prefix(str(s["name"]))[:-2])
+            rules.append(_server_rule(str(s["name"])))
     return list(dict.fromkeys(rules))
 
 

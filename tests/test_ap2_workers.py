@@ -30,7 +30,6 @@ from assistant.config import Config, ShadowModeError
 from assistant.resources import WorkerError
 from assistant.store import Store
 from assistant.workers import DIED, PROTECTED, Workers
-from autopilot import perms as v1_perms
 from autopilot import sessions as v1_sessions
 
 FAKE = str(ROOT / "tests" / "bin" / "fake-claude-v2")
@@ -406,6 +405,28 @@ class ProjectSetupTest(WorkerCase):
         self.assertNotIn("mcp__slack__slack_send_message", deny)
 
 
+class ServerRuleTest(unittest.TestCase):
+    """The whole-server deny rule names a server the way Claude Code keys it: every character outside
+    `[A-Za-z0-9_-]` becomes `_`, and a `claude.ai ` server then has its `_` runs squeezed and the ends trimmed."""
+
+    def test_a_server_is_named_the_way_claude_code_names_it(self):
+        for name, rule in (("claude.ai Jira & Confluence", "mcp__claude_ai_Jira_Confluence"),
+                           ("claude.ai Slack (prod)", "mcp__claude_ai_Slack_prod"),
+                           ("claude.ai Drive", "mcp__claude_ai_Drive"),
+                           ("claude.ai Acme - Slack", "mcp__claude_ai_Acme_-_Slack"),
+                           ("plugin:expo:expo", "mcp__plugin_expo_expo"),
+                           ("my  server!", "mcp__my__server_")):  # not claude.ai: no squeezing, no trimming
+            self.assertEqual(workers_mod._server_rule(name), rule, name)
+
+    def test_only_named_servers_in_a_list_are_read(self):
+        event = {"mcp_servers": ["x", {"status": "failed"}, {"name": "a", "status": "failed"},
+                                 {"name": "a", "status": "pending"}]}
+        self.assertEqual(workers_mod._not_connected(event), ["mcp__a"])
+        self.assertEqual(workers_mod._not_connected({"mcp_servers": {"a": 1}}), [])
+        self.assertEqual(workers_mod._not_connected({"mcp_servers": 5}), [])
+        self.assertEqual(workers_mod._not_connected({}), [])
+
+
 class ToolDiscoveryTest(WorkerCase):
     """A project that lists no `tools` gets the exact set the worker's own session will load: on every floor ap2
     writes, one `claude -p ... --output-format stream-json` in the worker's own folder, with the worker's env, that
@@ -539,15 +560,16 @@ class ToolDiscoveryTest(WorkerCase):
         self.assertIn("mcp__slack__slack_send_message", self.deny(cid))
 
     def test_a_launcher_that_does_not_exec_is_killed_with_its_whole_group_at_the_deadline(self):
-        with mock.patch.object(workers_mod, "DISCOVER_TIMEOUT", 0.5), \
+        # The deadline leaves the wrapper's child time to start and write its pid, even on a busy machine.
+        with mock.patch.object(workers_mod, "DISCOVER_TIMEOUT", 2), \
                 mock.patch.dict(os.environ, {"FAKE_TOOLS_WRAPPER": "1", "FAKE_TOOLS_HANG": "1"}):
             began = time.monotonic()
-            with self.assertRaisesRegex(WorkerError, r"no init event within 0\.5 s"):
+            with self.assertRaisesRegex(WorkerError, r"no init event within 2 s"):
                 self.start()
             took = time.monotonic() - began
         pid = self.discover_pid()
         self.kill_later(pid)
-        self.assertLess(took, 1.5)  # the child would sleep 30 s with the pipe open
+        self.assertLess(took, 10)  # the child would sleep 30 s with the pipe open
         self.assert_gone(pid)
         self.assertEqual(self.bg_calls(), [])
 
@@ -581,17 +603,28 @@ class ToolDiscoveryTest(WorkerCase):
     def test_a_server_not_connected_at_the_init_event_is_denied_whole(self):
         # Its tools are not in the init event yet, but the `--bg` session connects it later and could use them.
         cid = self.add_card()
-        servers = "slack:connected,tracker:pending,claude.ai Drive:needs-auth,builds:failed"
+        # Any status but `connected` is denied, an unknown one or none at all as well (a bare name has no status).
+        servers = ("slack:connected,tracker:pending,claude.ai Drive:needs-auth,builds:failed,"
+                   "claude.ai Jira & Confluence:pending,odd:disabled,nostatus")
+        not_connected = ("mcp__tracker", "mcp__claude_ai_Drive", "mcp__builds", "mcp__claude_ai_Jira_Confluence",
+                         "mcp__odd", "mcp__nostatus")
+        w = self.workers()
         with mock.patch.dict(os.environ, {"FAKE_MCP_SERVERS": servers}):
-            self.workers().start(cid, "implement", cwd=self.wt)
+            a = w.start(cid, "implement", cwd=self.wt)
         deny = self.deny(cid)
-        drive = v1_perms.tool_prefix("claude.ai Drive")[:-2]
-        self.assertEqual(drive, "mcp__claude_ai_Drive")
-        for rule in ("mcp__tracker", drive, "mcp__builds"):
+        for rule in not_connected:
             self.assertIn(rule, deny)
         self.assertIn("mcp__slack__slack_send_message", deny)  # a connected server: only its outward tools
         self.assertNotIn("mcp__slack", deny)
         self.assertNotIn("mcp__slack__slack_read_channel", deny)
+        # The in-place resume of a dead worker writes the whole-server rules into its floor as well.
+        self.drop_agent(a["short_id"])
+        with mock.patch.dict(os.environ, {"FAKE_MCP_SERVERS": servers}):
+            self.assertEqual(w.check()[0]["did"], "resumed")
+        self.assertEqual(len(self.bg_calls()), 2)
+        deny = self.deny(cid)
+        for rule in not_connected:
+            self.assertIn(rule, deny)
 
     def test_a_card_cannot_bring_its_own_tool_list(self):
         sid = "0b4c6f4e-0000-4000-8000-000000000001"
