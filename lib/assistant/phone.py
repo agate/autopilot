@@ -1,0 +1,175 @@
+"""The phone page's data (design 9.2): the card store turned into one JSON document, read only.
+
+`build(data, cfg=None, now=None, plugin_dir=None)` returns `{generated_at, mode, primary_language,
+secondary_language, languages, settings, lanes, projects, heartbeat, cards, full}`; `ap2 phone build` prints it.
+
+- The window: a card is on the phone when its lane is in `phone_lanes` and it is open (not `done`), or it is `done`
+  and its `updated_at` is at most `phone_history_days` days before `now` (0 shows no History; a `done` card with no
+  readable `updated_at` stays off).
+- `cards` are the local page's rows (`server.row`) in its order (`server.order`); `full` maps each one's id to the
+  local page's full card (`server.full_card`), less what stays on the Mac: the card's `sessions` and
+  `source.raw`, and every child or link that is not on the phone, which becomes `{id, off_phone: true}`.
+- `phone_hide_quotes`: a card made from a source record shows "Ana wrote a message in #team" (engine's
+  HIDDEN_PHRASES) instead of the record's words, in its row (`title: null`, `title_hidden` per language) and in
+  its full card (title, `plain.what`, `source.record` and the source block).
+
+Building writes nothing (the store is read without its lock file, as the local page's GETs do), starts no process
+and opens no connection. Publishing the data is a later dispatcher step, live mode only.
+"""
+from __future__ import annotations
+
+import copy
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Optional
+
+from assistant import cards, config, engine, server, templates
+from assistant.config import ConfigError
+from assistant.sources import Loader, SourceError
+
+MAC_ONLY = ("sessions",)  # card fields that stay on the Mac (and `source.raw`, a path to a file on it)
+
+
+def on_phone(card: dict, cfg: config.Config, now: datetime) -> bool:
+    """True when the card is inside the phone's window (see the module's words)."""
+    lane = card.get("lane")
+    if not (isinstance(lane, str) and lane in cfg.phone_lanes):
+        return False
+    if lane != "done":
+        return True
+    if cfg.phone_history_days == 0:
+        return False
+    try:
+        at = cards.parse_stamp(card.get("updated_at"))
+    except (TypeError, ValueError):
+        return False
+    return at >= now - timedelta(days=cfg.phone_history_days)
+
+
+def _record(card: dict) -> Optional[dict]:
+    """The source record the card was made from, or None."""
+    src = card.get("source")
+    return src["record"] if isinstance(src, dict) and isinstance(src.get("record"), dict) else None
+
+
+class _Hider:
+    """The hiding phrases of the cards made from a record, one per language, with each source's `brings` read once.
+    A source that cannot be loaded (removed, or a bad file) makes the phrase say `something`."""
+
+    def __init__(self, data: Path, plugin_dir: Optional[Path], langs: tuple):
+        missing = [lang for lang in langs if engine.hidden_phrases(lang) is None]
+        if missing:
+            raise ConfigError(f"phone_hide_quotes: no phrase to show instead of what people wrote in "
+                              f"{', '.join(missing)} yet (built in: {', '.join(engine.HIDDEN_PHRASES)})")
+        self.data, self.plugin_dir, self.langs = data, plugin_dir, langs
+        self.loader = None
+        self.brings = {}
+
+    def _brings(self, name) -> Optional[str]:
+        if not isinstance(name, str):
+            return None
+        if name not in self.brings:
+            try:
+                if self.loader is None:
+                    self.loader = Loader(self.data, self.plugin_dir)
+                self.brings[name] = self.loader.load(name).brings
+            except (SourceError, ConfigError):
+                self.brings[name] = None
+        return self.brings[name]
+
+    def texts(self, card: dict) -> dict:
+        record = _record(card)
+        brings = self._brings(card["source"].get("name"))
+        return {lang: engine.hidden_text(lang, record, brings) for lang in self.langs}
+
+
+def build(data, cfg: Optional[config.Config] = None, now: Optional[datetime] = None,
+          plugin_dir: Optional[Path] = None) -> dict:
+    """The phone page's data for the data folder `data`. `cfg` defaults to its config.yaml, `now` to the clock,
+    `plugin_dir` to the plugin's `sources/` (read only to name a hidden record's kind). Raises ConfigError (a bad
+    config, or hiding asked for in a language with no phrases) and CardError (a damaged card file)."""
+    data = Path(data)
+    cfg = cfg if cfg is not None else config.load(data)
+    now = now if now is not None else cards.now_utc()
+    langs = cards.languages(cfg)
+    hider = _Hider(data, plugin_dir, langs) if cfg.phone_hide_quotes else None
+    store = server._ReadStore(data, cfg=cfg, clock=lambda: now)
+    found = store.list()
+    shown = server.order([c for c in found if on_phone(c, cfg, now)])
+    by_id = {c["id"]: c for c in shown}
+    hidden = {c["id"]: hider.texts(c) for c in shown if hider is not None and _record(c) is not None}
+
+    def phone_row(card: dict) -> dict:
+        out = server.row(card, langs)
+        if card["id"] in hidden:
+            out["title"], out["title_hidden"] = None, dict(hidden[card["id"]])
+        return out
+
+    def neighbour(r: dict) -> dict:
+        """A child's or a link's row: the phone's own row, `{id, off_phone}` when it is not on the phone, or the
+        local page's `{id, missing}` as it is."""
+        if r.get("missing"):
+            return r
+        return phone_row(by_id[r["id"]]) if r["id"] in by_id else {"id": r["id"], "off_phone": True}
+
+    catalog = _once(lambda: templates.catalog(data))
+    full = {}
+    for c in shown:
+        out = copy.deepcopy(server.full_card(store, data, c, langs, found=found, catalog=catalog))
+        card = out["card"]
+        for key in MAC_ONLY:
+            card.pop(key, None)
+        if isinstance(card.get("source"), dict):
+            card["source"].pop("raw", None)
+        if c["id"] in hidden:
+            texts = hidden[c["id"]]
+            card["title"] = texts[langs[0]]
+            card["plain"]["what"] = dict(texts)
+            record = {k: v for k, v in card["source"]["record"].items() if k != "text"}
+            card["source"]["record"] = record
+            out["source_block"]["text"] = None
+            out["source_block"]["record"] = copy.deepcopy(record)
+        out["children"] = [neighbour(r) for r in out["children"]]
+        out["links"] = [neighbour(r) for r in out["links"]]
+        full[c["id"]] = out
+
+    lanes = {lane: 0 for lane in cards.LANES}
+    children = {}
+    for c in shown:
+        if c.get("lane") in lanes:
+            lanes[c["lane"]] += 1
+        if isinstance(c.get("parent"), str):
+            children.setdefault(c["parent"], []).append(c)
+    projects = []
+    for c in found:  # the store's order, as the local page lists them
+        if c.get("kind") != "project" or c["id"] not in by_id:
+            continue
+        kids = children.get(c["id"], [])
+        p = {"id": c["id"], "title": c.get("title"), "done": sum(1 for k in kids if k.get("lane") == "done"),
+             "total": len(kids)}
+        if c["id"] in hidden:
+            p["title"], p["title_hidden"] = None, dict(hidden[c["id"]])
+        projects.append(p)
+    return {"generated_at": cards.stamp(now), "mode": cfg.mode, "primary_language": cfg.primary_language,
+            "secondary_language": cfg.secondary_language, "languages": list(langs),
+            "settings": {"history_days": cfg.phone_history_days, "lanes": list(cfg.phone_lanes),
+                         "hide_quotes": cfg.phone_hide_quotes},
+            "lanes": lanes, "projects": projects, "heartbeat": server.heartbeat(data, now),
+            "cards": [phone_row(c) for c in shown], "full": full}
+
+
+def _once(fn):
+    """`fn()` run at most once: later calls return its result, or raise its error, again."""
+    memo = []
+
+    def call():
+        if not memo:
+            try:
+                memo.append((True, fn()))
+            except ConfigError as e:
+                memo.append((False, str(e)))
+        ok, value = memo[0]
+        if not ok:
+            raise ConfigError(value)
+        return value
+    return call
