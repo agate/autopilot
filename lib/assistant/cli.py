@@ -81,6 +81,7 @@ def _parser() -> argparse.ArgumentParser:
     _template_parser(sub)
     _worker_parser(sub)
     _serve_parser(sub)
+    _phone_parser(sub)
     return p
 
 
@@ -556,6 +557,76 @@ def cmd_serve(args) -> int:
 
 
 COMMANDS["serve"] = cmd_serve
+
+
+# --- ap2 phone (the phone page's data, design 9.2) -----------------------------------------------------------------
+# Builds the data only: publishing it is the dispatcher's step (live mode only), so there is no --publish here.
+
+def _phone_parser(sub) -> None:
+    p = sub.add_parser("phone", help="build the phone page's data", description="The phone page's data.")
+    ps = p.add_subparsers(dest="phone_command", metavar="<phone command>", title="phone commands")
+    ps.required = True
+    b = ps.add_parser("build", help="print the phone page's data as JSON",
+                      description="Print the phone page's data (open cards, recent History, full cards, under the "
+                                  "phone_* settings in config.yaml) as one JSON document, or write it to --out. "
+                                  "Read-only: it writes nothing else and publishes nothing; publishing is the "
+                                  "dispatcher's step, in live mode only. Sets up the data folder's layout on "
+                                  "first use.")
+    b.add_argument("--out", metavar="PATH", help="write the JSON to this file (replaced whole) instead of stdout")
+    b.add_argument("--data", metavar="PATH", help=DATA_HELP)
+
+
+def cmd_phone(args) -> int:
+    from assistant import phone
+    data = datadir.ensure(datadir.resolve(args.data))
+    text = json.dumps(phone.build(data), sort_keys=True, ensure_ascii=False) + "\n"
+    if args.out is None:
+        out = getattr(sys.stdout, "buffer", None)
+        if out is None:  # a stream with no bytes underneath (stdout closed is None too): as _write does
+            _write(text, sys.stdout)
+            return 0
+        try:
+            out.write(text.encode("utf-8"))
+            out.flush()
+        except OSError as e:
+            _to_devnull(out)
+            if isinstance(e, BrokenPipeError):
+                raise
+            raise _OutputError(e) from e
+        return 0
+    _write_file_whole(Path(args.out), text.encode("utf-8"))
+    return 0
+
+
+def _write_file_whole(path: Path, body: bytes) -> None:
+    """Write `body` to a temp file next to `path`, then rename it over `path`, so a reader never sees half a file.
+    Raises ConfigError naming the path."""
+    import tempfile
+    folder = path.parent
+    if not folder.is_dir():
+        raise ConfigError(f"--out {path}: the folder {folder} does not exist")
+    if path.is_dir():
+        raise ConfigError(f"--out {path}: is a folder")
+    tmp = None
+    try:
+        fd, tmp = tempfile.mkstemp(dir=str(folder), prefix=f".{path.name}.", suffix=".tmp")
+        with os.fdopen(fd, "wb") as f:
+            f.write(body)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        tmp = None
+    except OSError as e:
+        raise ConfigError(f"--out {path}: cannot write: {e}") from e
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+COMMANDS["phone"] = cmd_phone
 
 
 def main(argv: list) -> int:

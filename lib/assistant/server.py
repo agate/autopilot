@@ -143,6 +143,52 @@ def source_block(card: dict) -> Optional[dict]:
     return out
 
 
+def full_card(store: Store, data: Path, card: dict, langs: tuple, found: Optional[list] = None,
+              catalog: Optional[Callable[[], dict]] = None) -> dict:
+    """The full card (`GET /api/cards/<id>`, and the phone data's `full`): the card, its template and view, the
+    source block, its children and links as rows, and its activity. `found` (every card, as `store.list()` gives
+    them) and `catalog` (returns `templates.catalog(data)`, or raises its ConfigError) let a caller that builds
+    many full cards read the store and the templates once; without them each comes from the store and the
+    templates folder. Raises CardError when the children cannot be listed."""
+    out = {"card": card, "template": None, "source_block": source_block(card)}
+    try:
+        t = ((catalog or (lambda: templates.catalog(data)))().get(card.get("kind"))
+             if isinstance(card.get("kind"), str) else None)
+    except ConfigError as e:  # a bad user template: the card is still served
+        t = None
+        out["template_error"] = str(e)
+    if t is not None:
+        view = list(t.data["view"])
+        out["template"] = {"kind": t.kind, "title": t.data.get("title"), "origin": t.origin, "view": view}
+        # Design 9.4: every full card has the Ask box, so `questions` is added when the template leaves it out.
+        out["view"] = view + ([] if "questions" in view else ["questions"])
+    else:
+        out["view"] = (["source_block"] if out["source_block"] is not None else []) + list(VIEW_WITHOUT_TEMPLATE)
+    if found is None:
+        kids = store.list(parent=card.get("id"))
+        by_id = None
+    else:
+        kids = [c for c in found if c.get("parent") == card.get("id")]
+        by_id = {c.get("id"): c for c in found}
+    out["children"] = [row(c, langs) for c in order(kids)]
+    links = []
+    for link in card.get("links") if isinstance(card.get("links"), list) else []:
+        known = isinstance(link, str) and cards.CARD_ID.match(link)
+        if not known or (link not in by_id if by_id is not None else not store.path(link).exists()):
+            links.append({"id": link, "missing": True})
+            continue
+        if by_id is not None:
+            links.append(row(by_id[link], langs))
+            continue
+        try:
+            links.append(row(store.get(link), langs))
+        except CardError as e:  # a damaged linked card does not hide this one
+            links.append({"id": link, "missing": True, "error": str(e)})
+    out["links"] = links
+    out["activity"] = card.get("audit")
+    return out
+
+
 def heartbeat(data: Path, now: datetime) -> dict:
     """The gate's last run from `<data>/gate.json` (design 7.4): late at 180 seconds or more, or when there is no
     usable time (an `error` then says why)."""
@@ -520,33 +566,7 @@ class Handler(BaseHTTPRequestHandler):
         if not store.path(card_id).exists():
             raise HTTPError(404, f"no card {card_id}")
         card = self._store_call(store.get, card_id)
-        langs = cards.languages(cfg)
-        out = {"card": card, "template": None, "source_block": source_block(card)}
-        try:
-            t = templates.catalog(self.server.data).get(card.get("kind")) if isinstance(card.get("kind"), str) else None
-        except ConfigError as e:  # a bad user template: the card is still served
-            t = None
-            out["template_error"] = str(e)
-        if t is not None:
-            view = list(t.data["view"])
-            out["template"] = {"kind": t.kind, "title": t.data.get("title"), "origin": t.origin, "view": view}
-            # Design 9.4: every full card has the Ask box, so `questions` is added when the template leaves it out.
-            out["view"] = view + ([] if "questions" in view else ["questions"])
-        else:
-            out["view"] = (["source_block"] if out["source_block"] is not None else []) + list(VIEW_WITHOUT_TEMPLATE)
-        out["children"] = [row(c, langs) for c in order(self._store_call(store.list, parent=card_id))]
-        links = []
-        for link in card.get("links") if isinstance(card.get("links"), list) else []:
-            if not (isinstance(link, str) and cards.CARD_ID.match(link)) or not store.path(link).exists():
-                links.append({"id": link, "missing": True})
-                continue
-            try:
-                links.append(row(store.get(link), langs))
-            except CardError as e:  # a damaged linked card does not hide this one
-                links.append({"id": link, "missing": True, "error": str(e)})
-        out["links"] = links
-        out["activity"] = card.get("audit")
-        return out
+        return self._store_call(full_card, store, self.server.data, card, cards.languages(cfg))
 
     # -- POST /api/cards/<id>/questions --------------------------------------------------------------------------
 

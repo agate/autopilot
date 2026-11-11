@@ -401,5 +401,70 @@ class LayoutTest(unittest.TestCase):
             datadir.ensure(self.data)
 
 
+# --- the phone page's settings (design 9.2) --------------------------------------------------------------------
+
+PHONE_REFUSALS = [
+    ("days negative", "phone_history_days: -1\n", "phone_history_days"),
+    ("days too large", "phone_history_days: 366\n", "phone_history_days"),
+    ("days a float", "phone_history_days: 3.0\n", "phone_history_days"),
+    ("days a word", "phone_history_days: three\n", "phone_history_days"),
+    ("days quoted", "phone_history_days: '3'\n", "phone_history_days"),
+    ("days true", "phone_history_days: true\n", "phone_history_days"),
+    ("days empty", "phone_history_days:\n", "phone_history_days"),
+    ("lanes unknown", "phone_lanes: [needs, later]\n", "unknown lane 'later'"),
+    ("lanes repeated", "phone_lanes: [needs, running, needs]\n", "'needs' more than once"),
+    ("lanes empty", "phone_lanes: []\n", "at least one lane"),
+    ("lanes empty value", "phone_lanes:\n", "phone_lanes"),
+    ("lanes one word", "phone_lanes: needs\n", "phone_lanes"),
+    ("lanes a number in the list", "phone_lanes: [needs, 3]\n", "unknown lane 3"),
+    ("lanes a map", "phone_lanes: {needs: 1}\n", "phone_lanes"),
+    ("hide a word", "phone_hide_quotes: yes\n", "phone_hide_quotes"),
+    ("hide a number", "phone_hide_quotes: 1\n", "phone_hide_quotes"),
+    ("hide quoted", "phone_hide_quotes: 'true'\n", "phone_hide_quotes"),
+    ("hide empty", "phone_hide_quotes:\n", "phone_hide_quotes"),
+]
+
+
+class PhoneSettingsTest(unittest.TestCase):
+    def setUp(self):
+        self.data = Path(tempfile.mkdtemp(prefix="ap2-data-"))
+        self.addCleanup(shutil.rmtree, self.data, True)
+
+    def test_defaults(self):
+        for cfg in (Config(), config.load(self.data), config.parse(""), config.parse(config.DEFAULT_TEXT)):
+            self.assertEqual(cfg.phone_history_days, 3)
+            self.assertEqual(cfg.phone_lanes, ("needs", "running", "planned", "done"))
+            self.assertIs(cfg.phone_hide_quotes, False)
+
+    def test_the_default_text_documents_each_key_and_reads_back_as_the_defaults(self):
+        self.assertEqual(config.parse(config.DEFAULT_TEXT), Config())
+        for key in ("phone_history_days", "phone_lanes", "phone_hide_quotes"):
+            self.assertIn(key, config.KEYS)
+            self.assertIn(f"\n{key}: ", config.DEFAULT_TEXT)
+
+    def test_good_values(self):
+        cfg = config.parse("phone_history_days: 0\nphone_lanes: [done, needs]\nphone_hide_quotes: true\n")
+        self.assertEqual((cfg.phone_history_days, cfg.phone_lanes, cfg.phone_hide_quotes), (0, ("done", "needs"), True))
+        self.assertEqual(config.parse("phone_history_days: 365\n").phone_history_days, 365)
+        self.assertEqual(config.parse("phone_lanes:\n  - running\n").phone_lanes, ("running",))
+        self.assertIs(config.parse("phone_hide_quotes: false\n").phone_hide_quotes, False)
+        self.assertIs(config.parse("phone_hide_quotes: True\n").phone_hide_quotes, True)
+
+    def test_each_refusal_names_its_line(self):
+        for name, text, words in PHONE_REFUSALS:
+            with self.subTest(name):
+                with self.assertRaises(ConfigError) as ctx:
+                    config.load(write_config(self.data, "# phone\nmode: shadow\n" + text))
+                msg = str(ctx.exception)
+                self.assertIn(words, msg)
+                self.assertIn("config.yaml: line 3:", msg)
+                self.assertEqual(len(msg.splitlines()), 1)
+
+    def test_the_settings_shown_elsewhere_keep_their_keys(self):
+        # `ap2 config` and the local page's Settings show `as_dict()`; the phone keys stay out of it for now.
+        self.assertEqual(set(Config(phone_history_days=9).as_dict()),
+                         {"primary_language", "secondary_language", "mode", "keep_transcripts"})
+
+
 if __name__ == "__main__":
     unittest.main()
