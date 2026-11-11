@@ -1013,7 +1013,10 @@ Calls the author made without asking (check them):
     0-65535 is an argument error, exit 2. Nothing is installed: "started at login" comes with the slice that
     writes launchd jobs.
   - The request guard: every request must carry `Host: 127.0.0.1:<port>` or `localhost:<port>`, or it gets 403,
-    so a site that points its own name at 127.0.0.1 (DNS rebinding) cannot read cards. Every reply has
+    so a site that points its own name at 127.0.0.1 (DNS rebinding) cannot read cards. While it runs, the server
+    trusts every account and process on this Mac: the Host and Origin checks stop other web sites, not other
+    local users, who can read every card, source and setting and post questions. A per-run token is later work
+    if that is not acceptable. Every reply has
     `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` and the page's
     Content-Security-Policy (`default-src 'none'`, the page's own inline script and style, `connect-src 'self'`,
     `form-action 'none'`, `frame-ancestors 'none'`), and never an `Access-Control-Allow-*` header; `OPTIONS` is
@@ -1061,8 +1064,10 @@ Calls the author made without asking (check them):
     allowed in shadow mode, because it writes only inside the data folder, which shadow mode allows (10).** No
     route calls `config.require_live`, because none writes outside the data folder; a later route that does must
     call it first. The GETs write nothing: they read the store without creating its lock file, except a search
-    (`q`), which may build `index.sqlite`, the store's own cache, as `ap2 search` does. The server starts no
-    process and calls no Jira, Slack, GitHub or `claude`.
+    (`q`), which may build `index.sqlite`, the store's own cache, as `ap2 search` does. The question route may
+    create `.store.lock`, the store's own empty lock file, when it is missing, even for a refused question;
+    nothing else is written on a refusal. The server starts no process and calls no Jira, Slack, GitHub or
+    `claude`.
   - The page is one file with inline CSS and JS and no fonts or scripts from another host. It writes card text
     only as text (`textContent`), never as HTML. Screens by hash route: `#/lane/<lane>`, `#/search/<words>`,
     `#/project/<id>` (its children), `#/card/<id>`, `#/sources[/<name>]`, `#/templates[/<kind>]`, `#/settings`.

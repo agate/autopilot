@@ -69,6 +69,11 @@ def tree(folder: Path) -> dict:
 class ServerCase(unittest.TestCase):
     cfg = Config()
 
+    def outside_data(self) -> dict:
+        """`tree(self.tmp)` without the data folder and what is inside it."""
+        rel = str(self.data.relative_to(self.tmp))
+        return {k: v for k, v in tree(self.tmp).items() if k != rel and not k.startswith(rel + os.sep)}
+
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="ap2-server-")).resolve()
         self.addCleanup(shutil.rmtree, self.tmp, True)
@@ -165,14 +170,41 @@ class GuardTest(ServerCase):
             with self.subTest(host):
                 self.assertEqual(self.call("GET", "/api/state", headers={"Host": host})[0], 200)
 
-    def test_a_request_with_no_host_header_is_refused(self):
+    def test_a_foreign_host_is_refused_on_every_route_and_an_unknown_method(self):
+        card = self.add()
         self.start()
+        foreign = {"Host": "cards.example.com"}
+        for route in ("/", "/api/state", "/api/cards", f"/api/cards/{card['id']}", "/api/sources",
+                      "/api/sources/gh-mine", "/api/templates", "/api/templates/errand", "/api/settings",
+                      "/favicon.ico"):
+            with self.subTest(route):
+                self.assertEqual(self.call("GET", route, headers=foreign)[0], 403)
+        with self.subTest("BREW /"):
+            self.assertEqual(self.call("BREW", "/", headers=foreign)[0], 403)
+
+    def raw(self, request: bytes) -> bytes:
         with socket.create_connection((server.HOST, self.port), timeout=10) as s:
-            s.sendall(b"GET /api/state HTTP/1.0\r\n\r\n")
+            s.sendall(request)
             reply = b""
             while chunk := s.recv(65536):
                 reply += chunk
+        return reply
+
+    def test_a_request_with_no_host_header_is_refused(self):
+        self.start()
+        reply = self.raw(b"GET /api/state HTTP/1.0\r\n\r\n")
         self.assertTrue(reply.startswith(b"HTTP/1.0 403 "), reply[:80])
+
+    def test_a_request_line_with_no_version_or_garbage_still_gets_a_status_line_and_the_safe_headers(self):
+        self.start()
+        for request in (f"GET /api/state\r\nHost: 127.0.0.1:{self.port}\r\n\r\n".encode("ascii"),
+                        b"GARBAGE\r\n\r\n"):
+            with self.subTest(request):
+                reply = self.raw(request)
+                self.assertTrue(reply.startswith(b"HTTP/1.0 "), reply[:80])
+                head = reply.split(b"\r\n\r\n", 1)[0]
+                self.assertIn(b"\r\nCache-Control: no-store\r\n", head + b"\r\n")
+                self.assertIn(b"\r\nX-Content-Type-Options: nosniff\r\n", head + b"\r\n")
 
     def test_a_foreign_host_cannot_post_a_question_either(self):
         card = self.add()
@@ -557,7 +589,7 @@ class ManageTest(ServerCase):
         Engine(self.data, cfg=self.cfg, plugin_dir=self.plugin, clock=self.clock).read_saved("gh-mine", reply)
         card = self.add(kind="parcel")
         gate.run(self.data, START)
-        before = tree(self.data)
+        before, outside_before = tree(self.data), self.outside_data()
         self.start()
         for route in ("/", "/api/state", "/api/cards", "/api/cards?lane=needs&q=card", f"/api/cards/{card['id']}",
                       "/api/sources", "/api/sources/gh-mine", "/api/templates", "/api/templates/parcel",
@@ -565,6 +597,7 @@ class ManageTest(ServerCase):
             with self.subTest(route):
                 self.call("GET", route)
                 self.assertEqual(tree(self.data), before)
+                self.assertEqual(self.outside_data(), outside_before)
 
     def test_reads_on_a_fresh_data_folder_create_nothing(self):
         before = tree(self.data)
@@ -770,7 +803,7 @@ class ReadOnlyTest(ServerCase):
                 mock.patch("assistant.config.require_live", side_effect=AssertionError("require_live")) as live:
             self.start(cfg=Config(mode="shadow"))
             home_before, sibling_before, plugin_before = tree(home), tree(sibling), tree(self.plugin)
-            data_before = tree(self.data)
+            data_before, outside_before = tree(self.data), self.outside_data()
             status, _, body = self.ask(card["id"], "Why?")
             self.assertEqual(status, 201, body)
             for route in ("/api/state", "/api/cards", f"/api/cards/{card['id']}", "/api/sources", "/api/settings"):
@@ -778,6 +811,7 @@ class ReadOnlyTest(ServerCase):
             self.assertEqual(tree(home), home_before)
             self.assertEqual(tree(sibling), sibling_before)
             self.assertEqual(tree(self.plugin), plugin_before)
+            self.assertEqual(self.outside_data(), outside_before)
             self.assertNotEqual(tree(self.data), data_before)
         self.assertEqual(outside, [])
         live.assert_not_called()

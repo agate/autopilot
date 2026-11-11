@@ -253,6 +253,7 @@ def make_server(data, port: int = PORT, cfg: Optional[config.Config] = None, plu
 class Handler(BaseHTTPRequestHandler):
     server: Server
     protocol_version = "HTTP/1.0"  # one request per connection
+    default_request_version = "HTTP/1.0"  # a request line with no version or garbage still gets headers
     server_version = "ap2"
     sys_version = ""
     timeout = 30  # seconds a slow client may take per read

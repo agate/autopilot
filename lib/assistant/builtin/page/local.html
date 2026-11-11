@@ -761,7 +761,10 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
       } finally { button.disabled = false; }
     };
     const button = h('button', {class: 'btn primary', type: 'button', text: L('q.send'), onclick: send});
-    input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); send(); } });
+    input.addEventListener('keydown', e => {
+      if (e.isComposing || e.keyCode === 229) return;  // the Enter that ends an IME composition
+      if (e.key === 'Enter') { e.preventDefault(); send(); }
+    });
     return section('questions', list, h('div', {class: 'qa-form'}, input, button), status);
   }
   function activitySection(audit) {
@@ -981,6 +984,7 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
   }
 
   $('search').addEventListener('keydown', e => {
+    if (e.isComposing || e.keyCode === 229) return;  // the Enter that ends an IME composition
     if (e.key !== 'Enter') return;
     const q = $('search').value.trim();
     location.hash = q ? route('search', q) : route('lane', 'needs');

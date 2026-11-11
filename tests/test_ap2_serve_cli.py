@@ -9,6 +9,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 import urllib.error
 import urllib.request
@@ -55,7 +56,15 @@ class Ap2ServeCommandTest(unittest.TestCase):
         return proc
 
     def first_line(self, proc) -> dict:
-        line = proc.stdout.readline()
+        # readline() has no timeout of its own: read in a thread and give up after 30 seconds.
+        got = []
+        reader = threading.Thread(target=lambda: got.append(proc.stdout.readline()), daemon=True)
+        reader.start()
+        reader.join(30)
+        if reader.is_alive():
+            proc.kill()
+            self.fail("ap2 serve printed no first line within 30 seconds")
+        line = got[0]
         self.assertTrue(line, proc.stderr.read() if proc.poll() is not None else "no output")
         return json.loads(line)
 
