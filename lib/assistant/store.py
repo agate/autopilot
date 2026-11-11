@@ -48,6 +48,21 @@ def write_json(path: Path, obj) -> None:
         raise
 
 
+def check_writable(value, what: str = "card is") -> None:
+    """Prove the store can copy `value` and write it the way `write_json` does. `json.loads` and the checks'
+    unindented `json.dumps` run in C and follow a value much deeper than `copy.deepcopy` and the indented dump,
+    which stop at the recursion limit; so a value can parse and check and still break the copy or the writer. Raises
+    TooDeepError `<what> nested too deeply to copy or write`. Any other fault (a value JSON cannot write) is left to
+    the card checks, which name it."""
+    try:
+        copy.deepcopy(value)
+        json.dumps(value, sort_keys=True, indent=2, ensure_ascii=False)
+    except RecursionError:
+        raise cards.TooDeepError(f"{what} nested too deeply to copy or write") from None
+    except (TypeError, ValueError):
+        pass
+
+
 class Store:
     def __init__(self, data, cfg: Optional[config.Config] = None, clock: Callable[[], datetime] = cards.now_utc):
         """`data` is a data folder (see `datadir`); `cfg` defaults to its config.yaml; `clock()` returns the time
@@ -87,6 +102,7 @@ class Store:
             raise CardError(f"{path}: not a card file (its id is not its file name)")
         try:
             cards.check_stored(card)
+            check_writable(card)
         except CardError as e:
             raise (cards.TooDeepError if isinstance(e, cards.TooDeepError) else CardError)(
                 f"{path}: not a card file: {e}") from None
@@ -147,6 +163,7 @@ class Store:
             raise CardError(f"{', '.join(given)} {'is' if len(given) == 1 else 'are'} set by the store; leave "
                             f"{'it' if len(given) == 1 else 'them'} out")
         cards.validate(card, self.languages)
+        check_writable(card)
         with self._guard():
             at = self.clock()
             new = copy.deepcopy(card)
@@ -183,6 +200,7 @@ class Store:
         if given:
             pronoun = "it" if len(given) == 1 else "them"
             raise CardError(f"{', '.join(given)} cannot be changed; the store sets {pronoun}")
+        check_writable(changes, "changes are")
         with self._guard():
             return self._update(card_id, changes, by, did)
 
@@ -215,8 +233,10 @@ class Store:
             # hand edit too), and the languages may have changed since. Any point the store saved can be put back.
             try:
                 cards.check_stored(old)
+                check_writable(old)  # before restore.save, so a point too deep leaves no orphan point
             except CardError as e:
-                raise CardError(f"{restore.path(self.data, point_id)}: not a card restore point: {e}") from None
+                raise (cards.TooDeepError if isinstance(e, cards.TooDeepError) else CardError)(
+                    f"{restore.path(self.data, point_id)}: not a card restore point: {e}") from None
             at = self.clock()
             current = self._read(self.path(card_id)) if self.path(card_id).exists() else None
             saved = restore.save(self.data, current, at, write_json) if current is not None else None

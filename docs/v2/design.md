@@ -742,7 +742,10 @@ Calls the author made without asking (check them):
     cannot be read is kept by prune. A point that cannot be read at all (one nested too deeply for Python's JSON
     reader included) is kept by prune and refused by restore with one error naming its file. A card file or point
     nested too deeply is a `TooDeepError`: a CardError, so every caller that handles a damaged file handles it,
-    and also a RecursionError, so the raw prune keeps its `nested too deeply` words.
+    and also a RecursionError, so the raw prune keeps its `nested too deeply` words. A card file or point that
+    parses and checks but is too deep for the store to copy or write (`copy.deepcopy` and the indented writer stop
+    far sooner than the C reader) is refused the same way, a `TooDeepError` naming its file, before anything is
+    written (no restore point); add and update refuse such a card or `changes` before anything is written too.
   - Proposed opposite action: `Store.propose_opposite(id, action, run, by)` sets the card's `ask` to
     `{"type": "approve", "action": <move_ticket_back|close_pr|force_push_saved_ref|revert_pr>, "run": [argv...],
     "proposed": true, "text"?: <optional note>}` and runs nothing. It is refused when the card already has an open ask (that ask is never
