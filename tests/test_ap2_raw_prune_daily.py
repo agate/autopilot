@@ -249,7 +249,7 @@ class DailyCommandTest(unittest.TestCase):
 
     def run_gate(self, now: str):
         env = {k: v for k, v in os.environ.items() if k not in ("AP2_DATA", "LC_ALL")}
-        env.update(HOME=str(self.home), AP2_DATA=str(self.data), PYTHON_COLORS="0", TZ="Pacific/Kiritimati")
+        env.update(HOME=str(self.home), AP2_DATA=str(self.data), PYTHON_COLORS="0", TZ="<+14>-14")
         return subprocess.run([sys.executable, str(ROOT / "bin" / "ap2"), "gate", "--now", now],
                               capture_output=True, text=True, env=env, errors="replace", timeout=30)
 
@@ -266,9 +266,9 @@ class DailyCommandTest(unittest.TestCase):
         self.assertEqual(json.loads(r.stdout)["errors"], [])
         self.assertFalse((folder / old).exists())
         self.assertEqual(sorted(json.loads((self.data / gate.HEARTBEAT).read_text(encoding="utf-8"))), KEYS)
-        # A second run a minute later, the same UTC day though the next day in Kiritimati (the TZ the command
-        # runs under), so a check on the machine's local date would prune it: an old file put meanwhile stays
-        # until the next UTC day.
+        # A second run a minute later, the same UTC day though the next day in UTC+14 (the TZ the command runs
+        # under, a POSIX TZ string, so no zone file is needed), so a check on the machine's local date would
+        # prune it: an old file put meanwhile stays until the next UTC day.
         later = name(now - timedelta(days=40), "bbbbbb")
         (folder / later).write_text("{}", encoding="utf-8")
         r = self.run_gate("2025-11-11T10:00:30Z")
