@@ -420,12 +420,29 @@ class LiteralPathTest(WorkerCase):
         self.assertEqual(self.bg_calls(), [])
         self.assertEqual(self.discovery_calls(), [])  # refused before the tool discovery, too
 
+    def test_a_dead_workers_resume_is_refused_before_any_session_when_its_data_folder_moved(self):
+        a = self.start()  # no project: no `tools` listed, so every floor runs a tool discovery
+        self.drop_agent(a["short_id"])
+        moved = self.tmp / "x [v2]"  # the data folder, with its worker record and run folder, now under a pattern
+        shutil.move(str(self.data), str(moved))
+        w = Workers(moved, cfg=self.cfg, claude=FAKE, transcripts_dir=self.fake_home / "projects", clock=self.clock,
+                    store=Store(moved, self.cfg, self.clock))
+        out = w.check()
+        self.assertEqual(len(out), 1)
+        self.assertIn(str(moved), out[0].get("note", ""))
+        self.assertEqual(len(self.discovery_calls()), 1)  # only the start's: the resume ran no session
+        self.assertEqual(len(self.bg_calls()), 1)
+
     def test_floor_refuses_a_path_with_a_pattern_character(self):
         for bad in ("/tmp/a*b", "/tmp/a?b", "/tmp/a!b", "/tmp/a#b", "/tmp/a\\b", "/tmp/a[b", "/tmp/a]b",
-                    "/tmp/ab "):
+                    "/tmp/ab ", "/tmp/a[b/data"):  # the last: the character in a parent folder, not the last part
             with self.subTest(path=bad):
                 with self.assertRaisesRegex(WorkerError, re.escape(bad)):
                     workers_mod.floor("implement", {"tools": ["Read"]}, Path(bad), {})
+        with self.subTest(path="package folder"):
+            with mock.patch.object(workers_mod, "package_root", return_value=Path("/opt/a [b]")):
+                with self.assertRaisesRegex(WorkerError, r"package folder /opt/a \[b\]"):
+                    workers_mod.floor("implement", {"tools": ["Read"]}, self.data, {})
 
 
 class ServerRuleTest(unittest.TestCase):
