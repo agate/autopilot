@@ -822,14 +822,17 @@ Calls the author made without asking (check them):
     folder as the working folder, `read.timeout`). Its stdout is saved first, as is, to
     `<data>/sources/.raw/<source>/<YYYYMMDDTHHMMSSZ>-<6 hex>.json`, even when the command fails or the output is
     not JSON; a read that passes `read.timeout` is stopped and its partial stdout is saved the same way (the
-    error names the file, as it does for a nonzero exit; a dry run keeps nothing). The command runs in its own
+    error names the file, as it does for a nonzero exit; a dry run keeps nothing). At most `engine.MAX_OUTPUT`
+    (64 MiB) of stdout is kept: a command that prints more is stopped, and the first 64 MiB is saved as partial
+    output the same way; only the last 64 KiB of stderr is kept. The command runs in its own
     process group, and the whole group is killed on timeout, so the children it started stop too. An
     interrupted read (Ctrl-C, or any error while waiting) kills the command's group too. While a read waits (in
     the main thread), every signal in `engine.STOP_SIGNALS` (SIGHUP, SIGQUIT, SIGTERM, SIGUSR1, SIGUSR2, SIGALRM,
     SIGVTALRM, SIGPROF, SIGXCPU) that is at its default action kills the command's group too, then ap2 exits with
     128 + the signal number; one that is ignored or already handled is left alone, so nohup keeps working. Ctrl-C
-    does the same through KeyboardInterrupt. While the group is being killed, further signals are ignored, and
-    the previous handlers are put back when the read ends.
+    does the same through KeyboardInterrupt. These handlers are in place before the command starts; a signal that
+    comes while it starts is handled right after. While the group is being killed, further signals are ignored,
+    and the previous handlers are put back when the read ends.
     After a timeout kill the engine waits at most 5 more seconds for the rest of the output,
     then keeps what it has. A command that exited but left something it started holding its output open says so
     in the error, with its exit code. Then what the engine made of it goes next to it as `<same name>.report.json` (items, dropped).

@@ -17,7 +17,7 @@ from pathlib import Path
 from unittest import mock
 
 from tests.helpers import ROOT
-from assistant import datadir, sources
+from assistant import datadir, engine, sources
 from assistant.cards import CardError
 from assistant.config import Config, ShadowModeError
 from assistant.engine import STOP_SIGNALS, Engine, plain_words, snippet
@@ -205,16 +205,20 @@ class CommandReadTest(EngineCase):
 
     def test_a_source_without_a_timeout_gets_the_default(self):
         self.status_source(self.reply_copy("status-incidents.json"))
-        with mock.patch("assistant.engine.subprocess.Popen") as popen:
-            proc = popen.return_value
-            proc.communicate.return_value = (b'{"incidents": []}', b"")
-            proc.returncode = 0
+        waits = []
+
+        def pump(proc, out, err, seconds):
+            waits.append(seconds)
+            out.extend(b'{"incidents": []}')
+            return "done"
+
+        with mock.patch("assistant.engine.subprocess.Popen") as popen, mock.patch("assistant.engine._pump", pump):
+            popen.return_value.returncode = 0
             result = self.engine().read("vendor-status")
         self.assertEqual((result["items"], result["dropped"]), ([], []))
         popen.assert_called_once()
         self.assertIs(popen.call_args.kwargs["stdin"], subprocess.DEVNULL)
-        proc.communicate.assert_called_once()
-        self.assertEqual(proc.communicate.call_args.kwargs["timeout"], sources.DEFAULT_TIMEOUT)
+        self.assertEqual(waits, [sources.DEFAULT_TIMEOUT])
 
     def test_a_timeout_stops_the_children_of_the_command_too(self):
         pid_file = self.tmp / "grandchild.pid"
@@ -270,7 +274,7 @@ class CommandReadTest(EngineCase):
             time.sleep(30)
             """))
         started, raised = [], []
-        real = subprocess.Popen.communicate
+        real_pump, real_stop = engine._pump, engine._stop
 
         def interrupt(proc, *args, **kwargs):
             if not started:
@@ -280,7 +284,11 @@ class CommandReadTest(EngineCase):
                     time.sleep(0.02)
                 raised.append(time.monotonic())
                 raise KeyboardInterrupt
-            return real(proc, *args, **kwargs)
+            return real_pump(proc, *args, **kwargs)
+
+        def stop(proc):
+            signal.raise_signal(signal.SIGINT)  # a second Ctrl-C while the group is being stopped
+            real_stop(proc)
 
         def kill_left_over():
             for pid in started:
@@ -304,7 +312,7 @@ class CommandReadTest(EngineCase):
             sort: {{ all: alert }}
             """)
         before = handlers()
-        with mock.patch.object(subprocess.Popen, "communicate", autospec=True, side_effect=interrupt):
+        with mock.patch("assistant.engine._pump", interrupt), mock.patch("assistant.engine._stop", stop):
             with self.assertRaises(KeyboardInterrupt):
                 self.engine().read("sleeper")
             self.assertLess(time.monotonic() - raised[0], 5)  # stopped, not waited out
@@ -394,6 +402,36 @@ class CommandReadTest(EngineCase):
                 pid = int(pid_file.read_text())
                 self.assertGone(pid, f"the command {pid} is still running after {signum.name}")
                 self.assertEqual(code, 128 + signum)
+
+    def test_a_stop_signal_while_the_command_starts_stops_it(self):
+        # The signal comes after the command started but before the read waits on it.
+        pid_file = self.tmp / "early.pid"
+        driver = self.driver("early-driver", before=textwrap.dedent(f"""\
+            import os, subprocess
+            real = subprocess.Popen
+            def popen(*args, **kwargs):
+                proc = real(*args, **kwargs)
+                with open({str(pid_file)!r} + ".tmp", "w") as f:
+                    f.write(str(proc.pid))
+                os.replace({str(pid_file)!r} + ".tmp", {str(pid_file)!r})
+                signal.raise_signal(signal.SIGTERM)
+                return proc
+            subprocess.Popen = popen
+            """).replace("\n", "\n            "))
+        self.user_source("early", f"""\
+            source: early
+            brings: messages
+            read: {{ via: command, run: sleep 30, timeout: 20 }}
+            fill: paths
+            form: {{ id: .id, at: .at, text: .text }}
+            link: none
+            sort: {{ all: alert }}
+            """)
+        proc = self.drive(driver, "early", pid_file)
+        code = proc.wait(timeout=10)
+        pid = int(pid_file.read_text())
+        self.assertGone(pid, f"the command {pid} is still running after a SIGTERM while it started")
+        self.assertEqual(code, 128 + signal.SIGTERM)
 
     def test_an_ignored_sighup_leaves_the_read_running(self):
         # As under nohup: a SIGHUP that was ignored before the read stays ignored, and the read finishes.
@@ -502,6 +540,70 @@ class CommandReadTest(EngineCase):
                 self.engine().read("quick")
         [raw] = (self.data / "sources" / ".raw" / "quick").glob("*.json")
         self.assertEqual(raw.read_text(), "[1")
+
+    def test_output_past_the_cap_stops_the_read_and_keeps_the_first_part(self):
+        pid_file = self.tmp / "loud.pid"
+        script = self.tmp / "loud.py"
+        script.write_text(textwrap.dedent("""\
+            import os, sys, time
+            with open(sys.argv[1] + ".tmp", "w") as f:
+                f.write(str(os.getpid()))
+            os.replace(sys.argv[1] + ".tmp", sys.argv[1])
+            sys.stdout.buffer.write(b"x" * (1 << 20)); sys.stdout.flush()
+            time.sleep(30)
+            """))
+
+        def kill_left_over():
+            try:
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+            except (OSError, ValueError):
+                pass
+
+        self.addCleanup(kill_left_over)
+        self.user_source("loud", f"""\
+            source: loud
+            brings: messages
+            read: {{ via: command, run: '{sys.executable} {script} {pid_file}', timeout: 5 }}
+            fill: paths
+            form: {{ id: .id, at: .at, text: .text }}
+            link: none
+            sort: {{ all: alert }}
+            """)
+        cap = 64 * 1024
+        with mock.patch("assistant.engine.MAX_OUTPUT", cap):
+            started = time.monotonic()
+            with self.assertRaisesRegex(SourceError, rf"^loud: read.run printed more than {cap} bytes; stopped$"):
+                self.engine().read("loud", dry_run=True)
+            self.assertFalse((self.data / "sources" / ".raw" / "loud").exists())  # a dry run keeps nothing
+            self.assertGone(int(pid_file.read_text()), "the command is still running after the cap")
+            pid_file.unlink()
+            with self.assertRaisesRegex(SourceError, rf"^loud: read.run printed more than {cap} bytes; stopped "
+                                                     r"\(partial output saved as sources/\.raw/loud/[0-9TZ]+-"
+                                                     r"[0-9a-f]{6}\.json\)$"):
+                self.engine().read("loud")
+            self.assertLess(time.monotonic() - started, 4)  # stopped at the cap, not at the timeout
+        [raw] = (self.data / "sources" / ".raw" / "loud").glob("*.json")
+        self.assertEqual(raw.read_bytes(), b"x" * cap)
+        pid = int(pid_file.read_text())
+        self.assertGone(pid, f"the command {pid} is still running after the cap")
+
+    def test_only_the_end_of_stderr_is_kept(self):
+        script = self.tmp / "noisy.py"
+        script.write_text("import sys; sys.stderr.write('e' * 300000 + '\\nthe last line\\n'); print('[]')\n")
+        self.user_source("noisy", f"""\
+            source: noisy
+            brings: messages
+            read: {{ via: command, run: '{sys.executable} {script}', timeout: 5 }}
+            fill: paths
+            form: {{ id: .id, at: .at, text: .text }}
+            link: none
+            sort: {{ all: alert }}
+            """)
+        e = self.engine()
+        done = e._run(e.source("noisy"), dry_run=True)
+        self.assertEqual((done.returncode, done.stdout), (0, b"[]\n"))
+        self.assertEqual(len(done.stderr), 64 * 1024)
+        self.assertTrue(done.stderr.endswith(b"e\nthe last line\n"))
 
     def test_values_in_a_link_pattern_are_percent_encoded(self):
         reply = self.tmp / "odd-id.json"

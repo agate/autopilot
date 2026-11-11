@@ -18,11 +18,13 @@ import json
 import os
 import re
 import secrets
+import selectors
 import shlex
 import signal
 import sqlite3
 import subprocess
 import threading
+import time
 from datetime import timezone
 from pathlib import Path, PurePosixPath
 from typing import Callable, Optional
@@ -40,6 +42,9 @@ LANE = {"messages": "needs", "work": "planned"}
 PRI = "P2"
 # Seconds a read waits for the rest of its output after its timeout kill.
 DRAIN = 5
+# The most stdout a read keeps; past it the command is stopped. Only the end of its stderr is kept.
+MAX_OUTPUT = 64 * 1024 * 1024
+ERR_TAIL = 64 * 1024
 # The catchable signals whose default action ends the process and that a terminal, shell, supervisor or user may
 # send. While a read waits, those still at their default stop the command's group too (SIGINT does it through
 # KeyboardInterrupt). A missing one is skipped.
@@ -164,52 +169,66 @@ class Engine:
         if not argv:
             raise SourceError(f"{src.file}: read.run is empty")
         timeout = src.data["read"].get("timeout", sources.DEFAULT_TIMEOUT)
-        try:
-            # Its own process group, so a timeout stops the children it started too, not only the command.
-            proc = subprocess.Popen(argv, cwd=str(self.data), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                    stderr=subprocess.PIPE, shell=False, start_new_session=True)
-        except OSError as e:
-            raise SourceError(f"{src.name}: cannot run {argv[0]!r}: {e.strerror or e}") from e
-        previous = {}
+        guard = _Guard()
+        previous, proc, failed = {}, None, None
+        out, err = bytearray(), bytearray()
         try:
             try:
-                # A signal to ap2's group does not reach the command's group. A stop signal at its default ends
-                # ap2 with no exception: turn it into SystemExit so the branch below stops the command. One that
-                # is ignored (nohup) or already handled is left alone.
+                # A signal to ap2's group does not reach the command's group. Ctrl-C and a stop signal at its
+                # default go to `guard` from before the command starts, so the branch below stops the command; one
+                # that is ignored (nohup) or already handled is left alone. The command does not inherit `guard`:
+                # a handler set from Python is back at its default after exec.
                 if threading.current_thread() is threading.main_thread():
                     previous[signal.SIGINT] = signal.getsignal(signal.SIGINT)  # held while the group is stopped
+                    if previous[signal.SIGINT] is signal.default_int_handler:
+                        signal.signal(signal.SIGINT, guard)
                     for signum in STOP_SIGNALS:
                         if signal.getsignal(signum) is signal.SIG_DFL:
-                            previous[signum] = signal.signal(signum, _exit_on_signal)
-                out, err = proc.communicate(timeout=timeout)
-            except subprocess.TimeoutExpired as first:
-                held = _hold_signals() if previous else {}
-                code = proc.poll()
-                _stop(proc)
-                for signum, handler in held.items():
-                    signal.signal(signum, handler)
+                            previous[signum] = signal.signal(signum, guard)
                 try:
-                    out, _ = proc.communicate(timeout=DRAIN)
-                except subprocess.TimeoutExpired as late:
-                    # Something outside the group still holds the output open: keep what came so far.
-                    out = max(first.stdout or b"", late.stdout or b"", key=len)
-                    proc.stdout.close()
-                    proc.stderr.close()
-                    proc.wait()
-                if code is not None:
-                    saved = "" if dry_run else f" (output saved as {self._save_raw(src, out or b'')})"
-                    raise SourceError(f"{src.name}: read.run exited with {code}, but something it started still "
-                                      f"held its output open after {timeout} seconds; stopped{saved}") from None
-                saved = "" if dry_run else f" (partial output saved as {self._save_raw(src, out or b'')})"
-                raise SourceError(f"{src.name}: read.run took longer than {timeout} seconds; stopped{saved}") from None
+                    # Its own process group, so a stop reaches the children it started too, not only the command.
+                    proc = subprocess.Popen(argv, cwd=str(self.data), stdin=subprocess.DEVNULL,
+                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False,
+                                            start_new_session=True)
+                except OSError as e:
+                    failed = SourceError(f"{src.name}: cannot run {argv[0]!r}: {e.strerror or e}")
+                    failed.__cause__ = e
+                guard.start()  # a signal that came while the command started acts now
+                if failed is not None:
+                    raise failed
+                ended = _pump(proc, out, err, timeout)
             except BaseException:
                 # Ctrl-C does not reach the command's own group, so an interrupted read stops it here, and a
                 # second signal cannot cut that short.
                 if previous:
                     _hold_signals()
-                _stop(proc)
-                proc.wait()
+                if proc is not None:
+                    _stop(proc)
+                    proc.wait()
                 raise
+            if ended != "done":
+                code = proc.poll() if ended == "late" else None
+                held = _hold_signals() if previous else {}
+                _stop(proc)
+                for signum, handler in held.items():
+                    signal.signal(signum, handler)
+                if ended == "late":
+                    _pump(proc, out, err, DRAIN)  # what the command printed before the kill
+                # Something outside the group may still hold the output open: keep what came so far.
+                proc.stdout.close()
+                proc.stderr.close()
+                proc.wait()
+                del out[MAX_OUTPUT:]
+                part = "" if dry_run else self._save_raw(src, bytes(out))
+                if ended == "full":
+                    saved = f" (partial output saved as {part})" if part else ""
+                    raise SourceError(f"{src.name}: read.run printed more than {MAX_OUTPUT} bytes; stopped{saved}")
+                if code is not None:
+                    saved = f" (output saved as {part})" if part else ""
+                    raise SourceError(f"{src.name}: read.run exited with {code}, but something it started still "
+                                      f"held its output open after {timeout} seconds; stopped{saved}")
+                saved = f" (partial output saved as {part})" if part else ""
+                raise SourceError(f"{src.name}: read.run took longer than {timeout} seconds; stopped{saved}")
         finally:
             # Ctrl-C last, so a new one cannot cut the others short; a failed restore never hides the read's error.
             for signum, handler in reversed(list(previous.items())):
@@ -218,7 +237,9 @@ class Engine:
                         signal.signal(signum, handler)
                     except (OSError, ValueError):
                         pass
-        return subprocess.CompletedProcess(argv, proc.returncode, stdout=out, stderr=err)
+        proc.stdout.close()
+        proc.stderr.close()
+        return subprocess.CompletedProcess(argv, proc.returncode, stdout=bytes(out), stderr=bytes(err))
 
     def _save_raw(self, src: sources.Source, raw: bytes) -> str:
         """Save one read's raw output; return its path relative to the data folder."""
@@ -449,9 +470,33 @@ class Engine:
         raise SourceError(f"{src.name}: writes.{event} is not run by this version of ap2")
 
 
-def _exit_on_signal(signum, frame) -> None:
-    _hold_signals()
-    raise SystemExit(128 + signum)
+class _Guard:
+    """The handler a read sets for Ctrl-C and the stop signals. Until `start()` (the command is running) it only
+    notes the first signal; from then on it holds the signals and ends ap2: KeyboardInterrupt for Ctrl-C,
+    SystemExit(128 + the signal number) for the others."""
+
+    def __init__(self):
+        self.started = False
+        self.pending = None
+
+    def __call__(self, signum, frame) -> None:
+        if not self.started:
+            if self.pending is None:
+                self.pending = signum
+            return
+        self._end(self.pending or signum)
+
+    def start(self) -> None:
+        self.started = True
+        if self.pending is not None:
+            self._end(self.pending)
+
+    @staticmethod
+    def _end(signum) -> None:
+        _hold_signals()
+        if signum == signal.SIGINT:
+            raise KeyboardInterrupt
+        raise SystemExit(128 + signum)
 
 
 def _hold_signals() -> dict:
@@ -460,9 +505,38 @@ def _hold_signals() -> dict:
     held = {}
     for signum in (signal.SIGINT, *STOP_SIGNALS):
         handler = signal.getsignal(signum)
-        if handler is _exit_on_signal or (signum == signal.SIGINT and handler is not None):
+        if isinstance(handler, _Guard) or (signum == signal.SIGINT and handler is not None):
             held[signum] = signal.signal(signum, signal.SIG_IGN)
     return held
+
+
+def _pump(proc: subprocess.Popen, out: bytearray, err: bytearray, seconds: float) -> str:
+    """Read a read's stdout into `out` and its stderr into `err` (only the last ERR_TAIL bytes kept) for at most
+    `seconds`. Returns "done" once both reached their end and the command exited, "full" once `out` holds more
+    than MAX_OUTPUT bytes, and "late" when the time ran out first."""
+    deadline = time.monotonic() + seconds
+    with selectors.DefaultSelector() as sel:
+        for pipe, buf in ((proc.stdout, out), (proc.stderr, err)):
+            sel.register(pipe.fileno(), selectors.EVENT_READ, buf)
+        while sel.get_map():
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return "late"
+            for key, _ in sel.select(left):
+                chunk = os.read(key.fd, 65536)
+                if not chunk:
+                    sel.unregister(key.fd)
+                    continue
+                key.data.extend(chunk)
+                if key.data is err:
+                    del err[:-ERR_TAIL]
+                elif len(out) > MAX_OUTPUT:
+                    return "full"
+    try:
+        proc.wait(timeout=max(0, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        return "late"
+    return "done"
 
 
 def _stop(proc: subprocess.Popen) -> None:
