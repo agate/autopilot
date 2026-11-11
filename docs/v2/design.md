@@ -1114,10 +1114,12 @@ Calls the author made without asking (check them):
   - `check()` classifies each worker: done (its result file newer than its start), question (`question.json`
     newer than its start), parked, unknown (the listing failed: nothing is done), dead (no session, its process
     gone, or state failed), blocked (status waiting), idle (state blocked or done, or status idle), running. Done:
-    stop, save the session on the card, archive. Once a session is stopped (end, done, question, dead twice, both
-    pauses, a parked worker that cannot resume), its record leaves the worker list no matter what fails after, so
-    it is never seen as dead and resumed; the archive copy is best-effort (`archive: null` and `archive_error` on
-    the line; `finish` copies every id again). Dead once: resume in place (same slot) with "You were
+    stop, save the session on the card, archive. A worker's record leaves the list only once `claude stop` has
+    returned. After that, a failed step drops it only where a kept record would be misread as dead and resumed
+    (end, the idle pause, the blocked pause); done, question, died twice and a parked worker that cannot resume
+    keep it, so the next check closes it again and raises its ask. The blocked pause raises its resume hint only
+    once the stop has returned. The archive copy is best-effort (`archive: null` and `archive_error` on the line;
+    `finish` copies every id again). Dead once: resume in place (same slot) with "You were
     interrupted. Check your worktree and run files first..."; dead twice: stop and set a `fix` ask. Parked: with
     `--usage`, resume once v1's `park.resume_due` allows: the parked session is stopped first and the copy takes
     its place, on the same ports. One worker's error (a bad project file, a failed call) never stops the pass:

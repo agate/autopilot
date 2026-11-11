@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import signal
+import subprocess
 import tempfile
 import time
 import types
@@ -1272,7 +1273,7 @@ class NobodyWaitsTest(WorkerCase):
             self.write_result(a["card"])
             with mock.patch.object(Workers, "_save_session", side_effect=OSError("disk full")):
                 self.assertEqual(w.check()[0]["error"], "OSError")
-            self.assertEqual(w.check(), [])  # stopped: its record left the worker list all the same
+            self.assertEqual(w.check()[0]["did"], "ended")  # done keeps its record: the next check ends it again
 
         for path in (end, done, question, dead_once, dead_twice, idle_pause, block_pause_then_resume,
                      block_pause_then_finish, parked_then_resumed, parked_then_resumed_by_check,
@@ -1405,9 +1406,34 @@ class NobodyWaitsTest(WorkerCase):
 
 
 class StoppedLeavesTheListTest(WorkerCase):
-    """Once a session is stopped, its record leaves the worker list no matter what fails after (design 12): a record
-    left behind would be seen as dead by the next check and resumed in place."""
+    """A worker's record leaves the list only once `claude stop` has returned (design 12). After that, a failed step
+    drops it only where a kept record would be misread as dead and resumed (end, the idle pause, the blocked pause);
+    done, question, died twice and a parked worker that cannot resume keep it, so the next check closes it again
+    and raises its ask."""
     FULL = OSError(errno.ENOSPC, "No space left on device")
+
+    @staticmethod
+    def stop_times_out():
+        """`claude stop` times out (the session was never stopped); every other claude call runs as usual."""
+        real = subprocess.run
+
+        def run(argv, *a, **kw):
+            if list(argv[1:2]) == ["stop"]:
+                raise subprocess.TimeoutExpired(argv, 60)
+            return real(argv, *a, **kw)
+        return mock.patch.object(subprocess, "run", side_effect=run)
+
+    @staticmethod
+    def save_fails_once(w):
+        real = w._save_session
+        failed = []
+
+        def save(*a, **kw):
+            if not failed:
+                failed.append(True)
+                raise OSError(errno.EIO, "Input/output error")
+            return real(*a, **kw)
+        return mock.patch.object(w, "_save_session", side_effect=save)
 
     def idle_for_an_hour(self, w):
         a = self.start(w)
@@ -1430,6 +1456,7 @@ class StoppedLeavesTheListTest(WorkerCase):
         self.assertEqual(out["did"], "paused")
         self.assertIsNone(out["archive"])
         self.assertIn("No space left on device", out["archive_error"])
+        self.assertIn("ap2 worker finish", out["archive_error"])
         self.assertEqual(resources.Registry(self.data).read(), [])
         self.assertEqual(self.get(a["card"])["sessions"]["implement"]["state"], "paused")
         self.assertEqual(w.check(), [])
@@ -1446,6 +1473,84 @@ class StoppedLeavesTheListTest(WorkerCase):
         self.assertEqual(self.get(a["card"])["sessions"]["implement"]["state"], "ended")
         self.assertEqual(w.check(), [])
         self.assertEqual(self.resumes(), [])
+
+    def test_an_archive_error_with_no_message_names_its_type(self):
+        w = self.workers()
+        a = self.start(w)
+        with mock.patch.object(transcripts, "archive", side_effect=OSError()):
+            out = w.end(a["card"], "implement")
+        self.assertIn("(OSError)", out["archive_error"])
+
+    def test_a_stop_that_times_out_keeps_the_idle_worker_until_the_next_check_pauses_it(self):
+        w = self.workers()
+        a = self.idle_for_an_hour(w)
+        with self.stop_times_out():
+            out = w.check()[0]
+        self.assertEqual(out["error"], "TimeoutExpired")
+        self.assertEqual(out["did"], "nothing")
+        self.assertEqual([r["short_id"] for r in resources.Registry(self.data).read()], [a["short_id"]])
+        self.assertNotEqual(self.get(a["card"])["sessions"]["implement"]["state"], "paused")
+        self.assertEqual(w.check()[0]["did"], "paused")
+        self.assertEqual(resources.Registry(self.data).read(), [])
+        self.assertEqual(self.get(a["card"])["sessions"]["implement"]["state"], "paused")
+
+    def test_a_stop_that_times_out_keeps_the_ended_worker(self):
+        w = self.workers()
+        a = self.start(w)
+        with self.stop_times_out():
+            with self.assertRaises(subprocess.TimeoutExpired):
+                w.end(a["card"], "implement")
+        self.assertEqual([r["short_id"] for r in resources.Registry(self.data).read()], [a["short_id"]])
+        w.end(a["card"], "implement")
+        self.assertEqual(resources.Registry(self.data).read(), [])
+
+    def test_a_stop_that_times_out_raises_no_resume_hint_for_the_blocked_worker(self):
+        w = self.workers()
+        a = self.start(w)
+        self.set_agent(a["short_id"], status="waiting")
+        w.check()
+        self.clock.advance(30)
+        with self.stop_times_out():
+            out = w.check()[0]
+        self.assertEqual(out["error"], "TimeoutExpired")
+        self.assertEqual([r["short_id"] for r in resources.Registry(self.data).read()], [a["short_id"]])
+        ask = self.get(a["card"])["ask"]
+        self.assertNotEqual(ask.get("stage"), "paused")
+        self.assertNotIn("--resume", ask["text"])
+        self.assertEqual(w.check()[0]["did"], "paused")
+        self.assertIn(f"ap2 worker start {a['card']} implement --resume", self.get(a["card"])["ask"]["text"])
+
+    def test_a_failed_save_after_the_stop_keeps_the_question_until_the_next_check_asks_it(self):
+        w = self.workers()
+        a = self.start(w)
+        self.write_result(a["card"], "question.json", {"text": "Which port?"})
+        with self.save_fails_once(w):
+            out = w.check()[0]
+        self.assertEqual(out["error"], "OSError")
+        self.assertEqual(len(resources.Registry(self.data).read()), 1)
+        out = w.check()[0]
+        self.assertEqual(out["did"], "asked")
+        ask = self.get(a["card"])["ask"]
+        self.assertEqual((ask["type"], ask["text"]), ("answer", "Which port?"))
+        self.assertEqual(resources.Registry(self.data).read(), [])
+        rec = w.answer(a["card"], "8080")
+        self.assertIn("8080", self.resumes()[-1]["argv"][-1])
+        self.assertEqual([r["short_id"] for r in resources.Registry(self.data).read()], [rec["short_id"]])
+
+    def test_a_failed_save_after_the_stop_keeps_the_worker_that_died_twice_until_its_ask_is_raised(self):
+        w = self.workers()
+        a = self.start(w)
+        self.drop_agent(a["short_id"])
+        self.assertEqual(w.check()[0]["did"], "resumed")
+        self.drop_agent(resources.Registry(self.data).read()[0]["short_id"])
+        with self.save_fails_once(w):
+            self.assertEqual(w.check()[0]["error"], "OSError")
+        self.assertEqual(len(resources.Registry(self.data).read()), 1)
+        self.assertEqual(w.check()[0]["did"], "stopped")
+        ask = self.get(a["card"])["ask"]
+        self.assertEqual(ask["reason"], DIED)
+        self.assertIn("died twice", ask["text"])
+        self.assertEqual(resources.Registry(self.data).read(), [])
 
     def test_a_failed_save_after_the_stop_still_drops_the_idle_worker(self):
         w = self.workers()
