@@ -3,6 +3,7 @@ end / dead / parked, no process waiting for a human, transcripts and shadow mode
 (`tests/bin/fake-claude-v2`) against temp folders and an injected clock; nothing reaches the real ~/.claude."""
 from __future__ import annotations
 
+import errno
 import gzip
 import json
 import os
@@ -351,6 +352,16 @@ class ProjectSetupTest(WorkerCase):
         self.assertEqual(settings["permissions"]["allow"], [f"Bash({ROOT / 'bin' / 'ap2'} worker park:*)"])
         self.assertEqual(settings["env"], {k: v for k, v in env.items() if k.startswith("AP2_")})
         self.assertIn("Hosts you may reach besides the usual ones: api.example.com, cdn.example.com.", argv[-1])
+        # The per-card instructions: the run directory, the result file and the park command the allow rule names.
+        run = transcripts.run_dir(self.data, cid)
+        self.assertEqual(env["AP2_RUN_DIR"], str(run))
+        self.assertIn(f"Your run directory: {run}.", argv[-1])
+        self.assertIn("End your round by writing handback.json in your run directory.", argv[-1])
+        self.assertIn(f"At the usage limit, park: {ROOT / 'bin' / 'ap2'} worker park {cid} implement --note ",
+                      argv[-1])
+        rid = self.add_card(project="shop")
+        self.workers().start(rid, "review", cwd=self.wt, prompt="Review it.")
+        self.assertIn("End your round by writing review.json in your run directory.", self.bg_calls()[-1]["argv"][-1])
 
     def test_inherited_v1_variables_are_dropped(self):
         with mock.patch.dict(os.environ, {"AUTOPILOT_ROLE": "worker", "AUTOPILOT_DATA": "/v1"}):
@@ -393,6 +404,8 @@ class ProjectSetupTest(WorkerCase):
     def test_branch_without_a_prefix_and_from_the_card(self):
         from assistant import projects
         self.assertEqual(projects.branch(projects.DEFAULTS, "PROJ-1", "fix-it"), "PROJ-1.fix-it")
+        with self.assertRaisesRegex(config.ConfigError, r"branch_pattern '\{ticket\}'"):
+            projects.branch({"branch_pattern": "{ticket}"}, "P-1", "x")
         cid = self.add_card(branch="me.PROJ-9.given")
         self.assertEqual(self.workers().start(cid, "implement", cwd=self.wt)["branch"], "me.PROJ-9.given")
 
@@ -1259,7 +1272,7 @@ class NobodyWaitsTest(WorkerCase):
             self.write_result(a["card"])
             with mock.patch.object(Workers, "_save_session", side_effect=OSError("disk full")):
                 self.assertEqual(w.check()[0]["error"], "OSError")
-            self.assertEqual(w.check()[0]["did"], "ended")
+            self.assertEqual(w.check(), [])  # stopped: its record left the worker list all the same
 
         for path in (end, done, question, dead_once, dead_twice, idle_pause, block_pause_then_resume,
                      block_pause_then_finish, parked_then_resumed, parked_then_resumed_by_check,
@@ -1389,6 +1402,88 @@ class NobodyWaitsTest(WorkerCase):
         self.assertEqual(w.check()[0]["did"], "nothing")
         self.clock.advance(10)
         self.assertEqual(w.check()[0]["did"], "paused")
+
+
+class StoppedLeavesTheListTest(WorkerCase):
+    """Once a session is stopped, its record leaves the worker list no matter what fails after (design 12): a record
+    left behind would be seen as dead by the next check and resumed in place."""
+    FULL = OSError(errno.ENOSPC, "No space left on device")
+
+    def idle_for_an_hour(self, w):
+        a = self.start(w)
+        self.set_agent(a["short_id"], state="done", status="idle")
+        w.check()
+        self.clock.advance(60)
+        return a
+
+    def resumes(self) -> list:
+        return [c for c in self.bg_calls() if "--resume" in c["argv"]]
+
+    def stops(self) -> list:
+        return [c for c in self.calls() if c["argv"][:1] == ["stop"]]
+
+    def test_a_failed_archive_copy_still_pauses_the_idle_worker(self):
+        w = self.workers()
+        a = self.idle_for_an_hour(w)
+        with mock.patch.object(transcripts, "archive", side_effect=self.FULL):
+            out = w.check()[0]
+        self.assertEqual(out["did"], "paused")
+        self.assertIsNone(out["archive"])
+        self.assertIn("No space left on device", out["archive_error"])
+        self.assertEqual(resources.Registry(self.data).read(), [])
+        self.assertEqual(self.get(a["card"])["sessions"]["implement"]["state"], "paused")
+        self.assertEqual(w.check(), [])
+        self.assertEqual(self.resumes(), [])
+
+    def test_end_with_a_failed_archive_copy_returns_and_drops_the_record(self):
+        w = self.workers()
+        a = self.start(w)
+        with mock.patch.object(transcripts, "archive", side_effect=self.FULL):
+            out = w.end(a["card"], "implement")
+        self.assertIsNone(out["archive"])
+        self.assertIn("No space left on device", out["archive_error"])
+        self.assertEqual(resources.Registry(self.data).read(), [])
+        self.assertEqual(self.get(a["card"])["sessions"]["implement"]["state"], "ended")
+        self.assertEqual(w.check(), [])
+        self.assertEqual(self.resumes(), [])
+
+    def test_a_failed_save_after_the_stop_still_drops_the_idle_worker(self):
+        w = self.workers()
+        self.idle_for_an_hour(w)
+        with mock.patch.object(w, "_save_session", side_effect=OSError(errno.EIO, "Input/output error")):
+            out = w.check()[0]
+        self.assertIn("Input/output error", out["note"])
+        self.assertEqual(out["error"], "OSError")
+        self.assertEqual(len(self.stops()), 1)
+        self.assertEqual(resources.Registry(self.data).read(), [])
+        self.assertEqual(w.check(), [])
+        self.assertEqual(self.resumes(), [])
+
+    def test_a_failed_save_after_the_stop_still_drops_the_ended_worker(self):
+        w = self.workers()
+        a = self.start(w)
+        with mock.patch.object(w, "_save_session", side_effect=OSError(errno.EIO, "Input/output error")):
+            with self.assertRaisesRegex(OSError, "Input/output error"):
+                w.end(a["card"], "implement")
+        self.assertEqual(resources.Registry(self.data).read(), [])
+        self.assertEqual(w.check(), [])
+        self.assertEqual(self.resumes(), [])
+
+    def test_a_failed_save_after_the_blocked_pause_still_raises_the_resume_hint(self):
+        w = self.workers()
+        a = self.start(w)
+        self.set_agent(a["short_id"], status="waiting")
+        w.check()
+        self.clock.advance(30)
+        with mock.patch.object(w, "_save_session", side_effect=OSError(errno.EIO, "Input/output error")):
+            out = w.check()[0]
+        self.assertIn("Input/output error", out["note"])
+        self.assertEqual(resources.Registry(self.data).read(), [])
+        ask = self.get(a["card"])["ask"]
+        self.assertEqual((ask["reason"], ask["stage"]), ("permission_prompt", "paused"))
+        self.assertIn(f"ap2 worker start {a['card']} implement --resume", ask["text"])
+        self.assertEqual(w.check(), [])
+        self.assertEqual(self.resumes(), [])
 
 
 class WorkerAskTableTest(WorkerCase):
