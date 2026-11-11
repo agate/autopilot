@@ -402,8 +402,10 @@ How it is built (`lib/assistant/angles.py`, the table in `review/angles.yaml`):
   per nested key, a copy of the rest of the line per item); at most 200 globs in the whole file, across every
   `when.paths`, an `extends` without its own `when` counting the globs it takes from its base (`MAX_GLOBS`, refused
   at the entry that passes it); at most 256 characters in one glob (`MAX_GLOB`); no glob or kind twice in one
-  `when`. The picker's cost is then linear in the changed paths, whatever the globs: it reads each path once per
-  glob, a few integer steps per character, so a repo file adds at most 200 such reads per changed file. Measured
+  `when`. The picker's cost is then linear in the total length of the changed paths, plus a small cost per angle,
+  whatever the globs: it reads each path once per glob, a few integer steps per character, so a repo file adds at
+  most 200 such reads per changed file. It writes each PR kind's example files once per pick, not once per angle,
+  so kinds-only angles, which no cap bounds, add only that small cost each. Measured
   with 200 globs each kept alive to the end of every path (the worst case for this matcher): about 50 to 65
   microseconds per character of changed paths, so 0.5 s for four crafted files of 2,559 characters, 3 s for twenty,
   and 13 s for one path of 256,000 characters. Changed paths are the caller's data and are not capped; their total

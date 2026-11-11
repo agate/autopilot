@@ -543,6 +543,18 @@ class RefusalTest(AngleCase):
                     self.assertIn(word, msg)
                 self.assertNotIn("line 0", msg)
 
+    def test_every_line_breaking_or_bidi_character_is_refused_in_a_name(self):
+        # Each end of both bidi ranges and both separators: a range off by one, or a dropped category, lets one in.
+        chars = list(range(0x202A, 0x202F)) + list(range(0x2066, 0x206A)) + [0x2028, 0x2029]
+        for code in chars:
+            with self.subTest(char=f"U+{code:04X}"):
+                self.user('- name: "A\\u%04xB"\n  question: "q?"\n  when: always\n  brief: "b"\n' % code)
+                with self.assertRaises(AngleError) as e:
+                    self.load()
+                self.assertIn("line 1", str(e.exception))
+                self.assertIn("name must be one line of text with no control characters, not 'A\\u%04xB'" % code,
+                              str(e.exception))
+
     def test_file_text_is_shown_escaped_and_capped(self):
         good = '- name: A\n  question: "q?"\n  when: always\n  brief: "b"\n'
         esc, long = "x\\e[2Jy", "k" * 100000
@@ -1068,6 +1080,18 @@ class PickerTest(AngleCase):
         picked = angles.pick(table, files, "review", changed_lines=100)
         self.assertLess(time.monotonic() - start, 8)
         self.assertEqual(self.names(picked), ["Correctness", "Failure modes & observability"])
+
+    def test_many_kind_angles_pick_fast(self):
+        # No glob cap bounds kinds-only angles, and a PR author picks the path names: each kind's examples are
+        # written once per pick, not once per angle. Well under 0.1 s here; writing them per angle takes 5 s or more.
+        many = [angles.Angle(f"a{n}", "q", {"kinds": ["docs"]}, "b", "repo", "f", 2, n) for n in range(20000)]
+        table = angles.Table([angles.Angle("Correctness", "q", "always", "b", "built-in", "f", 0, 0)] + many)
+        files = ["docs/" + "a" * 3995]
+        start = time.monotonic()
+        picked = angles.pick(table, files, "loop")
+        self.assertLess(time.monotonic() - start, 1)
+        self.assertEqual(self.names(picked), ["Correctness", "a0", "a1", "a2"])
+        self.assertEqual(picked[1]["why"], "kind docs: " + files[0])
 
     def test_why_writes_file_names_on_one_line(self):
         # A changed file's name comes from the PR author, and git allows a newline or an escape in it.

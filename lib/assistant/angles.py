@@ -605,8 +605,9 @@ def _examples(files: list) -> str:
     return shown + (" (+%d more)" % (len(files) - 3) if len(files) > 3 else "")
 
 
-def _why(angle: Angle, files: list, found: dict) -> Optional[str]:
-    """Why `angle` matches the PR, in one line, or None when it does not."""
+def _why(angle: Angle, files: list, shown: dict) -> Optional[str]:
+    """Why `angle` matches the PR, in one line, or None when it does not. `shown` is each PR kind's examples, as
+    `_examples` writes them: written once per pick, since a table may hold any number of kinds-only angles."""
     if angle.when == "always":
         return "always"
     # At most three reasons are written out; the rest are only counted.
@@ -619,9 +620,9 @@ def _why(angle: Angle, files: list, found: dict) -> Optional[str]:
         elif any(glob_match(pattern, f) for f in files):
             more += 1
     for kind in angle.when.get("kinds", []):
-        if kind in found:
+        if kind in shown:
             if len(reasons) < 3:
-                reasons.append(f"kind {kind}: {_examples(found[kind])}")
+                reasons.append(f"kind {kind}: {shown[kind]}")
             else:
                 more += 1
     return "; ".join(reasons) + (" (+%d more)" % more if more else "") or None
@@ -653,12 +654,12 @@ def pick(table: Table, files: list, mode: str, changed_lines: Optional[int] = No
     most = count(files, mode, changed_lines)
     first = table.get(CORRECTNESS)
     out = [_picked(first, "always")]
-    found = kinds(files)
+    shown = {k: _examples(v) for k, v in kinds(files).items()}
     matched = []
     for a in table.angles:
         if a.name == CORRECTNESS:
             continue
-        why = _why(a, files, found)
+        why = _why(a, files, shown)
         if why:
             matched.append((-a.layer, a.pos, a, why))
     matched.sort(key=lambda m: (m[0], m[1]))
