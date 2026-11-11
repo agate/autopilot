@@ -999,8 +999,11 @@ Calls the author made without asking (check them):
     text of the first logged call of its tool whose `tool_input` holds every planned argument with the same value;
     for `fill: ai`, every logged text of its tools (a skill's: every logged text), in order, joined by a blank line,
     with no header added, so nothing code wrote can match an id; a logged call whose `tool_input` holds a planned
-    argument with another value is left out (a tool with none of the planned argument names still counts). Each
-    raw file is written to a temp file and renamed into place, so a symbolic link left at its path is replaced,
+    argument with another value is left out (a tool with none of the planned argument names still counts). Such a
+    tool (`slack_read_thread` for `slack-mentions`) is not pinned, so it can read a thread of any channel the
+    session names, private groups and IMs included; the word-for-word check only proves the ids came from a real
+    reply. Tying such a follow-up read to a thread the planned read returned is left to the launch slice (its
+    allow-list and brief; see "Not yet"). Each raw file is written to a temp file and renamed into place, so a symbolic link left at its path is replaced,
     never followed.
     Then it calls `Engine.read_saved`, which copies the raw under `.raw/<source>/`, writes the report, checks word
     for word and makes the cards. Take first plans each call again from its source as it loads now and refuses one that differs
@@ -1019,12 +1022,16 @@ Calls the author made without asking (check them):
     hook settings that call `ap2 scan save-raw`); the gate turning a source's `every:` into due watches and plans;
     measuring a scan's token cost; running `writes` in live mode; `plan: split_here`; one card for a Slack ask
     about a PR and the GitHub request for the same PR; `{setting}` patterns in `read.run`; pruning the scan
-    folders under `.scan` (the gate prunes only `.raw`). Before the
-    built-ins are relied on, the scan-session launch must confirm two things: the real Atlassian MCP server and
+    folders under `.scan` (the gate prunes only `.raw`); tying a `fill: ai` source's follow-up reads (such as
+    `slack_read_thread`) to the threads its planned read returned. Before the
+    built-ins are relied on, the scan-session launch must confirm three things: the real Atlassian MCP server and
     tool names and arguments (the built-ins follow appendix B, server `atlassian` with tools `search_issues` and
-    `get_issue`; the remote Atlassian MCP may name them differently and need a cloud id), and that the Slack
-    connector's reply text shows the channel id, since `place_id` is checked word for word and every
-    `slack-mentions` and `slack-alerts` record drops without it.
+    `get_issue`; the remote Atlassian MCP may name them differently and need a cloud id); the Slack tools' real
+    argument names (`slack_search_public` takes `keywords` and `filters`, not appendix A's `query`, so
+    `slack-mentions`' `read.query` must be renamed to what the connector takes; until then a search the session
+    makes carries none of the planned argument names, so the take's planned-argument rule does not pin it); and
+    that the Slack connector's reply text shows the channel id, since `place_id` is checked word for word and
+    every `slack-mentions` and `slack-alerts` record drops without it.
 - **[decided by the builder]** The gate and routines (slice 5, design 4.3 and 7.1 to 7.4). Modules:
   `lib/assistant/routines.py` (routine files, slots, missed runs) and `lib/assistant/gate.py` (one run).
   - Routine files are JSON, `<data>/routines/<name>.json`, not YAML: the gate writes `last_slot` back, and a JSON

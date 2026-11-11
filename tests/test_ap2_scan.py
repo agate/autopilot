@@ -728,6 +728,25 @@ class TakeTest(ScanCase):
         jira = {r["source"]: r for r in self.take(self.p)["reads"]}["jira-epic"]
         self.assertEqual([i["key"] for i in jira["items"]], ["PROJ-123", "PROJ-124", "PROJ-125"])
 
+    def test_a_paths_call_whose_only_reply_lacks_the_planned_argument_names_has_no_raw(self):
+        call = {"via": "mcp", "fill": "paths", "server": "atlassian", "tool": "get_issue", "args": {"issue": "PROJ-7"}}
+        logged = [{"tool_name": "mcp__atlassian__get_issue", "tool_input": {"issueIdOrKey": "PROJ-9"}, "text": "PROJ-9"}]
+        self.assertIsNone(scan.raw_for(call, logged))
+
+    def test_an_ai_call_keeps_only_the_reply_with_every_planned_argument(self):
+        call = {"via": "mcp", "fill": "ai", "server": "vendor", "tool": "list_issues",
+                "args": {"team": "core", "state": "open"}}
+        logged = [{"tool_name": "mcp__vendor__list_issues", "tool_input": {"team": "core", "state": "closed"},
+                   "text": "closed issues"},
+                  {"tool_name": "mcp__vendor__list_issues", "tool_input": {"team": "core", "state": "open"},
+                   "text": "open issues"}]
+        self.assertEqual(scan.raw_for(call, logged), "open issues")
+
+    def test_a_skill_call_keeps_every_logged_text_whatever_its_input(self):
+        call = {"via": "skill", "fill": "ai", "skill": "team-standup", "args": {"day": "today"}}
+        logged = [{"tool_name": "Bash", "tool_input": {"day": "yesterday"}, "text": "x"}]
+        self.assertEqual(scan.raw_for(call, logged), "x")
+
     def tamper(self, change) -> None:
         path = Path(self.p["plan"])
         p = json.loads(path.read_text())
