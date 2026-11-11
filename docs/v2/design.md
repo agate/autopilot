@@ -1429,7 +1429,7 @@ Calls the author made without asking (check them):
       writes nothing (the file is small enough to parse on every call).
     - The one call it lets through is Bash running exactly `<package>/bin/ap2 worker park <AP2_CARD> <AP2_ROLE>
       [--note TEXT]` on one line, the program quoted or not, with v1's tokenizer rules (no newline, backtick, `$`
-      or chaining/redirect token) and `#` read as a plain character, as bash reads one inside a word, so it hides
+      or `{`, no chaining/redirect token, at most 4096 characters) and `#` read as a plain character, as bash reads one inside a word, so it hides
       nothing. Any other flag (`--usage`, `--data`, `--by`, `--note=`), card, role or program (v1's `bin/ap`,
       another `ap2`) is denied.
     - The deny reason names that command with the worker's own card and role filled in, and the window and its

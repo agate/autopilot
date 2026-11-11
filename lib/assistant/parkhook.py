@@ -23,6 +23,7 @@ PARK_RULES = {"window_pct": 85, "stale_min": 60, "credit_pct": 90, "park_pct": 9
               "resume_after_min": 5}  # == workers.PARK_RULES (v1's default budget rules)
 MAX_STDIN = 1 << 20  # a payload past 1 MiB is not read: no opinion
 PUNCT = set("();<>|&")  # == v1 park.PUNCT: a token made of these chains or redirects
+MAX_COMMAND = 4096  # the park command is the package path, `worker park <card> <role>` and a one-line note
 
 
 def ap2_bin() -> str:
@@ -40,9 +41,12 @@ def _worker(env) -> tuple:
 def is_park_command(cmd: str, card: str, role: str) -> bool:
     """Exactly `<this package>/bin/ap2 worker park <card> <role> [--note TEXT]` on one line, the program quoted or
     not: the one command a parked worker may run. Anything chained to it, any `$` (command, parameter or arithmetic
-    expansion), any other flag, or another card or role is not it (v1's `park.is_park_command` tokenizer rules). A
-    `#` is a plain character, as bash reads one inside a word, so it cannot hide the rest of the line."""
-    if not cmd or "\n" in cmd or "`" in cmd or "$" in cmd:
+    expansion), any `{` (brace expansion would turn one token into several words, such as `{x,--usage,/tmp/f}`),
+    any other flag, or another card or role is not it (v1's `park.is_park_command` tokenizer rules). A `#` is a
+    plain character, as bash reads one inside a word, so it cannot hide the rest of the line. A command past
+    `MAX_COMMAND` is refused before it is tokenized: `shlex` is quadratic on one long token, and a hook that runs
+    past its timeout lets the call through."""
+    if not cmd or len(cmd) > MAX_COMMAND or "\n" in cmd or "`" in cmd or "$" in cmd or "{" in cmd:
         return False
     try:
         lex = shlex.shlex(cmd, posix=True, punctuation_chars=True)

@@ -107,11 +107,24 @@ class DecideTest(unittest.TestCase):
                    "# then ; ls": own + "#; ls", "--note x# then ;ls": own + " --note x#;ls",
                    "parameter expansion": own + " --note ${X:=a}", "arithmetic expansion": own + " --note $[1]",
                    "expansion in a default": own + r" --note ${X:=a[\$\(touch\ /tmp/p\)]}$[X]",
+                   "brace expansion": own + " --note {x,--data=/tmp/d}",
+                   "brace expansion to --usage": own + " --note {x,--usage,/tmp/u}",
                    "unbalanced quote": own + ' --note "x', "empty": ""}
         for name, cmd in refused.items():
             with self.subTest(name, cmd=cmd):
                 self.assertFalse(parkhook.is_park_command(cmd, "C1", "implement"))
                 self.assertTrue(denied(parkhook.decide(bash(cmd), WORKER, usage(95), RULES)))
+
+    def test_a_long_command_is_refused_before_it_is_tokenized(self):
+        own = f"{AP2} worker park C1 implement"
+        cmd = own + " --note " + "a" * parkhook.MAX_COMMAND
+        start = time.monotonic()
+        self.assertFalse(parkhook.is_park_command(cmd, "C1", "implement"))
+        self.assertLess(time.monotonic() - start, 0.5)
+        self.assertTrue(denied(parkhook.decide(bash(cmd), WORKER, usage(95), RULES)))
+        note = own + ' --note "' + "halfway, next: tests " * 10 + '"'
+        self.assertTrue(parkhook.is_park_command(note, "C1", "implement"))
+        self.assertIsNone(parkhook.decide(bash(note), WORKER, usage(95), RULES))
 
     def test_the_park_command_passes_only_as_bash(self):
         payload = {"tool_name": "Read", "tool_input": {"command": f"{AP2} worker park C1 implement"}}
