@@ -53,6 +53,15 @@ GIT = ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "-c",
        "-c", "core.hooksPath=/dev/null", "-c", "init.defaultBranch=main"]
 
 
+def _git_version() -> tuple:
+    try:
+        out = subprocess.run(["git", "--version"], capture_output=True, text=True).stdout
+    except OSError:
+        return (0,)
+    m = re.search(r"(\d+)\.(\d+)", out)
+    return (int(m.group(1)), int(m.group(2))) if m else (0,)
+
+
 class AngleCase(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="ap2-angles-")).resolve()
@@ -299,6 +308,109 @@ class LayerTest(AngleCase):
             self.user("")
             commit = self.commit_repo_file(text)
             self.assertIsNotNone(self.load(repo=self.repo, commit=commit).get("Bom angle"))
+
+    def test_bad_utf8_is_refused(self):
+        raw = b'- name: A\n  question: "q\xff?"\n  when: always\n  brief: "b"\n'
+        with self.subTest(layer="user"):
+            path = self.data / "review" / "angles.yaml"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(raw)
+            with self.assertRaises(AngleError) as e:
+                self.load()
+            self.assertTrue(str(e.exception).startswith(f"{path}: "), str(e.exception))
+            self.assertIn("cannot read", str(e.exception))
+        with self.subTest(layer="repo"):
+            self.user("")
+            self.git("init", "-q")
+            (self.repo / ".autopilot").mkdir()
+            (self.repo / ".autopilot" / "review.yaml").write_bytes(raw)
+            self.git("add", "-A")
+            self.git("commit", "-q", "-m", "bad utf-8")
+            commit = self.git("rev-parse", "HEAD")
+            with self.assertRaises(AngleError) as e:
+                self.load(repo=self.repo, commit=commit)
+            self.assertTrue(str(e.exception).startswith(f"{self.repo}/.autopilot/review.yaml at {commit[:12]}: "),
+                            str(e.exception))
+            self.assertIn("cannot read", str(e.exception))
+
+    def test_crlf_lines_are_counted_once(self):
+        path = self.data / "review" / "angles.yaml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b'- name: A\r\n  question: "q?"\r\n  when: always\r\n  brief: "b"\r\n  tools: [Bash]\r\n')
+        with self.assertRaises(AngleWidenError) as e:
+            self.load()
+        self.assertIn("line 5: ", str(e.exception))
+
+    def test_user_file_that_cannot_be_looked_at_is_refused(self):
+        path = self.user('- name: A\n  question: "q?"\n  when: always\n  brief: "b"\n')
+        real = os.stat
+
+        def stat(p, *a, **kw):
+            if Path(p) == path:
+                raise PermissionError(13, "denied")
+            return real(p, *a, **kw)
+
+        with mock.patch.object(angles.os, "stat", side_effect=stat):
+            with self.assertRaises(AngleError) as e:
+                self.load()
+        self.assertTrue(str(e.exception).startswith(f"{path}: cannot read"), str(e.exception))
+
+    def test_user_file_that_cannot_be_read_is_refused(self):
+        path = self.user('- name: A\n  question: "q?"\n  when: always\n  brief: "b"\n')
+        real = sources.read_capped
+
+        def read(p, *a, **kw):
+            if Path(p) == path:
+                raise PermissionError(13, "denied")
+            return real(p, *a, **kw)
+
+        with mock.patch.object(angles.sources, "read_capped", side_effect=read):
+            with self.assertRaises(AngleError) as e:
+                self.load()
+        self.assertTrue(str(e.exception).startswith(f"{path}: cannot read"), str(e.exception))
+
+    @unittest.skipUnless(shutil.which("git") and _git_version() >= (2, 44), "GIT_NO_LAZY_FETCH needs git 2.44")
+    def test_partial_clone_blob_is_not_fetched(self):
+        # A partial clone (blob:none) holds the commit and its trees, not the file's blob. Listing the size or reading
+        # the blob must not fetch it from the remote: the read stays local and the object store does not grow.
+        server, clone = self.tmp / "server.git", self.tmp / "clone"
+        self.git("init", "-q", "--bare", str(server))
+        self.git("-C", str(server), "config", "uploadpack.allowFilter", "true")
+        self.commit_without_file()
+        self.git("push", "-q", str(server), "HEAD:main")
+        self.git("clone", "-q", "--no-checkout", "--filter=blob:none", server.as_uri(), str(clone))
+        commit = self.commit_repo_file('- name: Remote\n  question: "q?"\n  when: always\n  brief: "b"\n')
+        self.git("push", "-q", str(server), "HEAD:main")
+        self.git("-C", str(clone), "fetch", "-q", "origin")
+
+        def store():
+            objects = clone / ".git" / "objects"
+            return sorted(str(p.relative_to(objects)) for p in objects.rglob("*") if p.is_file())
+
+        before = store()
+        where = f"{clone}/.autopilot/review.yaml at {commit[:12]}: "
+        with self.subTest(case="the listing has no size"):
+            with self.assertRaises(AngleError) as e:
+                self.load(repo=clone, commit=commit)
+            self.assertTrue(str(e.exception).startswith(where), str(e.exception))
+            self.assertIn("not in this clone (a partial clone)", str(e.exception))
+            self.assertEqual(store(), before)
+        with self.subTest(case="the blob is gone when read"):
+            # The listing gives a size, as if the blob were there, and it is gone when read.
+            real = angles._git
+
+            def git(repo, args, where_):
+                p = real(repo, args, where_)
+                if args[0] == "ls-tree":
+                    p.stdout = re.sub(rb"(blob [0-9a-f]+) +[^\t ]+\t", rb"\1 55\t", p.stdout)
+                return p
+
+            with mock.patch.object(angles, "_git", side_effect=git):
+                with self.assertRaises(AngleError) as e:
+                    self.load(repo=clone, commit=commit)
+            self.assertTrue(str(e.exception).startswith(where), str(e.exception))
+            self.assertIn("not in this clone (a partial clone)", str(e.exception))
+            self.assertEqual(store(), before)
 
 
 class ExtendsOffTest(AngleCase):
@@ -611,6 +723,25 @@ class RefusalTest(AngleCase):
         self.user('- name: A\n  question: "First?\\nSecond?"\n  when: always\n  brief: "a\\nb\\tc"\n')
         a = self.load().get("A")
         self.assertEqual((a.question, a.brief), ("First?\nSecond?", "a\nb\tc"))
+        self.user('- name: A\n  question: "a\\tb?"\n  when: always\n  brief: "b"\n')
+        self.assertEqual(self.load().get("A").question, "a\tb?")
+
+    def test_other_control_or_bidi_characters_are_refused_in_a_question_or_brief(self):
+        # A newline or a tab is prose; an escape, a NUL (which would break a later command line) or a bidi override
+        # is not, and a picked angle hands its question and brief on as they are.
+        for key, line in (("question", 2), ("brief", 4)):
+            for code in (0x1B, 0x00, 0x07, 0x0D, 0x202E, 0x2028):
+                with self.subTest(key=key, char=f"U+{code:04X}"):
+                    text = {"question": '"q?"', "brief": '"b"'}
+                    text[key] = '"x\\u%04xy"' % code
+                    self.user('- name: A\n  question: %s\n  when: always\n  brief: %s\n'
+                              % (text["question"], text["brief"]))
+                    with self.assertRaises(AngleError) as e:
+                        self.load()
+                    msg = str(e.exception)
+                    self.assertIn(f"line {line}: {key} must be text with no control characters but newlines and "
+                                  f"tabs, not {'x' + chr(code) + 'y'!r}", msg)
+                    self.assertNotIn(chr(code), msg)
 
     def test_many_entries_load_fast(self):
         self.user("".join(f"- {{name: o{n}, off: true}}\n" for n in range(20000)))
@@ -1009,6 +1140,8 @@ class PickerTest(AngleCase):
         for files in (["docs/a.md", "schema.sql"], ["tests/test_x.py"]):
             with self.subTest(files=files):
                 self.assertEqual(angles.count(files, "review", 200), 3)
+        with self.subTest(files=[]):
+            self.assertEqual(angles.count([], "review", 200), 3)
 
     def test_paths_or_kinds(self):
         self.user('- name: Billing data\n  question: "q?"\n  when: { paths: ["billing/**"], kinds: [data] }\n'
@@ -1068,6 +1201,10 @@ class PickerTest(AngleCase):
             angles.pick(table, ["a.py"], "nosuch")
         with self.assertRaises(ValueError):
             angles.pick(table, ["a.py"], "review")
+        for mode, lines in (("nosuch", 200), ("review", True), ("review", -1)):
+            with self.subTest(mode=mode, lines=lines):
+                with self.assertRaises(ValueError):
+                    angles.pick(table, ["a.py"], mode, lines)
 
     def test_most_globs_pick_fast(self):
         # The most globs one file may hold, each near the longest, against 300 changed files: bounded.

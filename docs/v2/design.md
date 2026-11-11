@@ -392,7 +392,9 @@ How it is built (`lib/assistant/angles.py`, the table in `review/angles.yaml`):
   given; `git rev-parse` to pin the commit, `git ls-tree --full-tree` to find the file and its size from the repo
   root, `git cat-file blob`). The path missing at that commit is no layer; any
   other git failure (no such repo or commit, a commit name starting with `-`, a folder or link at the path) is an
-  `AngleError`. A missing user file is no layer; an empty file holds no angles. Each file is a YAML list of maps of
+  `AngleError`. Every git call runs with `GIT_NO_LAZY_FETCH=1` (git 2.44 and later; an older git ignores it) and
+  `GIT_TERMINAL_PROMPT=0`, so a partial clone never fetches the file's blob from its remote, and a blob the clone
+  lacks is refused as "not in this clone (a partial clone)". A missing user file is no layer; an empty file holds no angles. Each file is a YAML list of maps of
   at most `sources.MAX_SOURCE` bytes (a leading BOM is dropped), read with `yamlish` (as the list under one wrapper
   key, so line numbers stay the file's own). A file that is not a list (a map, a flow list such as `[]`, a bare
   word, or a top-level `angles:` beside its items) is refused as "must be a list of angles".
@@ -422,7 +424,8 @@ How it is built (`lib/assistant/angles.py`, the table in `review/angles.yaml`):
   `extends` target and a glob must be one line of text, since each is shown on one line: a control character
   (Unicode category Cc, such as a newline, a tab or an escape), a line or paragraph separator (Zl, Zp) or a bidi
   override or isolate (U+202A to U+202E, U+2066 to U+2069, which make text read in another order) is refused; any
-  other character is text (a joined emoji, a no-break space). Any other key is refused, naming the file, line and
+  other character is text (a joined emoji, a no-break space). A `question` or `brief` refuses the same characters
+  but a newline and a tab, since a picked angle hands them on as they are. Any other key is refused, naming the file, line and
   key. Text from the file in an error (a key, name, kind or glob) is shown as its repr, control characters escaped,
   cut to 80 characters. A key in `templates.WIDEN` (compared with `templates._norm`, so `allowedTools`,
   `allowed-tools` and `allowed_tools` are one key), at any depth, is refused first with an `AngleWidenError`: an

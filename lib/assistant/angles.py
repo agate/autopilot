@@ -74,6 +74,11 @@ _COMMIT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/~^@{}-]{0,254}\Z")
 _WRAP = "angles:\n"   # yamlish reads only a top-level map, so a file is read as the list under this key
 _NOT_A_LIST = "an angle file must be a list of angles ('- name: ...')"
 _ONE_LINE = "must be one line of text with no control characters"
+_PROSE = "must be text with no control characters but newlines and tabs"
+_MISSING = "the file's blob is not in this clone (a partial clone); fetch it first"
+# Every git call stays local: a partial clone never fetches a missing blob from its remote (git 2.44 and later; an
+# older git ignores the variable), and a fetch an older git still starts never waits on a password prompt.
+_GIT_ENV = {"GIT_NO_LAZY_FETCH": "1", "GIT_TERMINAL_PROMPT": "0"}
 # Bidi overrides and isolates: they make text read in another order than it is (U+202A-U+202E, U+2066-U+2069).
 _BIDI = frozenset(map(chr, list(range(0x202A, 0x202F)) + list(range(0x2066, 0x206A))))
 
@@ -154,7 +159,7 @@ def _decode(data: bytes, where: str) -> str:
 def _git(repo, args: list, where: str) -> subprocess.CompletedProcess:
     try:
         return subprocess.run(["git", "-C", str(repo)] + args, capture_output=True, timeout=GIT_TIMEOUT,
-                              stdin=subprocess.DEVNULL)
+                              stdin=subprocess.DEVNULL, env={**os.environ, **_GIT_ENV})
     except (OSError, subprocess.SubprocessError) as e:
         raise AngleError(f"{where}: cannot run git: {e}") from e
 
@@ -193,10 +198,15 @@ def _read_repo(repo, commit: str) -> tuple:
     mode, kind, blob, size = (x.decode("ascii", "replace") for x in parts)
     if kind != "blob" or mode not in ("100644", "100755"):
         raise AngleError(f"{where}: not a regular file (git mode {mode}, {kind})")
-    if not size.isdigit() or int(size) > MAX_FILE:
+    # With lazy fetch off, a blob a partial clone does not hold is listed with no size ('BAD' in git 2.51).
+    if not size.isdigit():
+        raise AngleError(f"{where}: {_MISSING}")
+    if int(size) > MAX_FILE:
         raise AngleError(f"{where}: larger than {MAX_FILE} bytes")
     p = _git(repo, ["cat-file", "blob", blob], where)
     if p.returncode != 0:
+        if _git(repo, ["cat-file", "-e", blob], where).returncode != 0:
+            raise AngleError(f"{where}: {_MISSING}")
         raise _git_failed(p, where, "cannot read the file from the commit")
     if len(p.stdout) > MAX_FILE:
         raise AngleError(f"{where}: larger than {MAX_FILE} bytes")
@@ -244,6 +254,9 @@ class _Checker:
         # A name is printed on one line (pick's name and why, unknown_off).
         if key in ("name", "extends") and not _one_line(v):
             self.fail(path + (key,), f"{key} {_ONE_LINE}, not {_show(v)}")
+        # A question or brief is prose that may span lines, and pick() hands it on as it is.
+        if key in ("question", "brief") and any(_unsafe(ch) for ch in v if ch not in "\n\t"):
+            self.fail(path + (key,), f"{key} {_PROSE}, not {_show(v)}")
 
     def when(self, v, path: tuple) -> None:
         at = path + ("when",)
