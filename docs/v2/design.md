@@ -637,6 +637,9 @@ archived with the card.
 - Reused from secretary by copying, not calling: the Slack and GitHub reading logic (as built-in source files and
   engine checks), the investigator, analyst and reviewer agents, the presets.
 - **[open]** Moving v1's data from `~/.claude/autopilot-data` and secretary's state into the new data folder.
+  **[decided by the builder]** The read-only part is built: `ap2 import-v1` copies each v1 project (its
+  `config.json` and `state.json`) into v2 cards without changing v1's folder, so v2 shows v1's work in shadow mode
+  (section 12, "v1 import"). Moving or deleting v1's data, and secretary's state, stay open.
 
 ## 11. Open questions, most important first
 
@@ -650,7 +653,9 @@ archived with the card.
    result file is stopped and marked paused, can resume. Check them.
 3. **Replies on the local page** resume the session immediately (8.3)?
 4. **Drafts and quotes in two languages** (3.1, proposed part).
-5. **Data migration** from v1 and secretary (10).
+5. **Data migration** from v1 and secretary (10). **Answered for the read-only part:** `ap2 import-v1` copies v1
+   projects into cards and never writes to v1's folder (section 12, "v1 import"). Moving v1's or secretary's data
+   is still open.
 
 Calls the author made without asking (check them):
 
@@ -1580,6 +1585,55 @@ Calls the author made without asking (check them):
     `ap2 worker list`, `start CARD ROLE [--cwd P] [--prompt-file F] [--needs A,B] [--resume]`,
     `end CARD ROLE [--transcripts P]`, `check [--transcripts P] [--usage P]`,
     `park CARD ROLE [--note T] [--usage P]`, `answer CARD TEXT...`, `finish CARD [--transcripts P]`.
+- **[decided by the builder]** v1 import (10, 11 question 5), read-only, in `importv1.py`.
+  - Command: `ap2 import-v1 [--data PATH] [--from DIR] [--project NAME ...] [--dry-run]`. `--from` defaults to
+    v1's own data root (`AUTOPILOT_DATA`, else `~/.claude/autopilot-data`, v1's `paths.data_root()`). A project is
+    every `<from>/projects/<name>/` holding `config.json`, plus a legacy `<from>/<name>/config.json` whose
+    `projects/<name>/config.json` does not exist (v1's `ap_dir` rule); `<name>` must pass v1's `valid_name`; a
+    folder that cannot be looked into counts as found, so it is refused alone; a project folder whose real place
+    cannot be found (a link through a folder the import cannot look into) stops the import with one line, nothing
+    written, because an overlap with the data folder cannot be ruled out; a `projects` link to a place that does
+    not exist stops the import with one line too. `--project` (repeatable) limits
+    it; a name not found, a missing `--from` folder, or a data folder and `--from` (and its projects folder and
+    each project folder found, `--project` or not, symlinks followed) where either is inside the other (compared
+    as `datadir` does: letter case folded, then by file identity) is one `ap2: ...` line, exit 1, nothing written.
+  - Read-only for real: v1's files are read with `open(...).read()` and `json.loads`, never through v1's
+    `state.load` or `mutate` (they take a lock file inside v1's folder). Nothing is created or changed under
+    `--from`.
+  - Cards (feed `v1-import`, audit `by: v1-import`, each with `project: <name>`): a `project` card
+    (`key: v1:<name>`, title the name, `lane: done` when the project has tasks and every one is `done` or
+    `skipped`, else `running`; `source.record` keeps `repo`, `branch_pattern`, `branch_prefix` and the folder); a
+    `code` card per task under it (`key: v1:<name>:<task id>`, `status` v1's, lanes `todo` -> planned,
+    `in_progress`/`in_review` -> running, `blocked` -> needs, `done`/`skipped` -> done; `P1` when `critical`, else
+    `P2`; `origin: found` when v1's is, else `source`; `source.record` keeps `pr`, `branch`, `depends_on`,
+    `link`); a `question` card per open `ask` or `gate` decision (`key: v1:<name>:<decision id>`, `lane: needs`,
+    `ask: {type: answer | approve, from: v1}`, under its task's card, else the project's). Other decisions make no
+    card and are counted in the report's `not_imported`. A question card made while its decision was open is
+    closed (`lane: done`, `ask: null`) once v1 settles it; a question card whose decision has left state.json (v1
+    archives only settled decisions) is closed the same way.
+  - Text: a v1 text `{en, zh, ...}` gives each configured language its own text, else the base language
+    (`zh-Hans` -> `zh`), else `en`, else its first string. A label `{key, args}` is filled with `str.format_map`
+    (a placeholder without an argument stays as written, as v1's page does; a template longer than `MAX_LABEL`
+    (1,000) characters is shown as its key, before it is parsed; a template with a format spec, conversion, index
+    or attribute, one that does not parse, or one that would fill past `MAX_LABEL` characters, is shown as
+    written) from the package's `templates/labels.<lang>.json` with the v1 folder's `labels.<lang>.json` on top
+    (where v1 keeps its page translations), falling back to `en`, then to the key. `title` is the primary
+    language's text. Plain words come from fixed phrases (`importv1.PHRASES`, `en` and `zh`): `what` is the title,
+    `where` names the project (and task, with its v1 status), `do` says it is a read-only copy and to act on v1's
+    page. A configured language with no phrases is refused before anything is written.
+  - Re-run: the same key (among this feed's cards) updates `title`, `plain`, `lane`, `status`, `ask` and
+    `source` when they changed, and leaves the card alone when nothing did. A card is never removed (a task gone
+    from v1 keeps its card). `--dry-run` writes nothing, not even the data folder's layout, and reports
+    `would_add` (the card, with `parent` left out while its parent is only a would-add too) or `would_change`.
+  - Report on stdout: `{from, dry_run, projects: [{name, folder, cards: [{key, kind, action: add | update |
+    unchanged, card}], not_imported: {decisions}}], refused: [{name, folder, reason}]}`. Every card of a project
+    is checked as the store will check it before any is written, so a project whose files cannot be read
+    (missing, bad JSON, not an object, a state.json without `tasks` or `decisions`, a task or decision without an
+    id, an id used twice, an unknown task status, text the store refuses, a value nested deeper than the store
+    writes) is listed under `refused` and the others still import; the command then prints one `ap2: ...` line and
+    exits 1 after the report.
+  - Writes only inside the data folder, so it runs in shadow mode (no `require_live`). Not imported:
+    `events.jsonl`, reports, run folders, and `<data>/projects/<name>.yaml` (not written from `config.json`).
 - How the local server pushes updates to an open page (polling is fine).
   - **[decided by the builder]** Polling: the page asks `/api/state` every 10 seconds and redraws the top bar,
     the rail and the open list, so the heartbeat and new cards show without a reload.
