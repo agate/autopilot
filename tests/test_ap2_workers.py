@@ -7,6 +7,7 @@ import gzip
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -25,6 +26,7 @@ from assistant.config import Config, ShadowModeError
 from assistant.resources import WorkerError
 from assistant.store import Store
 from assistant.workers import DIED, Workers
+from autopilot import perms as v1_perms
 from autopilot import sessions as v1_sessions
 
 FAKE = str(ROOT / "tests" / "bin" / "fake-claude-v2")
@@ -391,13 +393,15 @@ class ToolDiscoveryTest(WorkerCase):
         with mock.patch.dict(os.environ, {"FAKE_TOOLS": "Read,mcp__Tracker__create_issue"}):
             self.assertEqual(w.check()[0]["did"], "resumed")
         self.assertEqual(len(self.discovery_calls()), 2)
+        self.assertEqual(self.discovery_calls()[1]["cwd"], str(self.wt))  # listed in the worker's own folder
         self.assertIn("mcp__Tracker__create_issue", self.deny(a["card"]))
 
     def test_a_failed_discovery_starts_nothing(self):
         cid = self.add_card()
         with mock.patch.dict(os.environ, {"FAKE_TOOLS_FAIL": "1"}):
             with self.assertRaisesRegex(WorkerError, r"cannot list the session's tools for the permission floor: "
-                                                     r".*no init event.*; list them in projects/.*\.yaml `tools`"):
+                                                     r".*no init event.*; give the card a project and list them "
+                                                     r"in its projects/<name>\.yaml `tools`"):
                 self.workers().start(cid, "implement", cwd=self.wt)
         self.assertEqual(len(self.discovery_calls()), 1)
         self.assertEqual(self.bg_calls(), [])
@@ -413,6 +417,41 @@ class ToolDiscoveryTest(WorkerCase):
         self.assertIn("cannot list the session's tools", out["note"])
         self.assertEqual(len(self.bg_calls()), 1)  # never resumed without its floor
         self.assertEqual(resources.Registry(self.data).read()[0]["resumes"], 1)
+
+    def test_a_failed_discovery_names_the_cards_project_file(self):
+        (self.data / "projects").mkdir()
+        (self.data / "projects" / "bare.yaml").write_text("repo: /repos/bare\n")
+        cid = self.add_card(project="bare")
+        with mock.patch.dict(os.environ, {"FAKE_TOOLS_FAIL": "1"}):
+            with self.assertRaisesRegex(WorkerError, r"; list them in projects/bare\.yaml `tools`$"):
+                self.workers().start(cid, "implement", cwd=self.wt)
+
+    def test_a_discovery_that_times_out_starts_nothing_and_counts_as_a_death(self):
+        timeout = subprocess.TimeoutExpired("claude", 180)
+        with mock.patch.object(v1_perms, "discover_tools", side_effect=timeout):
+            with self.assertRaisesRegex(WorkerError, "cannot list the session's tools"):
+                self.start()
+        self.assertEqual(self.bg_calls(), [])
+        w = self.workers()
+        a = self.start(w)
+        self.drop_agent(a["short_id"])
+        with mock.patch.object(v1_perms, "discover_tools", side_effect=timeout):
+            out = w.check()[0]
+            self.assertNotIn("error", out)
+            self.assertIn("cannot list the session's tools", out["note"])
+            self.assertEqual(resources.Registry(self.data).read()[0]["resumes"], 1)
+            self.assertEqual(w.check()[0]["did"], "stopped")
+        self.assertEqual(len(self.bg_calls()), 1)  # never resumed without its floor
+
+    def test_a_missing_claude_starts_nothing(self):
+        cid = self.add_card()  # no project: no `tools` listed, so they must be discovered
+        w = Workers(self.data, cfg=self.cfg, claude=str(self.tmp / "no-claude"),
+                    transcripts_dir=self.fake_home / "projects", clock=self.clock,
+                    store=Store(self.data, self.cfg, self.clock))
+        with self.assertRaisesRegex(WorkerError, "cannot list the session's tools"):
+            w.start(cid, "implement", cwd=self.wt)
+        self.assertEqual(self.bg_calls(), [])
+        self.assertEqual(resources.Registry(self.data).read(), [])
 
 
 # -- 4. start, end, dead, parked -----------------------------------------------------------------------------------

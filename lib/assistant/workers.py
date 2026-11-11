@@ -185,8 +185,10 @@ class Workers:
         try:
             tools = v1_perms.discover_tools(self.claude, cwd)
         except (OSError, RuntimeError, subprocess.SubprocessError) as e:
-            raise WorkerError(f"cannot list the session's tools for the permission floor: {e}; list them in "
-                              f"projects/{project.get('name') or '<name>'}.yaml `tools`") from e
+            name = project.get("name")
+            hint = (f"list them in projects/{name}.yaml `tools`" if name else
+                    "give the card a project and list them in its projects/<name>.yaml `tools`")
+            raise WorkerError(f"cannot list the session's tools for the permission floor: {e}; {hint}") from e
         return dict(project, tools=list(tools))
 
     def _launch(self, argv: list, cwd: str, env: dict) -> tuple:
