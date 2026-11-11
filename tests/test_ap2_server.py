@@ -243,6 +243,7 @@ class GuardTest(ServerCase):
         head = reply.split(b"\r\n\r\n", 1)[0]
         self.assertIn(b"\r\nCache-Control: no-store\r\n", head + b"\r\n")
         self.assertIn(b"\r\nX-Content-Type-Options: nosniff\r\n", head + b"\r\n")
+        self.assertIn(b"\r\nCross-Origin-Opener-Policy: same-origin\r\n", head + b"\r\n")
 
     def test_a_request_line_with_no_version_gets_no_reply_or_a_status_line_and_the_safe_headers(self):
         self.start()
@@ -275,6 +276,12 @@ class GuardTest(ServerCase):
         for site in ("same-origin", "none", "Same-Origin"):
             with self.subTest(site=site):
                 self.assertEqual(self.call("GET", "/api/state", headers={"Sec-Fetch-Site": site})[0], 200)
+        for path in ("/api/state", "/api/cards", f"/api/cards/{card['id']}", "/api/sources", "/api/sources/gh-mine",
+                     "/api/templates", "/api/templates/errand", "/api/settings"):
+            with self.subTest("every GET route", path=path):
+                status, _, reply = self.call("GET", path, headers={"Sec-Fetch-Site": "cross-site"})
+                self.assertEqual(status, 403, reply)
+                self.assertIn("another site", reply["error"])
         with self.subTest("the page itself"):
             status, hdrs, page = self.call("GET", "/", headers={"Sec-Fetch-Site": "cross-site"})
             self.assertEqual(status, 200)
@@ -305,6 +312,7 @@ class GuardTest(ServerCase):
                 status, hdrs, _ = self.call(method, path, body, headers)
                 self.assertEqual(hdrs.get("cache-control"), "no-store")
                 self.assertEqual(hdrs.get("x-content-type-options"), "nosniff")
+                self.assertEqual(hdrs.get("cross-origin-opener-policy"), "same-origin")
                 self.assertEqual([k for k in hdrs if k.startswith("access-control-")], [])
 
     def test_options_is_405(self):

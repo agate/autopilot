@@ -1057,9 +1057,11 @@ Calls the author made without asking (check them):
     trusts every account and process on this Mac: the Host and Origin checks stop other web sites, not other
     local users, who can read every card, source and setting and post questions. A per-run token is later work
     if that is not acceptable. Every reply has
-    `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` and the page's
-    Content-Security-Policy (`default-src 'none'`, the page's own inline script and style, `connect-src 'self'`,
-    `form-action 'none'`, `frame-ancestors 'none'`), and never an `Access-Control-Allow-*` header; `OPTIONS` is
+    `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`,
+    `Cross-Origin-Opener-Policy: same-origin` (a page on another site that opens this page in a window keeps no
+    handle to it, so it cannot keep changing its address to run searches) and the page's Content-Security-Policy
+    (`default-src 'none'`, the page's own inline script and style, `connect-src 'self'`, `form-action 'none'`,
+    `frame-ancestors 'none'`), and never an `Access-Control-Allow-*` header; `OPTIONS` is
     405, so no other site passes a preflight. Replies of 400 and up are logged to stderr, the UTC time first;
     2xx replies are not (the page polls).
   - Routes, JSON in and out: `GET /` (the page), `GET /api/state` (mode, languages, lane counts, `running`, the
