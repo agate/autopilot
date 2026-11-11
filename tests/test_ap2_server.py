@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import socket
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -367,7 +368,8 @@ class ListTest(ServerCase):
         st = self.ok("/api/state")
         self.assertEqual(st["lanes"], {"needs": 3, "running": 2, "planned": 2, "done": 3})
         self.assertEqual(st["running"], 2)
-        self.assertEqual(st["projects"], [{"id": self.proj["id"], "title": "The project", "done": 1, "total": 3}])
+        self.assertEqual(st["projects"], [{"id": self.proj["id"], "title": {"en": "The project"}, "done": 1,
+                                            "total": 3}])
         self.assertEqual(st["mode"], "shadow")
         self.assertEqual(st["primary_language"], "en")
         self.assertIsNone(st["secondary_language"])
@@ -388,8 +390,9 @@ class ListTest(ServerCase):
 
     def test_a_row_has_the_list_fields_only(self):
         row = self.ok("/api/cards?lane=needs")["cards"][1]
-        self.assertEqual(row, {"id": self.n_p2_new["id"], "title": "needs new", "kind": "errand", "lane": "needs",
-                               "pri": "P2", "feed": "chat", "parent": None, "origin": "source", "ask_type": "answer",
+        self.assertEqual(row, {"id": self.n_p2_new["id"], "title": {"en": "needs new"}, "kind": "errand",
+                               "lane": "needs", "pri": "P2", "feed": "chat", "parent": None, "origin": "source",
+                               "ask_type": "answer",
                                "plain_where": {"en": "where a thing (en)"},
                                "updated_at": self.n_p2_new["updated_at"]})
 
@@ -399,6 +402,53 @@ class ListTest(ServerCase):
         self.start(cfg=zh)
         rows = {r["id"]: r for r in self.ok("/api/cards")["cards"]}
         self.assertEqual(rows[card["id"]]["plain_where"], {"en": "where heron (en)", "zh": "where heron (zh)"})
+
+    def test_a_row_has_the_title_in_every_language(self):
+        zh = Config(secondary_language="zh")
+        two = plain("heron", langs=("en", "zh"))
+        text = self.add(cfg=zh, title="Same words", plain=two)
+        obj = self.add(cfg=zh, title={"en": "Retry payments", "zh": "重试付款"}, plain=two)
+        none = self.add(cfg=zh, title=None, plain=two)
+        self.start(cfg=zh)
+        rows = {r["id"]: r for r in self.ok("/api/cards?q=heron")["cards"]}
+        self.assertEqual(rows[text["id"]]["title"], {"en": "Same words", "zh": "Same words"})
+        self.assertEqual(rows[obj["id"]]["title"], {"en": "Retry payments", "zh": "重试付款"})
+        self.assertIsNone(rows[none["id"]]["title"])
+        full = self.ok(f"/api/cards/{obj['id']}")
+        self.assertEqual(full["card"]["title"], {"en": "Retry payments", "zh": "重试付款"})  # the stored card
+        full = self.ok(f"/api/cards/{text['id']}")
+        self.assertEqual(full["card"]["title"], "Same words")
+
+    def test_a_row_title_falls_back_to_the_primary_slot(self):
+        en = Config()
+        zh = Config(secondary_language="zh")
+        card = self.add(cfg=en, title={"en": "English only"}, plain=plain("egret", langs=("en", "zh")))
+        self.start(cfg=zh)
+        rows = {r["id"]: r for r in self.ok("/api/cards?q=egret")["cards"]}
+        self.assertEqual(rows[card["id"]]["title"], {"en": "English only", "zh": "English only"})
+        self.assertEqual(self.ok(f"/api/cards/{card['id']}")["card"]["title"], {"en": "English only"})
+
+    def test_row_title_unit(self):
+        langs = ("en", "zh")
+        self.assertEqual(server.row({"title": "T"}, langs)["title"], {"en": "T", "zh": "T"})
+        self.assertEqual(server.row({"title": {"en": "E", "zh": "Z"}}, langs)["title"], {"en": "E", "zh": "Z"})
+        self.assertEqual(server.row({"title": {"en": "E"}}, langs)["title"], {"en": "E", "zh": "E"})
+        self.assertEqual(server.row({"title": {"zh": "Z"}}, langs)["title"], {"en": None, "zh": "Z"})
+        for title in (None, 3, {}, {"ja": "J"}):
+            with self.subTest(title=title):
+                self.assertIsNone(server.row({"title": title}, langs)["title"])
+        self.assertIsNone(server.row({}, langs)["title"])
+
+    def test_state_projects_have_the_title_in_every_language(self):
+        zh = Config(secondary_language="zh")
+        two = plain("ibis", langs=("en", "zh"))
+        obj = self.add(cfg=zh, kind="project", lane="planned", title={"en": "Checkout", "zh": "结账"}, plain=two)
+        none = self.add(cfg=zh, kind="project", lane="planned", title=None, plain=two)
+        self.start(cfg=zh)
+        projects = {p["id"]: p for p in self.ok("/api/state")["projects"]}
+        self.assertEqual(projects[self.proj["id"]]["title"], {"en": "The project", "zh": "The project"})
+        self.assertEqual(projects[obj["id"]]["title"], {"en": "Checkout", "zh": "结账"})
+        self.assertIsNone(projects[none["id"]]["title"])
 
     def test_all_lanes_come_in_lane_order(self):
         body = self.ok("/api/cards")
@@ -544,10 +594,10 @@ class CardTest(ServerCase):
         self.assertEqual(sb["record"], card["source"]["record"])
         self.assertNotIn("link_refused", sb)
         self.assertEqual([r["id"] for r in body["children"]], [child["id"]])
-        self.assertEqual(body["children"][0]["title"], "child")
+        self.assertEqual(body["children"][0]["title"], {"en": "child"})
         self.assertEqual(body["links"], [{**body["links"][0]}, {"id": gone, "missing": True}])
         self.assertEqual(body["links"][0]["id"], other["id"])
-        self.assertEqual(body["links"][0]["title"], "other")
+        self.assertEqual(body["links"][0]["title"], {"en": "other"})
         self.assertEqual(body["activity"], card["audit"])
 
     def test_a_link_that_is_not_http_is_refused(self):
@@ -1036,6 +1086,46 @@ class PageTest(ServerCase):
         # A refused question shows a label, with the store's reason as a separate diagnostic line.
         self.assertIn("if (e.status === 409) status.replaceChildren(h('p', {text: L('q.refused')}), "
                       "h('p', {class: 'mono', text: e.message}))", text)
+
+    def test_the_page_picks_a_title_in_its_language_at_each_place(self):
+        text = PAGE.read_text(encoding="utf-8")
+        self.assertIn("function titleIn(t, fallback)", text)
+        for use in ("h('div', {class: 'row-title', text: titleIn(r.title)})",  # a list row
+                    "det.append(h('h1', {text: titleIn(c.title)}));",  # the card header, from the stored card
+                    "navLink(route('project', p.id), titleIn(p.title, p.id),",  # the project rail
+                    "L('list.project', {title: titleIn(p && p.title, l.arg)})"):  # the project list's header
+            with self.subTest(use):
+                self.assertIn(use, text)
+        for old in ("r.title ||", "c.title ||", "p.title ||", "p && p.title) ||"):
+            with self.subTest(old):
+                self.assertNotIn(old, text)
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_title_in_shows_one_language_only(self):
+        text = PAGE.read_text(encoding="utf-8")
+        src = text[text.index("  function titleIn("):]
+        src = src[:src.index("\n  }\n") + 5]
+        js = src + """
+const S = {lang: 'zh', state: {primary_language: 'en', languages: ['en', 'zh']}};
+const L = key => '[' + key + ']';
+const out = [
+  titleIn({en: 'Retry payments', zh: '重试付款'}),
+  titleIn({en: 'English only'}),
+  titleIn({en: 'English only', zh: '  '}),
+  titleIn('One text from an older reply'),
+  titleIn(null), titleIn(undefined), titleIn(''), titleIn({}), titleIn({ja: 'x'}), titleIn(3),
+  titleIn(null, 'c-id'), titleIn({en: 'E'}, 'c-id'),
+];
+S.lang = 'en';
+out.push(titleIn({en: 'Retry payments', zh: '重试付款'}), titleIn({zh: '只有中文'}));
+console.log(JSON.stringify(out));
+"""
+        out = subprocess.run(["node", "-e", js], capture_output=True, text=True, timeout=30)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(json.loads(out.stdout), [
+            "重试付款", "English only", "English only", "One text from an older reply",
+            "[card.untitled]", "[card.untitled]", "[card.untitled]", "[card.untitled]", "[card.untitled]",
+            "[card.untitled]", "c-id", "E", "Retry payments", "[card.untitled]"])
 
     def test_the_pages_search_caps_match_the_servers(self):
         text = PAGE.read_text(encoding="utf-8")

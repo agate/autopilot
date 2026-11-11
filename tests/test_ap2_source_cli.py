@@ -136,8 +136,8 @@ class SourceCommandTest(unittest.TestCase):
         self.assertTrue(out["dry_run"])
         self.assertIsNone(out["raw"])
         self.assertEqual([(i["action"], i["would_add"]["kind"], i["would_add"]["title"]) for i in out["items"]],
-                         [("add", "alert", "Elevated error rates on the payments API"),
-                          ("add", "alert", "Delayed webhooks")])
+                         [("add", "alert", {"en": "Elevated error rates on the payments API"}),
+                          ("add", "alert", {"en": "Delayed webhooks"})])
         self.assertEqual(tree(self.data), before)  # not even config.yaml or the folder layout
 
     def test_read_raw_takes_a_saved_reply(self):

@@ -65,6 +65,16 @@ Anti-goals (failure even if it "works"):
 - Every user-facing string has one slot per language. The data model stores the secondary version only when
   `secondary_language` is set. v1 keeps page strings in `templates/labels.en.json`; v2 adds `labels.<lang>.json`
   next to it.
+- **[decided by the builder]** A card's `title` has the same per-language shape as its plain words. It is
+  null, one text, or an object `{<lang>: text}`. One text means "the same words in every language": what every
+  card stored before this rule holds, and what a quote is (the author's own words). An object holds one non-empty
+  text per configured language, checked on add and update like `plain` (`title.zh missing`, `title.en is empty`);
+  a text title is not checked against the languages, and restore does not re-check them. Code-made titles (the
+  source engine, routine runs) write the object with the same words in each slot, because they quote a record or
+  the user's routine title and nothing in the code can translate. A writer that can write both languages (a scan
+  session, a worker, `ap2 card add`) gives the object with real words per language. A reader picks a language's
+  slot, else the primary's (`cards.title_for`); the local page shows only the page language's title. Translating
+  quotes is the proposed line below (open question 4), not part of this rule.
 - **[proposed]** A reply drafted for someone else stays in the language that person wrote in. On the
   other-language page its meaning is shown separately, and Copy leaves the meaning out. A quote shows the
   translation first and the original behind a collapsed "Original" toggle.
@@ -735,7 +745,9 @@ Calls the author made without asking (check them):
   - The store sets `id`, `created_at`, `updated_at` and `audit`; a card that gives one is refused. Required:
     `kind` and `feed` (non-empty text), `lane`, `pri`, `origin` (the enums of 4.1), `links` (a list of card ids),
     `plain`. Optional: `parent` (a card id or null), `ask` (null or an object whose `type` is one of the four),
-    `title` (text, searched). Other keys are kept as they are, for later templates. Ids in `parent` and `links` are
+    `title` (null, one text meaning the same words in every language, or `{<lang>: text}` with a non-empty text
+    for every configured language, `title.<lang> missing|is empty` otherwise (3.1); every slot is searched). Other
+    keys are kept as they are, for later templates. Ids in `parent` and `links` are
     checked for form only, not for existence (an import may add a child before its parent).
   - Plain words: `plain.what|where|do.<lang>` must be non-empty text for `primary_language` and, when set,
     `secondary_language`. One error class (`PlainWordsError`, a `CardError`) lists every gap, for example
@@ -839,11 +851,13 @@ Calls the author made without asking (check them):
     word (as whole tokens, slice 4 below) in the raw tool output (read as UTF-8, bad bytes replaced); one that does not is dropped with the reason
     (`form.id '...' is not in the raw output`), so a model cannot invent an id. A new card is
     `kind` = the template, `lane` `needs` (`brings: messages`) or `planned` (`brings: work`), `pri` P2,
-    `origin` `source`, `feed` the source's name, `title` the text's first line (80 characters), `key`, and
+    `origin` `source`, `feed` the source's name, `title` the text's first line (80 characters) in every
+    language's slot (`{<lang>: line}`, 3.1), `key`, and
     `source: {name, record, link, raw}` (the record's ids, the link, and the raw file it came from); a work
     card also gets `status`, through `status_map`. The same `key` updates the card that has it (`plain`,
     `title`, `source`, `status`; never `kind`, `lane`, `pri` or `ask`) with `by: source:<name>` and
-    `did: read <name>`; when only `raw` would change, nothing is written. `update_card` updates only, `none`
+    `did: read <name>`; when only `raw` would change, nothing is written, and an old card's one-text title equal
+    to every slot of the new title counts as unchanged (only its shape differs). `update_card` updates only, `none`
     makes nothing. The cards are found by key with `Store.list()` once per read. A card the store refuses to
     add or update (a stored card edited by hand into a bad one) drops only that item, naming the card or key,
     and a dry run drops it the same way; a failure of the store itself (a file or index error) still stops the
@@ -1090,8 +1104,9 @@ Calls the author made without asking (check them):
     came before the routine), so the gate only writes it as `last_slot` (action `start`, no card) and the routine
     counts from its next slot.
   - The run card: made through `Store.add` with `by: gate`, `kind: routine`, `feed: routines`, `lane: running`
-    (or `done` with `skipped: true` for a skipped run), `pri: P2`, `origin: source`, and the extra fields `key`
-    (`<routine>@<slot>`), `routine`, `slot`, `slot_tz`, `slot_at` (UTC), `late`, `skipped`, `late_minutes`. Then
+    (or `done` with `skipped: true` for a skipped run), `pri: P2`, `origin: source`, `title` the routine's title
+    in every language's slot (3.1), and the extra fields `key` (`<routine>@<slot>`), `routine`, `slot`,
+    `slot_tz`, `slot_at` (UTC), `late`, `skipped`, `late_minutes`. Then
     `last_slot` is written atomically (the file is read again first, so a change made meanwhile is kept). Before
     making a card the gate reads the routine cards once per run and looks for the key; a card found means it only
     writes `last_slot`. A damaged card file makes that read fail, so the routine waits (with an error) rather than
@@ -1242,7 +1257,10 @@ Calls the author made without asking (check them):
     2xx replies are not (the page polls).
   - Routes, JSON in and out: `GET /` (the page), `GET /api/state` (mode, languages, lane counts, `running`, the
     projects with `done`/`total` from their children, the heartbeat, `usage: null` and the page's `url`),
-    `GET /api/cards?lane=&kind=&parent=&q=&limit=` (`{total, cards}`, each a row: `id`, `title`, `kind`, `lane`,
+    `GET /api/cards?lane=&kind=&parent=&q=&limit=` (`{total, cards}`, each a row: `id`, `title`
+    (`{<lang>: text}` for each configured language, a gap
+    filled from the primary language, or null when the card has none; the projects in `/api/state` too), `kind`,
+    `lane`,
     `pri`, `feed`, `parent`, `origin`, `ask_type`, `plain_where` per language, `updated_at`; lane order, then by
     `pri` and the newest change in Needs you, Running and Planned, History newest first; `q` goes through the
     store's search and the other filters apply to its result; a `q` over 500 characters or 50 words is 400, so a
@@ -1409,7 +1427,8 @@ Calls the author made without asking (check them):
     start or timed out), nothing starts: the `WorkerError` says to list them in `projects/<name>.yaml` `tools`. On a dead
     worker's resume that counts as its one resume; a parked worker is stopped as when its resume cannot start. An in-place resume first
     checks that the worker's folder is still there, so a gone worktree says "cannot start the session". The branch is the card's `branch`, else the pattern with the card's `key` (else its id) and the first
-    three words of its title. The session gets them the way v1 passes setup: `--settings <run dir>/settings-<role>.json`
+    three words of its title in the primary language. The session gets them the way v1 passes setup:
+    `--settings <run dir>/settings-<role>.json`
     (the permission floor: v1's outward-tool and Bash denials, plus `Edit` denials on the data folder's own files
     (including the user's `templates/**` and `sources/**`, the rules the worker floor in `roles.py` promises; every
     card's run directory stays writable except its settings files) and the package, and one allow rule, `Bash(<package>/bin/ap2 worker park:*)`, as v1 allows its park command, and the park hook, `hooks.PreToolUse` `[{"matcher": "*", "hooks": [{"type": "command", "command": "\"<package>/bin/ap2\" hook-park", "timeout": 5}]}]` (v1's `perms.park_hook()` shape), so the worker and its subagents run it before each tool call; the floor refuses a data folder or package path that a gitignore pattern cannot

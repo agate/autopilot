@@ -18,7 +18,7 @@ PLAIN_LINES = ("what", "where", "do")
 # Set by the store on every add, update and restore; a writer may not give or change them.
 STORE_KEYS = ("id", "created_at", "updated_at", "audit")
 REQUIRED = ("kind", "lane", "feed", "links", "pri", "origin", "plain")
-OPTIONAL = ("parent", "ask", "title")
+OPTIONAL = ("parent", "ask", "title")  # title: null, a text, or {<lang>: text} (design 3.1)
 
 # c-YYYYMMDD-HHMMSS-xxxxxx: the UTC creation time, then 6 random hex digits. The month is in the id, so a card's
 # file is found without a scan, and nothing but these characters can reach a path.
@@ -129,8 +129,7 @@ def check_shape(card) -> None:
     parent = card.get("parent")
     if parent is not None and not (isinstance(parent, str) and CARD_ID.match(parent)):
         raise CardError(_not("parent", "a card id or null", parent))
-    if card.get("title") is not None and not isinstance(card["title"], str):
-        raise CardError(_not("title", "a text or null", card["title"]))
+    _title_shape(card.get("title"))
     ask = card.get("ask")
     if ask is not None:
         if not isinstance(ask, dict):
@@ -139,6 +138,18 @@ def check_shape(card) -> None:
             raise CardError(_not("ask.type", f"one of {', '.join(ASK_TYPES)}", ask.get("type")))
     if not isinstance(card["plain"], dict):
         raise CardError(_not("plain", "an object with what, where and do", card["plain"]))
+
+
+def _title_shape(title) -> None:
+    """A title is null, one text (the same words in every language: what every card stored before titles had one
+    slot per language holds, and what a quote is) or an object of one text per language (design 3.1)."""
+    if title is None or isinstance(title, str):
+        return
+    if not (isinstance(title, dict) and title and all(isinstance(k, str) for k in title)):
+        raise CardError(_not("title", "a text, an object of one text per language, or null", title))
+    for lang in sorted(title):
+        if not isinstance(title[lang], str):
+            raise CardError(_not(f"title.{lang}", "a text", title[lang]))
 
 
 def check_unicode(value, what: str = "text") -> None:
@@ -187,6 +198,33 @@ def plain_problems(plain, languages: tuple) -> list:
     return problems
 
 
+def title_problems(title, languages: tuple) -> list:
+    """Each language an object title is missing or has empty, as `title.<language> missing|is empty`. A text title
+    (or null) has none: one text is the same words in every language."""
+    if not isinstance(title, dict):
+        return []
+    problems = []
+    for lang in languages:
+        if lang not in title or title[lang] is None:
+            problems.append(f"title.{lang} missing")
+        elif not (isinstance(title[lang], str) and title[lang].strip()):
+            problems.append(f"title.{lang} is empty")
+    return problems
+
+
+def title_for(card, lang: str, primary: str):
+    """The card's title in `lang`: an object title's `lang` slot, else its `primary` slot, else None. A text title
+    is the same words in every language, so it is returned as it is; null and anything else give None."""
+    title = card.get("title") if isinstance(card, dict) else None
+    if isinstance(title, str):
+        return title
+    if isinstance(title, dict):
+        for key in (lang, primary):
+            if isinstance(title.get(key), str) and title[key].strip():
+                return title[key]
+    return None
+
+
 def languages(cfg) -> tuple:
     """The languages every card's plain words must be written in: the primary, then the secondary when set."""
     return tuple(lang for lang in (cfg.primary_language, cfg.secondary_language) if lang)
@@ -198,6 +236,12 @@ def check_plain(card: dict, langs: tuple) -> None:
         raise PlainWordsError("; ".join(problems))
 
 
+def check_title(card: dict, langs: tuple) -> None:
+    problems = title_problems(card.get("title"), langs)
+    if problems:
+        raise CardError("; ".join(problems))
+
+
 def validate(card, langs: tuple) -> None:
     """The full check run on every add and update. Raises CardError (PlainWordsError for the plain words)."""
     check_unicode(card)
@@ -205,10 +249,11 @@ def validate(card, langs: tuple) -> None:
         check_plain(card, langs)  # name the missing lines and languages, not just "plain missing"
     check_shape(card)
     check_plain(card, langs)
+    check_title(card, langs)
 
 
 def search_text(card: dict) -> str:
-    """What the search index holds for a card: its plain words in every language, title, kind and feed."""
+    """What the search index holds for a card: its plain words and title in every language, kind and feed."""
     parts = []
     plain = card.get("plain")
     plain = plain if isinstance(plain, dict) else {}
@@ -216,7 +261,12 @@ def search_text(card: dict) -> str:
         texts = plain.get(line)
         if isinstance(texts, dict):
             parts.extend(str(texts[k]) for k in sorted(texts) if isinstance(texts[k], str))
-    for key in ("title", "kind", "feed"):
+    title = card.get("title")
+    if isinstance(title, dict):
+        parts.extend(title[k] for k in sorted(k for k in title if isinstance(k, str)) if isinstance(title[k], str))
+    elif isinstance(title, str):
+        parts.append(title)
+    for key in ("kind", "feed"):
         if isinstance(card.get(key), str):
             parts.append(card[key])
     return "\n".join(parts)

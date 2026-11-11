@@ -451,6 +451,19 @@ class CardFirstTest(GateCase):
 class TwoLanguageCardTest(GateCase):
     cfg = Config(secondary_language="zh")
 
+    def test_the_title_has_one_slot_per_language(self):
+        self.put(last_slot="2026-11-09T09:00", title="Digest 摘要")
+        self.gate(utc(2026, 11, 10, 9, 2))
+        [card] = self.routine_cards()
+        self.assertEqual(card["title"], {"en": "Digest 摘要", "zh": "Digest 摘要"})
+
+    def test_run_card_writes_the_routine_title_in_each_language(self):
+        r = routines.parse(self.data / "routines" / "x.json", routine())
+        d = routines.Due("2026-11-10T09:00", utc(2026, 11, 10, 9), "run", timedelta(0))
+        self.assertEqual(gate.run_card(r, d, ("en",))["title"], {"en": "Daily digest"})
+        self.assertEqual(gate.run_card(r, d, ("ja", "zh-Hans"))["title"],
+                         {"ja": "Daily digest", "zh-Hans": "Daily digest"})
+
     def test_plain_words_in_every_configured_language(self):
         self.put(last_slot="2026-11-09T09:00", missed_run="skip")
         self.put("cleanup", last_slot="2026-11-09T09:00", title="Worktree cleanup")  # 30 min late: within 3h

@@ -432,6 +432,15 @@ class ProjectSetupTest(WorkerCase):
             self.workers().start(cid, "implement", cwd=self.wt)
         self.assertEqual(self.bg_calls(), [])
 
+    def test_an_object_title_gives_the_branch_its_primary_language_words(self):
+        title = {"zh": "重试 other words", "en": "Retry failed payments"}
+        cid = self.add_card(project="shop", key="widgets-key", title=title)
+        rec = self.workers().start(cid, "implement", cwd=self.wt, prompt="Do the work.")
+        self.assertEqual(rec["branch"], "me.widgets-key.retry-failed-payments")
+        text = self.add_card(project="shop", key="other-key", title="Retry failed payments")
+        self.assertEqual(self.workers().start(text, "review", cwd=self.wt)["branch"],
+                         "me.other-key.retry-failed-payments")
+
     def test_branch_without_a_prefix_and_from_the_card(self):
         from assistant import projects
         self.assertEqual(projects.branch(projects.DEFAULTS, "PROJ-1", "fix-it"), "PROJ-1.fix-it")

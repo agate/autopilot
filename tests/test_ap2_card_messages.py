@@ -97,7 +97,7 @@ def before(site: str, v) -> str:
         "links": f"links must be a list of card ids, not {({'k': v})!r}",
         "links: a link": f"links: not a card id: {[v]!r}",
         "parent": f"parent must be a card id or null, not {[v]!r}",
-        "title": f"title must be a text or null, not {[v]!r}",
+        "title": f"title must be a text, an object of one text per language, or null, not {[v]!r}",
         "ask": f"ask must be an object with a type, or null, not {[v]!r}",
         "ask.type": f"ask.type must be one of {', '.join(ASK_TYPES)}, not {[v]!r}",
         "plain": f"plain must be an object with what, where and do, not {[v]!r}",

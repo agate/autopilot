@@ -577,6 +577,16 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     if (obj && typeof obj === 'object' && typeof obj[S.lang] === 'string') return obj[S.lang];
     return null;
   }
+  function titleIn(t, fallback) {
+    // A card's title in the page's language: its slot for that language, else the primary language's (never both
+    // on one screen), else one text (a stored card's same words in every language, or an older reply), else the
+    // fallback (the untitled label unless given).
+    if (t && typeof t === 'object') {
+      const primary = (S.state && S.state.primary_language) || languages()[0];
+      for (const lang of [S.lang, primary]) if (typeof t[lang] === 'string' && t[lang].trim()) return t[lang];
+    } else if (typeof t === 'string' && t.trim()) return t;
+    return fallback === undefined ? L('card.untitled') : fallback;
+  }
 
   // --- language -------------------------------------------------------------------------------------------------
   function pickLang() {
@@ -652,7 +662,7 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     if (!list.length) projects.append(h('div', {class: 'empty', text: L('rail.none')}));
     for (const p of list) {
       const cur = (r.name === 'project' && r.arg === p.id);
-      projects.append(navLink(route('project', p.id), p.title || p.id, `${p.done}/${p.total}`, cur, false));
+      projects.append(navLink(route('project', p.id), titleIn(p.title, p.id), `${p.done}/${p.total}`, cur, false));
     }
     const manage = $('rail-manage');
     manage.replaceChildren(
@@ -683,7 +693,7 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     return h('a', {class: 'row', href: route('card', r.id), 'aria-selected': r.id === S.cardId ? 'true' : null},
       h('span', {class: 'dot ' + lane}),
       h('div', {class: 'row-main'},
-        h('div', {class: 'row-title', text: r.title || L('card.untitled')}),
+        h('div', {class: 'row-title', text: titleIn(r.title)}),
         where ? h('div', {class: 'row-sub', text: where}) : null,
         h('div', {class: 'row-meta'},
           h('span', {class: 'pri ' + text(r.pri), text: text(r.pri)}),
@@ -698,7 +708,7 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     if (l.name === 'search') { title = L('list.search', {q: l.arg}); hint = L('list.search_hint'); }
     else if (l.name === 'project') {
       const p = ((S.state && S.state.projects) || []).find(x => x.id === l.arg);
-      title = L('list.project', {title: (p && p.title) || l.arg}); hint = L('list.project_hint');
+      title = L('list.project', {title: titleIn(p && p.title, l.arg)}); hint = L('list.project_hint');
     } else { title = L('lane.' + l.arg); hint = L('hint.' + l.arg); }
     $('list-title').textContent = title;
     $('list-hint').textContent = hint;
@@ -828,7 +838,7 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
       c.feed ? h('span', {class: 'chip', text: L('chip.from', {feed: c.feed})}) : null,
       c.origin === 'found' ? h('span', {class: 'chip found', text: L('chip.found')}) : null,
       c.ask && c.ask.type ? h('span', {class: 'chip needs', text: L('ask.' + c.ask.type)}) : null));
-    det.append(h('h1', {text: c.title || L('card.untitled')}));
+    det.append(h('h1', {text: titleIn(c.title)}));
     const plain = c.plain || {};
     det.append(h('section', {class: 'plain'}, h('h3', {text: L('plain.title')}),
       h('dl', {}, ['what', 'where', 'do'].map(line => {
