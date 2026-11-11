@@ -201,14 +201,17 @@ class LayerTest(AngleCase):
         cases = {"not a repo": (self.tmp / "nowhere", commit),
                  "unknown commit": (self.repo, "0" * 40),
                  "an option": (self.repo, "--output=/tmp/x"),
+                 "control characters": (self.repo, "main\x1b]0;owned\x07"),
                  "commit without repo": (None, commit),
                  "repo without commit": (self.repo, None)}
         for label, (repo, rev) in cases.items():
             with self.subTest(case=label):
                 with self.assertRaises(AngleError) as e:
                     angles.load(self.data, repo=repo, commit=rev)
-                if label == "an option":
+                if label in ("an option", "control characters"):
                     self.assertIn("is not a commit name", str(e.exception))
+                self.assertNotIn("\x1b", str(e.exception))
+                self.assertNotIn("\x07", str(e.exception))
 
     def test_repo_path_that_is_a_folder_is_refused(self):
         self.git("init", "-q")
@@ -256,6 +259,25 @@ class LayerTest(AngleCase):
         got = self.by_name(angles.load(self.data, repo=self.repo / "sub", commit=commit))
         self.assertIn("Root", got)
         self.assertNotIn("Sub", got)
+        # The file is named from the repo root, where it was read, not from the folder given.
+        self.assertEqual(got["Root"].file, f"{self.repo}/.autopilot/review.yaml at {commit[:12]}")
+        with self.subTest(case="an error names the root file"):
+            (self.repo / ".autopilot" / "review.yaml").write_text(
+                '- name: Root\n  question: "q?"\n  when: always\n  brief: "b"\n  bogus: 1\n')
+            self.git("commit", "-q", "-am", "bad key")
+            commit = self.git("rev-parse", "HEAD")
+            with self.assertRaises(AngleError) as e:
+                angles.load(self.data, repo=self.repo / "sub", commit=commit)
+            self.assertTrue(str(e.exception).startswith(f"{self.repo}/.autopilot/review.yaml at {commit[:12]}: "
+                                                        "line 5: "), str(e.exception))
+            self.assertNotIn("/sub/", str(e.exception))
+
+    def test_bare_repo_file_is_named_from_the_path_given(self):
+        commit = self.commit_repo_file('- name: Bare\n  question: "q?"\n  when: always\n  brief: "b"\n')
+        bare = self.tmp / "bare.git"
+        self.git("clone", "-q", "--bare", str(self.repo), str(bare))
+        got = self.by_name(angles.load(self.data, repo=bare, commit=commit))
+        self.assertEqual(got["Bare"].file, f"{bare}/.autopilot/review.yaml at {commit[:12]}")
 
     def test_files_starting_with_a_bom_load(self):
         text = '\ufeff- name: Bom angle\n  question: "q?"\n  when: always\n  brief: "b"\n'
@@ -437,6 +459,15 @@ class RefusalTest(AngleCase):
                 '- question: "q?"\n  name: A\n  when: always\n  brief: "b"\n' * 2, "line 6", "named on line 2"),
             "extends bad when": ('- extends: Portability\n  when: sometimes\n', "line 2", "when"),
             "extends empty brief": ('- extends: Portability\n  brief: ""\n', "line 2", "brief"),
+            "a list beside the wrapper's key": ('- name: a\nangles: 1\n', None, "must be a list of angles"),
+            "an empty flow list": ('[]\n', "line 1", "must be a list of angles"),
+            "a bare word": ('hello\n', "line 1", "must be a list of angles"),
+            "glob too long": (f'- name: A\n  question: "q?"\n  when: {{ paths: ["{'a' * 257}"] }}\n  brief: "b"\n',
+                              "line 3", "longer than 256"),
+            "too many globs": ('- name: A\n  question: "q?"\n  when:\n    paths: [%s]\n  brief: "b"\n'
+                               % ", ".join(f"g{n}" for n in range(201)), "line 4", "at most 200"),
+            "a glob of 340,000 '**' parts": ('- name: A\n  question: "q?"\n  when: { paths: ["%s"] }\n  brief: "b"\n'
+                                             % "/".join(["**"] * 340000), "line 3", "longer than 256"),
         }
         for label, (text, line, word) in cases.items():
             with self.subTest(case=label):
@@ -450,6 +481,7 @@ class RefusalTest(AngleCase):
                     self.assertIn(line, msg)
                 if word:
                     self.assertIn(word, msg)
+                self.assertNotIn("line 0", msg)
 
     def test_file_text_is_shown_escaped_and_capped(self):
         good = '- name: A\n  question: "q?"\n  when: always\n  brief: "b"\n'
@@ -468,6 +500,8 @@ class RefusalTest(AngleCase):
             "extends unknown": f'- extends: "{esc}"\n  brief: "b"\n',
             "long extends": f'- extends: {long}\n  brief: "b"\n',
             "long widen key": good + '  "too' + " " * 100000 + 'ls": [Bash]\n',
+            "map duplicate key": f'"{esc}": 1\n"{esc}": 2\n',
+            "map long duplicate key": f'{long}: 1\n{long}: 2\n',
         }
         for label, text in cases.items():
             with self.subTest(case=label):
@@ -491,6 +525,74 @@ class RefusalTest(AngleCase):
         self.assertLess(time.monotonic() - start, 5)
         self.assertEqual(len(table.unknown_off), 20000)
         self.assertEqual(table.unknown_off[-1]["line"], 20000)
+
+    def test_many_new_angles_merge_fast(self):
+        # Pins the merge by name: the files are parsed before the clock starts, so only the merge is timed.
+        new = "".join(f"- {{name: o{n}, question: q, when: always, brief: b}}\n" for n in range(18000))
+        off = "".join(f"- {{name: o{n}, off: true}}\n" for n in range(18000))
+        self.assertLess(len(new.encode()), angles.MAX_FILE)
+        self.user(new)
+        commit = self.commit_repo_file(off)
+        user, repo = str(self.data / angles.USER_FILE), f"{self.repo}/{angles.REPO_FILE} at {commit[:12]}"
+        real = angles._parse
+        parsed = {user: real(new, user), repo: real(off, repo)}
+        with mock.patch.object(angles, "_parse", lambda text, where: parsed.get(where) or real(text, where)):
+            start = time.monotonic()
+            table = self.load()
+            self.assertLess(time.monotonic() - start, 2)
+            self.assertEqual(len(table.angles), 18015)
+            self.assertEqual(table.angles[-1].name, "o17999")
+            start = time.monotonic()
+            table = self.load(repo=self.repo, commit=commit)
+            self.assertLess(time.monotonic() - start, 2)
+        self.assertEqual(table.names(), BUILTIN_NAMES)
+
+    def test_line_lookup_is_linear_in_the_paths(self):
+        # Pins the checker on its own: deep key paths cost one step each, not one per prefix.
+        lines = {(0,) + ("a",) * k: k for k in range(1, 2001)}
+        start = time.monotonic()
+        c = angles._Checker("f", lines)
+        self.assertLess(time.monotonic() - start, 0.5)
+        self.assertEqual(c.line((0,)), 1)
+        self.assertEqual(c.line((0,) + ("a",) * 7), 7)
+        self.assertIsNone(c.line((1,)))
+
+    def test_deep_brackets_are_refused_before_parsing(self):
+        good = '- name: A\n  question: "q?"\n  when: always\n  brief: "b"\n'
+        self.assertEqual(angles.MAX_NESTING, 32)
+        cases = {"33 deep": (good + "  x: " + "[" * 33 + "]" * 33 + "\n", True),
+                 "closers in quotes do not hide it": (good + "  x: " + "[" * 20 + '"' + "]" * 20 + '", ' + "[" * 20
+                                                     + "]" * 40 + "\n", True),
+                 "32 deep": (good + "  x: " + "[" * 32 + "]" * 32 + "\n", False),
+                 "an apostrophe before brackets": (good + "  x: don't {a} [b] {c}\n", False)}
+        for label, (text, refused) in cases.items():
+            with self.subTest(case=label):
+                path = self.user(text)
+                with self.assertRaises(AngleError) as e:
+                    self.load()
+                msg = str(e.exception)
+                if refused:
+                    self.assertTrue(msg.startswith(f"{path}: line 5: "), msg[:300])
+                    self.assertIn("nested more than 32", msg)
+                else:
+                    self.assertNotIn("nested", msg)
+                    self.assertIn("unknown key 'x'", msg)
+
+    def test_deep_but_allowed_file_is_checked_fast(self):
+        # Flow maps 32 deep (the most allowed) on every line of a file near the cap: refused on its first key, fast.
+        line = "- " + "{a: " * angles.MAX_NESTING + "x" + "}" * angles.MAX_NESTING + "\n"
+        text = line * ((angles.MAX_FILE - 100) // len(line))
+        path = self.user(text)
+        start = time.monotonic()
+        with self.assertRaises(AngleError) as e:
+            self.load()
+        self.assertLess(time.monotonic() - start, 20)
+        self.assertEqual(str(e.exception), f"{path}: line 1: unknown key 'a' (known keys: {', '.join(angles.KEYS)})")
+
+    def test_glob_limits_at_the_edge_load(self):
+        globs = ", ".join(f'"{n:03d}' + "a" * 253 + '"' for n in range(200))
+        self.user(f'- name: A\n  question: "q?"\n  when: {{ paths: [{globs}] }}\n  brief: "b"\n')
+        self.assertEqual(len(self.load().get("A").when["paths"]), 200)
 
     def test_file_past_the_cap(self):
         path = self.user('- name: A\n  question: "q?"\n  when: always\n  brief: "%s"\n' % ("x" * sources.MAX_SOURCE))
@@ -600,6 +702,17 @@ class KindsGlobsTest(AngleCase):
                 start = time.monotonic()
                 self.assertIs(angles.glob_match(pattern, path), False)
                 self.assertLess(time.monotonic() - start, 2)
+
+
+    def test_glob_runs_and_dead_ends_stop_early(self):
+        # A run of '**' parts is matched as one, and a glob stops at the first part that leaves no match.
+        cases = {"a run of '**'": ("/".join(["**"] * 300000) + "/x", "a/" * 1000 + "b"),
+                 "a dead end": ("z/" + "a/" * 300000 + "b", "a/" * 1000 + "b")}
+        for label, (pattern, path) in cases.items():
+            with self.subTest(case=label):
+                start = time.monotonic()
+                self.assertIs(angles.glob_match(pattern, path), False)
+                self.assertLess(time.monotonic() - start, 3)
 
 
 class PickerTest(AngleCase):
@@ -724,6 +837,29 @@ class PickerTest(AngleCase):
             angles.pick(table, ["a.py"], "nosuch")
         with self.assertRaises(ValueError):
             angles.pick(table, ["a.py"], "review")
+
+    def test_most_globs_pick_fast(self):
+        # The most globs one angle may hold, each near the longest, against 3000 changed files: bounded.
+        globs = [("**/" * 82 + f"n{n:03d}.py") if n % 2 else (f"z{n:03d}/" + "a/" * 123 + "b") for n in range(200)]
+        self.assertEqual(len(globs), angles.MAX_GLOBS)
+        self.assertTrue(all(250 <= len(g) <= angles.MAX_GLOB for g in globs))
+        table = angles.Table([angles.Angle("Correctness", "q", "always", "b", "built-in", "f", 0, 0),
+                              angles.Angle("Wide", "q", {"paths": globs}, "b", "user", "f", 1, 0)])
+        files = [f"src/app/pkg{n % 50}/a/b/c/d/sub{n % 7}/mod{n}.py" for n in range(3000)]
+        start = time.monotonic()
+        picked = angles.pick(table, files, "loop")
+        self.assertLess(time.monotonic() - start, 150)
+        self.assertEqual(self.names(picked), ["Correctness"])
+
+    def test_why_shows_at_most_three_reasons(self):
+        self.user('- name: Many globs\n  question: "q?"\n'
+                  '  when: { paths: ["billing/**", "billing/*.py", "**/*.py", "billing/charge.py", "*/charge.py"] }\n'
+                  '  brief: "b"\n')
+        picked = {p["name"]: p for p in angles.pick(self.load(), ["billing/charge.py"], "loop")}
+        why = picked["Many globs"]["why"]
+        self.assertEqual(why.count("matched"), 3, why)
+        self.assertTrue(why.endswith(" (+2 more)"), why)
+        self.assertTrue(why.startswith("paths billing/** matched billing/charge.py; "), why)
 
     def test_small_line_constant(self):
         self.assertEqual(angles.SMALL_LINES, 30)

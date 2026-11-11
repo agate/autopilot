@@ -387,12 +387,21 @@ How it is built (`lib/assistant/angles.py`, the table in `review/angles.yaml`):
 
 - **[decided by the builder]** Files. Built in: `<plugin>/review/angles.yaml` (the repo root's `review/`, next to
   `sources/`). The user's: `<data>/review/angles.yaml`. The repo's: `.autopilot/review.yaml` read from the reviewed
-  commit, never the working tree, read-only (`git rev-parse` to pin the commit, `git ls-tree --full-tree` to find
-  the file and its size from the repo root, `git cat-file blob`). The path missing at that commit is no layer; any
+  commit, never the working tree, read-only (`git rev-parse --show-toplevel` to name the file from the repo root,
+  where it is read, so a subfolder given as the repo still names the root's file, and a bare repo keeps the path
+  given; `git rev-parse` to pin the commit, `git ls-tree --full-tree` to find the file and its size from the repo
+  root, `git cat-file blob`). The path missing at that commit is no layer; any
   other git failure (no such repo or commit, a commit name starting with `-`, a folder or link at the path) is an
   `AngleError`. A missing user file is no layer; an empty file holds no angles. Each file is a YAML list of maps of
   at most `sources.MAX_SOURCE` bytes (a leading BOM is dropped), read with `yamlish` (as the list under one wrapper
-  key, so line numbers stay the file's own).
+  key, so line numbers stay the file's own). A file that is not a list (a map, a flow list such as `[]`, a bare
+  word, or a top-level `angles:` beside its items) is refused as "must be a list of angles".
+- **[decided by the builder]** Limits, since a repo's file comes from a PR author: a line whose `[` / `{` nest more
+  than 32 deep (`MAX_NESTING`; a real angle needs a few) is refused, naming the line, before the file is parsed,
+  since each nested key costs the parser memory; at most 200 globs in one `when.paths` (`MAX_GLOBS`); at most 256
+  characters in one glob (`MAX_GLOB`). With these the picker's glob work is bounded by 200 x 256 characters per
+  angle and changed file. The nesting count stops lowering at a line's first quote, so it can only count too deep,
+  never too shallow.
 - **[decided by the builder]** An angle's keys: `name` (non-empty text, unique in its file, compared as written),
   `question` and `brief` (non-empty text), `when`, plus `extends` and `off`. Any other key is refused, naming the
   file, line and key. Text from the file in an error (a key, name, kind or glob) is shown as its repr, control
@@ -420,7 +429,7 @@ How it is built (`lib/assistant/angles.py`, the table in `review/angles.yaml`):
   rename) and lands in the table's `unknown_off` with its file and line. Correctness can be extended or replaced,
   never turned off; the built-in file must hold it.
 - **[decided by the builder]** Origin: every loaded angle says where it came from, `built-in`, `user`, `repo`,
-  `user, extends <name>` or `repo, extends <name>`, and the file that set it (the repo's as `<repo>/.autopilot/
+  `user, extends <name>` or `repo, extends <name>`, and the file that set it (the repo's as `<repo root>/.autopilot/
   review.yaml at <commit>`).
 - **[decided by the builder]** The picker, `pick(table, files, mode, changed_lines)`, with `mode` `loop` or
   `review`. Correctness always first, whatever its `when`. Then the matching angles: the repo's, then the user's,
@@ -430,7 +439,8 @@ How it is built (`lib/assistant/angles.py`, the table in `review/angles.yaml`):
   (`SMALL_LINES`, secretary's `review_small_lines`). When only Correctness is picked, the fallback angles fill to 2:
   Failure modes & observability, then Test value (secretary's `CODE_ROLES`), whichever is loaded and not off, as
   loaded. Each picked angle carries `name`, `question`, `brief`, `origin`, `file` and a one-line `why`: the globs
-  or kinds that matched with up to three of their files, `always`, or `fallback`.
+  or kinds that matched with up to three of their files (at most three such reasons, then `(+N more)`), `always`,
+  or `fallback`.
 - **[decided by the builder]** The built-in table merges v1's and secretary's, one angle per point of view, with
   secretary's question for each and a short brief from both: Correctness (always); Data correctness & backfill,
   Performance & locking (data); Blast radius & rollback, Security & least privilege (infra); API contract & backward

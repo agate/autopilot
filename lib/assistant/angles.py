@@ -33,6 +33,11 @@ USER_FILE = Path("review") / "angles.yaml"          # in the data folder
 REPO_FILE = ".autopilot/review.yaml"                 # in the reviewed commit
 MAX_FILE = sources.MAX_SOURCE
 GIT_TIMEOUT = 30
+# A repo's file comes from a PR author, so its cost is capped: at most this many globs in one when.paths, at most
+# this many characters in one glob, and '[' / '{' nested at most this deep on a line (a real angle needs ~5).
+MAX_GLOBS = 200
+MAX_GLOB = 256
+MAX_NESTING = 32
 
 LAYERS = ("built-in", "user", "repo")
 KEYS = ("name", "question", "when", "brief", "extends", "off")
@@ -64,6 +69,8 @@ KINDS = tuple(k for k, _ in CODE_KINDS) + ("tests", "docs")
 
 _COMMIT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/~^@{}-]{0,254}\Z")
 _WRAP = "angles:\n"   # yamlish reads only a top-level map, so a file is read as the list under this key
+_NOT_A_LIST = "an angle file must be a list of angles ('- name: ...')"
+_BRACKET = re.compile(r"[][{}\"']")
 
 
 class AngleError(ConfigError):
@@ -155,14 +162,18 @@ def _git_failed(p: subprocess.CompletedProcess, where: str, what: str) -> AngleE
 def _read_repo(repo, commit: str) -> tuple:
     """(text or None, where) of `.autopilot/review.yaml` at `commit` in `repo`. Read-only: `rev-parse`, `ls-tree`
     and `cat-file`. A path missing at that commit is no layer; every other failure is an AngleError."""
-    where = f"{repo}/{REPO_FILE} at {commit}"
     if not isinstance(commit, str) or not _COMMIT.match(commit):
-        raise AngleError(f"{where}: {commit!r} is not a commit name")
+        raise AngleError(f"{repo}/{REPO_FILE}: {_show(commit)} is not a commit name")
+    # The file is read from the repo root (ls-tree --full-tree), so it is named from there too. A bare repo has no
+    # top folder and keeps the path given; a folder that is no repo fails on the next command.
+    p = _git(repo, ["rev-parse", "--show-toplevel"], f"{repo}/{REPO_FILE}")
+    top = (os.fsdecode(p.stdout).rstrip("\n") if p.returncode == 0 else "") or str(repo)
+    where = f"{top}/{REPO_FILE} at {commit}"
     p = _git(repo, ["rev-parse", "--verify", "--quiet", f"{commit}^{{commit}}"], where)
     if p.returncode != 0:
         raise _git_failed(p, where, f"no commit {commit!r} in {repo}")
     sha = p.stdout.decode("ascii", "replace").strip()
-    where = f"{repo}/{REPO_FILE} at {sha[:12]}"
+    where = f"{top}/{REPO_FILE} at {sha[:12]}"
     p = _git(repo, ["ls-tree", "--full-tree", "-l", "-z", sha, "--", REPO_FILE], where)
     if p.returncode != 0:
         raise _git_failed(p, where, "cannot list the commit's files")
@@ -191,14 +202,15 @@ def _read_repo(repo, commit: str) -> tuple:
 class _Checker:
     def __init__(self, where: str, lines: dict):
         self.where, self.lines = where, lines
-        self.first = {}   # every prefix of a key's path -> the smallest line under it, so line() is one lookup
+        # A list item (i,) -> the smallest line of its keys. Every other path line() is asked about is a map key,
+        # so only one-element prefixes are kept: one step per key, whatever its depth.
+        self.first = {}
         for p, n in lines.items():
-            for k in range(len(p) + 1):
-                if n < self.first.get(p[:k], n + 1):
-                    self.first[p[:k]] = n
+            if p and n < self.first.get(p[:1], n + 1):
+                self.first[p[:1]] = n
 
     def line(self, path: tuple) -> Optional[int]:
-        """The line of a key's path in the file; for a list item, the first line of its keys."""
+        """The line of a key's path in the file; for a list item `(i,)`, the first line of its keys."""
         if path in self.lines:
             return self.lines[path]
         return self.first.get(path)
@@ -238,9 +250,13 @@ class _Checker:
             items = v[k]
             if not isinstance(items, list) or not items:
                 self.fail(at + (k,), f"when.{k} must be a non-empty list, not {_show(items)}")
+            if k == "paths" and len(items) > MAX_GLOBS:
+                self.fail(at + (k,), f"when.paths holds {len(items)} globs; at most {MAX_GLOBS}")
             for x in items:
                 if not isinstance(x, str) or not x.strip():
                     self.fail(at + (k,), f"when.{k} entries must be non-empty text, not {_show(x)}")
+                if k == "paths" and len(x) > MAX_GLOB:
+                    self.fail(at + (k,), f"glob {_show(x)} is longer than {MAX_GLOB} characters")
                 if k == "kinds" and x not in KINDS:
                     self.fail(at + (k,), f"unknown kind {_show(x)} in when.kinds (kinds: {', '.join(KINDS)})")
                 if k == "paths" and x.startswith("/"):
@@ -261,25 +277,52 @@ def _reason(reason: str) -> str:
     return s if len(s) <= 200 else s[:197] + "..."
 
 
+def _nesting(text: str, where: str) -> None:
+    """Refuse a line whose '[' / '{' nest deeper than MAX_NESTING, before yamlish keeps a path per key. A flow
+    collection ends on its line. A closing bracket after the line's first quote is not counted, since it may sit
+    inside a quoted string: quoted text can make the count too high, never too low."""
+    for no, line in enumerate(text.split("\n"), 1):
+        if "[" not in line and "{" not in line:
+            continue
+        depth, quoted = 0, False
+        for ch in _BRACKET.findall(line):
+            if ch in "[{":
+                depth += 1
+                if depth > MAX_NESTING:
+                    raise AngleError(f"{where}: line {no}: '[' and '{{' nested more than {MAX_NESTING} deep; an "
+                                     "angle needs only a few levels")
+            elif ch in "\"'":
+                quoted = True
+            elif not quoted and depth:
+                depth -= 1
+
+
 def _parse(text: str, where: str) -> tuple:
     """(entries, checker) of one file's text: a list of maps, checked for widening keys first."""
+    _nesting(text, where)
     try:
         yamlish.parse(text)
     except yamlish.YamlError as e:
+        if e.reason == "the top level must be a map of 'key: value' lines":
+            # A flow list or a bare word on the first line: neither a map nor a list of maps.
+            raise AngleError(f"{where}: line {e.line}: {_NOT_A_LIST}") from e
         if not e.reason.endswith("not a list"):
             raise AngleError(f"{where}: line {e.line}: {_reason(e.reason)}") from e
     else:
         if text.strip() and yamlish.load(text):
-            raise AngleError(f"{where}: an angle file must be a list of angles ('- name: ...'), not a map")
+            raise AngleError(f"{where}: {_NOT_A_LIST}, not a map")
         return [], _Checker(where, {})
     try:
         data, lines = yamlish.parse(_WRAP + text)
     except yamlish.YamlError as e:
+        if e.reason.startswith("duplicate key 'angles' (first on line 1)"):
+            # The file's own top-level 'angles:' line beside its list items: not a list of angles.
+            raise AngleError(f"{where}: line {e.line - 1}: {_NOT_A_LIST}") from e
         # Every line number in it is one past the file's own: the wrapper key is line 1.
         reason = re.sub(r"\(first on line (\d+)\)", lambda m: f"(first on line {int(m.group(1)) - 1})", e.reason)
         raise AngleError(f"{where}: line {e.line - 1}: {_reason(reason)}") from e
     if set(data) != {"angles"} or not isinstance(data["angles"], list):
-        raise AngleError(f"{where}: an angle file must be a list of angles ('- name: ...')")
+        raise AngleError(f"{where}: {_NOT_A_LIST}")
     lines = {p[1:]: n - 1 for p, n in lines.items() if p[:1] == ("angles",) and len(p) > 1}
     c = _Checker(where, lines)
     c.widen(data["angles"], ())
@@ -424,6 +467,8 @@ def glob_match(pattern: str, path: str) -> bool:
     is everything under its folder), `*` and `?` stay inside one path segment, every other character is itself.
     Linear in the segments (no backtracking), since a glob comes from a file a PR author can write."""
     parts, segs = pattern.split("/"), path.split("/")
+    # A run of '**' parts matches what one does.
+    parts = [part for i, part in enumerate(parts) if not (part == "**" and i and parts[i - 1] == "**")]
     n = len(segs)
     at = [True] + [False] * n          # at[j]: the glob so far matches the path's first j segments
     for i, part in enumerate(parts):
@@ -440,6 +485,8 @@ def glob_match(pattern: str, path: str) -> bool:
                 if at[j] and _segment_match(part, segs[j]):
                     nxt[j + 1] = True
         at = nxt
+        if not any(at):
+            return False
     return at[n]
 
 
@@ -460,7 +507,7 @@ def _why(angle: Angle, files: list, found: dict) -> Optional[str]:
     for kind in angle.when.get("kinds", []):
         if kind in found:
             reasons.append(f"kind {kind}: {_examples(found[kind])}")
-    return "; ".join(reasons) or None
+    return "; ".join(reasons[:3]) + (" (+%d more)" % (len(reasons) - 3) if len(reasons) > 3 else "") or None
 
 
 def _picked(angle: Angle, why: str) -> dict:
