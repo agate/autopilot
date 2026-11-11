@@ -1056,6 +1056,8 @@ class LifecycleTest(WorkerCase):
         c = self.start(w)
         for x in (a, b, c):
             self.drop_agent(x["short_id"])  # all dead, each with its one resume left
+        d = self.start(w)
+        self.set_agent(d["short_id"], status="idle")  # its idle clock starts in the first locked step
         real = Workers._discover
 
         def discover(self_, cwd, env):
@@ -1067,12 +1069,15 @@ class LifecycleTest(WorkerCase):
                 w.check()
         recs = {r["card"]: r for r in resources.Registry(self.data).read()}
         # The pass stops at the interrupt, before any resume starts: A, whose tools were already listed, is not
-        # resumed either, and C, after B, runs no discovery. Every record is written back as it was.
+        # resumed either, and C, after B, runs no discovery. The dead records are written back as they were, and
+        # D's idle clock, started before the interrupt, is on record.
         for x in (a, b, c):
             self.assertEqual((recs[x["card"]]["short_id"], recs[x["card"]]["resumes"]), (x["short_id"], 0))
-        self.assertEqual(len(self.bg_calls()), 3)  # the three starts only
-        self.assertEqual(len(self.discovery_calls()), 4)  # the three starts' and A's
-        self.assertEqual([o["did"] for o in w.check()], ["resumed"] * 3)  # the next check resumes all three
+        self.assertEqual(recs[d["card"]]["idle_since"], "2026-01-05T09:00:00Z")
+        self.assertEqual(len(self.bg_calls()), 4)  # the four starts only
+        self.assertEqual(len(self.discovery_calls()), 5)  # the four starts' and A's
+        out = {o["card"]: o["did"] for o in w.check()}
+        self.assertEqual([out[x["card"]] for x in (a, b, c)], ["resumed"] * 3)  # the next check resumes all three
 
     def test_a_result_file_that_vanishes_before_its_stat_is_not_newer(self):
         w = self.workers()
@@ -2544,6 +2549,39 @@ class DiscoveryOutsideTheLockTest(WorkerCase):
         self.assertEqual(len(self.bg_calls()), n)
         self.assertEqual(resources.Registry(self.data).read(), [])
         self.assertEqual(self.get(a["card"])["sessions"]["implement"]["state"], "ended")
+
+    def changed_in_place_during_the_discovery(self, w, a, **fields):
+        """Another writer sets `fields` on `a`'s record (same session, same folder) while `check()` lists the
+        resume's tools; check that no resume starts and return the record as it is after."""
+        def discover(cwd, env):
+            self.assertTrue(self.lock_is_free())  # else the lock below would wait forever
+            with resources.Registry(self.data).locked() as records:
+                next(r for r in records if r["card"] == a["card"]).update(fields)
+            return [], []
+
+        n = len(self.bg_calls())
+        with mock.patch.object(w, "_discover", side_effect=discover):
+            out = w.check()[0]
+        self.assertEqual(len(self.bg_calls()), n)  # no launch
+        self.assertIn("changed while its tools were listed", out["note"])
+        rec = resources.Registry(self.data).read()[0]
+        self.assertEqual(rec["short_id"], a["short_id"])
+        return rec
+
+    def test_a_close_started_during_the_discovery_is_not_resumed(self):
+        # An end() whose stop timed out keeps the record (same session, same folder) with a closing mark.
+        w = self.workers()
+        a = self.dead(w)
+        mark = w._mark("end")
+        rec = self.changed_in_place_during_the_discovery(w, a, closing=mark)
+        self.assertEqual(rec["closing"], mark)
+
+    def test_a_resume_counted_during_the_discovery_is_not_counted_again(self):
+        # An overlapping check counted the one resume on the same record while this check listed tools.
+        w = self.workers()
+        a = self.dead(w)
+        rec = self.changed_in_place_during_the_discovery(w, a, resumes=1)
+        self.assertEqual(rec["resumes"], 1)
 
     def test_a_start_that_lands_during_the_discovery_is_kept(self):
         w = self.workers()
