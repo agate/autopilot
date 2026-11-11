@@ -84,7 +84,8 @@ def _slug(text, words: int = 3) -> str:
 
 def floor(role: str, project: dict, data: Path, env: dict) -> dict:
     """The worker's permission floor (`--settings`): v1's outward-tool denials (`perms.denied_tools`, from the
-    project's `tools`) and Bash denials, the data folder's own files and the package, and the worker's env."""
+    project's `tools`; `Workers._tools` fills them in when it lists none) and Bash denials, the data folder's own
+    files and the package, and the worker's env."""
     if role not in ROLES:
         raise WorkerError(f"role must be one of {', '.join(ROLES)}, not {role!r}")
     deny = v1_perms.denied_tools(list(project.get("tools") or []))
@@ -174,6 +175,19 @@ class Workers:
                      '--note "<where you are and the next step>", then end your turn.')
         text = "\n".join(lines)
         return PR_COMMAND + text if role not in AGENTS else text
+
+    def _tools(self, project: dict, cwd: str) -> dict:
+        """The project with the session's tools, for the permission floor: the ones it lists, as they are, or when
+        it lists none, the ones a session in `cwd` starts with, found the way v1 does (`perms.discover_tools`, one
+        `claude -p` call). A worker never starts without its outward tools denied: no list, no start."""
+        if project.get("tools"):
+            return project
+        try:
+            tools = v1_perms.discover_tools(self.claude, cwd)
+        except (OSError, RuntimeError, subprocess.SubprocessError) as e:
+            raise WorkerError(f"cannot list the session's tools for the permission floor: {e}; list them in "
+                              f"projects/{project.get('name') or '<name>'}.yaml `tools`") from e
+        return dict(project, tools=list(tools))
 
     def _launch(self, argv: list, cwd: str, env: dict) -> tuple:
         """Run `claude --bg ...`; return (short id, session id or "")."""
@@ -290,7 +304,7 @@ class Workers:
             env = self._env(card, role, project, port_range, branch)
             name = session_name(card_id, role)
             settings = self.run_dir(card_id) / f"settings-{role}.json"
-            write_json(settings, floor(role, project, self.data, env))
+            write_json(settings, floor(role, self._tools(project, cwd), self.data, env))
             argv = self._argv(role, name, settings, self._prompt(prompt, card, role, project, port_range, branch),
                               sid)
             if parked:
@@ -406,14 +420,17 @@ class Workers:
         project = self._project(card)
         settings = self.run_dir(rec["card"]) / f"settings-{rec['role']}.json"
         env = self._env(card, rec["role"], project, rec["ports"], rec.get("branch") or "")
-        write_json(settings, floor(rec["role"], project, self.data, env))
+        if not (rec.get("cwd") and Path(rec["cwd"]).is_dir()):  # checked before the tools are listed there
+            raise WorkerError(f"cannot start the session: the worker's folder {rec.get('cwd') or '(none)'} is gone")
+        write_json(settings, floor(rec["role"], self._tools(project, rec["cwd"]), self.data, env))
         argv = self._argv(rec["role"], rec["session_name"], settings, prompt, rec["session_id"] or rec["short_id"])
         if rec.get("parked"):
             self._stop(rec["card"], rec["role"], rec.get("short_id"), BY)
         short, sid = self._launch(argv, rec["cwd"], env)
         # The new session runs now: record it before anything else can fail, so the registry never points at the
-        # old one.
-        rec.update(short_id=short, session_id=sid or rec["session_id"], started_at=cards.stamp(self.clock()),
+        # old one. Its id is the copy's, or "" when the listing does not show the copy yet: the next check fills it
+        # in (`_fill_session_id`), as for `start()`.
+        rec.update(short_id=short, session_id=sid, started_at=cards.stamp(self.clock()),
                    idle_since=None, blocked_since=None, parked=None,
                    resumes=rec.get("resumes", 0) + (1 if count else 0))
         # A resume runs under a new id; keep it on the card now, so no id is lost if the worker resumes again.

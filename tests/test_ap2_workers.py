@@ -91,6 +91,13 @@ class WorkerCase(unittest.TestCase):
     def bg_calls(self) -> list:
         return [c for c in self.calls() if c["argv"][:1] == ["--bg"]]
 
+    def discovery_calls(self) -> list:
+        return [c for c in self.calls() if c["argv"][:1] == ["-p"]]
+
+    def deny(self, card_id, role="implement") -> list:
+        f = transcripts.run_dir(self.data, card_id) / f"settings-{role}.json"
+        return json.loads(f.read_text())["permissions"]["deny"]
+
     def agents(self) -> list:
         f = self.fake_home / "agents.json"
         return json.loads(f.read_text()) if f.exists() else []
@@ -343,6 +350,70 @@ class ProjectSetupTest(WorkerCase):
         cid = self.add_card(branch="me.PROJ-9.given")
         self.assertEqual(self.workers().start(cid, "implement", cwd=self.wt)["branch"], "me.PROJ-9.given")
 
+    def test_listed_tools_are_used_as_they_are(self):
+        cid = self.add_card(project="shop")
+        self.workers().start(cid, "implement", cwd=self.wt)
+        self.assertEqual(self.discovery_calls(), [])  # no `claude -p`: the project lists its tools
+        deny = self.deny(cid)
+        self.assertIn("mcp__Tracker__send_message", deny)
+        self.assertNotIn("mcp__slack__slack_send_message", deny)
+
+
+class ToolDiscoveryTest(WorkerCase):
+    """A project that lists no `tools` gets them the way v1 does (`perms.discover_tools`), so its outward MCP tools
+    are denied as well."""
+
+    def test_unlisted_tools_are_discovered_and_the_outward_ones_denied(self):
+        cid = self.add_card()  # no project: no `tools` listed
+        self.workers().start(cid, "implement", cwd=self.wt)
+        found = self.discovery_calls()
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["cwd"], str(self.wt))
+        self.assertEqual(found[0]["argv"][found[0]["argv"].index("--output-format") + 1], "stream-json")
+        self.assertLess(self.calls().index(found[0]), self.calls().index(self.bg_calls()[0]))
+        deny = self.deny(cid)
+        self.assertIn("mcp__slack__slack_send_message", deny)
+        self.assertNotIn("mcp__slack__slack_read_channel", deny)
+        self.assertNotIn("Read", deny)
+
+    def test_a_project_with_no_tools_listed_is_discovered_too(self):
+        (self.data / "projects").mkdir()
+        (self.data / "projects" / "bare.yaml").write_text("repo: /repos/bare\n")
+        cid = self.add_card(project="bare")
+        self.workers().start(cid, "implement", cwd=self.wt)
+        self.assertEqual(len(self.discovery_calls()), 1)
+        self.assertIn("mcp__slack__slack_send_message", self.deny(cid))
+
+    def test_an_in_place_resume_discovers_again(self):
+        w = self.workers()
+        a = self.start(w)
+        self.drop_agent(a["short_id"])
+        with mock.patch.dict(os.environ, {"FAKE_TOOLS": "Read,mcp__Tracker__create_issue"}):
+            self.assertEqual(w.check()[0]["did"], "resumed")
+        self.assertEqual(len(self.discovery_calls()), 2)
+        self.assertIn("mcp__Tracker__create_issue", self.deny(a["card"]))
+
+    def test_a_failed_discovery_starts_nothing(self):
+        cid = self.add_card()
+        with mock.patch.dict(os.environ, {"FAKE_TOOLS_FAIL": "1"}):
+            with self.assertRaisesRegex(WorkerError, r"cannot list the session's tools for the permission floor: "
+                                                     r".*no init event.*; list them in projects/.*\.yaml `tools`"):
+                self.workers().start(cid, "implement", cwd=self.wt)
+        self.assertEqual(len(self.discovery_calls()), 1)
+        self.assertEqual(self.bg_calls(), [])
+        self.assertEqual(resources.Registry(self.data).read(), [])
+
+    def test_a_failed_discovery_on_resume_counts_as_a_death(self):
+        w = self.workers()
+        a = self.start(w)
+        self.drop_agent(a["short_id"])
+        with mock.patch.dict(os.environ, {"FAKE_TOOLS_FAIL": "1"}):
+            out = w.check()[0]
+        self.assertEqual((out["state"], out["did"]), ("dead", "nothing"))
+        self.assertIn("cannot list the session's tools", out["note"])
+        self.assertEqual(len(self.bg_calls()), 1)  # never resumed without its floor
+        self.assertEqual(resources.Registry(self.data).read()[0]["resumes"], 1)
+
 
 # -- 4. start, end, dead, parked -----------------------------------------------------------------------------------
 
@@ -550,6 +621,31 @@ class LifecycleTest(WorkerCase):
         self.write_result(a["card"], "question.json", {"text": "And the delay?"})
         w.check()
         w.answer(a["card"], "One second.")
+        self.assertEqual(self.bg_calls()[-1]["argv"][1:3], ["--resume", new])
+
+    def test_an_in_place_resumes_id_the_listing_did_not_show_yet_is_filled_in(self):
+        w = self.workers()
+        a = self.start(w)
+        self.drop_agent(a["short_id"])  # dead once: resumed in place
+        real, calls = v1_sessions.list_all, []
+
+        def listing(claude):
+            calls.append(claude)
+            return [] if len(calls) == 2 else real(claude)  # check's own listing, then `_launch`'s: the copy is late
+
+        with mock.patch("autopilot.sessions.list_all", side_effect=listing):
+            self.assertEqual(w.check()[0]["did"], "resumed")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(resources.Registry(self.data).read()[0]["session_id"], "")  # not the old one
+        new = self.agents()[-1]["sessionId"]
+        self.assertNotEqual(new, a["session_id"])
+        w.check()  # now it is listed
+        self.assertEqual(resources.Registry(self.data).read()[0]["session_id"], new)
+        saved = self.get(a["card"])["sessions"]["implement"]
+        self.assertEqual((saved["id"], saved["ids"], saved["state"]), (new, [a["session_id"], new], "running"))
+        self.write_result(a["card"], "question.json", {"text": "Three or five?"})
+        self.assertEqual(w.check()[0]["session_id"], new)
+        w.answer(a["card"], "Three.")
         self.assertEqual(self.bg_calls()[-1]["argv"][1:3], ["--resume", new])
 
     def test_an_unknown_listing_does_nothing(self):
@@ -1183,6 +1279,7 @@ class TranscriptsTest(WorkerCase):
         self.assertEqual((done["notes"], done["review"], done["memo"]),
                          ({"kept": "by the user"}, {"state": "paused"}, "a plain text"))
         self.assertEqual((done["implement"]["state"], done["implement"]["removed"]), ("finished", True))
+        self.assertEqual((done["implement"]["ids"], done["implement"]["id"]), ([a["session_id"]], a["session_id"]))
 
     def test_a_failed_claude_rm_is_not_listed_as_removed(self):
         w = self.workers()
@@ -1264,6 +1361,19 @@ class ShadowModeTest(WorkerCase):
         self.assertEqual(len(self.bg_calls()), 1)
         self.assertEqual(resources.Registry(self.data).read()[0].get("resumes", 0), 0)  # a refusal is no resume
         self.assertEqual(self.workers().check()[0]["did"], "nothing")
+
+    def test_a_parked_worker_stays_parked_in_shadow_mode(self):
+        w = self.workers(cfg=LIVE)
+        a = self.start(w)
+        w.park(a["card"], "implement", "x", usage_file=usage_file(self.tmp / "u.json", 95))
+        self.clock.advance(4 * 60)  # past the reset: it would resume in live mode
+        fresh = usage_file(self.tmp / "fresh.json", 3, resets_at="2026-01-05T17:00:00+00:00", fetched=self.clock())
+        out = self.workers(cfg=Config()).check(usage_file=fresh)[0]
+        self.assertEqual((out["state"], out["did"]), ("parked", "nothing"))
+        self.assertIn("shadow mode", out["note"])
+        self.assertEqual(len(resources.Registry(self.data).read()), 1)  # not stopped as a worker that died twice
+        self.assertIsNone(self.get(a["card"]).get("ask"))
+        self.assertEqual(len(self.bg_calls()), 1)
 
 
 if __name__ == "__main__":

@@ -910,7 +910,14 @@ Calls the author made without asking (check them):
   - Per-project setup: `<data>/projects/<name>.yaml`, named by the card's `project` field, with v1's keys `repo`,
     `branch_pattern` (`{prefix}.{task}.{short}`), `branch_prefix`, `resources`, `health_checks`, `extra_hosts`,
     `mcp_servers`, and `tools` (the MCP tool names a session in the repo has). An unknown key is refused with its
-    line. The branch is the card's `branch`, else the pattern with the card's `key` (else its id) and the first
+    line. A project that lists `tools` is used as is. When it lists none (or the card has no project), each start
+    and each in-place resume finds them the way v1 does (`perms.discover_tools`: one `claude -p ... --output-format
+    stream-json` in the worker's folder, after the shadow-mode refusal, under the worker list's lock), so the
+    outward MCP tools are always denied. If they cannot be listed (no init event, claude failed or timed out),
+    nothing starts: the `WorkerError` says to list them in `projects/<name>.yaml` `tools`. On a dead worker's
+    resume that counts as its one resume; a parked worker is stopped as when its resume cannot start. An in-place
+    resume first checks that the worker's folder is still there, so a gone worktree says "cannot start the
+    session", not that the tools could not be listed. The branch is the card's `branch`, else the pattern with the card's `key` (else its id) and the first
     three words of its title. The session gets them the way v1 passes setup: `--settings <run dir>/settings-<role>.json`
     (the permission floor: v1's outward-tool and Bash denials, plus `Edit` denials on the data folder's own files
     (including the user's `templates/**` and `sources/**`, the rules the worker floor in `roles.py` promises; every
@@ -942,7 +949,9 @@ Calls the author made without asking (check them):
     `sessions.<role>.state: stopped`) with the same `fix` ask (`reason: died_twice`, "could not resume after
     parking"); a shadow-mode refusal leaves it parked. A session the listing did not show yet when it started
     (`session_id` empty) gets its id from the next check's listing, on the record and the card's
-    `sessions.<role>` (`id` and `ids`), so a later stop archives it and a later resume continues it. Each clock
+    `sessions.<role>` (`id` and `ids`), so a later stop archives it and a later resume continues it. The same for
+    an in-place resume's copy: its record takes the copy's id, or empty when the listing lags, never the old
+    session's id. Each clock
     runs only
     while its state is seen without a break: a check that sees any other state (except unknown, which says
     nothing) resets `idle_since` / `blocked_since`, and a prompt that is gone takes its attach ask with it (only
