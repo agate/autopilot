@@ -389,6 +389,24 @@ class SlackThreadTest(BuiltinCase):
                 self.assertEqual((card["kind"], card["title"]), ("alert", "thanks all"))  # the latest's words
 
 
+    def test_with_no_card_making_category_a_thread_takes_the_latest_update_card_one(self):
+        self.user("pings", "source: pings\nbrings: messages\nread: { via: connector, tool: read_pings }\n"
+                           "fill: ai\nform: { id: x, thread_id: x, at: x, text: x }\nlink: none\n"
+                           "key: \"{thread_or_id}\"\n"
+                           "sort: { a: alert, r1: update_card, r2: update_card, f: none }\n")
+        raw = self.tmp / "pings.txt"
+        raw.write_text("1730000100.000001 thread 1730000000.000001\n1730000200.000002 thread 1730000000.000001\n"
+                       "1730000300.000003 thread 1730000000.000001\n")
+        thread = "1730000000.000001"
+        r1 = {"id": "1730000100.000001", "thread_id": thread, "at": "1730000100.000001", "text": "x", "category": "r1"}
+        r2 = {"id": "1730000200.000002", "thread_id": thread, "at": "1730000200.000002", "text": "y", "category": "r2"}
+        f = {"id": "1730000300.000003", "thread_id": thread, "at": "1730000300.000003", "text": "z", "category": "f"}
+        for records in ([r1, r2, f], [f, r2, r1]):
+            with self.subTest([r["category"] for r in records]):
+                result = self.engine().read_saved("pings", raw, records=records, dry_run=True)
+                self.assertEqual(result["dropped"], [])
+                self.assertEqual([i["category"] for i in result["items"]], ["r2", "r2", "r2"])
+
 class WordForWordTest(BuiltinCase):
     def test_place_id_is_checked_word_for_word(self):
         self.assertIn("place_id", engine.WORD_FOR_WORD)
@@ -400,8 +418,8 @@ class WordForWordTest(BuiltinCase):
         made_up = dict(record, place="C0NOTINRAW")
         result = self.engine().read_saved("slack-mentions", self.copy("slack-search.txt"),
                                           records=[made_up, record], dry_run=True)
-        self.assertEqual(result["dropped"], [{"item": 0, "reason": "form.place_id 'C0NOTINRAW' is not in the raw "
-                                                                   "output"}])
+        self.assertEqual(result["dropped"], [{"item": 0, "reason": "form.place 'C0NOTINRAW' is not in the raw "
+                                                                   "output"}])  # the field the record has
         self.assertEqual([(i["item"], i["key"]) for i in result["items"]],
                          [(1, "payments:1730000000.123456")])  # "#payments" is in the raw: kept
 
@@ -489,6 +507,10 @@ class JiraWritesTest(BuiltinCase):
         self.user("jira-epic", "extends: jira-epic\nwrites: { on_start: { assign: null } }\n")
         on_start = Loader(self.data).load("jira-epic").data["writes"]["on_start"]
         self.assertEqual(on_start, {"transition": "In Progress", "assign": None})  # one action off, the rest kept
+        self.user("jira-epic", "extends: jira-epic\nsettings: { site: jira.example.com, epic: PROJ-1 }\n"
+                               "never: [create_ticket, comment, assign]\nwrites: { on_start: { assign: null } }\n")
+        on_start = Loader(self.data).load("jira-epic").data["writes"]["on_start"]
+        self.assertEqual(on_start, {"transition": "In Progress", "assign": None})  # a null is no write, so never allows it
         self.user("jira-epic", "extends: jira-epic\nwrites: { on_pr: { transition: [a] } }\n")
         with self.assertRaisesRegex(SourceError, "writes.on_pr.transition must be a text"):
             Loader(self.data).load("jira-epic")

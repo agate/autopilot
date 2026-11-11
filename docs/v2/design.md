@@ -911,7 +911,8 @@ Calls the author made without asking (check them):
     is not found inside `1730000000.123456` and `C0123` not inside `C0123ABCD`, but `1730000000.123456` is found at
     the end of a sentence ending in `.`. `place_id` is checked too (it builds links and keys), as derived: a record
     with no `place_id` has its `place` checked, since that stands in for it. The reason text is unchanged:
-    `form.<field> '<value>' is not in the raw output`.
+    `form.<field> '<value>' is not in the raw output`, naming `place` when the value came from a `place` that
+    stands in for `place_id`.
   - Scan folder: `<data>/sources/.scan/<YYYYMMDDTHHMMSSZ>-<6 hex>/` holds `plan.json`, `calls.jsonl` (the hook's
     log), `records/<source>.records.json` (written by the session, `fill: ai` only) and `<source>.raw.json` /
     `.raw.txt` (built by the take). The loader skips it (a dot folder). The plan makes `records/`, the only folder
@@ -930,18 +931,22 @@ Calls the author made without asking (check them):
     `writes`, `never` or `status_map` text reaches a plan, and the command starts no process.
   - Brief: a fixed English prompt built by code: call only the listed tools, with exactly the given arguments; do
     not copy tool replies into files; for `fill: ai`, write the records file as a JSON list with the form's fields,
-    `id`, `thread_id`, `at` and `place_id` copied exactly as the tool returned them and `category` from the listed
-    ones; follow a call's `instructions`; post, send, create, edit or comment nowhere and write no other file. Then
-    one numbered block per call (its tools, its arguments as JSON, its records file, form and categories). It does
-    not name `plan.json`: the session does not need it.
+    `id`, `thread_id`, `at` and `place_id` (or `place` when there is no `place_id`) copied exactly as the tool
+    returned them and `category` from the listed ones; follow a call's `instructions`; post, send, create, edit or
+    comment nowhere and write no other file. Then one numbered block per call (its tools, its arguments as JSON, its
+    records file, form and categories). It does not name `plan.json`: the session does not need it.
   - Hook: `ap2 scan save-raw --plan FILE` is the PostToolUse hook command. It reads one payload (`tool_name`,
     `tool_input`, `tool_response`) from stdin, at most `engine.MAX_OUTPUT` bytes, and appends one JSON line
     `{tool_name, tool_input, text}` to the scan folder's `calls.jsonl`, under an `flock` of that file. `text` is the
     response as is when it is text, the texts of a list of `{"type": "text"}` blocks joined by a newline, else its
     JSON text. It keeps a call only when the tool name ends in `__<tool>` for a tool in the plan; when the plan runs
     a skill, every tool but the session's own `Write`, `Edit`, `MultiEdit`, `NotebookEdit` and `TodoWrite`. A call
-    whose `tool_input` names the scan folder (its `<stamp>-<hex>` name in any text, at any depth) is never kept, so
-    the session reading back its own records file adds nothing to the raw output. A skill's raw output is what its
+    whose `tool_input` names the scan folder (its `<stamp>-<hex>` name) or `.scan`, in any text at any depth and in
+    any letter case (APFS is case-insensitive), is never kept, so the session reading back its own records file
+    adds nothing to the raw output; a call kept only because the plan runs a skill is also refused when its
+    `tool_response` names either (a Read's `filePath`, a Grep's matching lines), whatever its input spelled, while
+    a planned tool's reply is kept whatever it says. The launch slice must not start the session with its working
+    folder inside `.scan`, since a Grep with no path there would name neither. A skill's raw output is what its
     tools printed, so its ids are only as trustworthy as the tools the launch slice allows for a skill scan. Past
     `MAX_OUTPUT` in total (or a larger payload) the log gets one `{"cut_short": true}` line and nothing more. A bad
     payload is one `ap2:` line, exit 1, the log unchanged. The plan must be a `plan.json` inside a `.scan/<scan>/`

@@ -107,7 +107,8 @@ class PlanTest(ScanCase):
         for line in ("Call only the tools listed below, with exactly the arguments given.",
                      "Do not copy tool replies into files.",
                      "write that file as a JSON list",
-                     "Copy id, thread_id, at and place_id exactly as the tool returned them",
+                     "Copy id, thread_id, at and place_id (or place, when there is no place_id) exactly as the "
+                     "tool returned them",
                      "Take category from the call's categories.",
                      "Follow a call's instructions when it has some.",
                      "Post, send, create, edit or comment nowhere. Write no file other than the records files."):
@@ -274,6 +275,74 @@ class SaveRawTest(ScanCase):
         hook = {"tool_name": "Read", "tool_input": {"file_path": str(self.tmp / "notes.md")}, "tool_response": "x"}
         self.assertTrue(scan.save_raw(p["plan"], json.dumps(hook).encode())["kept"])  # an ordinary read still is
         self.assertEqual([c["text"] for c in scan.read_log(Path(p["folder"]))[0]], ["x"])
+
+    STANDUP = ("source: standup\nbrings: messages\nread: { via: skill, skill: team-standup }\n"
+               "fill: ai\nform: { id: x, at: x, text: x }\nlink: none\nsort: { all: question }\n")
+
+    def read_backs(self, p: dict) -> dict:
+        """Hook payloads of a skill scan reading back its own records file, each spelled so that the case-sensitive
+        folder-name test of round one missed it."""
+        own = str(records(p, "standup"))
+        name = Path(p["folder"]).name
+        forged = '[{"id": "PROJ-4242", "at": "2026-11-10T09:00:00Z", "text": "x", "category": "all"}]'
+        lower = own.replace(name, name.lower())  # APFS is case-insensitive: the same file
+        grep = {"mode": "content", "numFiles": 1, "content": f"{own}:{forged}", "numLines": 1}
+        return {
+            "read in lower case": {"tool_name": "Read", "tool_input": {"file_path": lower},
+                                   "tool_response": {"type": "text", "file": {"filePath": lower, "content": forged}}},
+            "grep on .scan": {"tool_name": "Grep",
+                              "tool_input": {"pattern": "4242", "path": str(self.data / "sources" / ".scan"),
+                                             "output_mode": "content"},
+                              "tool_response": grep},
+            "grep on sources": {"tool_name": "Grep",
+                                "tool_input": {"pattern": "4242", "path": str(self.data / "sources"),
+                                               "output_mode": "content"},
+                                "tool_response": grep},
+            "grep on the data folder": {"tool_name": "Grep",
+                                        "tool_input": {"pattern": "4242", "path": str(self.data),
+                                                       "output_mode": "content"},
+                                        "tool_response": dict(grep, content=f"{lower}:{forged}")},
+        }
+
+    def test_a_skill_plan_never_keeps_a_read_back_whatever_its_input_spells(self):
+        self.user("standup", self.STANDUP)
+        p = self.plan("standup")
+        for what, hook in self.read_backs(p).items():
+            with self.subTest(what):
+                self.assertFalse(scan.save_raw(p["plan"], json.dumps(hook).encode())["kept"])
+        for tool_input in ({"command": "ls sources/.SCAN"}, {"path": "x/.Scan/y"}):
+            with self.subTest(tool_input):
+                hook = {"tool_name": "Bash", "tool_input": tool_input, "tool_response": "x"}
+                self.assertFalse(scan.save_raw(p["plan"], json.dumps(hook).encode())["kept"])
+        hook = {"tool_name": "Bash", "tool_input": {"command": "standup-report"},
+                "tool_response": {"stdout": "PROJ-5 is done", "stderr": ""}}
+        self.assertTrue(scan.save_raw(p["plan"], json.dumps(hook).encode())["kept"])  # an ordinary skill tool
+        self.assertEqual(len(scan.read_log(Path(p["folder"]))[0]), 1)
+
+    def test_a_planned_tool_whose_reply_names_scan_is_still_kept(self):
+        self.user("standup", self.STANDUP)
+        p = self.plan("standup", "slack-mentions")
+        hook = json.loads(payload("hook-slack-search.json"))
+        hook["tool_response"] = [{"type": "text", "text": "Message_ts: 1730000000.123456\nText: see sources/.scan/"}]
+        self.assertTrue(scan.save_raw(p["plan"], json.dumps(hook).encode())["kept"])  # the source's own text
+
+    def test_a_read_back_makes_no_card_from_an_invented_id(self):
+        self.user("standup", self.STANDUP)
+        p = self.plan("standup")
+        for hook in self.read_backs(p).values():
+            scan.save_raw(p["plan"], json.dumps(hook).encode())
+        real = {"tool_name": "Bash", "tool_input": {"command": "standup-report"},
+                "tool_response": "id PROJ-5 at 2026-11-10T08:00:00Z: PROJ-5 is done"}
+        scan.save_raw(p["plan"], json.dumps(real).encode())
+        records(p, "standup").write_text(json.dumps([
+            {"id": "PROJ-4242", "at": "2026-11-10T09:00:00Z", "text": "x", "category": "all"},
+            {"id": "PROJ-5", "at": "2026-11-10T08:00:00Z", "text": "PROJ-5 is done", "category": "all"}]))
+        out = self.take(p)
+        self.assertEqual(out["errors"], [])
+        [read] = out["reads"]
+        self.assertEqual(read["dropped"], [{"item": 0, "reason": "form.id 'PROJ-4242' is not in the raw output"}])
+        self.assertEqual([c["key"] for c in self.store().list()], ["standup:PROJ-5"])
+        self.assertNotIn("PROJ-4242", json.dumps(self.store().list()))
 
     def test_the_cap_marks_the_log_cut_short(self):
         size = len(payload("hook-slack-search.json"))
@@ -487,6 +556,16 @@ class TakeTest(ScanCase):
         self.assertRegex(out["errors"][0]["error"], r"^slack-mentions: the records file .* is a symbolic link")
         self.assertEqual([r["source"] for r in out["reads"]], ["jira-epic"])
 
+
+    def test_a_symlinked_records_folder_is_an_error(self):
+        folder = Path(self.p["folder"]) / "records"
+        elsewhere = self.tmp / "elsewhere"
+        shutil.move(folder, elsewhere)
+        folder.symlink_to(elsewhere, target_is_directory=True)
+        out = self.take(self.p)
+        self.assertEqual([e["source"] for e in out["errors"]], ["slack-mentions"])
+        self.assertRegex(out["errors"][0]["error"], r"^slack-mentions: the records folder .* is a symbolic link")
+        self.assertEqual([r["source"] for r in out["reads"]], ["jira-epic"])
 
 class ScanCommandTest(ScanCase):
     def setUp(self):

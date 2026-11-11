@@ -57,9 +57,9 @@ Rules:
 1. Call only the tools listed below, with exactly the arguments given.
 2. Do not copy tool replies into files. ap2 saves every reply itself.
 3. For a call with a records file, write that file as a JSON list with one object per item. Use only the form's
-   fields and category. Copy id, thread_id, at and place_id exactly as the tool returned them, character for
-   character. Take category from the call's categories. Leave out a field the reply does not have; never make one
-   up.
+   fields and category. Copy id, thread_id, at and place_id (or place, when there is no place_id) exactly as the
+   tool returned them, character for character. Take category from the call's categories. Leave out a field the
+   reply does not have; never make one up.
 4. Follow a call's instructions when it has some.
 5. Post, send, create, edit or comment nowhere. Write no file other than the records files.
 """
@@ -251,25 +251,31 @@ def response_text(response) -> str:
     return json.dumps(response, sort_keys=True, ensure_ascii=False)
 
 
-def keeps(p: dict, tool_name: str, tool_input=None, folder: Optional[Path] = None) -> bool:
+def keeps(p: dict, tool_name: str, tool_input=None, folder: Optional[Path] = None, tool_response=None) -> bool:
     """Whether the hook logs a call of `tool_name`: a name ending in `__<tool>` for a tool in the plan, or, when
     the plan runs a skill, any tool but the session's own file writes. A call whose `tool_input` names the scan
-    folder (its `<stamp>-<hex>` name in any text, at any depth) is never kept: the session reading back its own
-    records file must not put its own ids in the raw output."""
-    if folder is not None and _names(tool_input, Path(folder).name):
+    folder (its `<stamp>-<hex>` name) or `.scan`, in any text at any depth and in any letter case, is never kept;
+    nor is a call kept only for a skill whose `tool_response` names either (a Read's file path, a Grep's matching
+    lines). So the session reading back its own records file does not put its own ids in the raw output."""
+    words = (SCAN.name,) if folder is None else (Path(folder).name, SCAN.name)
+    if _names(tool_input, *words):
         return False
     if any(tool_name.endswith(f"__{t}") for call in p["calls"] for t in call_tools(call)):
-        return True
-    return any(call["via"] == "skill" for call in p["calls"]) and tool_name not in OWN_WRITES
+        return True  # a planned tool's reply is the source's own text, whatever it says
+    if not any(call["via"] == "skill" for call in p["calls"]) or tool_name in OWN_WRITES:
+        return False
+    return not _names(tool_response, *words)
 
 
-def _names(value, word: str) -> bool:
-    """Whether a text in `value` (texts, lists and maps, keys too) holds `word`."""
+def _names(value, *words: str) -> bool:
+    """Whether a text in `value` (texts, lists and maps, keys too) holds one of `words`, letter case ignored."""
+    words = tuple(w.casefold() for w in words)
     stack = [value]
     while stack:
         v = stack.pop()
         if isinstance(v, str):
-            if word in v:
+            text = v.casefold()
+            if any(w in text for w in words):
                 return True
         elif isinstance(v, dict):
             stack.extend(v.keys())
@@ -302,7 +308,7 @@ def save_raw(plan_file, payload: bytes) -> dict:
         raise ScanError("the hook payload's tool_input must be a JSON object")
     if "tool_response" not in hook:
         raise ScanError("the hook payload has no tool_response")
-    if not keeps(p, name, tool_input, folder):
+    if not keeps(p, name, tool_input, folder, hook["tool_response"]):
         return {"kept": False, "tool_name": name}
     line = {"tool_name": name, "tool_input": tool_input, "text": response_text(hook["tool_response"])}
     kept = _append(folder, line, cap)

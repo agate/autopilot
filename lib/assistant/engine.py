@@ -330,9 +330,9 @@ class Engine:
     @staticmethod
     def check_records(src: sources.Source, records, raw_text: str, raw: Optional[str] = None) -> tuple:
         """`fill: ai`: check the records a scan session filled (design 5.3). Each record's `id`, and its `thread_id`,
-        `at` and `place_id` when present (the derived `place_id`, so also a `place` that stands in for it), must
-        appear word for word in `raw_text`, the tool's raw output, as a whole token (`word_for_word`), so a model
-        cannot invent them. A record whose `place` or `place_id` is in
+        `at` and `place_id` when present (the derived `place_id`, so also a `place` that stands in for it, named
+        `place` in the reason), must appear word for word in `raw_text`, the tool's raw output, as a whole token
+        (`word_for_word`), so a model cannot invent them. A record whose `place` or `place_id` is in
         `read.skip_channels` (a leading `#` ignored) is dropped. Each record carries its `category`, one of
         `sort`'s. Too many records is refused (SourceError, naming `raw`, where the raw output was saved)."""
         if not isinstance(records, list):
@@ -348,7 +348,8 @@ class Engine:
                 values = form.derived(record, src.name)  # a `place_id` made from `place` is checked too
                 for field in WORD_FOR_WORD:
                     if field in values and not word_for_word(values[field], raw_text):
-                        raise ValueError(f"form.{field} {values[field]!r} is not in the raw output")
+                        shown = "place" if field == "place_id" and "place_id" not in record else field
+                        raise ValueError(f"form.{shown} {values[field]!r} is not in the raw output")
                 category = rec.get("category")
                 if not isinstance(category, str) or category not in src.sort:
                     raise ValueError(f"category {category!r} is not one of sort's ({', '.join(src.sort)})")
