@@ -77,9 +77,10 @@ def check_writable(value, what: str = "card is") -> None:
             if isinstance(child, kinds) and id(child) not in on_path:
                 if len(path) >= MAX_DEPTH:
                     raise cards.TooDeepError(f"{what} nested too deeply to copy or write")
-                path.append((child, inside(child)))
-                on_path.add(id(child))
-                break
+                if child:  # an empty one holds nothing deeper: counted above, never walked into
+                    path.append((child, inside(child)))
+                    on_path.add(id(child))
+                    break
         else:
             path.pop()
             on_path.discard(id(node))

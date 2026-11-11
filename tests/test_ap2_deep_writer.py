@@ -159,6 +159,9 @@ class InputTest(WriterCase):
 # -- the bound: MAX_DEPTH is written and read, one level more is refused ------------------------------------------
 
 class BoundTest(WriterCase):
+    def test_the_design_states_200(self):
+        self.assertEqual(MAX_DEPTH, 200)
+
     def test_a_card_at_the_bound_is_written_and_read_by_every_call(self):
         added = self.store.add(card(x=json.loads(AT_BOUND)), by="w")
         self.assertEqual(self.store.get(added["id"]), added)
@@ -194,6 +197,12 @@ class BoundTest(WriterCase):
         with self.subTest("add"):
             self.assert_refused(lambda: self.store.add(card(x=json.loads(PAST_BOUND)), by="w"),
                                 "card is nested too deeply to copy or write")
+        with self.subTest("add, nested tuples"):
+            nested = ()
+            for _ in range(250):
+                nested = (nested,)
+            self.assert_refused(lambda: self.store.add(card(x=nested), by="w"),
+                                "card is nested too deeply to copy or write")
         with self.subTest("update"):
             self.assert_refused(lambda: self.store.update(card_id, {"x": json.loads(PAST_BOUND)}, by="w"),
                                 "changes are nested too deeply to copy or write")
@@ -226,6 +235,23 @@ class StackTest(WriterCase):
         with self.subTest("search after index.sqlite is deleted"):
             (self.data / "index.sqlite").unlink()
             self.assertEqual(deeper(FRAMES, reads["search"]), [added])
+
+    def test_add_update_and_restore_at_the_bound_work_from_a_deeper_stack(self):
+        with self.subTest("add"):
+            added = deeper(FRAMES, lambda: self.store.add(card(x=json.loads(AT_BOUND)), by="w"))
+            self.assertEqual(self.store.get(added["id"]), added)
+        card_id, point, _ = self.card_with_point()
+        with self.subTest("update"):
+            self.clock.tick(minutes=1)
+            changed = deeper(FRAMES, lambda: self.store.update(card_id, {"x": json.loads(AT_BOUND)}, by="w"))
+            self.assertEqual(changed["x"], json.loads(AT_BOUND))
+            self.assertEqual(self.store.get(card_id), changed)
+        with self.subTest("restore"):
+            self.point_with_x(point, AT_BOUND)
+            self.clock.tick(minutes=1)
+            back = deeper(FRAMES, lambda: self.store.restore(point, by="user"))
+            self.assertEqual(back["x"], json.loads(AT_BOUND))
+            self.assertEqual(self.store.get(card_id), back)
 
     def test_the_check_gives_the_same_answer_at_any_stack(self):
         at, past = json.loads(with_x(card(), AT_BOUND)), json.loads(with_x(card(), PAST_BOUND))
@@ -267,6 +293,19 @@ class CycleTest(WriterCase):
         self.assertNotIsInstance(cm.exception, RecursionError)
         self.assertEqual(str(cm.exception), "text is not valid JSON: NaN or Infinity")  # the check's words, as before
         self.assertEqual(self.files(), before)
+
+
+class SharedTest(WriterCase):
+    def test_a_list_met_twice_counts_where_it_is_deepest(self):
+        shared = json.loads(lists(150))
+        wrap = json.loads(lists(100))
+        inner = wrap
+        while inner:
+            inner = inner[0]
+        inner.append(shared)  # `shared` is 3 levels deep in the card first, then 103
+        self.assert_refused(lambda: self.store.add(card(x=[shared, wrap]), by="w"),
+                            "card is nested too deeply to copy or write")
+        self.assertEqual(self.files(), {})
 
 
 # -- criterion 5: the gate survives --------------------------------------------------------------------------------
