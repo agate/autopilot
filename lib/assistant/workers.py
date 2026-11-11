@@ -430,7 +430,9 @@ class Workers:
         cwd = str(Path(cwd).resolve()) if cwd else ""  # absolute, so later checks from any folder find it
         if not cwd or not Path(cwd).is_dir():
             raise WorkerError(f"the worker's folder {cwd or '(none given)'} is not a folder; pass --cwd")
-        branch = card.get("branch") or projects.branch(project, card.get("key") or card_id, _slug(card.get("title")))
+        primary = self.cfg.primary_language
+        branch = card.get("branch") or projects.branch(project, card.get("key") or card_id,
+                                                       _slug(cards.title_for(card, primary, primary)))
         return {"old": old, "parked": parked, "needs": needs, "ports": port_range, "sid": sid, "cwd": cwd,
                 "branch": branch, "env": self._env(card, role, project, port_range, branch)}
 

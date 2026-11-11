@@ -124,7 +124,8 @@ def run_card(r: routines.Routine, d: routines.Due, languages: tuple) -> dict:
     words = {lang: _words(lang, r, d) for lang in languages}
     return {
         "kind": "routine", "lane": "done" if d.action == "skip" else "running", "feed": "routines",
-        "links": [], "pri": "P2", "origin": "source", "title": r.title,
+        "links": [], "pri": "P2", "origin": "source",
+        "title": {lang: r.title for lang in languages},  # the user's own words, the same in every language
         "key": f"{r.name}@{d.slot}", "routine": r.name, "slot": d.slot, "slot_tz": r.tz_name,
         "slot_at": cards.stamp(d.at), "late": d.action != "run", "skipped": d.action == "skip",
         "late_minutes": int(d.late_by.total_seconds() // 60),

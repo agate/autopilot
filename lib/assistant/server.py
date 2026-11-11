@@ -113,12 +113,18 @@ def order(found: list) -> list:
                                          0 if c.get("lane") == "done" else _rank(PRI_RANK, c.get("pri"), len(PRI_RANK))))
 
 
+def titles(card: dict, langs: tuple) -> Optional[dict]:
+    """The card's title in each language (`langs[0]`, the primary, fills a gap), or None when it has none."""
+    out = {lang: cards.title_for(card, lang, langs[0]) for lang in langs}
+    return out if any(isinstance(t, str) and t.strip() for t in out.values()) else None
+
+
 def row(card: dict, langs: tuple) -> dict:
     """A card as a list row: what the lists, the rail and the phone page need, nothing more."""
     plain = card.get("plain") if isinstance(card.get("plain"), dict) else {}
     where = plain.get("where") if isinstance(plain.get("where"), dict) else {}
     ask = card.get("ask")
-    return {"id": card.get("id"), "title": card.get("title"), "kind": card.get("kind"), "lane": card.get("lane"),
+    return {"id": card.get("id"), "title": titles(card, langs), "kind": card.get("kind"), "lane": card.get("lane"),
             "pri": card.get("pri"), "feed": card.get("feed"), "parent": card.get("parent"),
             "origin": card.get("origin"), "ask_type": ask.get("type") if isinstance(ask, dict) else None,
             "plain_where": {lang: where[lang] for lang in langs if isinstance(where.get(lang), str)},
@@ -503,12 +509,13 @@ class Handler(BaseHTTPRequestHandler):
                 lanes[c["lane"]] += 1
             if isinstance(c.get("parent"), str):
                 children.setdefault(c["parent"], []).append(c)
-        projects = [{"id": c["id"], "title": c.get("title"),
+        langs = cards.languages(cfg)
+        projects = [{"id": c["id"], "title": titles(c, langs),
                      "done": sum(1 for k in children.get(c["id"], []) if k.get("lane") == "done"),
                      "total": len(children.get(c["id"], []))}
                     for c in found if c.get("kind") == "project"]
         return {"mode": cfg.mode, "primary_language": cfg.primary_language,
-                "secondary_language": cfg.secondary_language, "languages": list(cards.languages(cfg)),
+                "secondary_language": cfg.secondary_language, "languages": list(langs),
                 "lanes": lanes, "running": lanes["running"], "projects": projects,
                 "heartbeat": heartbeat(self.server.data, self.server.clock()), "usage": None, "url": self.server.url}
 
