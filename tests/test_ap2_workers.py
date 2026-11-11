@@ -13,13 +13,19 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
+try:
+    import fcntl
+except ImportError:  # not POSIX
+    fcntl = None
+
 from tests.helpers import ROOT
 from tests.test_ap2_store import card
 from assistant import config, resources, transcripts
 from assistant.config import Config, ShadowModeError
 from assistant.resources import WorkerError
 from assistant.store import Store
-from assistant.workers import Workers
+from assistant.workers import DIED, Workers
+from autopilot import sessions as v1_sessions
 
 FAKE = str(ROOT / "tests" / "bin" / "fake-claude-v2")
 T0 = datetime(2026, 1, 5, 9, 0, 0, tzinfo=timezone.utc)
@@ -148,6 +154,14 @@ class PortsTest(WorkerCase):
         self.assertIn(["stop", a["short_id"]], [c["argv"] for c in self.calls()])
         self.assertEqual(len([r for r in resources.Registry(self.data).read() if r["card"] == a["card"]]), 1)
 
+    def test_a_parked_worker_with_a_resource_at_the_cap_resumes_into_its_own_slot(self):
+        w = self.workers(max_workers=2)
+        a = self.start(w, needs=["device"])
+        self.start(w)
+        w.park(a["card"], "implement", "x", usage_file=usage_file(self.tmp / "u.json", 95))
+        back = w.start(a["card"], "implement", prompt="Continue.", resume=True)  # its own slot and resource
+        self.assertEqual((back["needs"], back["ports"]), (["device"], a["ports"]))
+
     def test_park_is_refused_under_the_line(self):
         w = self.workers()
         a = self.start(w)
@@ -171,6 +185,9 @@ class PortsTest(WorkerCase):
         # the parked session sat idle; the copy that continues takes its place
         self.assertIn(["stop", a["short_id"]], [c["argv"] for c in self.calls()])
         self.assertNotIn(a["short_id"], [x["id"] for x in self.agents()])
+        self.assertEqual(rec["resumes"], 0)  # a parked worker's resume is not a death
+        self.drop_agent(rec["short_id"])
+        self.assertEqual(w.check()[0]["did"], "resumed")  # so its first death still gets its one resume
 
 
 # -- 2. single-use resources, needs and max_workers ---------------------------------------------------------------
@@ -377,6 +394,75 @@ class LifecycleTest(WorkerCase):
         a = self.start(w)
         self.set_agent(a["short_id"], pid=2 ** 22 + 12345)  # no such process
         self.assertEqual(w.list()[0]["state"], "dead")
+
+    def test_a_failed_session_is_dead(self):
+        w = self.workers()
+        a = self.start(w)
+        self.set_agent(a["short_id"], state="failed", status="idle")
+        self.assertEqual(w.list()[0]["state"], "dead")
+
+    def test_a_saved_session_id_that_is_a_flag_is_refused(self):
+        cid = self.add_card(sessions={"implement": {"id": "--allowedTools=Bash", "cwd": str(self.wt)}})
+        with self.assertRaisesRegex(WorkerError, "is not a session id"):
+            self.workers().start(cid, "implement", prompt="Continue.", resume=True)
+        self.assertEqual(self.bg_calls(), [])
+        self.assertEqual(resources.Registry(self.data).read(), [])
+
+    def lock_held(self) -> bool:
+        fd = os.open(str(self.data / resources.LOCK), os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        finally:
+            os.close(fd)  # closing it drops the lock this probe may have taken
+        return False
+
+    @unittest.skipIf(fcntl is None, "the worker list is locked with flock")
+    def test_check_takes_the_listing_under_the_lock(self):
+        """A start that lands between the listing and the lock would be judged against the stale listing: dead,
+        and resumed in place next to itself, two sessions in one worktree."""
+        w = self.workers()
+        self.start(w)
+        real, seen = v1_sessions.list_all, []
+
+        def listing(claude):
+            out = real(claude)
+            seen.append(self.lock_held())
+            if len(seen) == 1 and not seen[0]:
+                self.start(w)  # another process starts a worker after this listing was taken
+            return out
+
+        with mock.patch("autopilot.sessions.list_all", side_effect=listing):
+            out = w.check()
+        self.assertEqual(seen[:1], [True])
+        self.assertEqual([o["did"] for o in out], ["nothing"])
+        self.assertEqual([c for c in self.bg_calls() if "--resume" in c["argv"]], [])
+
+    def test_a_relative_cwd_is_saved_absolute(self):
+        old = os.getcwd()
+        self.addCleanup(os.chdir, old)
+        os.chdir(self.tmp)
+        cid = self.add_card()
+        rec = self.workers().start(cid, "implement", cwd="worktree", prompt="Do the work.")
+        self.assertEqual(rec["cwd"], str(self.wt))
+        self.assertEqual(resources.Registry(self.data).read()[0]["cwd"], str(self.wt))
+        self.assertEqual(self.get(cid)["sessions"]["implement"]["cwd"], str(self.wt))
+
+    def test_a_resume_that_cannot_start_counts_as_a_death(self):
+        w = self.workers()
+        a = self.start(w)
+        shutil.rmtree(self.wt)  # its worktree is gone, so its resume cannot start
+        self.drop_agent(a["short_id"])
+        out = w.check()[0]
+        self.assertEqual((out["state"], out["did"]), ("dead", "nothing"))
+        self.assertIn("cannot start the session", out["note"])
+        self.assertEqual(resources.Registry(self.data).read()[0]["resumes"], 1)
+        out = w.check()[0]
+        self.assertEqual(out["did"], "stopped")
+        ask = self.get(a["card"])["ask"]
+        self.assertEqual((ask["type"], ask["reason"]), ("fix", DIED))
+        self.assertEqual(resources.Registry(self.data).read(), [])  # its slot, ports and resources are free
 
     def test_dead_twice_stops_and_asks_for_a_fix(self):
         w = self.workers()
@@ -849,6 +935,16 @@ class WorkerAskTableTest(WorkerCase):
         w.check()
         return w
 
+    def setup_review_question(self, cid):
+        """Another role's question: a review worker asked and was stopped."""
+        w = self.workers()
+        self.start(w, card_id=cid, role="review")
+        q = self.write_result(cid, "question.json", {"text": "Three or five?"})
+        w.check()
+        old = (T0 - timedelta(hours=1)).timestamp()
+        os.utime(q, (old, old))  # older than the next worker's start, so it is not that worker's question
+        return w
+
     def setup_user(self, cid):
         Store(self.data, self.cfg, self.clock).update(cid, {"ask": {"type": "fix", "text": "mine",
                                                                     "role": "implement"}}, by="user")
@@ -881,6 +977,14 @@ class WorkerAskTableTest(WorkerCase):
     def path_prompt_answered(self, w, cid):
         """The user answered the prompt: the session runs on, nothing is stopped or started."""
         self.set_agent(self.rec()["short_id"], status="busy")
+        self.assertEqual(w.check()[0]["state"], "running")
+
+    def path_start_block_answered(self, w, cid):
+        """A new implement worker starts, waits at a permission prompt, and the user answers the prompt."""
+        rec = w.start(cid, "implement", cwd=self.wt, prompt="Again.")
+        self.set_agent(rec["short_id"], status="waiting")
+        self.assertEqual(w.check()[0]["state"], "blocked")
+        self.set_agent(rec["short_id"], status="busy")
         self.assertEqual(w.check()[0]["state"], "running")
 
     def path_done(self, w, cid):
@@ -924,6 +1028,7 @@ class WorkerAskTableTest(WorkerCase):
         ("question", "finish", None),
         # never closed by any path
         ("died", "start", "died"), ("died", "resume", "died"), ("died", "finish", "died"),
+        ("died", "start_block_answered", "died"), ("review_question", "start_block_answered", "question"),
         ("user", "in_place_resume", "user"), ("user", "parked_resume", "user"), ("user", "end", "user"),
         ("user", "end_then_resume", "user"), ("user", "end_then_finish", "user"), ("user", "pause", "user"),
         ("user", "question", "user"), ("user", "prompt_answered", "user"), ("user", "done", "user"),
@@ -937,7 +1042,8 @@ class WorkerAskTableTest(WorkerCase):
                 self.clock = Clock()
                 cid = self.add_card()
                 w = getattr(self, f"setup_{before}")(cid)
-                self.assertEqual(self.kind(self.get(cid).get("ask")), before.replace("_clock_lost", ""))
+                shown = {"attach_clock_lost": "attach", "review_question": "question"}.get(before, before)
+                self.assertEqual(self.kind(self.get(cid).get("ask")), shown)
                 getattr(self, f"path_{path}")(w, cid)
                 self.assertEqual(self.kind(self.get(cid).get("ask")), after)
 
@@ -996,6 +1102,36 @@ class TranscriptsTest(WorkerCase):
         self.assertFalse(orig.exists())
         self.assertIn(b"last words", gzip.decompress(Path(out["archived"][0]).read_bytes()))
         self.assertTrue(self.get(a["card"])["sessions"]["implement"]["removed"])
+
+    def test_finish_archives_every_id_of_a_role(self):
+        w = self.workers()
+        a = self.start(w)
+        self.drop_agent(a["short_id"])
+        self.assertEqual(w.check()[0]["did"], "resumed")  # in place, under a new id
+        b = resources.Registry(self.data).read()[0]
+        w.end(a["card"], "implement")
+        self.assertEqual(self.get(a["card"])["sessions"]["implement"]["ids"], [a["session_id"], b["session_id"]])
+        with self.original(b).open("a") as f:
+            f.write('{"type": "assistant", "text": "last words"}\n')
+        out = w.finish(a["card"])
+        folder = self.data / "sessions" / a["card"]
+        self.assertEqual(sorted(out["archived"]), sorted(str(folder / f"implement-{s}.jsonl.gz")
+                                                         for s in (a["session_id"], b["session_id"])))
+        newest = folder / f"implement-{b['session_id']}.jsonl.gz"
+        self.assertIn(b"last words", gzip.decompress(newest.read_bytes()))
+
+    def test_finish_never_writes_outside_the_data_folder_for_an_unknown_role(self):
+        w = self.workers()
+        a = self.start(w)
+        w.end(a["card"], "implement")
+        sessions = dict(self.get(a["card"])["sessions"], **{"../../../escaped": {"ids": [a["session_id"]]}})
+        Store(self.data, self.cfg, self.clock).update(a["card"], {"sessions": sessions}, by="test")
+        out = w.finish(a["card"])
+        self.assertEqual(out["archived"], [str(self.data / "sessions" / a["card"] / f"implement-{a['session_id']}"
+                                                                                  ".jsonl.gz")])
+        self.assertEqual([p for p in self.tmp.rglob("*.gz") if self.data not in p.parents], [])
+        with self.assertRaisesRegex(ValueError, "not a role"):
+            transcripts.archive_path(self.data, a["card"], "..", a["session_id"])
 
     def test_a_failed_claude_rm_is_not_listed_as_removed(self):
         w = self.workers()

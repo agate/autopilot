@@ -64,9 +64,11 @@ def check_start(records: list, needs, max_workers: int = MAX_WORKERS, skip=None)
 
 
 def plan(candidates: list, records: list, max_workers: int = MAX_WORKERS) -> list:
-    """Pick which of `candidates` ([{project, card, needs}], each ready to start, in order) start now: round-robin
-    across projects, never past the cap, and never two at once that need the same resource or one a running
-    worker holds. Returns `[(project, card)]`. v1's `plan_starts`, given the cards as todo tasks."""
+    """Pick which of `candidates` ([{project, card, needs}], each ready to start) start now: round-robin across
+    projects (in the order each project first appears), never past the cap, and never two at once that need the
+    same resource or one a running worker holds. Returns `[(project, card)]`. v1's `plan_starts`, given the cards
+    as todo tasks; within a project the order is v1's (`nextwork.ready` sorts the tasks, here by card id), not the
+    given order."""
     order, snaps = [], {}
     for c in candidates:
         if c["project"] not in snaps:

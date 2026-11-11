@@ -10,11 +10,13 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from tests.helpers import ROOT
 from tests.test_ap2_cli import temp_inside_the_accounts_claude
 from tests.test_ap2_store import card
+from tests.test_ap2_workers import usage_file
 
 AP2 = ROOT / "bin" / "ap2"
 FAKE = ROOT / "tests" / "bin" / "fake-claude-v2"
@@ -108,6 +110,44 @@ class WorkerCommandTest(unittest.TestCase):
         self.assertEqual(self.ok("card", "show", cid)["sessions"]["implement"]["id"], rec["session_id"])
         fin = self.ok("worker", "finish", cid, "--transcripts", str(self.fake_home / "projects"))
         self.assertEqual(fin["removed"], [rec["session_id"]])
+
+    def bg_calls(self) -> list:
+        return [c for c in self.calls() if c["argv"][:1] == ["--bg"]]
+
+    def usage(self, path: Path, percent: int, resets_in_min: int = 180) -> Path:
+        """A usage cache fetched now (the command runs on the real clock) with one window at `percent`."""
+        now = datetime.now(timezone.utc)
+        return usage_file(path, percent, resets_at=(now + timedelta(minutes=resets_in_min)).isoformat(),
+                          fetched=now)
+
+    def test_park_reads_the_home_usage_file_or_the_given_one(self):
+        self.live()
+        cid = self.add_card()
+        self.ok("worker", "start", cid, "implement", "--cwd", str(self.wt))
+        home_file = self.usage(self.home / ".claude.json", 95)
+        self.assertEqual(self.ok("worker", "park", cid, "implement", "--note", "x")["percent"], 95)
+        home_file.unlink()
+        other = self.usage(self.tmp / "usage.json", 95)
+        self.assertEqual(self.ok("worker", "park", cid, "implement", "--note", "x", "--usage", str(other))["percent"],
+                         95)
+
+    def test_answer_resume_and_a_parked_resume_by_check(self):
+        self.live()
+        cid = self.add_card()
+        rec = self.ok("worker", "start", cid, "implement", "--cwd", str(self.wt))
+        (self.data / "sessions" / cid / "question.json").write_text(json.dumps({"text": "Three retries or five?"}))
+        self.assertEqual([o["did"] for o in self.ok("worker", "check")], ["asked"])
+        answered = self.ok("worker", "answer", cid, "Three", "retries")
+        last = self.bg_calls()[-1]["argv"]
+        self.assertEqual(last[1:3], ["--resume", rec["session_id"]])
+        self.assertIn("The answer: Three retries", last[-1])
+        self.ok("worker", "end", cid, "implement")
+        again = self.ok("worker", "start", cid, "implement", "--resume")
+        self.assertEqual(self.bg_calls()[-1]["argv"][:3], ["--bg", "--resume", answered["session_id"]])
+        self.ok("worker", "park", cid, "implement", "--usage", str(self.usage(self.tmp / "u.json", 95, -60)))
+        under = self.usage(self.tmp / "under.json", 3)
+        self.assertEqual([o["did"] for o in self.ok("worker", "check", "--usage", str(under))], ["resumed"])
+        self.assertEqual(self.bg_calls()[-1]["argv"][1:3], ["--resume", again["session_id"]])
 
     def test_errors_are_one_line(self):
         cid = self.add_card()

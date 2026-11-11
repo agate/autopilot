@@ -24,6 +24,7 @@ from assistant.resources import WorkerError
 SESSIONS = "sessions"
 SUFFIX = ".jsonl.gz"
 SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,99}\Z")
+ROLE = re.compile(r"[a-z]+")  # a role is part of an archive's file name: lowercase letters only
 
 
 def default_projects() -> Path:
@@ -50,7 +51,14 @@ def find(projects, session_id: str) -> Optional[Path]:
     return max(hits, key=lambda p: p.stat().st_mtime) if hits else None
 
 
+def _check_role(role) -> str:
+    if not (isinstance(role, str) and ROLE.fullmatch(role)):
+        raise ValueError(f"not a role: {role!r}")
+    return role
+
+
 def archive_path(data, card_id: str, role: str, session_id: str) -> Path:
+    _check_role(role)
     return run_dir(data, card_id) / f"{role}-{_check_sid(session_id)}{SUFFIX}"
 
 

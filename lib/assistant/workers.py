@@ -184,6 +184,9 @@ class Workers:
 
     def _argv(self, role: str, name: str, settings: Path, prompt: str, resume_id: str = "") -> list:
         argv = [self.claude, "--bg"]
+        if resume_id and not transcripts.SESSION_ID.match(resume_id):
+            # It comes from the card or the worker list; one starting with "-" would become a claude flag.
+            raise WorkerError(f"{resume_id!r} is not a session id")
         if resume_id:
             # Flags on --resume start a copy under a new id; -n keeps the worker's name on that copy.
             argv += ["--resume", resume_id]
@@ -211,10 +214,12 @@ class Workers:
         return self.store.update(card_id, {"sessions": sessions}, by=by, did=f"worker {role}: {entry.get('state')}")
 
     def _set_ask(self, card_id: str, ask: dict, by: str) -> bool:
-        """Set the card's ask unless the user already has one open that a worker did not make."""
+        """Set the card's ask when it has none open, or replace the role's own worker ask (attach, paused or
+        question). Any other open ask (the user's own, another role's, the "died twice" ask) is kept: return
+        False."""
         card = self._card(card_id)
         cur = card.get("ask")
-        if cur is not None and cur.get("from") != "worker":
+        if cur is not None and self._worker_ask_kind(cur, ask["role"]) is None:
             return False
         self.store.update(card_id, {"ask": dict(ask, **{"from": "worker"})}, by=by, did=f"ask {ask['type']}")
         return True
@@ -274,7 +279,8 @@ class Workers:
             sid = ((parked or {}).get("session_id") or saved.get("id") or "") if resume else ""
             if resume and not sid:
                 raise WorkerError(f"card {card_id}: no saved {role} session to resume")
-            cwd = str(cwd or (parked or {}).get("cwd") or saved.get("cwd") or "")
+            cwd = cwd or (parked or {}).get("cwd") or saved.get("cwd") or ""
+            cwd = str(Path(cwd).resolve()) if cwd else ""  # absolute, so later checks from any folder find it
             if not cwd or not Path(cwd).is_dir():
                 raise WorkerError(f"the worker's folder {cwd or '(none given)'} is not a folder; pass --cwd")
             branch = card.get("branch") or projects.branch(project, card.get("key") or card_id,
@@ -415,13 +421,15 @@ class Workers:
     def check(self, by: str = BY, usage_file=None) -> list:
         """Look at every worker and act on its state (see the module docstring); return one entry per worker:
         `{card, role, state, did, ...}`. With `usage_file`, a parked worker whose window has reset resumes."""
-        listing = v1_sessions.list_all(self.claude)
         now = self.clock()
         b = None
         if usage_file:
             b = v1_budget.read(Path(usage_file), now_ms=int(now.timestamp() * 1000), stale_min=PARK_RULES["stale_min"])
         out = []
         with self.registry.locked() as records:
+            # Under the lock: a start that lands before it would otherwise be judged against a listing taken
+            # before that start, seen as dead and resumed next to itself.
+            listing = v1_sessions.list_all(self.claude)
             for rec in list(records):
                 state = self.classify(rec, listing)
                 entry = {"card": rec["card"], "role": rec["role"], "state": state, "did": "nothing"}
@@ -461,7 +469,13 @@ class Workers:
             records.remove(rec)
         elif state == "dead":
             if rec.get("resumes", 0) < 1:
-                self._resume_dead(rec, INTERRUPTED)
+                try:
+                    self._resume_dead(rec, INTERRUPTED)
+                except WorkerError:
+                    # The resume cannot start (e.g. its worktree is gone): it counts, so the next check stops it as
+                    # died twice instead of holding its slot forever. A shadow-mode refusal is not counted.
+                    rec["resumes"] = rec.get("resumes", 0) + 1
+                    raise
                 entry["did"] = "resumed"
             else:
                 why = "the worker died twice; look at its run files and its worktree, then start it again"
@@ -541,9 +555,10 @@ class Workers:
             raise WorkerError(f"card {card_id} still has a worker; end it first")
         archived, removed, note = [], [], None
         sessions = card.get("sessions") or {}
-        for role in sorted(sessions):
+        roles = [r for r in sorted(sessions) if r in ROLES]  # a role is part of a path: no other key is one
+        for role in roles:
             self._close_worker_asks(card_id, role, by)  # the card is done: no worker ask of it is still true
-        ids = [(role, sid) for role, entry in sorted(sessions.items()) for sid in (entry or {}).get("ids") or []]
+        ids = [(role, sid) for role in roles for sid in (sessions[role] or {}).get("ids") or []]
         for role, sid in ids:
             p = self._archive(card_id, role, sid)
             if p:

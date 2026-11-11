@@ -519,7 +519,8 @@ Rules:
    `prloop.json`). The gate sees the file (newer than the worker's start) and runs `worker end`: stop the process,
    save the session id on the card. Session state can be lost; the card cannot.
 2. **[decided, from v1]** Dead (no session, or its process is gone, with no result file): resume once with
-   "you were interrupted; check your worktree and run files first". Dead twice: stop and ask the user.
+   "you were interrupted; check your worktree and run files first". Dead twice: stop and ask the user. A resume
+   that cannot start (its worktree is gone) counts as that one resume.
 3. **[decided, open question 2]** No process waits for a human. A worker that needs the user writes
    `question.json` (`{"text": ...}`) in its run directory and ends its round; the gate stops it and frees its slot,
    and the question becomes the card's `ask` (`type: answer`, with the worker's text, role and session id). The
@@ -532,7 +533,8 @@ Rules:
    starts when a gate check first sees it idle; seeing it work again resets it.
    A worker's own ask never outlives its cause: any start of that role (fresh, `--resume`, or an in-place resume)
    and `finish` close the attach ask, the pause's resume hint and the worker's open question, and every stop also
-   closes the attach ask; the user's own asks and the "died twice" ask are never closed this way.
+   closes the attach ask; the user's own asks and the "died twice" ask are never closed this way. A worker's ask
+   replaces only the same role's own worker ask; any other open ask stays.
 6. When the card is done, its saved sessions are archived (3.5) and removed.
 
 Streaming one long-lived process per card was rejected: it needs supervision, restart logic and a decision on how
@@ -890,8 +892,9 @@ Calls the author made without asking (check them):
   - The card keeps what must outlive the process, through the card store: `sessions.<role>` =
     `{id, ids, cwd, needs, state, why, at}` (`state`: running, ended, asked, stopped, paused, finished; `ids` every
     session id the role had, since a resume runs under a new id), and the `ask` a worker raises (marked
-    `from: worker`; an open ask the user's own flow set is never overwritten). A worker's question that
-    cannot become the ask, because the user's own ask is open, is kept on `sessions.<role>.question`;
+    `from: worker`). A worker's ask replaces only the same role's own worker ask (attach, paused, question). Any
+    other open ask stays: the user's own, another role's, and the "died twice" ask. A worker's question that
+    cannot become the ask, because another ask is open, is kept on `sessions.<role>.question`;
     `ap2 worker answer` answers it from there (and leaves the user's ask open), and the next start clears it.
   - Run directory: `<data>/sessions/<card>/`, the same folder as the archives, so `keep_transcripts: never`
     leaves exactly the summary files there (brief, journal, hand-back, review, question) plus the worker's
@@ -900,7 +903,8 @@ Calls the author made without asking (check them):
     the first free slot first; a parked worker keeps its range and resource when it resumes. `max_workers` is 5
     and counts parked workers (they keep their slot). A start that would pass the cap, or needs a resource another
     worker holds, is refused with an error naming the holder; `resources.plan()` (v1's `plan_starts`) skips such
-    cards instead. Both are module defaults with keyword overrides, not `config.yaml` keys yet: `ap2 config`
+    cards instead. Within a project, `plan()` keeps v1's order (by card id), not the given order. Both are
+    module defaults with keyword overrides, not `config.yaml` keys yet: `ap2 config`
     prints the config exactly and its test pins the keys.
   - Per-project setup: `<data>/projects/<name>.yaml`, named by the card's `project` field, with v1's keys `repo`,
     `branch_pattern` (`{prefix}.{task}.{short}`), `branch_prefix`, `resources`, `health_checks`, `extra_hosts`,
@@ -917,6 +921,9 @@ Calls the author made without asking (check them):
   - Session: `claude --bg -n "<card> · <role>" --permission-mode auto --settings ... [--agent ...] --effort xhigh`
     (v1's defaults; the `pr` role runs `/autopilot:pr-loop` instead of an agent, until templates and roles define
     v2's own). A resume is `claude --bg --resume <id> -n ... --permission-mode ... --settings ... <prompt>`.
+    The resume id comes from the card or the worker list, so it is checked first: letters, digits and `-`, not
+    starting with `-`. Anything else is refused before claude runs, so it can never become a flag. `--cwd` is
+    saved absolute, so a later check run from another folder still finds it.
   - `check()` classifies each worker: done (its result file newer than its start), question (`question.json`
     newer than its start), parked, unknown (the listing failed: nothing is done), dead (no session, its process
     gone, or state failed), blocked (status waiting), idle (state blocked or done, or status idle), running. Done:
@@ -925,7 +932,11 @@ Calls the author made without asking (check them):
     `--usage`, resume once v1's `park.resume_due` allows: the parked session is stopped first and the copy takes
     its place, on the same ports. One worker's error (a bad project file, a failed call) never stops the pass:
     it goes on that worker's line as `note` (and `error`, the exception's name, when it is not one of v2's own
-    errors), the other workers are still acted on, and the worker list is written back. Each clock runs only
+    errors), the other workers are still acted on, and the worker list is written back. The listing is taken
+    under the worker list's lock, so a start that lands during a check is never judged against a listing from
+    before it. A dead worker whose resume cannot start (e.g. its worktree is gone) counts that try: the next
+    check stops it as died twice and raises the `fix` ask, so it never holds its slot forever. A shadow-mode
+    refusal is not counted. Each clock runs only
     while its state is seen without a break: a check that sees any other state (except unknown, which says
     nothing) resets `idle_since` / `blocked_since`, and a prompt that is gone takes its attach ask with it (only
     the ask this worker raised, marked `reason: permission_prompt`; the user's own ask is kept). A new prompt after
@@ -953,7 +964,9 @@ Calls the author made without asking (check them):
     is older than N days, `always` keeps all). `finish` (the card is done) makes the last copy of every id and, in
     live mode only, runs `claude rm` on each. A `claude rm` that exits non-zero raises with claude's message; `finish` lists
     it under `failed`, keeps that original (the next `finish` tries again) and marks a role `removed` only when
-    every one of its originals is gone.
+    every one of its originals is gone. `finish` acts only on the known roles (`implement`, `review`, `pr`) in
+    the card's `sessions`; any other key is skipped. An archive's role must be lowercase letters, else it is
+    refused, so a card's keys never make a path outside the data folder.
   - Commands, each with `--data PATH` and `--by NAME`, JSON on stdout, one `ap2: ...` line and exit 1 on an error:
     `ap2 worker list`, `start CARD ROLE [--cwd P] [--prompt-file F] [--needs A,B] [--resume]`,
     `end CARD ROLE [--transcripts P]`, `check [--transcripts P] [--usage P]`,
