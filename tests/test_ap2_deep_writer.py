@@ -18,6 +18,7 @@ import json
 import re
 import shutil
 import tempfile
+import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -306,6 +307,20 @@ class SharedTest(WriterCase):
         self.assert_refused(lambda: self.store.add(card(x=[shared, wrap]), by="w"),
                             "card is nested too deeply to copy or write")
         self.assertEqual(self.files(), {})
+
+    def test_a_value_shared_on_every_level_is_walked_once_per_depth(self):
+        card_id, _, _ = self.card_with_point()
+        ints, bad = [1], [float("nan")]
+        for _ in range(40):  # each level holds the one below twice: 2**40 paths, 41 lists
+            ints, bad = [ints, ints], [bad, bad]
+        before = self.files()
+        start = time.monotonic()
+        self.assertIsNone(check_writable(ints))
+        with self.assertRaisesRegex(CardError, r"\Atext is not valid JSON: NaN or Infinity\Z") as cm:
+            self.store.update(card_id, {"x": bad}, by="w")
+        self.assertLess(time.monotonic() - start, 2)  # walking every path would not end
+        self.assertNotIsInstance(cm.exception, cards.TooDeepError)
+        self.assertEqual(self.files(), before)
 
 
 # -- criterion 5: the gate survives --------------------------------------------------------------------------------

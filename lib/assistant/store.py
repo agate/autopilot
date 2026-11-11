@@ -59,9 +59,10 @@ def check_writable(value, what: str = "card is") -> None:
     `copy.deepcopy` and the indented writer, which stop at the recursion limit. Where they stop depends on how deep
     the caller's stack already is, so trying the copy gives one answer on write and another on read (a card the
     store wrote and then could not read). A fixed bound well under that limit gives the same answer everywhere, and
-    walking the value (with a list, not recursion; nothing copied, no text built) is cheap on every read. Raises
-    TooDeepError `<what> nested too deeply to copy or write` at the first level past the bound. Anything else (a
-    value JSON cannot write, a container already on the path, i.e. a cycle) is left to the card checks."""
+    walking the value (with a list, not recursion; nothing copied, no text built; a shared value walked again only
+    when met deeper) is cheap on every read. Raises TooDeepError `<what> nested too deeply to copy or write` at the
+    first level past the bound. Anything else (a value JSON cannot write, a container already on the path, i.e. a
+    cycle) is left to the card checks."""
     kinds = (dict, list, tuple)
     if not isinstance(value, kinds):
         return
@@ -71,13 +72,18 @@ def check_writable(value, what: str = "card is") -> None:
 
     path = [(value, inside(value))]
     on_path = {id(value)}
+    walked = {id(value): 1}  # id -> the deepest depth a container was already walked from
     while path:
         node, rest = path[-1]
         for child in rest:
             if isinstance(child, kinds) and id(child) not in on_path:
                 if len(path) >= MAX_DEPTH:
                     raise cards.TooDeepError(f"{what} nested too deeply to copy or write")
-                if child:  # an empty one holds nothing deeper: counted above, never walked into
+                depth = len(path) + 1
+                # an empty one holds nothing deeper: counted above, never walked into; one already walked from as
+                # deep or deeper holds nothing new (so each is walked at most MAX_DEPTH times, not once per path)
+                if child and walked.get(id(child), 0) < depth:
+                    walked[id(child)] = depth
                     path.append((child, inside(child)))
                     on_path.add(id(child))
                     break
