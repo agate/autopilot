@@ -75,7 +75,7 @@ class AngleWidenError(AngleError):
 
     def __init__(self, file: str, key: str, line: Optional[int]):
         at = f"line {line}: " if line else ""
-        super().__init__(f"{file}: {at}'{key}' is not allowed: an angle cannot add tools or permissions; it is "
+        super().__init__(f"{file}: {at}{_show(key)} is not allowed: an angle cannot add tools or permissions; it is "
                          "prose for a reviewer, and each reviewer keeps the tools and permission floor its role "
                          "ships with")
         self.file, self.key, self.line = file, key, line
@@ -135,7 +135,8 @@ def _decode(data: bytes, where: str) -> str:
         text = data.decode("utf-8")
     except UnicodeDecodeError as e:
         raise AngleError(f"{where}: cannot read: {e}") from e
-    return text.replace("\r\n", "\n").replace("\r", "\n")
+    # yamlish drops a leading BOM only at the very start of its text, and the file is read under a wrapper key.
+    return text.lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _git(repo, args: list, where: str) -> subprocess.CompletedProcess:
@@ -162,7 +163,7 @@ def _read_repo(repo, commit: str) -> tuple:
         raise _git_failed(p, where, f"no commit {commit!r} in {repo}")
     sha = p.stdout.decode("ascii", "replace").strip()
     where = f"{repo}/{REPO_FILE} at {sha[:12]}"
-    p = _git(repo, ["ls-tree", "-l", "-z", sha, "--", REPO_FILE], where)
+    p = _git(repo, ["ls-tree", "--full-tree", "-l", "-z", sha, "--", REPO_FILE], where)
     if p.returncode != 0:
         raise _git_failed(p, where, "cannot list the commit's files")
     out = p.stdout.rstrip(b"\0")
@@ -190,13 +191,17 @@ def _read_repo(repo, commit: str) -> tuple:
 class _Checker:
     def __init__(self, where: str, lines: dict):
         self.where, self.lines = where, lines
+        self.first = {}   # every prefix of a key's path -> the smallest line under it, so line() is one lookup
+        for p, n in lines.items():
+            for k in range(len(p) + 1):
+                if n < self.first.get(p[:k], n + 1):
+                    self.first[p[:k]] = n
 
     def line(self, path: tuple) -> Optional[int]:
         """The line of a key's path in the file; for a list item, the first line of its keys."""
         if path in self.lines:
             return self.lines[path]
-        found = [n for p, n in self.lines.items() if p[:len(path)] == path]
-        return min(found) if found else None
+        return self.first.get(path)
 
     def fail(self, path: tuple, reason: str):
         n = self.line(path) if path else None
@@ -226,7 +231,7 @@ class _Checker:
             self.fail(at, f"when must be 'always' or a map with paths and/or kinds, not {_show(v)}")
         for k in v:
             if k not in WHEN_KEYS:
-                self.fail(at + (k,), f"unknown key '{k}' in when (known keys: {', '.join(WHEN_KEYS)})")
+                self.fail(at + (k,), f"unknown key {_show(k)} in when (known keys: {', '.join(WHEN_KEYS)})")
         for k in WHEN_KEYS:
             if k not in v:
                 continue
@@ -237,14 +242,23 @@ class _Checker:
                 if not isinstance(x, str) or not x.strip():
                     self.fail(at + (k,), f"when.{k} entries must be non-empty text, not {_show(x)}")
                 if k == "kinds" and x not in KINDS:
-                    self.fail(at + (k,), f"unknown kind '{x}' in when.kinds (kinds: {', '.join(KINDS)})")
+                    self.fail(at + (k,), f"unknown kind {_show(x)} in when.kinds (kinds: {', '.join(KINDS)})")
                 if k == "paths" and x.startswith("/"):
-                    self.fail(at + (k,), f"glob '{x}' starts with '/'; globs match repo-relative paths, so drop it")
+                    self.fail(at + (k,), f"glob {_show(x)} starts with '/'; globs match repo-relative paths, "
+                                         "so drop it")
 
 
 def _show(v) -> str:
+    """A value from a file as a message shows it: its repr (control characters escaped), at most 80 characters."""
     s = repr(v)
     return s if len(s) <= 80 else s[:77] + "..."
+
+
+def _reason(reason: str) -> str:
+    """yamlish's reason with any file text in it made safe to print: control characters escaped, at most 200
+    characters."""
+    s = "".join(ch if ch.isprintable() else repr(ch)[1:-1] for ch in reason)
+    return s if len(s) <= 200 else s[:197] + "..."
 
 
 def _parse(text: str, where: str) -> tuple:
@@ -253,7 +267,7 @@ def _parse(text: str, where: str) -> tuple:
         yamlish.parse(text)
     except yamlish.YamlError as e:
         if not e.reason.endswith("not a list"):
-            raise AngleError(f"{where}: {e}") from e
+            raise AngleError(f"{where}: line {e.line}: {_reason(e.reason)}") from e
     else:
         if text.strip() and yamlish.load(text):
             raise AngleError(f"{where}: an angle file must be a list of angles ('- name: ...'), not a map")
@@ -261,7 +275,9 @@ def _parse(text: str, where: str) -> tuple:
     try:
         data, lines = yamlish.parse(_WRAP + text)
     except yamlish.YamlError as e:
-        raise AngleError(f"{where}: line {e.line - 1}: {e.reason}") from e
+        # Every line number in it is one past the file's own: the wrapper key is line 1.
+        reason = re.sub(r"\(first on line (\d+)\)", lambda m: f"(first on line {int(m.group(1)) - 1})", e.reason)
+        raise AngleError(f"{where}: line {e.line - 1}: {_reason(reason)}") from e
     if set(data) != {"angles"} or not isinstance(data["angles"], list):
         raise AngleError(f"{where}: an angle file must be a list of angles ('- name: ...')")
     lines = {p[1:]: n - 1 for p, n in lines.items() if p[:1] == ("angles",) and len(p) > 1}
@@ -277,14 +293,14 @@ def _entry(c: _Checker, i: int, entry) -> dict:
         c.fail((), f"item {i + 1} must be a map with name, question, when and brief, not {_show(entry)}")
     for key in entry:
         if key not in KEYS:
-            c.fail(path + (key,), f"unknown key '{key}' (known keys: {', '.join(KEYS)})")
+            c.fail(path + (key,), f"unknown key {_show(key)} (known keys: {', '.join(KEYS)})")
     entry = dict(entry)
     if "off" in entry:
         if entry["off"] is not True:
             c.fail(path + ("off",), f"off must be true, not {_show(entry['off'])}")
         extra = [k for k in entry if k not in ("name", "off")]
         if extra:
-            c.fail(path + (extra[0],), f"an entry with off: true holds only name, not '{extra[0]}'")
+            c.fail(path + (extra[0],), f"an entry with off: true holds only name, not {_show(extra[0])}")
         if "name" not in entry:
             c.fail(path + ("off",), "an entry with off: true needs the name of the angle to turn off")
         c.text(entry, "name", path)
@@ -310,18 +326,22 @@ def _apply(table: Table, layer: int, text: Optional[str], where: str) -> None:
         return
     entries, c = _parse(text, where)
     earlier = {a.name: a for a in table.angles}
+    # The table by name; a dict keeps a replaced name in its place and appends a new one, like the table.
+    current = dict(earlier)
     seen = {}
     for i, raw in enumerate(entries):
         entry = _entry(c, i, raw)
         name = entry["name"]
+        named = (i, "name") if c.line((i, "name")) else (i, "extends") if c.line((i, "extends")) else (i,)
         if name in seen:
-            c.fail((i,), f"angle '{name}' is already named on line {seen[name]}; a name is used once per file")
-        seen[name] = c.line((i,))
+            c.fail(named, f"angle {_show(name)} is already named on line {seen[name]}; a name is used once per "
+                          "file")
+        seen[name] = c.line(named)
         if "off" in entry:
             if name == CORRECTNESS:
                 c.fail((i, "off"), f"{CORRECTNESS} cannot be turned off; extend or replace it instead")
             if name in earlier:
-                table.angles = [a for a in table.angles if a.name != name]
+                del current[name]
             else:
                 table.unknown_off.append({"name": name, "file": where, "line": c.line((i,))})
             continue
@@ -329,7 +349,7 @@ def _apply(table: Table, layer: int, text: Optional[str], where: str) -> None:
             base = earlier.get(entry["extends"])
             if base is None:
                 where_from = ", ".join(LAYERS[:layer]) or "no earlier layer"
-                c.fail((i, "extends"), f"extends '{entry['extends']}', but no earlier layer has an angle of that "
+                c.fail((i, "extends"), f"extends {_show(entry['extends'])}, but no earlier layer has an angle of that "
                                        f"name (looked in: {where_from})")
             fields = {k: copy.deepcopy(getattr(base, k)) for k in FIELDS}
             fields.update({k: copy.deepcopy(entry[k]) for k in FIELDS if k in entry})
@@ -337,12 +357,9 @@ def _apply(table: Table, layer: int, text: Optional[str], where: str) -> None:
         else:
             fields = {k: copy.deepcopy(entry[k]) for k in FIELDS}
             origin = LAYERS[layer]
-        angle = Angle(fields["name"], fields["question"], fields["when"], fields["brief"], origin, where, layer, i)
-        at = next((j for j, a in enumerate(table.angles) if a.name == name), None)
-        if at is None:
-            table.angles.append(angle)
-        else:
-            table.angles[at] = angle
+        current[name] = Angle(fields["name"], fields["question"], fields["when"], fields["brief"], origin, where,
+                              layer, i)
+    table.angles = list(current.values())
 
 
 def load(data_dir=None, repo=None, commit=None, plugin_file=None) -> Table:
@@ -382,23 +399,48 @@ def kinds(files: list) -> dict:
     return {k: found[k] for k in KINDS if k in found}
 
 
-def _glob_regex(pattern: str) -> str:
-    parts = pattern.split("/")
-    out = []
-    for i, seg in enumerate(parts):
-        last = i == len(parts) - 1
-        if seg == "**":
-            out.append(".+" if last else "(?:[^/]+/)*")
-            continue
-        rx = "".join("[^/]*" if ch == "*" else "[^/]" if ch == "?" else re.escape(ch) for ch in seg)
-        out.append(rx if last else rx + "/")
-    return "".join(out)
+def _segment_match(pattern: str, text: str) -> bool:
+    """Whether one path segment `text` matches one glob segment: `*` is any run of characters, `?` is one, every
+    other character is itself. Two pointers, going back only to the last `*`: at most len * len steps."""
+    p = t = 0
+    star, mark = -1, 0
+    while t < len(text):
+        if p < len(pattern) and pattern[p] == "*":
+            star, mark = p, t
+            p += 1
+        elif p < len(pattern) and (pattern[p] == "?" or pattern[p] == text[t]):
+            p += 1
+            t += 1
+        elif star >= 0:
+            p, mark = star + 1, mark + 1
+            t = mark
+        else:
+            return False
+    return all(ch == "*" for ch in pattern[p:])
 
 
 def glob_match(pattern: str, path: str) -> bool:
     """Whether the repo-relative `path` matches `pattern` as a whole: `**` is any number of folders (a final `**`
-    is everything under its folder), `*` and `?` stay inside one path segment, every other character is itself."""
-    return re.fullmatch(_glob_regex(pattern), path, re.S) is not None
+    is everything under its folder), `*` and `?` stay inside one path segment, every other character is itself.
+    Linear in the segments (no backtracking), since a glob comes from a file a PR author can write."""
+    parts, segs = pattern.split("/"), path.split("/")
+    n = len(segs)
+    at = [True] + [False] * n          # at[j]: the glob so far matches the path's first j segments
+    for i, part in enumerate(parts):
+        if part == "**" and i == len(parts) - 1:
+            # Everything under its folder: one character or more after the last '/' matched so far.
+            return any(at[j] and (j < n - 1 or segs[j] != "") for j in range(n))
+        nxt = [False] * (n + 1)
+        if part == "**":
+            # Zero or more whole folders, each with a name.
+            for j in range(n + 1):
+                nxt[j] = at[j] or (j > 0 and nxt[j - 1] and segs[j - 1] != "")
+        else:
+            for j in range(n):
+                if at[j] and _segment_match(part, segs[j]):
+                    nxt[j + 1] = True
+        at = nxt
+    return at[n]
 
 
 def _examples(files: list) -> str:

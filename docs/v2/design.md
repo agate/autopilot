@@ -387,25 +387,28 @@ How it is built (`lib/assistant/angles.py`, the table in `review/angles.yaml`):
 
 - **[decided by the builder]** Files. Built in: `<plugin>/review/angles.yaml` (the repo root's `review/`, next to
   `sources/`). The user's: `<data>/review/angles.yaml`. The repo's: `.autopilot/review.yaml` read from the reviewed
-  commit, never the working tree, read-only (`git rev-parse` to pin the commit, `git ls-tree` to find the file and
-  its size, `git cat-file blob`). The path missing at that commit is no layer; any other git failure (no such repo
-  or commit, a commit name starting with `-`, a folder or link at the path) is an `AngleError`. A missing user file
-  is no layer; an empty file holds no angles. Each file is a YAML list of maps of at most `sources.MAX_SOURCE`
-  bytes, read with `yamlish` (as the list under one wrapper key, so line numbers stay the file's own).
+  commit, never the working tree, read-only (`git rev-parse` to pin the commit, `git ls-tree --full-tree` to find
+  the file and its size from the repo root, `git cat-file blob`). The path missing at that commit is no layer; any
+  other git failure (no such repo or commit, a commit name starting with `-`, a folder or link at the path) is an
+  `AngleError`. A missing user file is no layer; an empty file holds no angles. Each file is a YAML list of maps of
+  at most `sources.MAX_SOURCE` bytes (a leading BOM is dropped), read with `yamlish` (as the list under one wrapper
+  key, so line numbers stay the file's own).
 - **[decided by the builder]** An angle's keys: `name` (non-empty text, unique in its file, compared as written),
   `question` and `brief` (non-empty text), `when`, plus `extends` and `off`. Any other key is refused, naming the
-  file, line and key. A key in `templates.WIDEN` (compared with `templates._norm`, so `allowedTools`,
-  `allowed-tools` and `allowed_tools` are one key), at any depth, is refused first with an `AngleWidenError`: an
-  angle cannot add tools or permissions. `AngleError` and `AngleWidenError` are `ConfigError`s; a broken angle file
-  stops the load with a clear error, like a broken template (D19).
+  file, line and key. Text from the file in an error (a key, name, kind or glob) is shown as its repr, control
+  characters escaped, cut to 80 characters. A key in `templates.WIDEN` (compared with `templates._norm`, so
+  `allowedTools`, `allowed-tools` and `allowed_tools` are one key), at any depth, is refused first with an
+  `AngleWidenError`: an angle cannot add tools or permissions. `AngleError` and `AngleWidenError` are
+  `ConfigError`s; a broken angle file stops the load with a clear error, like a broken template (D19).
 - **[decided by the builder]** `when` is `always`, or a map with `paths` (a non-empty list of globs) and/or `kinds`
   (a non-empty list of `data`, `infra`, `api`, `ci`, `ui`, `tests`, `docs`). Kinds come from file paths with
-  secretary's patterns (`AREAS`, `TESTS`, `DOCS`), copied into `angles.py`; as in secretary, the five code kinds
-  are read only from files that are neither tests nor docs (`api/test_x.py` is `tests`, not `api`). A glob matches
-  the whole repo-relative path: `**` is any number of folders (a final `**` is everything under its folder), `*` and
-  `?` stay inside one path segment, and every other character is itself (`[` included). A glob starting with `/`
-  is refused, since it could never match. An angle matches when any changed file matches one of its globs, or the
-  PR has one of its kinds.
+  secretary's patterns (`AREAS`, `TESTS`, `DOCS`), copied into `angles.py`; as in secretary, the five code kinds are
+  read only from files that are neither tests nor docs (`api/test_x.py` is `tests`, not `api`). A glob matches the
+  whole repo-relative path: `**` is any number of folders (a final `**` is everything under its folder), `*` and `?`
+  stay inside one path segment, and every other character is itself (`[` included). A glob starting with `/` is
+  refused, since it could never match. A glob comes from a file a PR author can write, so the matcher works segment
+  by segment, never with a backtracking regex, in time bounded by the glob's and the path's lengths. An angle
+  matches when any changed file matches one of its globs, or the PR has one of its kinds.
 - **[decided by the builder]** Layers: built in, then the user's, then the repo's; the later one wins on the same
   name. An entry with neither `extends` nor `off` is a whole angle (all of `name`, `question`, `when`, `brief`) and
   adds or replaces; a replaced angle keeps its place in the table and a new one goes last. `extends: <name>` merges

@@ -6,7 +6,9 @@ import shutil
 import subprocess
 import tempfile
 import textwrap
+import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from tests.helpers import ROOT
@@ -203,8 +205,10 @@ class LayerTest(AngleCase):
                  "repo without commit": (self.repo, None)}
         for label, (repo, rev) in cases.items():
             with self.subTest(case=label):
-                with self.assertRaises(AngleError):
+                with self.assertRaises(AngleError) as e:
                     angles.load(self.data, repo=repo, commit=rev)
+                if label == "an option":
+                    self.assertIn("is not a commit name", str(e.exception))
 
     def test_repo_path_that_is_a_folder_is_refused(self):
         self.git("init", "-q")
@@ -230,10 +234,40 @@ class LayerTest(AngleCase):
     def test_repo_file_past_the_cap_is_refused(self):
         big = '- name: Big\n  question: "q?"\n  when: always\n  brief: "%s"\n' % ("x" * sources.MAX_SOURCE)
         commit = self.commit_repo_file(big)
-        with self.assertRaises(AngleError) as e:
-            self.load(repo=self.repo, commit=commit)
+        with mock.patch.object(angles, "_git", wraps=angles._git) as git:
+            with self.assertRaises(AngleError) as e:
+                self.load(repo=self.repo, commit=commit)
         self.assertIn(".autopilot/review.yaml", str(e.exception))
         self.assertIn(str(sources.MAX_SOURCE), str(e.exception))
+        # The size listed by ls-tree refuses it; the blob is never read.
+        self.assertTrue(git.call_args_list)
+        for call in git.call_args_list:
+            self.assertNotIn("cat-file", call.args[1])
+
+    def test_repo_file_is_read_from_the_repo_root(self):
+        self.git("init", "-q")
+        for folder, name in ((self.repo, "Root"), (self.repo / "sub", "Sub")):
+            path = folder / ".autopilot" / "review.yaml"
+            path.parent.mkdir(parents=True)
+            path.write_text(f'- name: {name}\n  question: "q?"\n  when: always\n  brief: "b"\n')
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "two files")
+        commit = self.git("rev-parse", "HEAD")
+        got = self.by_name(angles.load(self.data, repo=self.repo / "sub", commit=commit))
+        self.assertIn("Root", got)
+        self.assertNotIn("Sub", got)
+
+    def test_files_starting_with_a_bom_load(self):
+        text = '\ufeff- name: Bom angle\n  question: "q?"\n  when: always\n  brief: "b"\n'
+        with self.subTest(layer="user"):
+            path = self.data / "review" / "angles.yaml"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(text.encode("utf-8"))
+            self.assertIsNotNone(self.load().get("Bom angle"))
+        with self.subTest(layer="repo"):
+            self.user("")
+            commit = self.commit_repo_file(text)
+            self.assertIsNotNone(self.load(repo=self.repo, commit=commit).get("Bom angle"))
 
 
 class ExtendsOffTest(AngleCase):
@@ -346,6 +380,11 @@ class RefusalTest(AngleCase):
                     self.assertIn(f"line {line}", msg)
                     self.assertIn(key, msg)
                     self.assertIn("cannot add tools or permissions", msg)
+        with self.subTest(where="list in when"):
+            self.user('- name: A\n  question: "q?"\n  when:\n    paths:\n      - tools: [Bash]\n  brief: "b"\n')
+            with self.assertRaises(AngleWidenError) as e:
+                self.load()
+            self.assertIn("line 5", str(e.exception))
 
     def test_widen_in_extends_and_in_repo(self):
         with self.subTest(layer="user extends"):
@@ -392,6 +431,12 @@ class RefusalTest(AngleCase):
             "a list of words": ('- A\n- B\n', None, "map"),
             "bad yaml": ('- name: A\n  question: "q?\n', "line 2", None),
             "extends not text": ('- extends: [A]\n', "line 1", "extends"),
+            "duplicate key": ('- name: A\n  name: B\n  question: "q?"\n  when: always\n  brief: "b"\n',
+                              "line 2", "first on line 1"),
+            "duplicate name written after question": (
+                '- question: "q?"\n  name: A\n  when: always\n  brief: "b"\n' * 2, "line 6", "named on line 2"),
+            "extends bad when": ('- extends: Portability\n  when: sometimes\n', "line 2", "when"),
+            "extends empty brief": ('- extends: Portability\n  brief: ""\n', "line 2", "brief"),
         }
         for label, (text, line, word) in cases.items():
             with self.subTest(case=label):
@@ -405,6 +450,47 @@ class RefusalTest(AngleCase):
                     self.assertIn(line, msg)
                 if word:
                     self.assertIn(word, msg)
+
+    def test_file_text_is_shown_escaped_and_capped(self):
+        good = '- name: A\n  question: "q?"\n  when: always\n  brief: "b"\n'
+        esc, long = "x\\e[2Jy", "k" * 100000
+        cases = {
+            "unknown key": good + f'  "{esc}": 1\n',
+            "long unknown key": good + f'  {long}: 1\n',
+            "duplicate key": good + f'  "{esc}": 1\n  "{esc}": 2\n',
+            "long duplicate key": good + f'  {long}: 1\n  {long}: 2\n',
+            "when unknown key": f'- name: A\n  question: "q?"\n  when: {{ "{esc}": [a] }}\n  brief: "b"\n',
+            "unknown kind": f'- name: A\n  question: "q?"\n  when: {{ kinds: ["{esc}"] }}\n  brief: "b"\n',
+            "long kind": f'- name: A\n  question: "q?"\n  when: {{ kinds: [{long}] }}\n  brief: "b"\n',
+            "absolute glob": f'- name: A\n  question: "q?"\n  when: {{ paths: ["/{esc}"] }}\n  brief: "b"\n',
+            "duplicate name": (f'- name: "{esc}"\n  question: "q?"\n  when: always\n  brief: "b"\n') * 2,
+            "long duplicate name": (f'- name: {long}\n  question: "q?"\n  when: always\n  brief: "b"\n') * 2,
+            "extends unknown": f'- extends: "{esc}"\n  brief: "b"\n',
+            "long extends": f'- extends: {long}\n  brief: "b"\n',
+            "long widen key": good + '  "too' + " " * 100000 + 'ls": [Bash]\n',
+        }
+        for label, text in cases.items():
+            with self.subTest(case=label):
+                path = self.user(text)
+                with self.assertRaises(AngleError) as e:
+                    self.load()
+                msg = str(e.exception)
+                self.assertTrue(msg.startswith(str(path)), msg[:300])
+                self.assertNotIn("\x1b", msg)
+                self.assertLess(len(msg), len(str(path)) + 400, msg[:300])
+        with self.subTest(case="widen keeps the raw key"):
+            self.user(good + '  "too' + " " * 1000 + 'ls": [Bash]\n')
+            with self.assertRaises(AngleWidenError) as e:
+                self.load()
+            self.assertEqual(e.exception.key, "too" + " " * 1000 + "ls")
+
+    def test_many_entries_load_fast(self):
+        self.user("".join(f"- {{name: o{n}, off: true}}\n" for n in range(20000)))
+        start = time.monotonic()
+        table = self.load()
+        self.assertLess(time.monotonic() - start, 5)
+        self.assertEqual(len(table.unknown_off), 20000)
+        self.assertEqual(table.unknown_off[-1]["line"], 20000)
 
     def test_file_past_the_cap(self):
         path = self.user('- name: A\n  question: "q?"\n  when: always\n  brief: "%s"\n' % ("x" * sources.MAX_SOURCE))
@@ -478,10 +564,42 @@ class KindsGlobsTest(AngleCase):
                  ("docs/[a].md", "docs/[a].md", True),
                  ("docs/[a].md", "docs/a.md", False),
                  ("a.py", "x/a.py", False),
-                 ("**", "any/thing/at/all.txt", True)]
+                 ("**", "any/thing/at/all.txt", True),
+                 ("src/*.py", "src/a.pyc", False),
+                 ("billing/*", "billing/a/b.py", False),
+                 ("billing/**/b.py", "billing/xb.py", False),
+                 ("billing/**/b.py", "billing/b.py", True),
+                 ("billing/**/b.py", "billing/x/y/b.py", True),
+                 ("billing/**/b.py", "billing//b.py", False),
+                 ("billing/**", "billing", False),
+                 ("billing/**", "billing/", False),
+                 ("billing/**", "billing/a/", True),
+                 ("billing/**", "billing//", True),
+                 ("**", "", False),
+                 ("**/x", "x", True),
+                 ("a/**/**/x", "a/x", True),
+                 ("a/**/**", "a/b", True),
+                 ("a//b", "a//b", True),
+                 ("billing/", "billing/", True),
+                 ("*a*b", "xxaxxbxb", True),
+                 ("*a*b", "xxaxxbxa", False),
+                 ("a**b", "axxb", True),
+                 ("a*", "a", True),
+                 ("?", "", False),
+                 ("src/*.py", "src/.py", True)]
         for pattern, path, want in cases:
             with self.subTest(pattern=pattern, path=path):
                 self.assertIs(angles.glob_match(pattern, path), want)
+
+    def test_globs_take_linear_time(self):
+        cases = [("*a" * 7 + "*b", "a" * 40), ("*a" * 10 + "*b", "a" * 40),
+                 ("**/**/**/**/**/**/**/x", "a/" * 60 + "b"), ("*a" * 200 + "*b", "a" * 4000),
+                 ("/".join(["**"] * 200) + "/x", "a/" * 2000 + "b")]
+        for pattern, path in cases:
+            with self.subTest(pattern=pattern[:40], path=path[:40]):
+                start = time.monotonic()
+                self.assertIs(angles.glob_match(pattern, path), False)
+                self.assertLess(time.monotonic() - start, 2)
 
 
 class PickerTest(AngleCase):
@@ -557,6 +675,25 @@ class PickerTest(AngleCase):
         with self.subTest(mode="review"):
             picked = angles.pick(table, files, "review", changed_lines=200)
             self.assertEqual(self.names(picked), ["Correctness", "Payments safety", "Billing style"])
+
+    def test_file_order_inside_a_layer(self):
+        self.user('- name: New first\n  question: "q?"\n  when: always\n  brief: "b"\n'
+                  '- name: Reader clarity\n  question: "Mine?"\n  when: always\n  brief: "b"\n')
+        picked = angles.pick(self.load(), ["lib/util.py"], "loop")
+        self.assertEqual(self.names(picked), ["Correctness", "New first", "Reader clarity"])
+
+    def test_review_count(self):
+        for files in (["docs/a.md", "schema.sql"], ["tests/test_x.py"]):
+            with self.subTest(files=files):
+                self.assertEqual(angles.count(files, "review", 200), 3)
+
+    def test_paths_or_kinds(self):
+        self.user('- name: Billing data\n  question: "q?"\n  when: { paths: ["billing/**"], kinds: [data] }\n'
+                  '  brief: "b"\n')
+        picked = {p["name"]: p for p in angles.pick(self.load(), ["schema.sql"], "loop")}
+        self.assertIn("Billing data", picked)
+        self.assertIn("kind data", picked["Billing data"]["why"])
+        self.assertNotIn("paths", picked["Billing data"]["why"])
 
     def test_builtin_order_is_riskiest_first(self):
         table = self.load()
