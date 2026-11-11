@@ -520,15 +520,23 @@ Rules:
    `prloop.json`). The gate sees the file (newer than the worker's start) and runs `worker end`: stop the process,
    save the session id on the card. Session state can be lost; the card cannot.
 2. **[decided, from v1]** Dead (no session, or its process is gone, with no result file): resume once with
-   "you were interrupted; check your worktree and run files first". Dead twice: stop and ask the user.
-3. **[proposed]** No process waits for a human. A worker that needs the user writes `question.json` and ends its
-   round; the question becomes the card's `ask`; the user's answer resumes the session with the answer in the
-   prompt.
-4. **[proposed]** A worker stuck at a permission prompt (state blocked, status waiting) gets a card telling the
-   user to `claude attach`. After a time limit (for example 30 minutes) it is stopped and the card keeps it
-   resumable. Not yet verified: whether the prompt appears again on resume.
-5. **[proposed]** Fallback: any worker idle for N minutes with no result file is stopped and marked "paused, can
-   resume".
+   "you were interrupted; check your worktree and run files first". Dead twice: stop and ask the user. A resume
+   that cannot start (its worktree is gone) counts as that one resume. A parked worker whose resume cannot start
+   is stopped at once and asks the user the same way.
+3. **[decided, open question 2]** No process waits for a human. A worker that needs the user writes
+   `question.json` (`{"text": ...}`) in its run directory and ends its round; the gate stops it and frees its slot,
+   and the question becomes the card's `ask` (`type: answer`, with the worker's text, role and session id). The
+   user's answer resumes the session with the question and the answer in the prompt (`ap2 worker answer`).
+4. **[decided, open question 2]** A worker stuck at a permission prompt (status waiting) gets the card's `ask`
+   (`type: fix`) telling the user to `claude attach <id>`. After 30 minutes it is stopped and the card keeps it
+   resumable (`sessions.<role>.state: paused`). Not yet verified: whether the prompt appears again on resume.
+5. **[decided, open question 2]** Fallback: any worker idle for 60 minutes (its turn ended: state blocked or done
+   with a live process, or status idle) with no result file is stopped and marked "paused, can resume". The clock
+   starts when a gate check first sees it idle; seeing it work again resets it.
+   A worker's own ask never outlives its cause: any start of that role (fresh, `--resume`, or an in-place resume)
+   and `finish` close the attach ask, the pause's resume hint and the worker's open question, and every stop also
+   closes the attach ask; the user's own asks and the "died twice" ask are never closed this way. A worker's ask
+   replaces only the same role's own worker ask; any other open ask stays.
 6. When the card is done, its saved sessions are archived (3.5) and removed.
 
 Streaming one long-lived process per card was rejected: it needs supervision, restart logic and a decision on how
@@ -625,6 +633,10 @@ archived with the card.
    recommendation, as the default; a routine may set `skip` or `once` instead. Only the latest missed slot is
    considered.
 2. **Worker lifecycle**: confirm "no process waits for a human" and the idle timeout (8.2, points 3 to 5).
+   **[decided by the builder]** The proposals are taken as written (v2 RULES.md line 3): `question.json` ends
+   the round and becomes an `answer` ask, the answer resumes the session; a permission prompt gets a `fix` ask
+   to `claude attach` and is stopped after 30 minutes, kept resumable; any worker idle 60 minutes with no
+   result file is stopped and marked paused, can resume. Check them.
 3. **Replies on the local page** resume the session immediately (8.3)?
 4. **Drafts and quotes in two languages** (3.1, proposed part).
 5. **Data migration** from v1 and secretary (10).
@@ -687,11 +699,12 @@ Calls the author made without asking (check them):
   add, get, update, list, restore, propose_opposite, prune, search), `restore.py` (restore points and proposed
   opposite actions) and `index.py` (`index.sqlite`); the gate: `routines.py` (routine files and slots) and `gate.py`
   (one gate run, `ap2 gate`); templates and roles: `templates.py` (loading, the user's override, validation,
-  briefs) and `roles.py` (the shipped roles and their tools); and the source engine: `sources.py` (loading,
+  briefs) and `roles.py` (the shipped roles and their tools); the source engine: `sources.py` (loading,
   `extends:`, checks), `form.py` (the form, the path language, `{field}` patterns and derived fields) and
-  `engine.py` (read, fill, check, link and key, sort, card); and scan sessions: `scan.py` (the plan, the brief, the
-  save-raw hook and the take). `ap2 config [--data PATH]` prints the effective config
-  and `data_dir` as JSON. With stdout
+  `engine.py` (read, fill, check, link and key, sort, card); scan sessions: `scan.py` (the plan, the brief, the
+  save-raw hook and the take); and for workers, `workers.py`, `resources.py`, `transcripts.py` and `projects.py`
+  (see the workers entry below). `ap2 config [--data PATH]` prints the effective config and `data_dir` as JSON.
+  With stdout
   closed, `ap2 config` sets up the folder, prints nothing and exits 0; when its reader goes away
   (`ap2 config | true`) it exits 1 with nothing on stderr; when a write fails (a full disk) it prints one line,
   `ap2: cannot write the output: ...`, and exits 1. `ap2` with no arguments prints the usage, listing the
@@ -1186,9 +1199,154 @@ Calls the author made without asking (check them):
     what it would replace, `builtin`, `user` or null; it copies nothing). They only read: none creates the data
     folder. Errors follow the other commands (one `ap2: ...` line, exit 1).
   - Later work: template versions (6: "the old version stays") and Claude's suggested changes are not built yet.
+- **[decided by the builder]** Workers and sessions (8.1, 8.2, 8.5, 3.5), carried over from v1 by import
+  (`lib/autopilot/workers.py`, `sessions.py`, `nextwork.py`, `budget.py`, `park.py`, `perms.py`; none changed).
+  - Modules: `workers.py` (the `Workers` API: start, end, park, classify, list, check, answer, finish),
+    `resources.py` (port ranges, single-use resources, `max_workers`, the start plan and the worker list),
+    `transcripts.py` (gzipped copies, pruning, `claude rm`) and `projects.py` (the per-project setup).
+  - The worker list is one file, `<data>/workers.json`, changed only under `<data>/.workers.lock`: ports, the cap
+    and resources are counted across every project, so one locked read decides each start. A record holds the
+    card, role, project, session name and ids, ports, needs, cwd, branch, start time, resumes, `parked`,
+    `idle_since` and `blocked_since`. One worker per card at a time.
+  - The card keeps what must outlive the process, through the card store: `sessions.<role>` =
+    `{id, ids, cwd, needs, state, why, at}` (`state`: running, ended, asked, stopped, paused, finished; `ids` every
+    session id the role had, since a resume runs under a new id), and the `ask` a worker raises (marked
+    `from: worker`). A worker's ask replaces only the same role's own worker ask (attach, paused, question). Any
+    other open ask stays: the user's own, another role's, and the "died twice" ask. A worker's question that
+    cannot become the ask, because another ask is open, is kept on `sessions.<role>.question`;
+    `ap2 worker answer` answers it from there (and leaves the user's ask open), and the next start clears it.
+  - Run directory: `<data>/sessions/<card>/`, the same folder as the archives, so `keep_transcripts: never`
+    leaves exactly the summary files there (brief, journal, hand-back, review, question) plus the worker's
+    `settings-<role>.json`.
+  - Ports: 10 per worker from `port_base` 7200 (v1 uses 7100, so v2 next to v1 never hands out the same range),
+    the first free slot first; a parked worker keeps its range and resource when it resumes. `max_workers` is 5
+    and counts parked workers (they keep their slot). A start that would pass the cap, or needs a resource another
+    worker holds, is refused with an error naming the holder; `resources.plan()` (v1's `plan_starts`) skips such
+    cards instead. Within a project, `plan()` keeps v1's order (by card id), not the given order. Both are
+    module defaults with keyword overrides, not `config.yaml` keys yet: `ap2 config`
+    prints the config exactly and its test pins the keys.
+  - Per-project setup: `<data>/projects/<name>.yaml`, named by the card's `project` field, with v1's keys `repo`,
+    `branch_pattern` (`{prefix}.{task}.{short}`), `branch_prefix`, `resources`, `health_checks`, `extra_hosts`,
+    `mcp_servers`, and `tools` (the MCP tool names a worker's session has). An unknown key is refused with its
+    line. The floor's tool list is the exact set the worker's own session will load, found in the worker's own
+    folder by a session that never reaches a model turn. A project that lists `tools` is used as is, always first
+    (`projects/**` is Edit-denied). When it lists none (or the card has no project), ap2 finds them every time it
+    writes a floor (start, `--resume`, answer, in-place resume of a dead or parked worker), after the shadow-mode
+    refusal and under the worker list's lock: one `claude -p "Reply with the single word OK." --output-format
+    stream-json --verbose` in the worker's folder, with the same process env as its `--bg` launch, so the folder's
+    local-scope MCP servers (`claude mcp add` stores them in `~/.claude.json` under that folder's path), an
+    approved `<folder>/.mcp.json` and the plugins are all seen. Its output is read line by line; at the first init
+    event (`type: system`, `subtype: init`, the event v1's `perms.parse_discovery` reads) the tools are taken and
+    the process is killed at once, before anything else is read. If no init event arrives within
+    `DISCOVER_TIMEOUT` (180 s) it is killed too. It runs in its own process group and every kill ends the whole
+    group (a `claude` launcher that does not exec, the real claude under it, the MCP servers and hooks they
+    started), and the child is reaped before the call returns. A server the init event's `mcp_servers` lists as
+    not `connected` (pending, failed, needs-auth or anything else) has no tools in that event yet, so it is denied
+    whole (`mcp__<server key>`, with the server name normalized the way Claude Code keys it: every character
+    outside `[A-Za-z0-9_-]` becomes `_`, and for a `claude.ai ` server runs of `_` are squeezed and the ends
+    trimmed, so `claude.ai Jira & Confluence` is `mcp__claude_ai_Jira_Confluence`): a slow or not-yet-connected
+    server never goes out un-denied.
+    No tool list is read from or saved on a card: a card is not trusted storage (`ap2 card add`, workers and
+    scans write cards).
+    Why this is safe: the session is killed at its init event, which comes before the model's first reply, so the
+    model never runs, and nothing a worker wrote into its folder (a CLAUDE.md, settings, allow rules) can make it
+    call a tool. What it does not cover: the folder's MCP server commands and SessionStart hooks do start before
+    the init event. They run only what the worker's own Bash could already run in that folder; limiting what the
+    worker's Bash writes is the worker-floor task still queued.
+    The outward MCP tools are always denied. If they cannot be listed (no init event, claude failed, could not
+    start or timed out), nothing starts: the `WorkerError` says to list them in `projects/<name>.yaml` `tools`. On a dead
+    worker's resume that counts as its one resume; a parked worker is stopped as when its resume cannot start. An in-place resume first
+    checks that the worker's folder is still there, so a gone worktree says "cannot start the session". The branch is the card's `branch`, else the pattern with the card's `key` (else its id) and the first
+    three words of its title. The session gets them the way v1 passes setup: `--settings <run dir>/settings-<role>.json`
+    (the permission floor: v1's outward-tool and Bash denials, plus `Edit` denials on the data folder's own files
+    (including the user's `templates/**` and `sources/**`, the rules the worker floor in `roles.py` promises; every
+    card's run directory stays writable except its settings files) and the package, and one allow rule, `Bash(<package>/bin/ap2 worker park:*)`, as v1 allows its park command; the floor refuses a data folder or package path that a gitignore pattern cannot
+    name literally (one holding `[ ] * ? \ ! #` or ending in a space), before any session starts) and env `AP2_ROLE`, `AP2_DATA`, `AP2_CARD`, `AP2_PROJECT`, `AP2_RUN_DIR`, `AP2_PORTS`,
+    `AP2_BRANCH`, `AP2_EXTRA_HOSTS`, `AP2_MCP_SERVERS`, `AP2_HEALTH_CHECKS` (JSON), in both the process env and the
+    settings' `env`. v1's `AUTOPILOT_*` variables are dropped, so v1's park hook never takes a v2 worker for its
+    own. The prompt ends with the card, role, branch, port range, run directory, extra hosts, the result file to
+    write, `question.json` and the park command. Health checks are passed, not run: the gate runs them (v1
+    `access.py`) in a later slice.
+  - Session: `claude --bg -n "<card> · <role>" --permission-mode auto --settings ... [--agent ...] --effort xhigh`
+    (v1's defaults; the `pr` role runs `/autopilot:pr-loop` instead of an agent, until templates and roles define
+    v2's own). A resume is `claude --bg --resume <id> -n ... --permission-mode ... --settings ... <prompt>`.
+    The resume id comes from the card or the worker list, so it is checked first: letters, digits and `-`, not
+    starting with `-`. Anything else is refused before claude runs, so it can never become a flag. `--cwd` is
+    saved absolute, so a later check run from another folder still finds it.
+  - `check()` classifies each worker: done (its result file newer than its start), question (`question.json`
+    newer than its start), parked, unknown (the listing failed: nothing is done), dead (no session, its process
+    gone, or state failed), blocked (status waiting), idle (state blocked or done, or status idle), running. Done:
+    stop, save the session on the card, archive. A worker's record leaves the list only once `claude stop` has
+    returned. A close that was started is finished before anything else: before it sends `claude stop` it records
+    on the worker's record what it closes for (`closing`: end, done, question, died twice, idle, blocked, or a
+    parked worker that cannot resume), and the next check (or `end`) that finds that mark completes the same close
+    (stop again, save, drop, raise the same ask or hint) instead of acting on the session's state, since a stop that
+    timed out may still have landed. Once the stop has returned, a failed step drops it only where a kept record would be misread as dead and resumed
+    (end, the idle pause, the blocked pause); done, question, died twice and a parked worker that cannot resume
+    keep it, so the next check closes it again and raises its ask. `end` that finishes another path's mark does
+    that path's close and follow-up, but with end's drop rule: once the stop has returned the record always leaves
+    the list, so a save that keeps failing (e.g. the card file is gone) cannot hold its slot and ports forever. The blocked pause raises its resume hint only
+    once the stop has returned. The archive copy is best-effort (`archive: null` and `archive_error` on the line;
+    `finish` copies every id again). Dead once: resume in place (same slot) with "You were
+    interrupted. Check your worktree and run files first..."; dead twice: stop and set a `fix` ask. Parked: with
+    `--usage`, resume once v1's `park.resume_due` allows, on the same ports. Every in-place resume stops the old
+    session first, whatever its state (a failed one may keep its process), and the copy takes its place. One worker's error (a bad project file, a failed call, a run folder that cannot
+    be read while it is classified) never stops the pass: it goes on that worker's line as `note` (and `error`, the exception's name, when it is not one of v2's own
+    errors), the other workers are still acted on, and the worker list is written back. The worker list is written
+    back however its locked block ends, normally or by any exception (Ctrl-C included), so every change already made
+    reaches disk (an interrupted end keeps its `closing` mark or has dropped its record; an interrupted pass stops at
+    that worker), and the exception is then re-raised. A worker with a started
+    close (`closing`) still has that close finished when its state cannot be read: the mark says what to do. A
+    result or question file that is gone between its two looks is not newer. The listing is taken
+    under the worker list's lock, so a start that lands during a check is never judged against a listing from
+    before it. A dead worker whose resume cannot start (e.g. its worktree is gone) counts that try: the next
+    check stops it as died twice and raises the `fix` ask, so it never holds its slot forever. A shadow-mode
+    refusal is not counted. A parked worker whose resume cannot start is stopped at once (`did: stopped`,
+    `sessions.<role>.state: stopped`) with the same `fix` ask (`reason: died_twice`, "could not resume after
+    parking"); a shadow-mode refusal leaves it parked. A session the listing did not show yet when it started
+    (`session_id` empty) gets its id from the next check's listing, on the record and the card's
+    `sessions.<role>` (`id` and `ids`), so a later stop archives it and a later resume continues it. The same for
+    an in-place resume's copy: its record takes the copy's id, or empty when the listing lags, never the old
+    session's id. Each clock
+    runs only
+    while its state is seen without a break: a check that sees any other state (except unknown, which says
+    nothing) resets `idle_since` / `blocked_since`, and a prompt that is gone takes its attach ask with it (only
+    the ask this worker raised, marked `reason: permission_prompt`; the user's own ask is kept). A new prompt after
+    a break gets a new ask and a new 30 minutes. When the 30 minutes are up, the attach ask is replaced by one that
+    says how to go on (`ap2 worker start <card> <role> --resume`, same `reason`), since the session to attach to
+    is stopped; any start of that role (a resume, an answer) closes it. One rule for every worker ask (any ask
+    with `from: worker`), in one helper, `_close_worker_asks`: the worker asks of a role are the attach ask
+    (`type: fix`, `reason: permission_prompt`), the pause's resume hint (the same, plus `stage: paused`) and its
+    question (`type: answer`). Any new session of the role (start, `--resume`, an in-place resume of a dead or
+    parked worker) and `finish` close all three; every stop of a session (end, done, question, dead twice, both
+    pauses, a parked worker replaced by its copy) and a prompt that is gone close the attach ask. A stop never
+    closes the question, since the question path stops the session first and then raises it. The user's own
+    asks and the "died twice" ask (`reason: died_twice`) are never closed by it; only the user closes them.
+    When the user's own ask is open, a permission prompt is reported on the check's line (`did: nothing`, the
+    attach text in `note`); once the card has no open ask and the prompt is still there, the attach ask is
+    raised, and the 30 minutes still count from the first sight of the prompt. Parking (`ap2 worker park`) reuses `budget.parking`
+    with v1's default rules (park at 90%, resume 5 minutes after the reset).
+  - Shadow mode: starting a worker, resuming one (dead, parked, answered) and `claude rm` call
+    `config.require_live` first and raise `ShadowModeError` before anything runs. Listing, classifying, `check`,
+    `end` (stopping is local), parking and archiving copies work in shadow mode; `finish` then makes the copies,
+    keeps the originals and says so.
+  - Transcripts: each round end copies `<projects>/*/<session id>.jsonl` (the folder is passed in; default
+    `~/.claude/projects`, only read) to `<data>/sessions/<card>/<role>-<session id>.jsonl.gz`, then prunes every
+    archive by `keep_transcripts` (`never` removes them all and writes none, `<N>d` removes those whose file time
+    is older than N days, `always` keeps all). `finish` (the card is done) makes the last copy of every id and, in
+    live mode only, runs `claude rm` on each. A `claude rm` that exits non-zero raises with claude's message; `finish` lists
+    it under `failed`, keeps that original (the next `finish` tries again) and marks a role `removed` only when
+    every one of its originals is gone. `finish` acts only on the known roles (`implement`, `review`, `pr`) in
+    the card's `sessions`; any other key, and a role with no ids, is left as it is on the card. An archive's role must be lowercase letters, else it is
+    refused, so a card's keys never make a path outside the data folder.
+  - Commands, each with `--data PATH` and `--by NAME`, JSON on stdout, one `ap2: ...` line and exit 1 on an error:
+    `ap2 worker list`, `start CARD ROLE [--cwd P] [--prompt-file F] [--needs A,B] [--resume]`,
+    `end CARD ROLE [--transcripts P]`, `check [--transcripts P] [--usage P]`,
+    `park CARD ROLE [--note T] [--usage P]`, `answer CARD TEXT...`, `finish CARD [--transcripts P]`.
 - How the local server pushes updates to an open page (polling is fine).
-- Exact limits: idle timeout, grace for missed slots, page sizes. Decided so far: raw source files and their
-  reports are kept 30 days (`engine.RAW_KEEP`, section 12).
+- Exact limits: idle timeout (decided: 60 minutes, and 30 at a permission prompt; see the workers entry), grace
+  for missed slots, page sizes. Decided so far: raw source files and their reports are kept 30 days
+  (`engine.RAW_KEEP`, section 12).
 
 ## Appendix: example files
 
