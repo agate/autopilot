@@ -930,10 +930,10 @@ Calls the author made without asking (check them):
     wall-clock text in the new zone (Eastern 09:00 becomes Pacific 06:00, so the Pacific 09:00 slot still runs); a
     reset would instead make the routine `start` again and skip the slot. The file changes only at the next write.
     An unknown old zone is refused on `last_slot_tz`; a slot that cannot be moved (past the end of the calendar) is
-    refused on `last_slot`. A file without `last_slot_tz` behaves as before. A known limit: when the moved slot lands
-    in the second pass of the new zone's repeated hour at the end of daylight saving time, a slot later in that same
-    hour (whose first pass came before the last run) may run once, late. It needs a `tz` change during that hour,
-    and it is accepted.
+    refused on `last_slot`. A file without `last_slot_tz` behaves as before. A moved slot also keeps its exact
+    moment (in memory only; the file gains no key, since `last_slot` and `last_slot_tz` already pin it), and a slot
+    whose time is at or before that moment is not run, so a move that lands in the repeated hour at the end of
+    daylight saving time runs no slot twice; the clock-went-back check compares that moment too.
   - A fatal error. When a run stops with a config error (config.yaml cannot be read, the lock cannot be opened, the
     data folder fails) and the data folder exists, `gate.run` appends `<UTC time> fatal: <error>` to gate.log, best
     effort, then raises the same error; `ap2 gate` still prints one `ap2: ...` line and exits 1. Keeping launchd's
