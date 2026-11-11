@@ -411,6 +411,36 @@ class LayerTest(AngleCase):
             self.assertTrue(str(e.exception).startswith(where), str(e.exception))
             self.assertIn("not in this clone (a partial clone)", str(e.exception))
             self.assertEqual(store(), before)
+        with self.subTest(case="a git that does not know GIT_NO_LAZY_FETCH"):
+            # An older git ignores the variable and starts the fetch; with no transport allowed it cannot reach the
+            # remote, so nothing is fetched and the read still fails loud.
+            env = {k: v for k, v in angles._GIT_ENV.items() if k != "GIT_NO_LAZY_FETCH"}
+            with mock.patch.object(angles, "_GIT_ENV", env):
+                with self.assertRaises(AngleError) as e:
+                    self.load(repo=clone, commit=commit)
+            self.assertTrue(str(e.exception).startswith(where), str(e.exception))
+            self.assertEqual(store(), before)
+
+    def test_present_blob_git_cannot_read_is_not_called_missing(self):
+        # In a full clone the blob is there: a size git cannot list, or a read that fails, is not "fetch it first".
+        commit = self.commit_repo_file('- name: Here\n  question: "q?"\n  when: always\n  brief: "b"\n')
+        real = angles._git
+        for case in ("no size", "read fails"):
+            def git(repo, args, where_):
+                p = real(repo, args, where_)
+                if case == "no size" and args[0] == "ls-tree":
+                    p.stdout = re.sub(rb"(blob [0-9a-f]+) +[0-9]+\t", rb"\1     BAD\t", p.stdout)
+                if case == "read fails" and args[:2] == ["cat-file", "blob"]:
+                    p = subprocess.CompletedProcess(p.args, 128, b"", b"fatal: loose object is corrupt\n")
+                return p
+
+            with self.subTest(case=case):
+                with mock.patch.object(angles, "_git", side_effect=git):
+                    with self.assertRaises(AngleError) as e:
+                        self.load(repo=self.repo, commit=commit)
+                msg = str(e.exception)
+                self.assertNotIn("not in this clone", msg)
+                self.assertIn("may be corrupt" if case == "no size" else "cannot read the file from the commit", msg)
 
 
 class ExtendsOffTest(AngleCase):
