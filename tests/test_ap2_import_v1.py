@@ -301,6 +301,35 @@ class ImportV1Test(unittest.TestCase):
         self.assertEqual(card["plain"]["where"], before["plain"]["where"])
         self.assertEqual(set(self.actions(self.ok("--project", "shop")).values()), {"unchanged"})
 
+    def test_closing_looks_only_at_the_projects_own_cards(self):
+        self.ok("--project", "shop")
+        shop = {k: c for k, c in self.by_key().items() if k.startswith("v1:shop")}
+        self.edit_state("projects/shop", lambda s: s["decisions"].pop(0))
+        test = self
+
+        class OnlyLookedUp(dict):
+            """A card map that refuses to be walked whole and records each card read from it."""
+            read = []
+
+            def __getitem__(self, key):
+                self.read.append(key)
+                return dict.__getitem__(self, key)
+
+            def items(self):
+                test.fail("the closing step walked every card")
+            keys = values = __iter__ = items
+
+        other = {f"v1:other:Q{n}": {"key": f"v1:other:Q{n}", "kind": "question", "lane": "needs", "ask": {}}
+                 for n in range(1000)}
+        existing = OnlyLookedUp({**other, **shop})
+        own = [k for k in shop if k.startswith("v1:shop:")]
+        entries, _ = importv1.plan("shop", self.v1 / "projects" / "shop", ("en",), importv1.Labels(self.v1),
+                                   existing, own)
+        self.assertIn("v1:shop:D1", [e["key"] for e in entries])
+        self.assertFalse([e for e in entries if e["key"].startswith("v1:other")])
+        self.assertTrue(OnlyLookedUp.read)
+        self.assertTrue(all(k.startswith("v1:shop:") for k in OnlyLookedUp.read), OnlyLookedUp.read)
+
     def test_an_archived_decision_closes_its_card_keeping_each_languages_text(self):
         self.set_config("secondary_language: zh\n")
         self.ok("--project", "shop")
@@ -628,6 +657,21 @@ class ImportV1Test(unittest.TestCase):
         self.assertIn("shop", line)
         self.assertFalse(self.data.exists())
 
+    def test_a_symlinked_project_folder_whose_real_location_is_inside_the_data_folder_is_refused(self):
+        if not hasattr(os, "symlink"):
+            self.skipTest("no symlinks here")
+        real = self.data / "mirror" / "shop"
+        real.parent.mkdir(parents=True)
+        shutil.move(str(self.v1 / "projects" / "shop"), str(real))
+        try:
+            (self.v1 / "projects" / "shop").symlink_to(real, target_is_directory=True)
+        except (OSError, NotImplementedError) as e:
+            self.skipTest(f"cannot make a symlink: {e}")
+        before = snapshot(self.data)
+        line = self.fails()
+        self.assertIn("shop", line)
+        self.assertEqual(snapshot(self.data), before)
+
     def test_a_v1_folder_inside_the_data_folder_is_refused(self):
         self.data = self.tmp / "d"
         self.v1 = self.data / "v1"
@@ -698,6 +742,8 @@ class ImportV1Test(unittest.TestCase):
             "a status that is not text": (lambda d: (d / "state.json").write_text(
                 json.dumps({"tasks": [{"id": "PROJ-9", "status": ["todo"]}], "decisions": []}),
                 encoding="utf-8"), "unknown status"),
+            "a state without tasks": (lambda d: (d / "state.json").write_text(
+                json.dumps({"decisions": []}), encoding="utf-8"), "tasks"),
             "a state without decisions": (lambda d: (d / "state.json").write_text(
                 json.dumps({"tasks": []}), encoding="utf-8"), "decisions"),
             "text that is not Unicode": (lambda d: (d / "state.json").write_text(

@@ -260,6 +260,9 @@ def read_project(folder: Path) -> tuple:
     """(config, tasks, decisions) of one v1 project. Raises _Refused with the reason."""
     cfg = _read_object(folder, "config.json")
     state = _read_object(folder, "state.json")
+    # v1 cannot load a state.json without tasks either; read as none, a done project would turn running again.
+    if "tasks" not in state:
+        raise _Refused("state.json: tasks missing")
     tasks = _items(state, "tasks")
     # v1 cannot load a state.json without decisions; read as none, every open question card would be closed.
     if "decisions" not in state:
@@ -340,10 +343,11 @@ class _Maker:
         return entry
 
 
-def plan(name: str, folder: Path, langs: tuple, labels: Labels, existing: dict) -> tuple:
+def plan(name: str, folder: Path, langs: tuple, labels: Labels, existing: dict, own: list) -> tuple:
     """The cards one project makes, parents first, and how many decisions it does not import. `existing` is this
-    feed's cards by key. Each card is checked as the store will check it, so a project is refused before any of its
-    cards is written. Raises _Refused."""
+    feed's cards by key; `own` is the keys in it under this project (`v1:<name>:...`), so closing looks only at
+    those. Each card is checked as the store will check it, so a project is refused before any of its cards is
+    written. Raises _Refused."""
     cfg, tasks, decisions = read_project(folder)
     make = _Maker(name, folder, langs, labels)
     out = [make.project(cfg, tasks)] + [make.task(t) for t in tasks]
@@ -363,7 +367,8 @@ def plan(name: str, folder: Path, langs: tuple, labels: Labels, existing: dict) 
     # card still open whose decision is gone is closed too.
     ids = task_ids | {d["id"] for d in decisions}
     prefix = f"v1:{name}:"
-    for key, old in sorted(existing.items()):
+    for key in sorted(own):
+        old = existing[key]
         if (key.startswith(prefix) and key[len(prefix):] not in ids and old.get("kind") == "question"
                 and (old.get("lane") != "done" or old.get("ask") is not None)):
             out.append(make.closed(old))
@@ -427,9 +432,14 @@ def run(data: Path, source: Optional[str] = None, names: Optional[list] = None, 
     existing = _cards_by_key(store, dry_run)
     labels = Labels(root)
     report = {"from": str(root), "dry_run": dry_run, "projects": [], "refused": []}
+    # Each project's keys, grouped once: a v1 name never holds ":", so `v1:<name>:<id>` splits at the first one.
+    by_project = {}
+    for key in existing:
+        if key.startswith("v1:") and ":" in key[3:]:
+            by_project.setdefault(key[3:].split(":", 1)[0], []).append(key)
     for name, folder in found.items():
         try:
-            entries, skipped = plan(name, folder, langs, labels, existing)
+            entries, skipped = plan(name, folder, langs, labels, existing, by_project.get(name, []))
         except _Refused as e:
             report["refused"].append({"name": name, "folder": str(folder), "reason": str(e)})
             continue

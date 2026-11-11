@@ -1562,10 +1562,10 @@ Calls the author made without asking (check them):
   - Report on stdout: `{from, dry_run, projects: [{name, folder, cards: [{key, kind, action: add | update |
     unchanged, card}], not_imported: {decisions}}], refused: [{name, folder, reason}]}`. Every card of a project
     is checked as the store will check it before any is written, so a project whose files cannot be read
-    (missing, bad JSON, not an object, a state.json without `decisions`, a task or decision without an id, an id
-    used twice, an unknown task status, text the store refuses, a value nested deeper than the store writes) is
-    listed under `refused` and the others still import; the command then prints one `ap2: ...` line and exits 1
-    after the report.
+    (missing, bad JSON, not an object, a state.json without `tasks` or `decisions`, a task or decision without an
+    id, an id used twice, an unknown task status, text the store refuses, a value nested deeper than the store
+    writes) is listed under `refused` and the others still import; the command then prints one `ap2: ...` line and
+    exits 1 after the report.
   - Writes only inside the data folder, so it runs in shadow mode (no `require_live`). Not imported:
     `events.jsonl`, reports, run folders, and `<data>/projects/<name>.yaml` (not written from `config.json`).
 - How the local server pushes updates to an open page (polling is fine).
