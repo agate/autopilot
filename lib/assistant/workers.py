@@ -313,14 +313,17 @@ class Workers:
                               f"{where}") from e
         return dict(project, tools=tools, deny_servers=servers)
 
-    def _launch(self, argv: list, cwd: str, env: dict) -> tuple:
-        """Run `claude --bg ...`; return (short id, session id or "")."""
+    def _launch(self, argv: list, cwd: str, env: dict) -> str:
+        """Run `claude --bg ...`; return its short id. The caller puts it on record before it asks the listing for
+        the session id (`_session_id`), so a running session is never left with no record pointing at it."""
         try:
-            short = v1_workers._launch(argv, cwd, self._process_env(env))
+            return v1_workers._launch(argv, cwd, self._process_env(env))
         except (OSError, RuntimeError, subprocess.SubprocessError) as e:
             raise WorkerError(f"cannot start the session: {e}") from e
-        found = v1_sessions.find_by_id(short, v1_sessions.list_all(self.claude)) or {}
-        return short, found.get("sessionId") or ""
+
+    def _session_id(self, short: str) -> str:
+        """The session id of the session with this short id, or "" when the listing does not show it yet."""
+        return (v1_sessions.find_by_id(short, v1_sessions.list_all(self.claude)) or {}).get("sessionId") or ""
 
     def _argv(self, role: str, name: str, settings: Path, prompt: str, resume_id: str = "") -> list:
         argv = [self.claude, "--bg"]
@@ -356,13 +359,18 @@ class Workers:
     def _set_ask(self, card_id: str, ask: dict, by: str) -> bool:
         """Set the card's ask when it has none open, or replace the role's own worker ask (attach, paused or
         question). Any other open ask (the user's own, another role's, the "died twice" ask) is kept: return
-        False."""
-        card = self._card(card_id)
-        cur = card.get("ask")
-        if cur is not None and self._worker_ask_kind(cur, ask["role"]) is None:
-            return False
-        self.store.update(card_id, {"ask": dict(ask, **{"from": "worker"})}, by=by, did=f"ask {ask['type']}")
-        return True
+        False. The card's current ask is checked and the new one written under one hold of the store lock, so a
+        user's ask that lands meanwhile is never overwritten."""
+        def room(card):
+            cur = card.get("ask")
+            return cur is None or self._worker_ask_kind(cur, ask["role"]) is not None
+
+        try:
+            done = self.store.update_checked(card_id, {"ask": dict(ask, **{"from": "worker"})}, by=by, check=room,
+                                             did=f"ask {ask['type']}")
+        except CardError as e:
+            raise WorkerError(str(e)) from None
+        return done is not None
 
     @staticmethod
     def _worker_ask_kind(ask, role: str) -> Optional[str]:
@@ -379,10 +387,16 @@ class Workers:
     def _close_worker_asks(self, card_id: str, role: str, by: str, kinds=WORKER_ASKS) -> None:
         """Close the role's own worker ask when it is one of `kinds`, because its cause is gone. One rule for every
         worker ask: any new session of the role (start, `--resume`, an in-place resume) and `finish` close all
-        three kinds; every stop closes the attach ask. Nothing else on the card is touched."""
-        kind = self._worker_ask_kind(self._card(card_id).get("ask"), role)
-        if kind in kinds:
-            self.store.update(card_id, {"ask": None}, by=by, did=f"ask closed: the worker's {kind} ask is over")
+        three kinds; every stop closes the attach ask. Nothing else on the card is touched: the ask is checked and
+        closed under one hold of the store lock, so a user's ask that lands meanwhile stays open."""
+        def own(card):
+            kind = self._worker_ask_kind(card.get("ask"), role)
+            return f"ask closed: the worker's {kind} ask is over" if kind in kinds else False
+
+        try:
+            self.store.update_checked(card_id, {"ask": None}, by=by, check=own)
+        except CardError as e:
+            raise WorkerError(str(e)) from None
 
     def _archive(self, card_id: str, role: str, session_id: str):
         if not session_id:
@@ -392,11 +406,43 @@ class Workers:
 
     # -- start -----------------------------------------------------------------------------------------------------
 
+    def _plan_start(self, records: list, card: dict, role: str, project: dict, saved: dict, cwd, needs,
+                    resume: bool) -> dict:
+        """Everything a start decides from the worker list: no other worker on the card, the slot and `needs`, the
+        ports, the session to resume and the folder. Raises WorkerError when the start may not go ahead. `start()`
+        runs it on a read of the list before the tool discovery, and again under the lock before it launches."""
+        card_id = card["id"]
+        old = self._find(records, card_id, role)
+        other = next((r for r in records if r["card"] == card_id and r is not old), None)
+        if other is not None:
+            raise WorkerError(f"card {card_id} already has a worker: {other['session_name']}; end it first")
+        parked = old if old is not None and old.get("parked") else None
+        if old is not None and not (resume and parked):
+            raise WorkerError(f"{old['session_name']} is already {'parked' if parked else 'running'}"
+                              f"{'; resume it with --resume' if parked else ''}")
+        needs = list(needs if needs is not None else (parked or {}).get("needs") or saved.get("needs") or [])
+        check_start(records, needs, self.max_workers, skip=parked)
+        port_range = parked["ports"] if parked else next_ports(records, self.port_base)
+        sid = ((parked or {}).get("session_id") or saved.get("id") or "") if resume else ""
+        if resume and not sid:
+            raise WorkerError(f"card {card_id}: no saved {role} session to resume")
+        cwd = cwd or (parked or {}).get("cwd") or saved.get("cwd") or ""
+        cwd = str(Path(cwd).resolve()) if cwd else ""  # absolute, so later checks from any folder find it
+        if not cwd or not Path(cwd).is_dir():
+            raise WorkerError(f"the worker's folder {cwd or '(none given)'} is not a folder; pass --cwd")
+        branch = card.get("branch") or projects.branch(project, card.get("key") or card_id, _slug(card.get("title")))
+        return {"old": old, "parked": parked, "needs": needs, "ports": port_range, "sid": sid, "cwd": cwd,
+                "branch": branch, "env": self._env(card, role, project, port_range, branch)}
+
     def start(self, card_id: str, role: str, cwd=None, prompt: str = "", needs=None, resume: bool = False,
               by: str = BY) -> dict:
         """Start a worker on a card, or with `resume` continue its saved session (a parked worker keeps its ports;
         otherwise the card's saved session for the role, e.g. after an answer or a pause). Live mode only.
-        Raises ShadowModeError, WorkerError or ConfigError; nothing starts when it raises."""
+        Raises ShadowModeError, WorkerError or ConfigError; nothing starts when it raises.
+
+        The tool discovery (one `claude -p`, up to DISCOVER_TIMEOUT seconds) runs before the worker list's lock is
+        taken, so no other start, end or check waits on it; under the lock every check is made again on the list
+        as it is then, and the floor is written with the ports picked there."""
         config.require_live(self.cfg, f"start a {role} worker on card {card_id}")
         if role not in ROLES:
             raise WorkerError(f"role must be one of {', '.join(ROLES)}, not {role!r}")
@@ -404,43 +450,36 @@ class Workers:
         project = self._project(card)
         saved = (card.get("sessions") or {}).get(role) or {}
         now = self.clock()
+        # A start the list already refuses fails here, before any discovery runs.
+        planned = self._plan_start(self.registry.read(), card, role, project, saved, cwd, needs, resume)
+        require_literal(self.data)  # before the tool discovery runs a session
+        found = self._tools(project, planned["cwd"], planned["env"])
         with self.registry.locked() as records:
-            old = self._find(records, card_id, role)
-            other = next((r for r in records if r["card"] == card_id and r is not old), None)
-            if other is not None:
-                raise WorkerError(f"card {card_id} already has a worker: {other['session_name']}; end it first")
-            parked = old if old is not None and old.get("parked") else None
-            if old is not None and not (resume and parked):
-                raise WorkerError(f"{old['session_name']} is already {'parked' if parked else 'running'}"
-                                  f"{'; resume it with --resume' if parked else ''}")
-            needs = list(needs if needs is not None else (parked or {}).get("needs") or saved.get("needs") or [])
-            check_start(records, needs, self.max_workers, skip=parked)
-            port_range = parked["ports"] if parked else next_ports(records, self.port_base)
-            sid = ((parked or {}).get("session_id") or saved.get("id") or "") if resume else ""
-            if resume and not sid:
-                raise WorkerError(f"card {card_id}: no saved {role} session to resume")
-            cwd = cwd or (parked or {}).get("cwd") or saved.get("cwd") or ""
-            cwd = str(Path(cwd).resolve()) if cwd else ""  # absolute, so later checks from any folder find it
-            if not cwd or not Path(cwd).is_dir():
-                raise WorkerError(f"the worker's folder {cwd or '(none given)'} is not a folder; pass --cwd")
-            branch = card.get("branch") or projects.branch(project, card.get("key") or card_id,
-                                                           _slug(card.get("title")))
-            env = self._env(card, role, project, port_range, branch)
+            plan = self._plan_start(records, card, role, project, saved, cwd, needs, resume)
+            if plan["cwd"] != planned["cwd"]:
+                # The tools were found in another folder (the parked record changed meanwhile): they may not be
+                # the ones this session loads.
+                raise WorkerError(f"the worker's folder changed from {planned['cwd']} to {plan['cwd']} while its "
+                                  "tools were listed; start it again")
+            old, parked, port_range, env = plan["old"], plan["parked"], plan["ports"], plan["env"]
+            cwd, needs, sid, branch = plan["cwd"], plan["needs"], plan["sid"], plan["branch"]
             name = session_name(card_id, role)
             settings = self.run_dir(card_id) / f"settings-{role}.json"
             argv = self._argv(role, name, settings, self._prompt(prompt, card, role, project, port_range, branch),
                               sid)
-            require_literal(self.data)  # before the tool discovery runs a session
-            write_json(settings, floor(role, self._tools(project, cwd, env), self.data, env))
+            write_json(settings, floor(role, found, self.data, env))
             if parked:
                 self._stop(card_id, role, parked.get("short_id"), by)  # the parked session sits idle; the copy
                 # takes its place
-            short, new_sid = self._launch(argv, cwd, env)
+            short = self._launch(argv, cwd, env)
             rec = {"card": card_id, "role": role, "project": project.get("name"), "session_name": name,
-                   "session_id": new_sid, "short_id": short, "ports": port_range, "needs": needs, "cwd": cwd,
+                   "session_id": "", "short_id": short, "ports": port_range, "needs": needs, "cwd": cwd,
                    "branch": branch, "started_at": cards.stamp(now), "resumes": 0, "parked": None,
                    "idle_since": None, "blocked_since": None}
+            # On record before the listing is asked for its id: a Ctrl-C or an error there still leaves a record
+            # that points at the running session (the next check fills the id in, `_fill_session_id`).
             records[:] = [r for r in records if r is not old] + [rec]
+            rec["session_id"] = new_sid = self._session_id(short)
         self._save_session(card_id, role, by, id=new_sid or sid, cwd=cwd, needs=needs, state="running", why=None,
                            question=None)
         self._close_worker_asks(card_id, role, by)  # a new session: its old prompt, pause or question is over
@@ -608,11 +647,11 @@ class Workers:
         text = q.get("text") if isinstance(q, dict) else q
         return text if text else "The worker asked a question but its question.json could not be read."
 
-    def _resume_dead(self, rec: dict, prompt: str, count: bool = True) -> None:
+    def _resume_dead(self, rec: dict, prompt: str, count: bool = True, by: str = BY) -> None:
         """Resume a worker's own session in place (same slot, same ports). Live mode only. `count` adds one to
         `resumes` (a dead worker's resume; a parked worker's is not counted). The old session is always stopped
         first (a parked one sits idle; a failed one may keep its process): the copy that continues takes its place,
-        as in `start()`."""
+        as in `start()`. `by` (the check's caller) is the name on the card's audit."""
         config.require_live(self.cfg, f"resume the {rec['role']} worker on card {rec['card']}")
         card = self._card(rec["card"])
         project = self._project(card)
@@ -626,17 +665,18 @@ class Workers:
         # Whatever its state (parked, failed with its process alive, or gone: a stop of a gone session is harmless),
         # the old session is stopped first, so it never runs on untracked next to the copy. A stop that raises
         # leaves the record as it is.
-        self._stop(rec["card"], rec["role"], rec.get("short_id"), BY)
-        short, sid = self._launch(argv, rec["cwd"], env)
-        # The new session runs now: record it before anything else can fail, so the registry never points at the
-        # old one. Its id is the copy's, or "" when the listing does not show the copy yet: the next check fills it
-        # in (`_fill_session_id`), as for `start()`.
-        rec.update(short_id=short, session_id=sid, started_at=cards.stamp(self.clock()),
+        self._stop(rec["card"], rec["role"], rec.get("short_id"), by)
+        short = self._launch(argv, rec["cwd"], env)
+        # The new session runs now: record it before anything else can fail (the listing below included), so the
+        # registry never points at the old one. Its id is the copy's, or "" when the listing does not show the copy
+        # yet: the next check fills it in (`_fill_session_id`), as for `start()`.
+        rec.update(short_id=short, session_id="", started_at=cards.stamp(self.clock()),
                    idle_since=None, blocked_since=None, parked=None,
                    resumes=rec.get("resumes", 0) + (1 if count else 0))
+        rec["session_id"] = self._session_id(short)
         # A resume runs under a new id; keep it on the card now, so no id is lost if the worker resumes again.
-        self._save_session(rec["card"], rec["role"], BY, id=rec["session_id"], state="running", why=None)
-        self._close_worker_asks(rec["card"], rec["role"], BY)  # a new session: its old prompt or pause is over
+        self._save_session(rec["card"], rec["role"], by, id=rec["session_id"], state="running", why=None)
+        self._close_worker_asks(rec["card"], rec["role"], by)  # a new session: its old prompt or pause is over
 
     def check(self, by: str = BY, usage_file=None) -> list:
         """Look at every worker and act on its state (see the module docstring); return one entry per worker:
@@ -713,7 +753,7 @@ class Workers:
         elif state == "dead":
             if rec.get("resumes", 0) < 1:
                 try:
-                    self._resume_dead(rec, INTERRUPTED)
+                    self._resume_dead(rec, INTERRUPTED, by=by)
                 except WorkerError:
                     # The resume cannot start (e.g. its worktree is gone): it counts, so the next check stops it as
                     # died twice instead of holding its slot forever. A shadow-mode refusal is not counted.
@@ -750,7 +790,7 @@ class Workers:
             if b is not None and v1_park.resume_due(rec, now, {"budget": PARK_RULES}, b):
                 try:
                     self._resume_dead(rec, "Usage is under the line again. Continue the task from where you "
-                                           "parked.", count=False)
+                                           "parked.", count=False, by=by)
                 except WorkerError as e:
                     # The resume cannot start (e.g. its worktree is gone): stop it as a worker that died twice, so
                     # it never holds its slot forever. A shadow-mode refusal is not a WorkerError: it waits.
@@ -786,7 +826,9 @@ class Workers:
         if q.exists():
             os.replace(q, q.with_name(f"question-{cards.stamp(self.clock()).replace(':', '')}.json"))
         if own:
-            self.store.update(card_id, {"ask": None}, by=by, did="answer")
+            # `start` closed the worker's question already; this closes it only if it is still there, so a user's
+            # ask that landed meanwhile stays open.
+            self._close_worker_asks(card_id, role, by, kinds=("question",))
         return rec
 
     def finish(self, card_id: str, by: str = BY) -> dict:
@@ -805,23 +847,35 @@ class Workers:
             p = self._archive(card_id, role, sid)
             if p:
                 archived.append(p)
+        # What an earlier finish already removed is never `claude rm`-ed again (a second rm of a gone original can
+        # fail and would keep the role from ever being marked removed): a role marked `removed`, and each id in its
+        # `removed_ids`.
+        gone = {role: set() if (sessions[role] or {}).get("removed") is True
+                else set((sessions[role] or {}).get("removed_ids") or []) for role in roles}
+        todo = [(role, sid) for role, sid in ids
+                if (sessions[role] or {}).get("removed") is not True and sid not in gone[role]]
         failed = []
         try:
-            for _role, sid in ids:
+            for role, sid in todo:
                 try:
                     transcripts.remove_original(self.cfg, self.claude, sid)  # refuses in shadow mode, before running
                 except WorkerError as e:  # claude rm failed: the original stays, the next finish tries again
                     failed.append(str(e))
                     continue
                 removed.append(sid)
+                gone[role].add(sid)
         except config.ShadowModeError as e:
             note = f"{e} The originals are kept; the copies are made."
         if removed:
             done = dict(sessions)  # any other key, and a role with no ids, is kept as it is
             for role in roles:
                 entry = sessions[role] or {}
-                if entry.get("ids") and set(entry["ids"]) <= set(removed):  # every original of the role is gone
-                    done[role] = dict(entry, state="finished", removed=True)
+                if entry.get("removed") is True or not entry.get("ids"):
+                    continue
+                entry = dict(entry, removed_ids=[sid for sid in entry["ids"] if sid in gone[role]])
+                if set(entry["ids"]) <= gone[role]:  # every original of the role is gone
+                    entry.update(state="finished", removed=True)
+                done[role] = entry
             self.store.update(card_id, {"sessions": done}, by=by, did="worker sessions removed")
         out = {"card": card_id, "archived": archived, "removed": removed}
         if failed:
