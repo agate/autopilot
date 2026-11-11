@@ -81,7 +81,8 @@ class DecideTest(unittest.TestCase):
     def test_only_its_own_park_command_passes(self):
         own = f"{AP2} worker park C1 implement"
         allowed = {"bare": own, "with a note": own + ' --note "x y"', "quoted program": f'"{AP2}" worker park C1 '
-                   'implement --note "x y"', "single-quoted note": own + " --note 'halfway; next: tests'"}
+                   'implement --note "x y"', "single-quoted note": own + " --note 'halfway; next: tests'",
+                   "a # inside the note": own + ' --note "PR #3 done"'}
         for name, cmd in allowed.items():
             with self.subTest(name, cmd=cmd):
                 self.assertTrue(parkhook.is_park_command(cmd, "C1", "implement"))
@@ -100,7 +101,12 @@ class DecideTest(unittest.TestCase):
                    "another subcommand": f"{AP2} worker end C1 implement",
                    "; ls": own + "; ls", "&& ls": own + " && ls", "| cat": own + " | cat",
                    "$(ls)": own + ' --note "$(ls)"', "backtick": own + " --note `ls`",
-                   "newline": own + "\nls", "background": own + " --note &", "redirect": own + " --note >",
+                   "newline": own + "\nls", "newline after --note": own + " --note\nls",
+                   "background": own + " --note &", "redirect": own + " --note >",
+                   # bash starts a comment only at a word start, so a `#` inside a word hides nothing from it.
+                   "# then ; ls": own + "#; ls", "--note x# then ;ls": own + " --note x#;ls",
+                   "parameter expansion": own + " --note ${X:=a}", "arithmetic expansion": own + " --note $[1]",
+                   "expansion in a default": own + r" --note ${X:=a[\$\(touch\ /tmp/p\)]}$[X]",
                    "unbalanced quote": own + ' --note "x', "empty": ""}
         for name, cmd in refused.items():
             with self.subTest(name, cmd=cmd):
@@ -182,6 +188,26 @@ class HookCommandTest(unittest.TestCase):
         self.assertEqual((r.returncode, r.stdout), (0, b""))
         r = self.run_hook(json.dumps(bash("ls")).encode(), usage=self.usage_file(50, "low.json"))
         self.assertEqual((r.returncode, r.stdout), (0, b""))
+
+    def test_with_no_arguments_it_reads_the_usage_under_home(self):
+        """The form Claude Code runs (`ap2 hook-park`, no arguments) reads `~/.claude.json`; HOME is the temp home."""
+        self.usage_file(95, "home/.claude.json")
+        r = self.run_hook(json.dumps(bash("ls")).encode(), args=[])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(denied(json.loads(r.stdout)))
+
+    def test_a_closed_stdout_still_exits_0(self):
+        """A deny written to a pipe whose reader is gone is dropped, and the exit is still 0."""
+        read_end, write_end = os.pipe()
+        os.close(read_end)
+        try:
+            r = subprocess.run([sys.executable, AP2, "hook-park", "--usage", str(self.usage)], stdout=write_end,
+                               stderr=subprocess.PIPE, input=json.dumps(bash("ls")).encode(),
+                               env=self.env(**WORKER), timeout=60)
+        finally:
+            os.close(write_end)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stderr, b"")
 
     def test_errors_never_break_the_session(self):
         cases = {"invalid JSON": dict(stdin=b"{not json"),

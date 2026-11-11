@@ -1428,9 +1428,10 @@ Calls the author made without asking (check them):
       command it names succeeds. Not v1's `read_fast`: that keeps a side cache in v1's data folder, and this hook
       writes nothing (the file is small enough to parse on every call).
     - The one call it lets through is Bash running exactly `<package>/bin/ap2 worker park <AP2_CARD> <AP2_ROLE>
-      [--note TEXT]` on one line, the program quoted or not, with v1's tokenizer rules (no newline, backtick, `$(`
-      or chaining/redirect token). Any other flag (`--usage`, `--data`, `--by`, `--note=`), card, role or program
-      (v1's `bin/ap`, another `ap2`) is denied.
+      [--note TEXT]` on one line, the program quoted or not, with v1's tokenizer rules (no newline, backtick, `$`
+      or chaining/redirect token) and `#` read as a plain character, as bash reads one inside a word, so it hides
+      nothing. Any other flag (`--usage`, `--data`, `--by`, `--note=`), card, role or program (v1's `bin/ap`,
+      another `ap2`) is denied.
     - The deny reason names that command with the worker's own card and role filled in, and the window and its
       percent. A subagent's call (payload `agent_id`) is told to stop and reply to its parent with exactly
       `parked for quota`.
@@ -1438,7 +1439,7 @@ Calls the author made without asking (check them):
       usage) is no output and exit 0. It writes nothing, needs no data folder and works the same in shadow mode.
     - It runs before every tool call, so `bin/ap2` routes `hook-park` to `parkhook.main` before it imports `cli`
       (and `cli.main` routes it before it builds the parser, for a caller that imports `cli`), and `parkhook`
-      imports only `json`, `os`, `sys`, `shlex`, `pathlib` and v1's `budget`: not `workers`, `store` or
+      imports only `json`, `os`, `shlex`, `pathlib` and v1's `budget`: not `workers`, `store` or
       `config`. Its copies of the park rules and roles are kept equal to `workers.PARK_RULES` and `workers.ROLES`
       by a test.
   - Shadow mode: starting a worker, resuming one (dead, parked, answered) and `claude rm` call

@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 import os
 import shlex
-import sys
 from pathlib import Path
 
 from autopilot import budget as v1_budget
@@ -40,13 +39,15 @@ def _worker(env) -> tuple:
 
 def is_park_command(cmd: str, card: str, role: str) -> bool:
     """Exactly `<this package>/bin/ap2 worker park <card> <role> [--note TEXT]` on one line, the program quoted or
-    not: the one command a parked worker may run. Anything chained to it, any shell expansion, any other flag, or
-    another card or role is not it (v1's `park.is_park_command` tokenizer rules)."""
-    if not cmd or "\n" in cmd or "`" in cmd or "$(" in cmd:
+    not: the one command a parked worker may run. Anything chained to it, any `$` (command, parameter or arithmetic
+    expansion), any other flag, or another card or role is not it (v1's `park.is_park_command` tokenizer rules). A
+    `#` is a plain character, as bash reads one inside a word, so it cannot hide the rest of the line."""
+    if not cmd or "\n" in cmd or "`" in cmd or "$" in cmd:
         return False
     try:
         lex = shlex.shlex(cmd, posix=True, punctuation_chars=True)
         lex.whitespace_split = True
+        lex.commenters = ""
         toks = list(lex)
     except ValueError:
         return False
@@ -115,9 +116,8 @@ def main(argv: list, stdin=None) -> int:
         if payload is None:
             return 0
         out = decide(payload, os.environ, v1_budget.read(usage_path, stale_min=PARK_RULES["stale_min"]), PARK_RULES)
-        if out:
-            sys.stdout.write(json.dumps(out) + "\n")
-            sys.stdout.flush()
+        if out:  # unbuffered: a closed stdout raises here, not again at interpreter exit
+            os.write(1, (json.dumps(out) + "\n").encode())
     except Exception:  # noqa: BLE001 - a hook must never break the session
         pass
     return 0
