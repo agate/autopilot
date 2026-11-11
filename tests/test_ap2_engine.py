@@ -213,7 +213,8 @@ class CommandReadTest(EngineCase):
         self.status_source(self.reply_copy("status-incidents.json"), self.tmp / "cwd.txt", 3)
         with mock.patch("assistant.engine.os.fsync", self.full):
             with self.assertRaisesRegex(SourceError, r"^vendor-status: read.run exited with 3: it went wrong \(the "
-                                                     r"output was not saved: .*No space left on device\)$") as cm:
+                                                     r"output was not saved: cannot save the raw output in "
+                                                     r".*No space left on device\)$") as cm:
                 self.engine().read("vendor-status")
         self.assertIsInstance(cm.exception.__cause__, SourceError)  # the save failure, which names the folder
         self.assertEqual(list((self.data / "sources" / ".raw" / "vendor-status").iterdir()), [])
@@ -233,7 +234,8 @@ class CommandReadTest(EngineCase):
             """)
         with mock.patch("assistant.engine.os.fsync", self.full):
             with self.assertRaisesRegex(SourceError, r"^slow: read.run took longer than 1 seconds; stopped \(the "
-                                                     r"partial output was not saved: .*No space left on device\)$"):
+                                                     r"partial output was not saved: cannot save the raw output in "
+                                                     r".*No space left on device\)$"):
                 self.engine().read("slow")
         self.assertEqual(list((self.data / "sources" / ".raw" / "slow").iterdir()), [])
 

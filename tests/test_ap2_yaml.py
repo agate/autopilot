@@ -112,6 +112,12 @@ class ScalarTest(unittest.TestCase):
         self.assertEqual(self.one("x - 'a # b'"), "x - 'a")
         self.assertEqual(self.one("x [y, 'z # w"), "x [y, 'z")  # a '[' mid-value opens no flow collection
 
+    def test_a_quote_right_after_a_colon_mid_value_stays_plain_text(self):
+        # Outside brackets a ':' opens a value only with a space or tab after it, so a quote right after it is text.
+        self.assertEqual(self.one("a:'b # c"), "a:'b")
+        self.assertEqual(self.one("a:'b"), "a:'b")
+        self.assertEqual(self.one('10:"30 # x'), '10:"30')
+
     def test_quoted_strings(self):
         self.assertEqual(self.one('"a # not a comment"'), "a # not a comment")
         self.assertEqual(self.one("'it''s'"), "it's")
@@ -329,6 +335,13 @@ class ErrorTest(unittest.TestCase):
                 self.assertIn(f"line {line}:", msg)
                 self.assertIn(words, msg)
                 self.assertEqual(ctx.exception.line, line)
+
+    def test_a_quote_after_a_broken_block_indicator_is_refused(self):
+        # '-' then a tab, or '--', is not a '- ' block indicator, so the quote after it opens no string.
+        with self.assertRaisesRegex(YamlError, r"^line 2: a tab after '-' or '\?' is not supported; use a space$"):
+            load("k:\n  -\t 'b\n")
+        with self.assertRaisesRegex(YamlError, r"^line 2: expected 'key: value' at this indent$"):
+            load("k:\n  -- 'b\n")
 
     def test_one_error_class(self):
         self.assertTrue(issubclass(YamlError, ValueError))
