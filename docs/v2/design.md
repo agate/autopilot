@@ -732,6 +732,8 @@ Calls the author made without asking (check them):
     Text that is not valid Unicode (a lone surrogate, e.g. from command-line bytes that are not UTF-8) is refused
     on add, update, `--by`, `did` and search before anything is written; so are NaN and Infinity (cards are
     standard JSON) and values JSON cannot write with sorted keys (mixed key types, sets). `did`, when given, is checked like `by`: non-empty text.
+    An error shows at most 200 characters of a bad value (its repr, then `...`), so a huge or deep hand-edited
+    value gives a short error line.
   - Restore points: one file `<data>/restore/<point id>.json` with
     `{"id", "at", "kind": "card", "card_id", "card"}`, id `r-YYYYMMDD-HHMMSS-xxxxxx` (ASCII digits only). A point
     is refused, naming its file, unless its `id` is its file name and its `card_id` is its card's `id`, and its
