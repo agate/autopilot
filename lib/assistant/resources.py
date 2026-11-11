@@ -90,7 +90,9 @@ class Registry:
 
     @contextlib.contextmanager
     def locked(self):
-        """Hold the lock and yield the records; what the block leaves in the list is written back."""
+        """Hold the lock and yield the records; what the block leaves in the list is written back, however the
+        block ends (normally or by any exception, Ctrl-C included), so every change already made reaches disk.
+        An exception is re-raised after the write. Callers change the list only once what it records is true."""
         self.data.mkdir(parents=True, exist_ok=True)
         fd = os.open(str(self.data / LOCK), os.O_CREAT | os.O_RDWR, 0o644)
         try:
@@ -98,9 +100,11 @@ class Registry:
                 fcntl.flock(fd, fcntl.LOCK_EX)
             records = self._read()
             before = json.dumps(records, sort_keys=True)
-            yield records
-            if json.dumps(records, sort_keys=True) != before:
-                write_json(self.path, {"workers": records})
+            try:
+                yield records
+            finally:
+                if json.dumps(records, sort_keys=True) != before:
+                    write_json(self.path, {"workers": records})
         finally:
             os.close(fd)
 

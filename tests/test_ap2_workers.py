@@ -224,6 +224,14 @@ class PortsTest(WorkerCase):
 # -- 2. single-use resources, needs and max_workers ---------------------------------------------------------------
 
 class ResourcesTest(WorkerCase):
+    def test_a_change_made_in_the_locked_block_is_written_back_when_the_block_raises(self):
+        reg = resources.Registry(self.data)
+        with self.assertRaises(KeyboardInterrupt):
+            with reg.locked() as records:
+                records.append({"card": "c1", "role": "implement"})
+                raise KeyboardInterrupt
+        self.assertEqual(reg.read(), [{"card": "c1", "role": "implement"}])
+
     def test_a_held_resource_refuses_the_start_naming_the_holder(self):
         w = self.workers()
         a = self.start(w, needs=["native-dev-loop"])
@@ -804,6 +812,16 @@ class LifecycleTest(WorkerCase):
         self.assertEqual((saved["id"], saved["state"]), (a["session_id"], "ended"))
         self.assertEqual(resources.Registry(self.data).read(), [])
         self.assertTrue(Path(out[0]["archive"]).is_file())
+
+    def test_one_check_ends_every_done_worker(self):
+        w = self.workers()
+        a = self.start(w)
+        b = self.start(w)
+        self.write_result(a["card"])
+        self.write_result(b["card"])
+        out = w.check()
+        self.assertEqual([e["did"] for e in out], ["ended", "ended"])
+        self.assertEqual(resources.Registry(self.data).read(), [])
 
     def test_each_role_has_its_result_file(self):
         w = self.workers()
@@ -1627,6 +1645,40 @@ class StoppedLeavesTheListTest(WorkerCase):
         self.assertEqual(self.get(a["card"])["sessions"]["implement"]["state"], "ended")
         self.assertEqual(self.resumes(), [])
 
+    def test_an_end_interrupted_after_its_stop_landed_is_finished_by_the_next_check(self):
+        # Ctrl-C while `claude stop` hangs after sending its stop: the mark is on disk, so the ended worker is
+        # never resumed.
+        w = self.workers()
+        a = self.start(w)
+        real = subprocess.run
+
+        def run(argv, *args, **kw):
+            done = real(argv, *args, **kw)
+            if list(argv[1:2]) == ["stop"]:
+                raise KeyboardInterrupt
+            return done
+        with mock.patch.object(subprocess, "run", side_effect=run):
+            with self.assertRaises(KeyboardInterrupt):
+                w.end(a["card"], "implement")
+        self.assertNotIn(a["short_id"], [x["id"] for x in self.agents()])  # the stop landed
+        recs = resources.Registry(self.data).read()
+        self.assertEqual([(r["short_id"], r["closing"]["path"]) for r in recs], [(a["short_id"], "end")])
+        self.assertEqual(w.check()[0]["did"], "ended")
+        self.assertEqual(resources.Registry(self.data).read(), [])
+        self.assertEqual(self.get(a["card"])["sessions"]["implement"]["state"], "ended")
+        self.assertEqual(self.resumes(), [])
+
+    def test_an_end_interrupted_in_its_archive_copy_leaves_no_record(self):
+        w = self.workers()
+        a = self.start(w)
+        with mock.patch.object(transcripts, "archive", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                w.end(a["card"], "implement")
+        self.assertEqual(resources.Registry(self.data).read(), [])
+        self.assertEqual(self.get(a["card"])["sessions"]["implement"]["state"], "ended")
+        self.assertEqual(w.check(), [])
+        self.assertEqual(len(self.bg_calls()), 1)  # the start only: no resume
+
     def test_a_started_close_is_finished_even_when_its_state_cannot_be_read(self):
         w = self.workers()
         a = self.start(w)
@@ -2056,6 +2108,8 @@ class TranscriptsTest(WorkerCase):
             transcripts.archive_path(self.data, a["card"], "..", a["session_id"])
         with self.assertRaisesRegex(ValueError, "not a role"):
             transcripts.archive_path(self.data, a["card"], "implement/../../x", a["session_id"])
+        with self.assertRaisesRegex(ValueError, "not a session id"):
+            transcripts.archive_path(self.data, a["card"], "implement", "abc/../../x")
 
     def test_finish_marks_only_roles_whose_originals_are_gone(self):
         w = self.workers()

@@ -1130,8 +1130,10 @@ Calls the author made without asking (check them):
     `--usage`, resume once v1's `park.resume_due` allows, on the same ports. Every in-place resume stops the old
     session first, whatever its state (a failed one may keep its process), and the copy takes its place. One worker's error (a bad project file, a failed call, a run folder that cannot
     be read while it is classified) never stops the pass: it goes on that worker's line as `note` (and `error`, the exception's name, when it is not one of v2's own
-    errors), the other workers are still acted on, and the worker list is written back. A pass that is interrupted
-    (Ctrl-C) stops at that worker, writes the list back with every change already made, then re-raises. A worker with a started
+    errors), the other workers are still acted on, and the worker list is written back. The worker list is written
+    back however its locked block ends, normally or by any exception (Ctrl-C included), so every change already made
+    reaches disk (an interrupted end keeps its `closing` mark or has dropped its record; an interrupted pass stops at
+    that worker), and the exception is then re-raised. A worker with a started
     close (`closing`) still has that close finished when its state cannot be read: the mark says what to do. A
     result or question file that is gone between its two looks is not newer. The listing is taken
     under the worker list's lock, so a start that lands during a check is never judged against a listing from

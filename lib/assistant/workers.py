@@ -665,8 +665,8 @@ class Workers:
                     if not isinstance(e, (config.ShadowModeError, WorkerError, CardError, config.ConfigError)):
                         entry["error"] = type(e).__name__  # not one of ours: name it, so the gate can report it
                 except BaseException as e:  # noqa: BLE001 - raised below, once the list is written back
-                    # Ctrl-C (or another exit) mid-pass: stop here, but leave the block normally, so the changes
-                    # already made (an earlier worker's resume, its new short id) are written back first.
+                    # Ctrl-C (or another exit) mid-pass: stop here, so no later worker is acted on. The changes
+                    # already made (an earlier worker's resume, its new short id) are written back either way.
                     stopped = e
                     break
                 out.append(entry)
