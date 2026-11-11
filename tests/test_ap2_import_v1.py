@@ -242,6 +242,15 @@ class ImportV1Test(unittest.TestCase):
             if key != "v1:shop:PROJ-1":
                 self.assertEqual(c, first[key], key)
 
+    def test_the_report_names_each_cards_id_on_an_add_and_on_a_rerun(self):
+        for _ in range(2):
+            report = self.ok()
+            got = self.by_key()
+            entries = [e for p in report["projects"] for e in p["cards"]]
+            self.assertTrue(entries)
+            for e in entries:
+                self.assertEqual(e["card"], got[e["key"]]["id"], e["key"])
+
     def test_a_rerun_updates_a_changed_title_and_source_record(self):
         self.ok("--project", "shop")
         self.edit_state("projects/shop", lambda s: s["tasks"][0].update(
@@ -350,6 +359,53 @@ class ImportV1Test(unittest.TestCase):
         self.set_config("secondary_language: zh-Hans\n")
         self.ok("--project", "shop")
         self.assertEqual(self.by_key()["v1:shop:PROJ-1"]["plain"]["what"]["zh-Hans"], "加购物车")
+
+    def test_a_label_with_a_base_language_script_uses_the_base_languages_labels(self):
+        self.set_config("secondary_language: zh-Hans\n")
+        self.ok("--project", "shop")
+        self.assertEqual(self.by_key()["v1:shop:D2"]["plain"]["what"]["zh-Hans"],
+                         "D9 收到了两个不同的回答。以哪个为准？")
+
+    def test_a_labels_file_that_is_broken_or_not_text_falls_back_to_english(self):
+        self.set_config("secondary_language: zh\n")
+        for text in ("{", json.dumps({"two_answers": 5})):
+            with self.subTest(text):
+                shutil.rmtree(self.data / "items", ignore_errors=True)
+                (self.v1 / "labels.zh.json").write_text(text, encoding="utf-8")
+                self.ok("--project", "shop")
+                what = self.by_key()["v1:shop:D2"]["plain"]["what"]
+                self.assertEqual(what["zh"], what["en"])
+
+    def test_a_label_key_with_no_text_is_shown_as_the_key(self):
+        self.edit_state("projects/shop", lambda s: s["decisions"][1].update(title={"key": "no_such_label"}))
+        self.ok("--project", "shop")
+        self.assertEqual(self.by_key()["v1:shop:D2"]["title"], "no_such_label")
+
+    def test_a_label_that_would_fill_too_long_is_shown_as_written(self):
+        template = "{i}" * 2000
+        (self.v1 / "labels.en.json").write_text(json.dumps({"boom": template}), encoding="utf-8")
+        self.edit_state("projects/shop", lambda s: s["tasks"][0].update(
+            title={"key": "boom", "args": {"i": "x" * 2000}}))
+        self.ok("--project", "shop")
+        c = self.by_key()["v1:shop:PROJ-1"]
+        self.assertEqual(c["title"], template)
+        self.assertEqual(c["plain"]["what"]["en"], template)
+
+    def test_the_title_is_the_primary_languages_text_when_it_is_not_english(self):
+        self.set_config("primary_language: zh\nsecondary_language: en\n")
+        self.ok("--project", "shop")
+        self.assertEqual(self.by_key()["v1:shop:PROJ-1"]["title"], "加购物车")
+
+    def test_where_names_the_project_and_a_questions_task(self):
+        self.set_config("secondary_language: zh\n")
+        self.ok("--project", "shop")
+        got = self.by_key()
+        for lang in ("en", "zh"):
+            with self.subTest(lang):
+                self.assertIn("shop", got["v1:shop"]["plain"]["where"][lang])
+                self.assertIn("shop", got["v1:shop:D1"]["plain"]["where"][lang])
+                self.assertIn("PROJ-4", got["v1:shop:D1"]["plain"]["where"][lang])  # D1 is about task PROJ-4
+                self.assertNotIn("PROJ", got["v1:shop:D2"]["plain"]["where"][lang])  # D2 has no task
 
     def test_a_language_without_phrases_is_refused_before_anything_is_written(self):
         self.set_config("secondary_language: fr\n")
@@ -503,6 +559,11 @@ class ImportV1Test(unittest.TestCase):
             "missing state.json": (lambda d: (d / "state.json").unlink(), "state.json"),
             "config.json not JSON": (lambda d: (d / "config.json").write_text("[", encoding="utf-8"), "config.json"),
             "state not an object": (lambda d: (d / "state.json").write_text("[]", encoding="utf-8"), "object"),
+            "config not an object": (lambda d: (d / "config.json").write_text("[]", encoding="utf-8"), "object"),
+            "tasks not a list": (lambda d: (d / "state.json").write_text(
+                json.dumps({"tasks": None}), encoding="utf-8"), "not a list"),
+            "a task not an object": (lambda d: (d / "state.json").write_text(
+                json.dumps({"tasks": ["x"]}), encoding="utf-8"), "not an object"),
             "a task without id": (lambda d: (d / "state.json").write_text(
                 json.dumps({"tasks": [{"title": {"en": "x"}, "status": "todo"}], "decisions": []}),
                 encoding="utf-8"), "id"),

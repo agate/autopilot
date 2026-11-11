@@ -1546,8 +1546,9 @@ Calls the author made without asking (check them):
     closed (`lane: done`, `ask: null`) once v1 settles it.
   - Text: a v1 text `{en, zh, ...}` gives each configured language its own text, else the base language
     (`zh-Hans` -> `zh`), else `en`, else its first string. A label `{key, args}` is filled with `str.format_map`
-    (a placeholder without an argument stays as written, as v1's page does; a template with a format spec or
-    conversion, or one that does not parse, is shown as written) from the package's
+    (a placeholder without an argument stays as written, as v1's page does; a template with a format spec,
+    conversion, index or attribute, one that does not parse, or one that would fill past `MAX_LABEL` (10,000)
+    characters, is shown as written) from the package's
     `templates/labels.<lang>.json` with the v1 folder's `labels.<lang>.json` on top (where v1 keeps its page
     translations), falling back to `en`, then to the key. `title` is the primary language's text. Plain words come
     from fixed phrases (`importv1.PHRASES`, `en` and `zh`): `what` is the title, `where` names the project (and

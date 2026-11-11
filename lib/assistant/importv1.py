@@ -38,6 +38,8 @@ ASK = {"ask": "answer", "gate": "approve"}
 UPDATED = ("title", "plain", "lane", "status", "ask", "source")
 TASK_RECORD = ("pr", "branch", "depends_on", "link")
 PROJECT_RECORD = ("repo", "branch_pattern", "branch_prefix")
+# The longest a filled v1 label may be, in characters; a label that would fill longer is shown as written.
+MAX_LABEL = 10_000
 
 # The code-made plain words, one entry per language. A language is matched exactly, then by its first part
 # (zh-Hans -> zh), as `engine.phrases` does.
@@ -111,8 +113,9 @@ class Labels:
         for each in dict.fromkeys((lang, lang.split("-")[0], "en")):
             template = self.table(each).get(key)
             if template is not None:
-                if not _plain_fields(template):
-                    return template  # a format spec or conversion v1's page would not apply, printed as written
+                size = _filled_size(template, args)
+                if size is None or size > MAX_LABEL:
+                    return template  # a format v1's page would not apply, or one filled too long, printed as written
                 try:
                     return template.format_map(_Keep(args))
                 except (ValueError, IndexError, KeyError, AttributeError, TypeError):
@@ -120,14 +123,23 @@ class Labels:
         return str(key)
 
 
-def _plain_fields(template: str) -> bool:
-    """True when every `{...}` in `template` is a bare name: no format spec (`{id:>9}`, which could build a huge
-    string) and no conversion (`{id!r}`). A template that does not parse is not plain either."""
+def _filled_size(template: str, args: dict) -> Optional[int]:
+    """How many characters `template` has once filled from `args` (a placeholder without an argument counts as
+    written), so a label repeating one field cannot build a huge string. None when a `{...}` is not a bare name:
+    a format spec (`{id:>9}`), a conversion (`{id!r}`), an index or attribute (`{id[0]}`, `{id.real}`), none of
+    which v1's page applies. A template that does not parse is None too."""
+    size = 0
     try:
-        return all(not spec and conversion is None for _, field, spec, conversion in string.Formatter().parse(template)
-                   if field is not None)
+        for literal, field, spec, conversion in string.Formatter().parse(template):
+            size += len(literal)
+            if field is None:
+                continue
+            if spec or conversion is not None or "." in field or "[" in field:
+                return None
+            size += len(str(args[field])) if field in args else len(field) + 2
     except ValueError:
-        return False
+        return None
+    return size
 
 
 def _read_quietly(path: Path):
