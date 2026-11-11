@@ -1331,26 +1331,28 @@ Calls the author made without asking (check them):
     `done` card with no readable `updated_at` stays off. A project's children count the same way.
   - The document: `{generated_at, mode, primary_language, secondary_language, languages, settings:
     {history_days, lanes, hide_quotes}, lanes, projects, heartbeat, cards, full}`. `lanes` (all four keys) counts
-    only the cards on the phone; `projects` is the local page's project list over those cards, `done`/`total`
-    from the children on the phone; `heartbeat` is the local page's; `cards` are the local page's rows in its
-    order. These are the JSON shapes of the local page entry above.
+    only the cards on the phone; `projects` is the local page's project list over those cards (each `title` per
+    language, as there), `done`/`total` from the children on the phone; `heartbeat` is the local page's; `cards`
+    are the local page's rows in its order. These are the JSON shapes of the local page entry above.
   - `full` maps each card id in `cards` to the local page's full card (`GET /api/cards/<id>`), built by the
     same function, `server.full_card`, with two changes only: the card's `sessions` and `source.raw` (a path to
     a file on this Mac) are removed, and a child or link that is not on the phone (outside the window or the
     lanes) is `{id, off_phone: true}` with no title or words, so old history does not reach the phone through a
     link. A link to a card that is gone stays `{id, missing: true}`. Questions and their answers stay (9.4).
-  - Hiding what people wrote (`phone_hide_quotes: true`), for every card with a source record: the row has
-    `title: null` and `title_hidden: {<language>: text}` for each configured language, so the page shows the
-    chosen language only (anti-goal 1); the full card's `title` is the primary language's text, `plain.what` is
-    the text per language, `key` is removed (a source's key may be made from the text), `source.record` loses
+  - Hiding what people wrote (`phone_hide_quotes: true`), for every card with a source record: the row has `title:
+    null` and `title_hidden: {<language>: text}` for each configured language, so the page shows the chosen language
+    only (anti-goal 1); the full card's `title` is the text per language, like `title_hidden`, `plain.what` is the
+    text per language too, `key` is removed (a source's key may be made from the text), `source.record` loses
     `text`, and the source block's `text` is null and its `record` has no `text`. The source block keeps `name`,
     `author`, `place`, `at` and the http(s) `link`, so Open in source still works. The text names who and where
-    only: `{author} wrote {thing} in {place}` (`Ana wrote a message in #team`), or without an author `Someone
-    wrote ...`, or without a place no `in ...`; `{thing}` is `a message` for a `brings: messages` source, `an
-    item` for `brings: work`, `something` when the source cannot be loaded. The phrases sit next to the engine's
-    plain-words phrases (`engine.HIDDEN_PHRASES`, `en` and `zh`, matched the same way); hiding in a language with
-    none is one ConfigError line. A project's entry in `projects` is hidden the same way. Cards without a source
-    record are unchanged.
+    only: `{author} wrote {thing} in {place}` (`Ana wrote a message in #team`), or without an author `Someone wrote
+    ...`, or without a place no `in ...`; `{thing}` is `a message` for a `brings: messages` source, `an item` for
+    `brings: work`, `something` when the source cannot be loaded. The phrases sit next to the engine's plain-words
+    phrases (`engine.HIDDEN_PHRASES`, `en` and `zh`, matched the same way); hiding in a language with none is one
+    ConfigError line. A project's entry in `projects` is hidden the same way. Cards without a source record are
+    unchanged.
+  - **[decided by the builder]** Once titles have one slot per language, a hidden card's full-card `title` holds
+    the phrase per language, so one screen never shows both languages.
   - Read-only, in shadow and live mode alike: building writes nothing in the data folder (it reads the store
     without its lock file, as the local page's GETs do, and never builds `index.sqlite`), starts no process and
     opens no connection. The command writes only to stdout or `--out` (inside the data folder is allowed, since

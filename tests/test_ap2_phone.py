@@ -174,7 +174,8 @@ class WindowTest(PhoneCase):
         counted = Counter(r["lane"] for r in data["cards"])
         self.assertEqual(data["lanes"], {lane: counted.get(lane, 0) for lane in cards.LANES})
         self.assertEqual(sum(data["lanes"].values()), len(data["cards"]))
-        self.assertEqual(data["projects"], [{"id": project["id"], "title": "Move the shop", "done": 1, "total": 2}])
+        self.assertEqual(data["projects"], [{"id": project["id"], "title": {"en": "Move the shop"}, "done": 1,
+                                              "total": 2}])
         self.assertEqual(data["heartbeat"], server.heartbeat(self.data, NOW))
         self.assertEqual(data["heartbeat"]["age_seconds"], 25)
         self.assertEqual(set(data["full"]), {r["id"] for r in data["cards"]})
@@ -249,7 +250,7 @@ class FullCardTest(PhoneCase):
         self.assertNotIn("raw", full["card"]["source"])
         self.assertEqual(full["children"], [server.row(Store(self.data, cfg=self.cfg).get(child_in["id"]), ("en",)),
                                             {"id": child_old["id"], "off_phone": True}])
-        self.assertEqual(full["links"][0]["title"], "linked, open")
+        self.assertEqual(full["links"][0]["title"], {"en": "linked, open"})
         self.assertEqual(full["links"][1:], [{"id": link_old["id"], "off_phone": True}, {"id": gone, "missing": True}])
         self.assertNotIn("old finished child", json.dumps(self.build(), ensure_ascii=False))
         self.assertNotIn("linked, old history", json.dumps(self.build(), ensure_ascii=False))
@@ -299,7 +300,7 @@ class HideTest(PhoneCase):
         self.assertIsNone(row["title"])
         self.assertEqual(row["title_hidden"], {"en": phrase})
         full = data["full"][card["id"]]
-        self.assertEqual(full["card"]["title"], phrase)
+        self.assertEqual(full["card"]["title"], {"en": phrase})
         self.assertEqual(full["card"]["plain"]["what"], {"en": phrase})
         self.assertNotIn("text", full["card"]["source"]["record"])
         sb = full["source_block"]
@@ -324,10 +325,10 @@ class HideTest(PhoneCase):
         card = self.pr42()
         data = self.build()
         row = next(r for r in data["cards"] if r["id"] == card["id"])
-        self.assertIn(MARKER, row["title"])
+        self.assertIn(MARKER, row["title"]["en"])
         self.assertNotIn("title_hidden", row)
         full = data["full"][card["id"]]
-        self.assertIn(MARKER, full["card"]["title"])
+        self.assertIn(MARKER, full["card"]["title"]["en"])
         self.assertIn(MARKER, full["card"]["plain"]["what"]["en"])
         self.assertIn(MARKER, full["source_block"]["text"])
 
@@ -351,7 +352,7 @@ class HideTest(PhoneCase):
         self.assertEqual(row["title_hidden"], {"en": "octo-dev wrote a message in widgets",
                                                "zh": "octo-dev 在 widgets 写了一条消息"})
         full = data["full"][card["id"]]
-        self.assertEqual(full["card"]["title"], "octo-dev wrote a message in widgets")  # the primary language only
+        self.assertEqual(full["card"]["title"], row["title_hidden"])  # the phrase per language, like the row
         self.assertEqual(full["card"]["plain"]["what"], row["title_hidden"])
 
     def test_the_shorter_forms(self):
@@ -374,7 +375,7 @@ class HideTest(PhoneCase):
                         source={"name": "gone-source", "link": None, "record": {"text": MARKER, "author": "Ana"}})
         data = self.build(phone_hide_quotes=True)
         self.assertNotIn(MARKER, json.dumps(data, ensure_ascii=False))
-        self.assertEqual(data["full"][card["id"]]["card"]["title"], "Ana wrote something")
+        self.assertEqual(data["full"][card["id"]]["card"]["title"], {"en": "Ana wrote something"})
 
     def test_a_language_with_no_phrases_is_refused(self):
         cfg = Config(primary_language="fr", phone_hide_quotes=True)
