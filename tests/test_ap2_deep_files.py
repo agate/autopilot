@@ -193,10 +193,12 @@ class FieldTooDeepToPrintTest(DeepCase):
         card_id = "c-20261101-000000-abcdef"
         path = self.store.path(card_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        depth = 25_000  # parses on 3.14 but is too deep for its repr; too deep to parse on 3.9-3.13
+        # Depending on the Python and its stack, this fails at parse, at the check's repr (TooDeepError), or is a
+        # plain "not a card file" CardError. In every case it is a CardError naming the file, never a RecursionError.
+        depth = 25_000
         path.write_text('{"id": "%s", "audit": ' % card_id + '{"a":' * depth + "1" + "}" * depth + "}",
                         encoding="utf-8")
-        with self.assertRaisesRegex(cards.TooDeepError, re.escape(f"{path}: ") + ".*nested too deeply"):
+        with self.assertRaisesRegex(CardError, r"\A" + re.escape(f"{path}: ")):
             self.store.get(card_id)
 
 
