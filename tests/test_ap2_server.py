@@ -195,16 +195,23 @@ class GuardTest(ServerCase):
         reply = self.raw(b"GET /api/state HTTP/1.0\r\n\r\n")
         self.assertTrue(reply.startswith(b"HTTP/1.0 403 "), reply[:80])
 
-    def test_a_request_line_with_no_version_or_garbage_still_gets_a_status_line_and_the_safe_headers(self):
+    def assert_status_line_and_safe_headers(self, reply: bytes):
+        self.assertTrue(reply.startswith(b"HTTP/1.0 "), reply[:80])
+        head = reply.split(b"\r\n\r\n", 1)[0]
+        self.assertIn(b"\r\nCache-Control: no-store\r\n", head + b"\r\n")
+        self.assertIn(b"\r\nX-Content-Type-Options: nosniff\r\n", head + b"\r\n")
+
+    def test_a_request_line_with_no_version_gets_no_reply_or_a_status_line_and_the_safe_headers(self):
         self.start()
-        for request in (f"GET /api/state\r\nHost: 127.0.0.1:{self.port}\r\n\r\n".encode("ascii"),
-                        b"GARBAGE\r\n\r\n"):
-            with self.subTest(request):
-                reply = self.raw(request)
-                self.assertTrue(reply.startswith(b"HTTP/1.0 "), reply[:80])
-                head = reply.split(b"\r\n\r\n", 1)[0]
-                self.assertIn(b"\r\nCache-Control: no-store\r\n", head + b"\r\n")
-                self.assertIn(b"\r\nX-Content-Type-Options: nosniff\r\n", head + b"\r\n")
+        reply = self.raw(f"GET /api/state\r\nHost: 127.0.0.1:{self.port}\r\n\r\n".encode("ascii"))
+        # Some Python versions close a request line with no version without replying.
+        # A bare body with no status line and headers is never allowed.
+        if reply:
+            self.assert_status_line_and_safe_headers(reply)
+
+    def test_a_garbage_request_line_still_gets_a_status_line_and_the_safe_headers(self):
+        self.start()
+        self.assert_status_line_and_safe_headers(self.raw(b"GARBAGE\r\n\r\n"))
 
     def test_a_foreign_host_cannot_post_a_question_either(self):
         card = self.add()
