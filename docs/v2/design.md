@@ -737,7 +737,10 @@ Calls the author made without asking (check them):
     is refused, naming its file, unless its `id` is its file name and its `card_id` is its card's `id`, and its
     card passes the same structure check as a card file. `Store.prune()` removes points
     older than 30 days (kept at exactly 30); every gate run calls it (slice 5). A point whose time
-    cannot be read is kept.
+    cannot be read is kept by prune. A point that cannot be read at all (one nested too deeply for Python's JSON
+    reader included) is kept by prune and refused by restore with one error naming its file. A card file or point
+    nested too deeply is a `TooDeepError`: a CardError, so every caller that handles a damaged file handles it,
+    and also a RecursionError, so the raw prune keeps its `nested too deeply` words.
   - Proposed opposite action: `Store.propose_opposite(id, action, run, by)` sets the card's `ask` to
     `{"type": "approve", "action": <move_ticket_back|close_pr|force_push_saved_ref|revert_pr>, "run": [argv...],
     "proposed": true, "text"?: <optional note>}` and runs nothing. It is refused when the card already has an open ask (that ask is never
@@ -755,7 +758,7 @@ Calls the author made without asking (check them):
   other-version or stale-marked file is rebuilt from `items/` (written to a temp file, then `os.replace`; the temp
   file is removed when the build fails). Results are read from the card files, never from the index, and a card is
   kept only when its file holds every word of the query, so a row that is behind its file never shows a card. A search whose rebuild meets a damaged card file
-  fails with one error naming that file. Hand edits to card files that remove words are caught by this re-check,
+  (one nested too deeply for Python's JSON reader included) fails with one error naming that file. Hand edits to card files that remove words are caught by this re-check,
   but added words are found only after the next rebuild (delete `index.sqlite` to force one). An index row that
   is not a card id, or a repeated row, is skipped. A month folder in `items/` that cannot be read fails the call
   with one error; it is never skipped, so a rebuild cannot silently drop its cards.

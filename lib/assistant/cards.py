@@ -36,6 +36,12 @@ class PlainWordsError(CardError):
     missing`."""
 
 
+class TooDeepError(CardError, RecursionError):
+    """A file or value is nested deeper than Python's JSON reader or writer can follow. A CardError, so every
+    caller that handles a damaged file handles this one; also a RecursionError, so a caller that already says
+    `nested too deeply` for a RecursionError (the raw prune) keeps its words."""
+
+
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -120,6 +126,8 @@ def check_unicode(value, what: str = "text") -> None:
         raise CardError(f"{what} is not valid JSON: NaN or Infinity") from None
     except TypeError as e:
         raise CardError(f"{what} is not JSON: {e}") from None
+    except RecursionError:
+        raise TooDeepError(f"{what} is not valid JSON: nested too deeply") from None
 
 
 def check_stored(card) -> None:
@@ -129,12 +137,20 @@ def check_stored(card) -> None:
     if not isinstance(card, dict):
         raise CardError(f"a card is a JSON object, not {type(card).__name__}")
     if not isinstance(card.get("audit"), list):
-        raise CardError("audit missing" if "audit" not in card else f"audit must be a list, not {card['audit']!r}")
+        raise CardError("audit missing" if "audit" not in card else _must_be(card, "audit", "a list"))
     if not isinstance(card.get("plain"), dict):
-        raise CardError("plain missing" if "plain" not in card else f"plain must be an object, not {card['plain']!r}")
+        raise CardError("plain missing" if "plain" not in card else _must_be(card, "plain", "an object"))
     if card.get("ask") is not None and not isinstance(card["ask"], dict):
-        raise CardError(f"ask must be an object or null, not {card['ask']!r}")
+        raise CardError(_must_be(card, "ask", "an object or null"))
     check_unicode(card)
+
+
+def _must_be(card: dict, field: str, what: str) -> str:
+    """`<field> must be <what>, not <value>`; a TooDeepError when the value is nested too deeply to print."""
+    try:
+        return f"{field} must be {what}, not {card[field]!r}"
+    except RecursionError:
+        raise TooDeepError(f"{field} must be {what}, and is nested too deeply") from None
 
 
 def plain_problems(plain, languages: tuple) -> list:
