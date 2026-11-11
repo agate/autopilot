@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import unittest
 
 from tests.helpers import LIB, ROOT
@@ -334,18 +335,24 @@ class ErrorTest(unittest.TestCase):
 
 
 class LongLineTest(unittest.TestCase):
-    """The reader's time grows in step with a line's length: a 1 MiB line of quote characters reads in a second or
-    two. Each runs in a child process, so a slow reader fails at the timeout instead of holding the suite."""
+    """The reader's time grows in step with a line's length: a 1 MiB line of quote characters reads well under a
+    second. Each runs in a child process that must finish within LIMIT seconds; the timeout stops a reader that hangs
+    so it fails instead of holding the suite."""
 
     N = 1024 * 1024  # sources.MAX_SOURCE
+    # The fixed reader takes well under a second; the quadratic one takes 8 s or more even on a fast machine.
+    LIMIT = 5
     CHILD = "import json, sys; from assistant import yamlish; print(json.dumps(yamlish.load(sys.stdin.read())))"
 
     def load_in_a_child(self, text: str):
         env = {k: v for k, v in os.environ.items() if k != "LC_ALL"}
         env.update(PYTHONPATH=str(LIB), PYTHON_COLORS="0", PYTHONIOENCODING="utf-8")
+        start = time.monotonic()
         r = subprocess.run([sys.executable, "-c", self.CHILD], input=text, capture_output=True, text=True,
                            encoding="utf-8", env=env, timeout=15)
+        elapsed = time.monotonic() - start
         self.assertEqual((r.returncode, r.stderr), (0, ""))
+        self.assertLess(elapsed, self.LIMIT)
         return json.loads(r.stdout)
 
     def test_a_long_line_of_quotes_reads_in_linear_time(self):
