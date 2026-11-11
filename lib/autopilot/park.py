@@ -10,6 +10,7 @@ from autopilot import budget, cli, config, paths
 
 # A park hook runs before every tool call of every worker, so this module imports only what it needs.
 PUNCT = set("();<>|&")
+MAX_COMMAND = 4096  # the park command is the package path, `worker park <ap> <task> <role>` and a one-line note
 
 
 def _ap_bin() -> str:
@@ -18,12 +19,17 @@ def _ap_bin() -> str:
 
 def is_park_command(cmd: str) -> bool:
     """Exactly `<ap> worker park <ap> <task> <role> [--note TEXT]` on one line: the one command a parking
-    worker may run. Anything chained to it, or any shell expansion, is not it."""
-    if not cmd or "\n" in cmd or "`" in cmd or "$(" in cmd:
+    worker may run. Anything chained to it, any `$` (command, parameter or arithmetic expansion) and any `{`
+    (brace expansion would turn one token into several words, such as `{implement,--data=x}`) is not it. A `#`
+    is a plain character, as bash reads one inside a word, so it cannot hide the rest of the line. A command past
+    `MAX_COMMAND` is refused before it is tokenized: `shlex` is quadratic on one long token, and a hook that runs
+    past its timeout lets the call through."""
+    if not cmd or len(cmd) > MAX_COMMAND or "\n" in cmd or "`" in cmd or "$" in cmd or "{" in cmd:
         return False
     try:
         lex = shlex.shlex(cmd, posix=True, punctuation_chars=True)
         lex.whitespace_split = True
+        lex.commenters = ""
         toks = list(lex)
     except ValueError:
         return False
