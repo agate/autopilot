@@ -917,7 +917,9 @@ Calls the author made without asking (check them):
     log), `records/<source>.records.json` (written by the session, `fill: ai` only) and `<source>.raw.json` /
     `.raw.txt` (built by the take). The loader skips it (a dot folder). The plan makes `records/`, the only folder
     the session writes in; `plan.json` and `calls.jsonl` are code's, and the launch slice must allow `Write` and
-    `Edit` only under `<scan>/records/`.
+    `Edit` only under `<scan>/records/`, and must deny `Read`, `Grep` and `Glob` everywhere in the data folder but
+    `<scan>/records/`. Those permission rules are the guard; the hook's path check below is a second line, since a
+    relative path from a working folder above the data folder names neither the data folder nor the scan folder.
   - Plan: `ap2 scan plan [NAME...] [--data PATH]` (no name: every `mcp`, `connector` and `skill` source) writes
     `plan.json` and prints `{plan, version, made_at, folder, calls, errors, brief}`. A call is `source`, `via`,
     `fill`, `args`, `server`/`tool`/`tools`/`skill` as written, `allowed_tools` (`mcp__<server>__<tool>` when the
