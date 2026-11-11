@@ -1333,13 +1333,15 @@ Calls the author made without asking (check them):
   - The document: `{generated_at, mode, primary_language, secondary_language, languages, settings:
     {history_days, lanes, hide_quotes}, lanes, projects, heartbeat, cards, full}`. `lanes` (all four keys) counts
     only the cards on the phone; `projects` is the local page's project list over those cards (each `title` per
-    language, as there), `done`/`total` from the children on the phone; `heartbeat` is the local page's; `cards`
-    are the local page's rows in its order. These are the JSON shapes of the local page entry above.
+    language, as there), `done`/`total` from the children on the phone; `heartbeat` is the local page's (its
+    `error` scrubbed, see Local paths); `cards` are the local page's rows in its order. These are the JSON shapes of
+    the local page entry above.
   - `full` maps each card id in `cards` to the local page's full card (`GET /api/cards/<id>`), built by the
-    same function, `server.full_card`, with two changes only: the card's `sessions` and `source.raw` (a path to
-    a file on this Mac) are removed, and a child or link that is not on the phone (outside the window or the
-    lanes) is `{id, off_phone: true}` with no title or words, so old history does not reach the phone through a
-    link. A link to a card that is gone stays `{id, missing: true}`. Questions and their answers stay (9.4).
+    same function, `server.full_card`, with these changes only (plus hiding and the Local paths scrub below): the
+    card's `sessions` and `source.raw` (a path to a file on this Mac) are removed, and a child or link that is not
+    on the phone (outside the window or the lanes) is `{id, off_phone: true}` with no title or words, so old
+    history does not reach the phone through a link. A link to a card that is gone stays `{id, missing: true}`.
+    Questions and their answers stay (9.4).
   - Hiding what people wrote (`phone_hide_quotes: true`), for every card with a source record: the row has `title:
     null` and `title_hidden: {<language>: text}` for each configured language, so the page shows the chosen language
     only (anti-goal 1); the full card's `title` is the text per language, like `title_hidden`, `plain.what` is the

@@ -313,7 +313,7 @@ class ScrubTest(PhoneCase):
         return self.add(ask={"type": "fix", "text": text, "role": "implement", "reason": "died"}, **over)
 
     def test_the_data_folder_becomes_data_as_given_and_resolved(self):
-        link = self.tmp / "data-link"
+        link = self.tmp / "data (link)+[1]"
         link.symlink_to(self.data, target_is_directory=True)
         card = self.bad_template_and_gate()
         asked = self.ask(f"{self.data}/workers.json: cannot read; see '{link}/logs/x.log'")
@@ -377,7 +377,11 @@ class ScrubTest(PhoneCase):
                 f"{real}/repo{real}/repo/a": "~/repo~/repo/a", f"file://localhost{real}/a": "file://localhost~/a",
                 f"see _{real}_ or": "see _~_ or", f"~~{real}~~ was wrong": "~~~~~ was wrong",
                 f"_see {real}._": "_see ~._", f"~~{real}.~~ no": "~~~.~~ no", f"{real}的PR": "~的PR",
-                f"{real}._backup/a": f"{real}._backup/a",
+                f"{real}._backup/a": f"{real}._backup/a", f"{real}--old/a": f"{real}--old/a",
+                f"cd {home}&&git pull": "cd ~&&git pull", f"cd {home};ls|head>{home}/o": "cd ~;ls|head>~/o",
+                f"HOME={home},PWD=/tmp": "HOME=~,PWD=/tmp", f"copied {real}...then": "copied ~...then",
+                " ".join(f"{real}{c}a" for c in ",;:&|<>()'\"!?*^[]{}`"):
+                    " ".join(f"~{c}a" for c in ",;:&|<>()'\"!?*^[]{}`"),
                 f"{real}-a {real}@a {real}~a {real}$a {real}%a {real}#a {real}=a":
                     f"{real}-a {real}@a {real}~a {real}$a {real}%a {real}#a {real}=a"}
         rows = {text: self.ask(text) for text in kept}
