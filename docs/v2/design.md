@@ -804,8 +804,8 @@ Calls the author made without asking (check them):
     Patterns may name the record's fields and the derived fields, defined once in `form.derived`: `id_digits`
     (the id without its dots, Slack's `p` link), `place_id` (the record's own when the form fills it, else
     `place`), `source` (the source's name) and `thread_or_id` (slice 4, below). A pattern naming a value the record lacks (`{thread_id}` on a
-    top-level message, `{site}` before a setting supplies it) drops the record with the reason; so does one
-    naming an empty or blank value (`key: {thread_id} is empty`), so two different items never share a key
+    top-level message) drops the record with the reason (a declared but empty setting refuses the read instead, slice 4,
+    below); so does one naming an empty or blank value (`key: {thread_id} is empty`), so two different items never share a key
     such as `C0123ABCD:`.
   - Sort and cards: `fill: paths` with one category gives every record that category; with several it makes no
     card (the item says why); `fill: ai` records carry their `category`, a text that must be in `sort`. A

@@ -2,6 +2,8 @@
 No session is started and no tool is called: every reply here is a fixture."""
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -139,12 +141,36 @@ class PlanTest(ScanCase):
         self.assertIn("1. standup (skill): run the skill team-standup.", out["brief"])
         self.assertIn("   Instructions: Keep only the items that name you.", out["brief"])
 
+    def test_the_engines_own_read_keys_are_not_call_arguments(self):
+        self.user("vendor", """\
+            source: vendor
+            brings: messages
+            read: { via: mcp, server: vendor, tool: list_incidents, timeout: 30, run: x, status: open }
+            fill: paths
+            form: { id: .id, at: .at, text: .text }
+            link: none
+            sort: { all: alert }
+            """)
+        out = self.plan("vendor")
+        self.assertEqual(out["errors"], [])
+        [call] = out["calls"]
+        self.assertEqual(call["args"], {"status": "open"})
+
     def test_each_error_is_listed_and_the_other_calls_are_still_planned(self):
         self.settings("slack-mentions")
         self.user("vendor", """\
             source: vendor
             brings: messages
             read: { via: mcp, server: vendor, tools: [list_incidents, get_incident] }
+            fill: paths
+            form: { id: .id, at: .at, text: .text }
+            link: none
+            sort: { all: alert }
+            """)
+        self.user("both-tools", """\
+            source: both-tools
+            brings: messages
+            read: { via: mcp, server: vendor, tool: list_incidents, tools: [get_incident] }
             fill: paths
             form: { id: .id, at: .at, text: .text }
             link: none
@@ -159,16 +185,20 @@ class PlanTest(ScanCase):
             link: none
             sort: { all: question }
             """)
-        out = self.plan("slack-mentions", "github-my-prs", "jira-epic", "vendor", "skill-paths", "no-such")
+        out = self.plan("slack-mentions", "github-my-prs", "jira-epic", "vendor", "both-tools", "skill-paths",
+                        "no-such")
         self.assertEqual([c["source"] for c in out["calls"]], ["slack-mentions"])
         errors = {e["source"]: e["error"] for e in out["errors"]}
-        self.assertEqual(sorted(errors), ["github-my-prs", "jira-epic", "no-such", "skill-paths", "vendor"])
+        self.assertEqual(sorted(errors), ["both-tools", "github-my-prs", "jira-epic", "no-such", "skill-paths",
+                                          "vendor"])
         self.assertEqual(errors["github-my-prs"], "github-my-prs: read.via is command; the gate runs it with ap2 "
                                                   "source read github-my-prs, not a scan session")
         self.assertEqual(errors["jira-epic"], "jira-epic: settings.site is not set; add it in "
                                               "<data>/sources/jira-epic.yaml (extends: jira-epic)")
         self.assertEqual(errors["vendor"], "vendor: fill: paths reads one tool's reply; give exactly one read.tool "
                                            "(and no read.tools)")
+        self.assertEqual(errors["both-tools"], "both-tools: fill: paths reads one tool's reply; give exactly one "
+                                               "read.tool (and no read.tools)")
         self.assertEqual(errors["skill-paths"], "skill-paths: via: skill gives text, not one tool's JSON reply; use "
                                                 "fill: ai")
         self.assertIn("no source named 'no-such'", errors["no-such"])
@@ -524,6 +554,18 @@ class SaveRawTest(ScanCase):
             with self.assertRaisesRegex(ScanError, "larger than 100 bytes; the scan log .* is marked cut short"):
                 scan.save_raw(self.p["plan"], payload("hook-slack-search.json"))
         self.assertEqual(scan.read_log(Path(self.p["folder"])), ([], True))
+
+    def test_the_command_reads_one_byte_past_the_cap_and_marks_the_log_cut_short(self):
+        from assistant import cli
+        cap = 100
+        stdin = io.TextIOWrapper(io.BytesIO(b"x" * (cap + 1)), encoding="utf-8")
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch("assistant.engine.MAX_OUTPUT", cap), mock.patch.object(sys, "stdin", stdin), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli.main(["scan", "save-raw", "--plan", self.p["plan"]])
+        self.assertEqual((code, out.getvalue()), (1, ""))
+        self.assertRegex(err.getvalue(), rf"\Aap2: the hook payload is larger than {cap} bytes; [^\n]*\n\Z")
+        self.assertEqual(json.loads(self.log.read_text().splitlines()[-1]), {"cut_short": True})
 
     def test_bad_payloads_are_refused_and_the_log_is_unchanged(self):
         scan.save_raw(self.p["plan"], payload("hook-slack-search.json"))

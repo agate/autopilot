@@ -265,6 +265,32 @@ class SettingsTest(BuiltinCase):
         self.assertEqual(result["items"], [])
         self.assertEqual({d["reason"] for d in result["dropped"]}, {"link: {host} missing"})
 
+    def test_settings_are_filled_into_nested_lists_and_maps(self):
+        self.user("nested", """\
+            source: nested
+            brings: messages
+            settings: { me: U0EXAMPLE1, epic: PROJ-1 }
+            read:
+              via: connector
+              tool: search_things
+              filters: { from: "<@{me}>" }
+              ids: ["{epic}"]
+            fill: ai
+            form: { id: x, at: x, text: x }
+            link: none
+            sort: { all: question }
+            """)
+        self.assertEqual(sources.fill_args(Loader(self.data).load("nested")),
+                         {"filters": {"from": "<@U0EXAMPLE1>"}, "ids": ["PROJ-1"]})
+
+    def test_an_empty_setting_named_only_in_the_key_is_refused_before_the_copy(self):
+        p = self.user("jira-epic", 'extends: jira-epic\nsettings: { site: jira.example.com }\n'
+                                   'read: { jql: "order by updated" }\nlink: none\nkey: "{epic}:{id}"\n')
+        with self.assertRaises(SourceError) as cm:
+            self.engine().read_saved("jira-epic", self.copy("jira-epic-issues.json"))
+        self.assertEqual(str(cm.exception), f"jira-epic: settings.epic is not set; add it in {p}")
+        self.assertFalse((self.data / "sources" / ".raw").exists())
+
     def test_an_arg_naming_no_setting_is_refused_in_the_args(self):
         self.user("jira-epic", 'extends: jira-epic\nsettings: { site: jira.example.com, epic: PROJ-1 }\n'
                                'read: { jql: "parent = {project}" }\n')
@@ -324,6 +350,37 @@ class SlackThreadTest(BuiltinCase):
         [card] = self.store().list()
         self.assertEqual((card["kind"], card["title"]), ("alert", "recovered"))
 
+    def test_a_thread_takes_its_earliest_card_making_category_in_either_order(self):
+        top = self.records[0]  # question
+        reply = dict(self.records[1], category="ask_to_do")  # a later reply in the same thread
+        for records in ([top, reply], [reply, top]):
+            with self.subTest([r["category"] for r in records]):
+                result = self.engine().read_saved("slack-mentions", self.copy("slack-search.txt"), records=records,
+                                                  dry_run=True)
+                self.assertEqual(result["dropped"], [])
+                self.assertEqual([i["category"] for i in result["items"]], ["question", "question"])
+
+    def test_a_thread_shows_the_record_with_the_later_at_not_the_later_id(self):
+        raw = self.tmp / "pings.txt"
+        raw.write_text("1730000900.000001 at 1730000100.000001 thread 1730000000.000001 first\n"
+                       "1730000100.000002 at 1730000200.000002 thread 1730000000.000001 second\n")
+        thread = "1730000000.000001"
+        earlier = {"id": "1730000900.000001", "thread_id": thread, "at": "1730000100.000001", "text": "first",
+                   "category": "q"}
+        later = {"id": "1730000100.000002", "thread_id": thread, "at": "1730000200.000002", "text": "second",
+                 "category": "q"}
+        for n, records in enumerate(([earlier, later], [later, earlier])):
+            with self.subTest([r["text"] for r in records]):
+                self.data = datadir.ensure(self.tmp / f"data-{n}")  # a fresh store for each order
+                self.user("pings", "source: pings\nbrings: messages\nread: { via: connector, tool: read_pings }\n"
+                                   "fill: ai\nform: { id: x, thread_id: x, at: x, text: x }\nlink: none\n"
+                                   "key: \"{thread_or_id}\"\nsort: { q: question }\n")
+                result = self.engine().read_saved("pings", raw, records=records)
+                self.assertEqual(result["dropped"], [])
+                [card] = self.store().list()
+                self.assertEqual((card["key"], card["title"], card["source"]["record"]["id"]),
+                                 (thread, "second", "1730000100.000002"))
+
     def test_a_top_level_messages_link_uses_its_own_ts(self):
         result = self.engine().read_saved("slack-mentions", self.copy("slack-search.txt"), records=self.records[:1],
                                           dry_run=True)
@@ -334,6 +391,9 @@ class SlackThreadTest(BuiltinCase):
     def test_a_record_from_a_skipped_channel_is_dropped(self):
         result = self.engine().read_saved("slack-mentions", self.copy("slack-search.txt"), records=self.records[:3])
         self.assertEqual(result["dropped"], [{"item": 2, "reason": "form.place 'random' is in read.skip_channels"}])
+        result = self.engine().read_saved("slack-mentions", self.copy("slack-search.txt"),
+                                          records=[dict(self.records[2], place="#random")], dry_run=True)
+        self.assertEqual(result["dropped"], [{"item": 0, "reason": "form.place '#random' is in read.skip_channels"}])
         by_id = dict(self.records[2], place="#elsewhere")
         result = self.engine().read_saved("slack-mentions", self.copy("slack-search.txt"),
                                           records=[{**by_id, "place_id": "C0999RAND"}], dry_run=True)
@@ -443,6 +503,8 @@ class WordForWordTest(BuiltinCase):
             ("1730000000.123456", "1730000000.123456_2", False),
             ("PROJ-1", "PROJ-12 and PROJ-1.", True),
             ("PROJ-1", "PROJ-12", False),
+            ("123", "PROJ-123", False),
+            ("C0123", "C0123-ABCD", False),
             ("C0123ABCD", "C0123ABCDE C0123ABCD", True),
             ("", "anything", True),
             ("é1", "café1", False),
