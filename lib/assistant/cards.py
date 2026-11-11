@@ -25,6 +25,9 @@ OPTIONAL = ("parent", "ask", "title")
 # ASCII digits only: `\d` alone would also match other scripts' digits (Arabic-Indic, full-width).
 CARD_ID = re.compile(r"c-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})-[0-9a-f]{6}\Z", re.ASCII)
 TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+# An error shows at most this many characters of a bad value's repr, then `...`: a hand-edited card can hold a huge
+# value, and its whole repr would make one error line (in gate.json, the routine error, the terminal) that size.
+SHOWN_CHARS = 200
 
 
 class CardError(ValueError):
@@ -34,6 +37,12 @@ class CardError(ValueError):
 class PlainWordsError(CardError):
     """The plain-words block is missing a line or a language. The message names each, e.g. `plain.where.zh
     missing`."""
+
+
+class TooDeepError(CardError, RecursionError):
+    """A file or value is nested deeper than Python's JSON reader or writer can follow. A CardError, so every
+    caller that handles a damaged file handles this one; also a RecursionError, so a caller that already says
+    `nested too deeply` for a RecursionError (the raw prune) keeps its words."""
 
 
 def now_utc() -> datetime:
@@ -53,10 +62,34 @@ def new_id(prefix: str, at: datetime) -> str:
     return f"{prefix}-{at.astimezone(timezone.utc):%Y%m%d-%H%M%S}-{secrets.token_hex(3)}"
 
 
+def shown(value) -> str:
+    """A value as an error shows it: its repr, cut to its first SHOWN_CHARS characters then `...` when longer.
+    Raises RecursionError, as repr does, when the value is nested too deeply to print."""
+    text = repr(value)
+    return text if len(text) <= SHOWN_CHARS else text[:SHOWN_CHARS] + "..."
+
+
+def _not(field: str, what: str, value) -> str:
+    """`<field> must be <what>, not <value>`, the value cut by `shown`; a TooDeepError when the value is nested
+    too deeply to print."""
+    try:
+        return f"{field} must be {what}, not {shown(value)}"
+    except RecursionError:
+        raise TooDeepError(f"{field} must be {what}, and is nested too deeply") from None
+
+
+def _not_an_id(head: str, value, tail: str = "") -> str:
+    """`<head>not a card id: <value><tail>`, the value cut by `shown`; a TooDeepError when it is too deep."""
+    try:
+        return f"{head}not a card id: {shown(value)}{tail}"
+    except RecursionError:
+        raise TooDeepError(f"{head}not a card id: nested too deeply{tail}") from None
+
+
 def check_id(card_id) -> str:
     """Return `card_id` when it is a well-formed card id; raise CardError otherwise."""
     if not (isinstance(card_id, str) and CARD_ID.match(card_id)):
-        raise CardError(f"not a card id: {card_id!r} (expected c-YYYYMMDD-HHMMSS-xxxxxx)")
+        raise CardError(_not_an_id("", card_id, " (expected c-YYYYMMDD-HHMMSS-xxxxxx)"))
     return card_id
 
 
@@ -68,12 +101,12 @@ def month(card_id: str) -> str:
 
 def _enum(card: dict, key: str, allowed: tuple) -> None:
     if card[key] not in allowed:
-        raise CardError(f"{key} must be one of {', '.join(allowed)}, not {card[key]!r}")
+        raise CardError(_not(key, f"one of {', '.join(allowed)}", card[key]))
 
 
 def _text(card: dict, key: str) -> None:
     if not (isinstance(card[key], str) and card[key].strip()):
-        raise CardError(f"{key} must be a non-empty text, not {card[key]!r}")
+        raise CardError(_not(key, "a non-empty text", card[key]))
 
 
 def check_shape(card) -> None:
@@ -89,23 +122,23 @@ def check_shape(card) -> None:
     _enum(card, "pri", PRIS)
     _enum(card, "origin", ORIGINS)
     if not isinstance(card["links"], list):
-        raise CardError(f"links must be a list of card ids, not {card['links']!r}")
+        raise CardError(_not("links", "a list of card ids", card["links"]))
     for link in card["links"]:
         if not (isinstance(link, str) and CARD_ID.match(link)):
-            raise CardError(f"links: not a card id: {link!r}")
+            raise CardError(_not_an_id("links: ", link))
     parent = card.get("parent")
     if parent is not None and not (isinstance(parent, str) and CARD_ID.match(parent)):
-        raise CardError(f"parent must be a card id or null, not {parent!r}")
+        raise CardError(_not("parent", "a card id or null", parent))
     if card.get("title") is not None and not isinstance(card["title"], str):
-        raise CardError(f"title must be a text or null, not {card['title']!r}")
+        raise CardError(_not("title", "a text or null", card["title"]))
     ask = card.get("ask")
     if ask is not None:
         if not isinstance(ask, dict):
-            raise CardError(f"ask must be an object with a type, or null, not {ask!r}")
+            raise CardError(_not("ask", "an object with a type, or null", ask))
         if ask.get("type") not in ASK_TYPES:
-            raise CardError(f"ask.type must be one of {', '.join(ASK_TYPES)}, not {ask.get('type')!r}")
+            raise CardError(_not("ask.type", f"one of {', '.join(ASK_TYPES)}", ask.get("type")))
     if not isinstance(card["plain"], dict):
-        raise CardError(f"plain must be an object with what, where and do, not {card['plain']!r}")
+        raise CardError(_not("plain", "an object with what, where and do", card["plain"]))
 
 
 def check_unicode(value, what: str = "text") -> None:
@@ -115,11 +148,13 @@ def check_unicode(value, what: str = "text") -> None:
     try:
         json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True).encode("utf-8")
     except UnicodeEncodeError as e:  # a ValueError too, so it is caught first
-        raise CardError(f"{what} is not valid Unicode: {e.object[e.start:e.end]!r}") from None
+        raise CardError(f"{what} is not valid Unicode: {shown(e.object[e.start:e.end])}") from None
     except ValueError:
         raise CardError(f"{what} is not valid JSON: NaN or Infinity") from None
     except TypeError as e:
         raise CardError(f"{what} is not JSON: {e}") from None
+    except RecursionError:
+        raise TooDeepError(f"{what} is not valid JSON: nested too deeply") from None
 
 
 def check_stored(card) -> None:
@@ -129,11 +164,11 @@ def check_stored(card) -> None:
     if not isinstance(card, dict):
         raise CardError(f"a card is a JSON object, not {type(card).__name__}")
     if not isinstance(card.get("audit"), list):
-        raise CardError("audit missing" if "audit" not in card else f"audit must be a list, not {card['audit']!r}")
+        raise CardError("audit missing" if "audit" not in card else _not("audit", "a list", card["audit"]))
     if not isinstance(card.get("plain"), dict):
-        raise CardError("plain missing" if "plain" not in card else f"plain must be an object, not {card['plain']!r}")
+        raise CardError("plain missing" if "plain" not in card else _not("plain", "an object", card["plain"]))
     if card.get("ask") is not None and not isinstance(card["ask"], dict):
-        raise CardError(f"ask must be an object or null, not {card['ask']!r}")
+        raise CardError(_not("ask", "an object or null", card["ask"]))
     check_unicode(card)
 
 
