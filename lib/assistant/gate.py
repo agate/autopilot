@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
-from assistant import cards, routines
+from assistant import cards, engine, routines
 from assistant.cards import CardError
 from assistant.config import ConfigError
 from assistant.store import Store, write_json
@@ -322,6 +322,16 @@ def _run(data: Path, now: datetime, watches, store: Optional[Store]) -> dict:
         log(f"prune: error: {e}")
     if pruned:
         log(f"pruned {len(pruned)} restore point(s) older than 30 days")
+
+    # Old raw source files and their reports (design 12): logged only; gate.json keeps its five keys.
+    raw = engine.prune_raw(data, now, store.list)
+    if raw["link"]:
+        log(f"prune raw: {raw['link']} is a link; raw source files are not pruned")
+    for e in raw["errors"]:
+        errors.append(e)
+        log(f"prune raw: error: {e['error']}")
+    if raw["removed"]:
+        log(f"pruned {len(raw['removed'])} raw source file(s) older than {engine.RAW_KEEP.days} days")
 
     errors = [{k: _safe(v) for k, v in e.items()} for e in errors]  # e.g. a file name that is not UTF-8
     out = {"last_run_at": cards.stamp(now), "routines": found, "watches_due": due_names, "pruned": pruned,
