@@ -65,6 +65,16 @@ Anti-goals (failure even if it "works"):
 - Every user-facing string has one slot per language. The data model stores the secondary version only when
   `secondary_language` is set. v1 keeps page strings in `templates/labels.en.json`; v2 adds `labels.<lang>.json`
   next to it.
+- **[decided by the builder]** A card's `title` has the same per-language shape as its plain words. It is
+  null, one text, or an object `{<lang>: text}`. One text means "the same words in every language": what every
+  card stored before this rule holds, and what a quote is (the author's own words). An object holds one non-empty
+  text per configured language, checked on add and update like `plain` (`title.zh missing`, `title.en is empty`);
+  a text title is not checked against the languages, and restore does not re-check them. Code-made titles (the
+  source engine, routine runs) write the object with the same words in each slot, because they quote a record or
+  the user's routine title and nothing in the code can translate. A writer that can write both languages (a scan
+  session, a worker, `ap2 card add`) gives the object with real words per language. A reader picks a language's
+  slot, else the primary's (`cards.title_for`); the local page shows only the page language's title. Translating
+  quotes is the proposed line below (open question 4), not part of this rule.
 - **[proposed]** A reply drafted for someone else stays in the language that person wrote in. On the
   other-language page its meaning is shown separately, and Copy leaves the meaning out. A quote shows the
   translation first and the original behind a collapsed "Original" toggle.
@@ -722,6 +732,9 @@ archived with the card.
 - Reused from secretary by copying, not calling: the Slack and GitHub reading logic (as built-in source files and
   engine checks), the investigator, analyst and reviewer agents, the presets.
 - **[open]** Moving v1's data from `~/.claude/autopilot-data` and secretary's state into the new data folder.
+  **[decided by the builder]** The read-only part is built: `ap2 import-v1` copies each v1 project (its
+  `config.json` and `state.json`) into v2 cards without changing v1's folder, so v2 shows v1's work in shadow mode
+  (section 12, "v1 import"). Moving or deleting v1's data, and secretary's state, stay open.
 
 ## 11. Open questions, most important first
 
@@ -735,7 +748,9 @@ archived with the card.
    result file is stopped and marked paused, can resume. Check them.
 3. **Replies on the local page** resume the session immediately (8.3)?
 4. **Drafts and quotes in two languages** (3.1, proposed part).
-5. **Data migration** from v1 and secretary (10).
+5. **Data migration** from v1 and secretary (10). **Answered for the read-only part:** `ap2 import-v1` copies v1
+   projects into cards and never writes to v1's folder (section 12, "v1 import"). Moving v1's or secretary's data
+   is still open.
 
 Calls the author made without asking (check them):
 
@@ -831,7 +846,9 @@ Calls the author made without asking (check them):
   - The store sets `id`, `created_at`, `updated_at` and `audit`; a card that gives one is refused. Required:
     `kind` and `feed` (non-empty text), `lane`, `pri`, `origin` (the enums of 4.1), `links` (a list of card ids),
     `plain`. Optional: `parent` (a card id or null), `ask` (null or an object whose `type` is one of the four),
-    `title` (text, searched). Other keys are kept as they are, for later templates. Ids in `parent` and `links` are
+    `title` (null, one text meaning the same words in every language, or `{<lang>: text}` with a non-empty text
+    for every configured language, `title.<lang> missing|is empty` otherwise (3.1); every slot is searched). Other
+    keys are kept as they are, for later templates. Ids in `parent` and `links` are
     checked for form only, not for existence (an import may add a child before its parent).
   - Plain words: `plain.what|where|do.<lang>` must be non-empty text for `primary_language` and, when set,
     `secondary_language`. One error class (`PlainWordsError`, a `CardError`) lists every gap, for example
@@ -935,11 +952,13 @@ Calls the author made without asking (check them):
     word (as whole tokens, slice 4 below) in the raw tool output (read as UTF-8, bad bytes replaced); one that does not is dropped with the reason
     (`form.id '...' is not in the raw output`), so a model cannot invent an id. A new card is
     `kind` = the template, `lane` `needs` (`brings: messages`) or `planned` (`brings: work`), `pri` P2,
-    `origin` `source`, `feed` the source's name, `title` the text's first line (80 characters), `key`, and
+    `origin` `source`, `feed` the source's name, `title` the text's first line (80 characters) in every
+    language's slot (`{<lang>: line}`, 3.1), `key`, and
     `source: {name, record, link, raw}` (the record's ids, the link, and the raw file it came from); a work
     card also gets `status`, through `status_map`. The same `key` updates the card that has it (`plain`,
     `title`, `source`, `status`; never `kind`, `lane`, `pri` or `ask`) with `by: source:<name>` and
-    `did: read <name>`; when only `raw` would change, nothing is written. `update_card` updates only, `none`
+    `did: read <name>`; when only `raw` would change, nothing is written, and an old card's one-text title equal
+    to every slot of the new title counts as unchanged (only its shape differs). `update_card` updates only, `none`
     makes nothing. The cards are found by key with `Store.list()` once per read. A card the store refuses to
     add or update (a stored card edited by hand into a bad one) drops only that item, naming the card or key,
     and a dry run drops it the same way; a failure of the store itself (a file or index error) still stops the
@@ -1186,8 +1205,9 @@ Calls the author made without asking (check them):
     came before the routine), so the gate only writes it as `last_slot` (action `start`, no card) and the routine
     counts from its next slot.
   - The run card: made through `Store.add` with `by: gate`, `kind: routine`, `feed: routines`, `lane: running`
-    (or `done` with `skipped: true` for a skipped run), `pri: P2`, `origin: source`, and the extra fields `key`
-    (`<routine>@<slot>`), `routine`, `slot`, `slot_tz`, `slot_at` (UTC), `late`, `skipped`, `late_minutes`. Then
+    (or `done` with `skipped: true` for a skipped run), `pri: P2`, `origin: source`, `title` the routine's title
+    in every language's slot (3.1), and the extra fields `key` (`<routine>@<slot>`), `routine`, `slot`,
+    `slot_tz`, `slot_at` (UTC), `late`, `skipped`, `late_minutes`. Then
     `last_slot` is written atomically (the file is read again first, so a change made meanwhile is kept). Before
     making a card the gate reads the routine cards once per run and looks for the key; a card found means it only
     writes `last_slot`. A damaged card file makes that read fail, so the routine waits (with an error) rather than
@@ -1273,7 +1293,8 @@ Calls the author made without asking (check them):
     from the card (`{a.b}` reads a field inside a field; `{{` and `}}` are literal braces). A placeholder the
     card lacks, or holds as null or blank text, is an error (`BriefError`) naming every such field; a value must
     be text or a number. A filled value is not read again. Built-in briefs use only `{id}`, a field every
-    stored card has, because `title` is optional.
+    stored card has, because `title` is optional. `{title}` fills the primary language's title
+    (`cards.title_for`), so a brief names the same words for a text or a per-language title.
   - No added tools or permissions: a key that would widen a role is refused anywhere in the file (top level,
     a `roles` entry, a button), before any other check, with one error class `TemplateWidenError` naming the
     file, line and key. The keys, compared without letter case, `-`, `_` or spaces: `tools`, `tool`,
@@ -1338,7 +1359,10 @@ Calls the author made without asking (check them):
     2xx replies are not (the page polls).
   - Routes, JSON in and out: `GET /` (the page), `GET /api/state` (mode, languages, lane counts, `running`, the
     projects with `done`/`total` from their children, the heartbeat, `usage: null` and the page's `url`),
-    `GET /api/cards?lane=&kind=&parent=&q=&limit=` (`{total, cards}`, each a row: `id`, `title`, `kind`, `lane`,
+    `GET /api/cards?lane=&kind=&parent=&q=&limit=` (`{total, cards}`, each a row: `id`, `title`
+    (`{<lang>: text}` for each configured language, a gap
+    filled from the primary language, or null when the card has none; the projects in `/api/state` too), `kind`,
+    `lane`,
     `pri`, `feed`, `parent`, `origin`, `ask_type`, `plain_where` per language, `updated_at`; lane order, then by
     `pri` and the newest change in Needs you, Running and Planned, History newest first; `q` goes through the
     store's search and the other filters apply to its result; a `q` over 500 characters or 50 words is 400, so a
@@ -1409,26 +1433,28 @@ Calls the author made without asking (check them):
     `done` card with no readable `updated_at` stays off. A project's children count the same way.
   - The document: `{generated_at, mode, primary_language, secondary_language, languages, settings:
     {history_days, lanes, hide_quotes}, lanes, projects, heartbeat, cards, full}`. `lanes` (all four keys) counts
-    only the cards on the phone; `projects` is the local page's project list over those cards, `done`/`total`
-    from the children on the phone; `heartbeat` is the local page's; `cards` are the local page's rows in its
-    order. These are the JSON shapes of the local page entry above.
+    only the cards on the phone; `projects` is the local page's project list over those cards (each `title` per
+    language, as there), `done`/`total` from the children on the phone; `heartbeat` is the local page's; `cards`
+    are the local page's rows in its order. These are the JSON shapes of the local page entry above.
   - `full` maps each card id in `cards` to the local page's full card (`GET /api/cards/<id>`), built by the
     same function, `server.full_card`, with two changes only: the card's `sessions` and `source.raw` (a path to
     a file on this Mac) are removed, and a child or link that is not on the phone (outside the window or the
     lanes) is `{id, off_phone: true}` with no title or words, so old history does not reach the phone through a
     link. A link to a card that is gone stays `{id, missing: true}`. Questions and their answers stay (9.4).
-  - Hiding what people wrote (`phone_hide_quotes: true`), for every card with a source record: the row has
-    `title: null` and `title_hidden: {<language>: text}` for each configured language, so the page shows the
-    chosen language only (anti-goal 1); the full card's `title` is the primary language's text, `plain.what` is
-    the text per language, `key` is removed (a source's key may be made from the text), `source.record` loses
+  - Hiding what people wrote (`phone_hide_quotes: true`), for every card with a source record: the row has `title:
+    null` and `title_hidden: {<language>: text}` for each configured language, so the page shows the chosen language
+    only (anti-goal 1); the full card's `title` is the text per language, like `title_hidden`, `plain.what` is the
+    text per language too, `key` is removed (a source's key may be made from the text), `source.record` loses
     `text`, and the source block's `text` is null and its `record` has no `text`. The source block keeps `name`,
     `author`, `place`, `at` and the http(s) `link`, so Open in source still works. The text names who and where
-    only: `{author} wrote {thing} in {place}` (`Ana wrote a message in #team`), or without an author `Someone
-    wrote ...`, or without a place no `in ...`; `{thing}` is `a message` for a `brings: messages` source, `an
-    item` for `brings: work`, `something` when the source cannot be loaded. The phrases sit next to the engine's
-    plain-words phrases (`engine.HIDDEN_PHRASES`, `en` and `zh`, matched the same way); hiding in a language with
-    none is one ConfigError line. A project's entry in `projects` is hidden the same way. Cards without a source
-    record are unchanged.
+    only: `{author} wrote {thing} in {place}` (`Ana wrote a message in #team`), or without an author `Someone wrote
+    ...`, or without a place no `in ...`; `{thing}` is `a message` for a `brings: messages` source, `an item` for
+    `brings: work`, `something` when the source cannot be loaded. The phrases sit next to the engine's plain-words
+    phrases (`engine.HIDDEN_PHRASES`, `en` and `zh`, matched the same way); hiding in a language with none is one
+    ConfigError line. A project's entry in `projects` is hidden the same way. Cards without a source record are
+    unchanged.
+  - **[decided by the builder]** Once titles have one slot per language, a hidden card's full-card `title` holds
+    the phrase per language, so one screen never shows both languages.
   - Read-only, in shadow and live mode alike: building writes nothing in the data folder (it reads the store
     without its lock file, as the local page's GETs do, and never builds `index.sqlite`), starts no process and
     opens no connection. The command writes only to stdout or `--out` (inside the data folder is allowed, since
@@ -1505,7 +1531,8 @@ Calls the author made without asking (check them):
     start or timed out), nothing starts: the `WorkerError` says to list them in `projects/<name>.yaml` `tools`. On a dead
     worker's resume that counts as its one resume; a parked worker is stopped as when its resume cannot start. An in-place resume first
     checks that the worker's folder is still there, so a gone worktree says "cannot start the session". The branch is the card's `branch`, else the pattern with the card's `key` (else its id) and the first
-    three words of its title. The session gets them the way v1 passes setup: `--settings <run dir>/settings-<role>.json`
+    three words of its title in the primary language. The session gets them the way v1 passes setup:
+    `--settings <run dir>/settings-<role>.json`
     (the permission floor: v1's outward-tool and Bash denials, plus `Edit` denials on the data folder's own files
     (including the user's `templates/**` and `sources/**`, the rules the worker floor in `roles.py` promises; every
     card's run directory stays writable except its settings files) and the package, and one allow rule, `Bash(<package>/bin/ap2 worker park:*)`, as v1 allows its park command, and the park hook, `hooks.PreToolUse` `[{"matcher": "*", "hooks": [{"type": "command", "command": "\"<package>/bin/ap2\" hook-park", "timeout": 5}]}]` (v1's `perms.park_hook()` shape), so the worker and its subagents run it before each tool call; the floor refuses a data folder or package path that a gitignore pattern cannot
@@ -1639,6 +1666,55 @@ Calls the author made without asking (check them):
     `ap2 worker list`, `start CARD ROLE [--cwd P] [--prompt-file F] [--needs A,B] [--resume]`,
     `end CARD ROLE [--transcripts P]`, `check [--transcripts P] [--usage P]`,
     `park CARD ROLE [--note T] [--usage P]`, `answer CARD TEXT...`, `finish CARD [--transcripts P]`.
+- **[decided by the builder]** v1 import (10, 11 question 5), read-only, in `importv1.py`.
+  - Command: `ap2 import-v1 [--data PATH] [--from DIR] [--project NAME ...] [--dry-run]`. `--from` defaults to
+    v1's own data root (`AUTOPILOT_DATA`, else `~/.claude/autopilot-data`, v1's `paths.data_root()`). A project is
+    every `<from>/projects/<name>/` holding `config.json`, plus a legacy `<from>/<name>/config.json` whose
+    `projects/<name>/config.json` does not exist (v1's `ap_dir` rule); `<name>` must pass v1's `valid_name`; a
+    folder that cannot be looked into counts as found, so it is refused alone; a project folder whose real place
+    cannot be found (a link through a folder the import cannot look into) stops the import with one line, nothing
+    written, because an overlap with the data folder cannot be ruled out; a `projects` link to a place that does
+    not exist stops the import with one line too. `--project` (repeatable) limits
+    it; a name not found, a missing `--from` folder, or a data folder and `--from` (and its projects folder and
+    each project folder found, `--project` or not, symlinks followed) where either is inside the other (compared
+    as `datadir` does: letter case folded, then by file identity) is one `ap2: ...` line, exit 1, nothing written.
+  - Read-only for real: v1's files are read with `open(...).read()` and `json.loads`, never through v1's
+    `state.load` or `mutate` (they take a lock file inside v1's folder). Nothing is created or changed under
+    `--from`.
+  - Cards (feed `v1-import`, audit `by: v1-import`, each with `project: <name>`): a `project` card
+    (`key: v1:<name>`, title the name, `lane: done` when the project has tasks and every one is `done` or
+    `skipped`, else `running`; `source.record` keeps `repo`, `branch_pattern`, `branch_prefix` and the folder); a
+    `code` card per task under it (`key: v1:<name>:<task id>`, `status` v1's, lanes `todo` -> planned,
+    `in_progress`/`in_review` -> running, `blocked` -> needs, `done`/`skipped` -> done; `P1` when `critical`, else
+    `P2`; `origin: found` when v1's is, else `source`; `source.record` keeps `pr`, `branch`, `depends_on`,
+    `link`); a `question` card per open `ask` or `gate` decision (`key: v1:<name>:<decision id>`, `lane: needs`,
+    `ask: {type: answer | approve, from: v1}`, under its task's card, else the project's). Other decisions make no
+    card and are counted in the report's `not_imported`. A question card made while its decision was open is
+    closed (`lane: done`, `ask: null`) once v1 settles it; a question card whose decision has left state.json (v1
+    archives only settled decisions) is closed the same way.
+  - Text: a v1 text `{en, zh, ...}` gives each configured language its own text, else the base language
+    (`zh-Hans` -> `zh`), else `en`, else its first string. A label `{key, args}` is filled with `str.format_map`
+    (a placeholder without an argument stays as written, as v1's page does; a template longer than `MAX_LABEL`
+    (1,000) characters is shown as its key, before it is parsed; a template with a format spec, conversion, index
+    or attribute, one that does not parse, or one that would fill past `MAX_LABEL` characters, is shown as
+    written) from the package's `templates/labels.<lang>.json` with the v1 folder's `labels.<lang>.json` on top
+    (where v1 keeps its page translations), falling back to `en`, then to the key. `title` is the primary
+    language's text. Plain words come from fixed phrases (`importv1.PHRASES`, `en` and `zh`): `what` is the title,
+    `where` names the project (and task, with its v1 status), `do` says it is a read-only copy and to act on v1's
+    page. A configured language with no phrases is refused before anything is written.
+  - Re-run: the same key (among this feed's cards) updates `title`, `plain`, `lane`, `status`, `ask` and
+    `source` when they changed, and leaves the card alone when nothing did. A card is never removed (a task gone
+    from v1 keeps its card). `--dry-run` writes nothing, not even the data folder's layout, and reports
+    `would_add` (the card, with `parent` left out while its parent is only a would-add too) or `would_change`.
+  - Report on stdout: `{from, dry_run, projects: [{name, folder, cards: [{key, kind, action: add | update |
+    unchanged, card}], not_imported: {decisions}}], refused: [{name, folder, reason}]}`. Every card of a project
+    is checked as the store will check it before any is written, so a project whose files cannot be read
+    (missing, bad JSON, not an object, a state.json without `tasks` or `decisions`, a task or decision without an
+    id, an id used twice, an unknown task status, text the store refuses, a value nested deeper than the store
+    writes) is listed under `refused` and the others still import; the command then prints one `ap2: ...` line and
+    exits 1 after the report.
+  - Writes only inside the data folder, so it runs in shadow mode (no `require_live`). Not imported:
+    `events.jsonl`, reports, run folders, and `<data>/projects/<name>.yaml` (not written from `config.json`).
 - How the local server pushes updates to an open page (polling is fine).
   - **[decided by the builder]** Polling: the page asks `/api/state` every 10 seconds and redraws the top bar,
     the rail and the open list, so the heartbeat and new cards show without a reload.

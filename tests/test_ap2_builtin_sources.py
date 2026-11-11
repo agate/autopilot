@@ -348,7 +348,7 @@ class SlackThreadTest(BuiltinCase):
         self.assertEqual([(i["item"], i["category"], i["becomes"], i["action"]) for i in result["items"]],
                          [(0, "alert", "alert", "add"), (1, "alert", "alert", "unchanged")])
         [card] = self.store().list()
-        self.assertEqual((card["kind"], card["title"]), ("alert", "recovered"))
+        self.assertEqual((card["kind"], card["title"]), ("alert", {"en": "recovered"}))
 
     def test_a_thread_takes_its_earliest_card_making_category_in_either_order(self):
         top = self.records[0]  # question
@@ -379,7 +379,7 @@ class SlackThreadTest(BuiltinCase):
                 self.assertEqual(result["dropped"], [])
                 [card] = self.store().list()
                 self.assertEqual((card["key"], card["title"], card["source"]["record"]["id"]),
-                                 (thread, "second", "1730000100.000002"))
+                                 (thread, {"en": "second"}, "1730000100.000002"))
 
     def test_a_top_level_messages_link_uses_its_own_ts(self):
         result = self.engine().read_saved("slack-mentions", self.copy("slack-search.txt"), records=self.records[:1],
@@ -423,7 +423,7 @@ class SlackThreadTest(BuiltinCase):
         result = self.engine().read_saved("slack-alerts", raw, records=[recovered])
         self.assertEqual([(i["becomes"], i["action"]) for i in result["items"]], [("update_card", "update")])
         [card] = self.store().list()
-        self.assertEqual((card["kind"], card["title"]), ("alert", "recovered"))
+        self.assertEqual((card["kind"], card["title"]), ("alert", {"en": "recovered"}))
 
     def test_a_recovery_then_an_fyi_reply_still_updates_the_alert_card_in_either_order(self):
         raw = self.tmp / "alerts.txt"
@@ -446,7 +446,7 @@ class SlackThreadTest(BuiltinCase):
                 self.assertEqual([(i["category"], i["becomes"], i["action"]) for i in result["items"]],
                                  [("recovered", "update_card", "update"), ("recovered", "update_card", "unchanged")])
                 [card] = self.store().list()
-                self.assertEqual((card["kind"], card["title"]), ("alert", "thanks all"))  # the latest's words
+                self.assertEqual((card["kind"], card["title"]), ("alert", {"en": "thanks all"}))  # the latest's words
 
 
     def test_with_no_card_making_category_a_thread_takes_the_latest_update_card_one(self):

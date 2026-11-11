@@ -1006,7 +1006,7 @@ class SortToCardTest(EngineCase):
         card = next(c for c in cards if c["key"] == "inc01abcd")
         self.assertEqual({k: card[k] for k in ("kind", "lane", "feed", "pri", "origin", "links", "title")},
                          {"kind": "alert", "lane": "needs", "feed": "vendor-status", "pri": "P2", "origin": "source",
-                          "links": [], "title": "Elevated error rates on the payments API"})
+                          "links": [], "title": {"en": "Elevated error rates on the payments API"}})
         self.assertEqual(card["source"], {
             "name": "vendor-status", "link": "https://status.example.com/incidents/inc01abcd", "raw": first["raw"],
             "record": {"id": "inc01abcd", "at": "2026-11-10T13:40:05.000Z",
@@ -1032,7 +1032,7 @@ class SortToCardTest(EngineCase):
         after = self.store().list()
         self.assertEqual(len(after), 2)
         updated = self.store().get(card["id"])
-        self.assertEqual(updated["title"], "Payments API errors are falling")
+        self.assertEqual(updated["title"], {"en": "Payments API errors are falling"})
         self.assertEqual(updated["source"]["raw"], third["raw"])
         self.assertEqual(updated["audit"][-1]["did"], "read vendor-status")
         self.assertEqual(updated["audit"][-1]["by"], "source:vendor-status")
@@ -1059,7 +1059,7 @@ class SortToCardTest(EngineCase):
                          {"kind": "question", "lane": "done", "pri": "P0", "ask": ask})
         for k in ("title", "plain", "source"):
             self.assertNotEqual(after[k], moved[k], k)
-        self.assertEqual(after["title"], "Payments API errors are falling")
+        self.assertEqual(after["title"], {"en": "Payments API errors are falling"})
 
     def test_the_same_key_twice_in_one_read_is_one_card(self):
         reply = self.tmp / "dup.json"
@@ -1098,7 +1098,7 @@ class SortToCardTest(EngineCase):
         [dropped] = result["dropped"]
         self.assertEqual(dropped["item"], 1)
         self.assertRegex(dropped["reason"], rf"^card {ids['inc02efgh']}: pri must be one of ")
-        self.assertEqual(self.store().get(ids["inc03ijkl"])["title"], "Renamed 2")
+        self.assertEqual(self.store().get(ids["inc03ijkl"])["title"], {"en": "Renamed 2"})
         raw = self.data / result["raw"]
         self.assertEqual(json.loads(raw.with_name(raw.stem + ".report.json").read_text()), result)
 
@@ -1203,7 +1203,7 @@ class SortToCardTest(EngineCase):
                 self.assertEqual(str(cm.exception), f"cannot use the card store in X: failed (already written by "
                                                     f"this read: {ids['inc01abcd']}; raw output saved as {raw})")
                 self.assertIs(cm.exception.__cause__.__cause__, cause)
-                titles = {c["key"]: c["title"] for c in self.store().list()}
+                titles = {c["key"]: c["title"]["en"] for c in self.store().list()}
                 self.assertEqual(titles, {"inc01abcd": "Renamed inc01abcd", "inc02efgh": mock.ANY})
                 self.assertNotEqual(titles["inc02efgh"], "Renamed inc02efgh")
 
@@ -1307,6 +1307,82 @@ class SortToCardTest(EngineCase):
         self.assertEqual(self.store().list(), [])
         self.assertFalse((self.data / "sources" / ".raw").exists())  # refused before the read ran
 
+    def test_a_new_card_has_its_title_in_every_language(self):
+        cfg = Config(secondary_language="zh")
+        self.status_source(self.reply_copy("status-incidents.json"))
+        self.engine(cfg).read("vendor-status")
+        card = next(c for c in Store(self.data, cfg=cfg).list() if c["key"] == "inc01abcd")
+        self.assertEqual(card["title"], {"en": "Elevated error rates on the payments API",
+                                         "zh": "Elevated error rates on the payments API"})
+
+    def old_text_title_card(self, cfg):
+        """A card read before titles had one slot per language: its title is one text."""
+        reply = self.reply_copy("status-incidents.json")
+        self.status_source(reply)
+        self.engine(cfg).read("vendor-status")
+        store = Store(self.data, cfg=cfg, clock=self.clock)
+        card = next(c for c in store.list() if c["key"] == "inc01abcd")
+        self.clock.tick()
+        return reply, store, store.update(card["id"], {"title": "Elevated error rates on the payments API"},
+                                          by="test")
+
+    def test_a_reread_of_an_old_text_title_card_is_unchanged(self):
+        cfg = Config(secondary_language="zh")
+        _, store, old = self.old_text_title_card(cfg)
+        self.clock.tick()
+        result = self.engine(cfg).read("vendor-status")
+        self.assertEqual([i["action"] for i in result["items"]], ["unchanged", "unchanged"])
+        self.assertEqual(store.get(old["id"]), old)  # no audit entry, no new title shape written
+        self.clock.tick()
+        dry = self.engine(cfg).read("vendor-status", dry_run=True)
+        self.assertEqual([(i["action"], i.get("would_change")) for i in dry["items"]],
+                         [("unchanged", None), ("unchanged", None)])
+
+    def test_a_dry_run_on_an_old_text_title_card_does_not_name_the_title(self):
+        cfg = Config(secondary_language="zh")
+        reply, _, _ = self.old_text_title_card(cfg)
+        changed = json.loads(reply.read_text())
+        changed["incidents"][0]["created_at"] = "2026-11-10T13:45:00.000Z"
+        reply.write_text(json.dumps(changed))
+        self.clock.tick()
+        dry = self.engine(cfg).read("vendor-status", dry_run=True)
+        self.assertEqual([(i["action"], i.get("would_change")) for i in dry["items"]],
+                         [("update", ["plain", "source"]), ("unchanged", None)])
+
+    def test_a_renamed_record_writes_the_object_over_an_old_text_title(self):
+        cfg = Config(secondary_language="zh")
+        reply, store, old = self.old_text_title_card(cfg)
+        changed = json.loads(reply.read_text())
+        changed["incidents"][0]["name"] = "Payments API errors are falling"
+        reply.write_text(json.dumps(changed))
+        self.clock.tick()
+        result = self.engine(cfg).read("vendor-status")
+        self.assertEqual([i["action"] for i in result["items"]], ["update", "unchanged"])
+        after = store.get(old["id"])
+        self.assertEqual(after["title"], {"en": "Payments API errors are falling",
+                                          "zh": "Payments API errors are falling"})
+        self.assertEqual(len(after["audit"]), len(old["audit"]) + 1)
+
+    def test_an_old_text_title_with_other_words_is_rewritten(self):
+        cfg = Config(secondary_language="zh")
+        _, store, old = self.old_text_title_card(cfg)
+        self.clock.tick()
+        store.update(old["id"], {"title": "Edited by hand"}, by="test")
+        self.clock.tick()
+        result = self.engine(cfg).read("vendor-status")
+        self.assertEqual([i["action"] for i in result["items"]], ["update", "unchanged"])
+        self.assertEqual(store.get(old["id"])["title"], {"en": "Elevated error rates on the payments API",
+                                                         "zh": "Elevated error rates on the payments API"})
+
+    def test_same_title_compares_a_text_with_an_object(self):
+        self.assertTrue(engine._same("title", "A", {"en": "A", "zh": "A"}))
+        self.assertTrue(engine._same("title", {"en": "A", "zh": "A"}, {"en": "A", "zh": "A"}))
+        self.assertFalse(engine._same("title", "A", {"en": "A", "zh": "B"}))
+        self.assertFalse(engine._same("title", "A", {"en": "B"}))
+        self.assertFalse(engine._same("title", "A", {}))
+        self.assertFalse(engine._same("title", {"en": "A"}, {"en": "A", "zh": "A"}))
+        self.assertFalse(engine._same("title", None, {"en": "A"}))
+
     def test_a_long_first_line_makes_an_80_character_title(self):
         reply = self.tmp / "long.json"
         incidents = json.loads((REPLIES / "status-incidents.json").read_text())
@@ -1315,8 +1391,8 @@ class SortToCardTest(EngineCase):
         self.status_source(reply)
         self.engine().read("vendor-status")
         card = next(c for c in self.store().list() if c["key"] == "inc01abcd")
-        self.assertEqual(len(card["title"]), 80)
-        self.assertEqual(card["title"], "y" * 79 + "…")
+        self.assertEqual(len(card["title"]["en"]), 80)
+        self.assertEqual(card["title"], {"en": "y" * 79 + "…"})
 
     def test_snippet(self):
         self.assertEqual(snippet("\n  first   line \nsecond"), "first line")

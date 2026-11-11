@@ -1,0 +1,13 @@
+{
+  "name": "notes",
+  "source": {"preset": "jira-epic", "key": "PROJ-200"},
+  "repo": "/srv/repos/notes",
+  "branch_pattern": "{prefix}.{task}.{short}",
+  "branch_prefix": "dev",
+  "resources": [],
+  "authority": {"merge": false},
+  "merge_method": "squash",
+  "report_times": [],
+  "watches": [],
+  "extra_hosts": []
+}

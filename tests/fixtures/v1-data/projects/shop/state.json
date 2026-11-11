@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "tasks": [
+    {"id": "PROJ-1", "title": {"en": "Add the cart", "zh": "加购物车"}, "depends_on": [], "status": "todo",
+     "link": "https://example.com/browse/PROJ-1", "needs": [], "critical": false, "phase": 1, "origin": "source"},
+    {"id": "PROJ-2", "title": {"en": "Fix the checkout total"}, "depends_on": ["PROJ-1"], "status": "in_progress",
+     "link": null, "needs": [], "critical": true, "phase": 1, "origin": "found", "branch": "dev.PROJ-2.fix-total"},
+    {"id": "PROJ-3", "title": {"en": "Show the receipt"}, "depends_on": [], "status": "in_review",
+     "link": "https://example.com/browse/PROJ-3", "needs": [], "critical": false, "phase": 2, "origin": "source",
+     "pr": "https://github.com/org/repo/pull/7", "branch": "dev.PROJ-3.receipt"},
+    {"id": "PROJ-4", "title": {"en": "Pick a payment provider"}, "depends_on": [], "status": "blocked",
+     "link": null, "needs": [], "critical": false, "phase": 2, "origin": "source"},
+    {"id": "PROJ-5", "title": {"en": "Set up the repo"}, "depends_on": [], "status": "done",
+     "link": null, "needs": [], "critical": false, "phase": 1, "origin": "source", "pr": "https://github.com/org/repo/pull/1"},
+    {"id": "PROJ-6", "title": {"en": "Old idea"}, "depends_on": [], "status": "skipped",
+     "link": null, "needs": [], "critical": false, "phase": 3, "origin": "source"}
+  ],
+  "workers": [],
+  "decisions": [
+    {"id": "D1", "kind": "ask", "task": "PROJ-4", "title": {"en": "Which payment provider?", "zh": "用哪家支付？"},
+     "body": {"en": "Two providers fit."}, "options": [], "links": [], "status": "open", "created_at": "2026-11-01T10:00:00Z"},
+    {"id": "D2", "kind": "gate", "title": {"key": "two_answers", "args": {"id": "D9"}},
+     "body": {"en": "Approve to go on."}, "options": [], "links": [], "status": "open", "created_at": "2026-11-02T10:00:00Z"},
+    {"id": "D3", "kind": "self", "task": "PROJ-2", "title": {"en": "Used integer cents"},
+     "body": {"en": "Floats round badly."}, "options": [], "links": [], "status": "open", "created_at": "2026-11-03T10:00:00Z"},
+    {"id": "D4", "kind": "system", "title": {"key": "dispatcher_stuck"},
+     "body": {"en": "Two passes started nothing."}, "options": [], "links": [], "status": "open", "created_at": "2026-11-04T10:00:00Z"},
+    {"id": "D5", "kind": "ask", "task": "PROJ-1", "title": {"en": "Keep the old cart?"},
+     "body": {"en": "It still works."}, "options": [], "links": [], "status": "answered", "answer": "no",
+     "created_at": "2026-11-05T10:00:00Z", "answered_at": "2026-11-05T11:00:00Z"}
+  ],
+  "last_report": null
+}
