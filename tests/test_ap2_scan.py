@@ -174,6 +174,26 @@ class PlanTest(ScanCase):
         self.assertIn("no source named 'no-such'", errors["no-such"])
         self.assertEqual(json.loads(Path(out["plan"]).read_text())["errors"], out["errors"])
 
+    def test_a_server_or_tool_that_cannot_be_in_an_mcp_tool_name_is_an_error(self):
+        self.settings("slack-mentions")
+        self.user("jira-mine", "extends: jira-ticket\n" + SETTINGS["jira-ticket"]
+                  + 'read: { server: "claude.ai Atlassian" }\n')
+        self.user("any-tool", 'source: any-tool\nbrings: messages\nread: { via: mcp, server: vendor, tool: "*" }\n'
+                              "fill: ai\nform: { id: x, at: x, text: x }\nlink: none\nsort: { all: question }\n")
+        self.user("bad-list", "source: bad-list\nbrings: messages\n"
+                              'read: { via: connector, tools: [slack_read_thread, "slack read"] }\n'
+                              "fill: ai\nform: { id: x, at: x, text: x }\nlink: none\nsort: { all: question }\n")
+        out = self.plan("slack-mentions", "jira-mine", "any-tool", "bad-list")
+        self.assertEqual([c["source"] for c in out["calls"]], ["slack-mentions"])
+        errors = {e["source"]: e["error"] for e in out["errors"]}
+        self.assertEqual(errors, {
+            "jira-mine": "jira-mine: read.server must be the server's name as it appears in its tool names "
+                         "(mcp__<server>__<tool>), such as claude_ai_Atlassian, not 'claude.ai Atlassian'",
+            "any-tool": "any-tool: read.tool must be the tool's name as it appears in its tool names "
+                        "(mcp__<server>__<tool>), such as get_issue, not '*'",
+            "bad-list": "bad-list: a read.tools entry must be the tool's name as it appears in its tool names "
+                        "(mcp__<server>__<tool>), such as get_issue, not 'slack read'"})
+
     def test_no_name_plans_every_scan_source_and_skips_command_sources(self):
         self.settings("slack-mentions")
         out = self.plan()
@@ -241,10 +261,24 @@ class SaveRawTest(ScanCase):
     def test_a_source_that_names_its_server_keeps_only_that_servers_tool(self):
         self.settings("jira-ticket")
         p = self.plan("jira-ticket")
-        other = dict(json.loads(payload("hook-jira-object.json")), tool_name="mcp__other__get_issue")
-        self.assertFalse(scan.save_raw(p["plan"], json.dumps(other).encode())["kept"])  # another server's get_issue
+        for name in ("mcp__other__get_issue", "mcp__Atlassian__get_issue"):  # another server's get_issue
+            with self.subTest(name):
+                other = dict(json.loads(payload("hook-jira-object.json")), tool_name=name)
+                self.assertFalse(scan.save_raw(p["plan"], json.dumps(other).encode())["kept"])
         self.assertTrue(scan.save_raw(p["plan"], payload("hook-jira-object.json"))["kept"])
         self.assertEqual([c["tool_name"] for c in scan.read_log(Path(p["folder"]))[0]], ["mcp__atlassian__get_issue"])
+
+    def test_a_tools_list_that_names_its_server_keeps_only_that_servers_tools(self):
+        self.user("vendor", "source: vendor\nbrings: messages\n"
+                            "read: { via: mcp, server: vendor, tools: [list_incidents, get_incident] }\n"
+                            "fill: ai\nform: { id: x, at: x, text: x }\nlink: none\nsort: { all: question }\n")
+        p = self.plan("vendor")
+        for name, kept in (("mcp__other__get_incident", False), ("mcp__Vendor__get_incident", False),
+                           ("mcp__vendor__get_incident", True)):
+            with self.subTest(name):
+                hook = {"tool_name": name, "tool_input": {}, "tool_response": "incident 1"}
+                self.assertEqual(scan.save_raw(p["plan"], json.dumps(hook).encode())["kept"], kept)
+        self.assertEqual([c["tool_name"] for c in scan.read_log(Path(p["folder"]))[0]], ["mcp__vendor__get_incident"])
 
     def test_a_connector_source_keeps_its_tool_on_any_server(self):
         for name in ("mcp__claude_ai_Slack__slack_search_public", "mcp__x__slack_search_public"):

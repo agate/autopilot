@@ -962,7 +962,9 @@ Calls the author made without asking (check them):
     `timeout`, `run`, `server`, `tool`, `tools`, `skill`, `skip_channels`), with each `{setting}` filled into their
     text values. `errors` (`{source, error}`), while the others are still planned: a `via: command` source (the gate
     runs it with `ap2 source read`), a source with an unset setting, a `fill: paths` source that is not exactly one
-    `read.tool`, a `via: skill` source with `fill: paths`, a file that does not load, a name with no source. No
+    `read.tool`, a `via: skill` source with `fill: paths`, a `read.server`, `read.tool` or `read.tools` entry that
+    is not a name as Claude Code's tool names spell it (`[A-Za-z0-9_-]+`, such as `claude_ai_Atlassian`, not
+    `claude.ai Atlassian` or `*`), a file that does not load, a name with no source. No
     `writes`, `never` or `status_map` text reaches a plan, and the command starts no process.
   - Brief: a fixed English prompt built by code: call only the listed tools, with exactly the given arguments; do
     not copy tool replies into files; for `fill: ai`, write the records file as a JSON list with the form's fields,

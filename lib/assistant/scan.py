@@ -23,6 +23,7 @@ import errno
 import fcntl
 import json
 import os
+import re
 import secrets
 import shutil
 import stat
@@ -67,6 +68,11 @@ Rules:
 
 def _text(v) -> bool:
     return isinstance(v, str) and bool(v.strip())
+
+
+# A server or tool name as it appears in Claude Code's tool names (mcp__<server>__<tool>).
+_TOOL_PART = re.compile(r"[A-Za-z0-9_-]+")
+_AS_IN_TOOL_NAMES = "as it appears in its tool names (mcp__<server>__<tool>)"
 
 
 class ScanError(ConfigError):
@@ -148,9 +154,16 @@ def _call(src: sources.Source, folder: Path) -> dict:
             raise SourceError(f"{src.name}: read.tools must be a list of tool names, not {tools!r}")
         if tool is None and tools is None:
             raise SourceError(f"{src.name}: via: {src.via} needs read.tool or read.tools, the tools to call")
+        for key, t in [("read.tool", tool)] + [("a read.tools entry", t) for t in tools or []]:
+            if t is not None and not _TOOL_PART.fullmatch(t):
+                raise SourceError(f"{src.name}: {key} must be the tool's name {_AS_IN_TOOL_NAMES}, such as "
+                                  f"get_issue, not {t!r}")
         server = read.get("server")
         if server is not None and not _text(server):
             raise SourceError(f"{src.name}: read.server must be a server name, not {server!r}")
+        if server is not None and not _TOOL_PART.fullmatch(server):
+            raise SourceError(f"{src.name}: read.server must be the server's name {_AS_IN_TOOL_NAMES}, such as "
+                              f"claude_ai_Atlassian, not {server!r}")
     args = sources.fill_args(src)  # refuses an unset setting, in the args, the link or the key
     call = {"source": src.name, "via": src.via, "fill": src.fill, "args": args}
     for key in ("server", "tool", "tools", "skill"):
