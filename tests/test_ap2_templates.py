@@ -625,6 +625,51 @@ class CheckTest(TempFolder):
         with self.assertRaises(TemplateError):
             templates.check(path, self.data)
 
+    def test_check_does_not_take_a_folder_for_a_kind(self):
+        path = self.write("parcel.yaml", GOOD.replace("lane: done", "child: crate"))
+        elsewhere = self.tmp / "elsewhere"
+        elsewhere.mkdir()
+        crate = self.data / "templates" / "crate.yaml"
+        rows = [("a folder named crate.yaml", crate.mkdir, crate.rmdir, False),
+                ("a link to a folder", lambda: crate.symlink_to(elsewhere), crate.unlink, False),
+                # a link to itself: stat fails with a loop error, so it stays a kind and nothing raises
+                ("a link loop", lambda: os.symlink("crate.yaml", crate), crate.unlink, True)]
+        for name, make, remove, accepted in rows:
+            with self.subTest(name):
+                make()
+                try:
+                    if accepted:
+                        self.assertTrue(templates.check(path, self.data)["ok"])
+                        continue
+                    with self.assertRaisesRegex(TemplateError, "crate"):
+                        templates.check(path, self.data)
+                    installed = self.data / "templates" / "parcel.yaml"
+                    shutil.copy(path, installed)
+                    try:
+                        with self.assertRaisesRegex(TemplateError, "crate"):  # catalog agrees: no kind
+                            templates.catalog(self.data)
+                    finally:
+                        installed.unlink()
+                finally:
+                    remove()
+
+    def test_check_knows_an_installed_file_that_is_a_link(self):
+        elsewhere = self.tmp / "elsewhere"
+        elsewhere.mkdir()
+        target = self.write("parcel.yaml", GOOD, elsewhere)
+        (self.data / "templates" / "parcel.yaml").symlink_to(target)
+        out = templates.check(target, self.data)
+        self.assertEqual((out["replaces"], out["installed"]), (None, True))
+        copy = self.write("parcel.yaml", GOOD)  # the same text, another file
+        out = templates.check(copy, self.data)
+        self.assertEqual((out["replaces"], out["installed"]), ("user", False))
+
+    def test_check_does_not_take_a_folder_for_the_installed_file(self):
+        (self.data / "templates" / "question.yaml").mkdir()
+        path = self.write("question.yaml", (FIXTURES / "question.yaml").read_text())
+        out = templates.check(path, self.data)
+        self.assertEqual((out["replaces"], out["installed"]), ("builtin", False))
+
 
 if __name__ == "__main__":
     unittest.main()

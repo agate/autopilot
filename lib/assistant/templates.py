@@ -406,11 +406,18 @@ def catalog(data_dir=None) -> dict:
 def check(path, data_dir=None) -> dict:
     """Validate a template file without installing it (design 6: installed only after the user checks it). Says
     which template it would replace: `builtin`, `user` (one already in the data folder), or None (a new kind).
-    Other user files are not read or stat-ed (their kinds come from their names), so a bad one elsewhere does not
-    hide this file's result."""
+    Other user files are not read (their kinds come from their names), so a bad one elsewhere does not hide this
+    file's result: an entry that stats as a folder (following links) is no kind, as in `catalog`, and one that
+    cannot be stat-ed for any reason stays a kind and never raises."""
+    def is_folder(p: Path) -> bool:  # following links; False when it cannot be stat-ed for any reason
+        try:
+            return stat.S_ISDIR(p.stat().st_mode)
+        except OSError:
+            return False
+
     path = Path(path)
     user_dir = _user_dir(data_dir)
-    user = _entries(user_dir) if user_dir is not None else []
+    user = [p for p in _entries(user_dir) if not is_folder(p)] if user_dir is not None else []
     kinds = {p.name[:-len(SUFFIX)] for p in _files(BUILTIN_DIR) + user}
     t = load_file(path, "user", kinds)
     installed_path = user_dir / path.name if user_dir is not None else None
