@@ -107,6 +107,7 @@ found and first set up is in section 12.
 ├── sessions/          AI conversations per card, gzipped (see 3.5)
 ├── templates/         the user's templates; they win over built-in ones
 ├── sources/           the user's sources; they win over built-in ones
+│   └── .raw/          raw read output and reports, kept 30 days (a file a card links to is kept)
 ├── routines/          one file per routine (see 7.3)
 ├── restore/           restore points, kept 30 days
 ├── index.sqlite       search, rebuilt from items/ when missing
@@ -850,7 +851,24 @@ Calls the author made without asking (check them):
     is copied or parsed when it is larger than `engine.MAX_OUTPUT` (64 MiB), as a command's output past it would
     be. The `--records` file must hold a JSON list (`null` is refused, not read as no records). A saved file
     already in `.raw/<source>/` is named by that folder's path even when `.raw` is a link to another folder. A raw
-    save that fails (a full disk) removes the file it started. Old raw files are not pruned yet.
+    save that fails (a full disk) removes the file it started.
+  - Old raw files. Each gate run calls `engine.prune_raw(data, now, store.list)`. A raw file is a regular file
+    directly in `<data>/sources/.raw/<source>/` named `<YYYYMMDDTHHMMSSZ>-<6 lowercase hex>.json`; its age is the
+    UTC stamp in its name, not its mtime, so a copy or a restored backup does not make it young again. It is
+    removed when it is more than `engine.RAW_KEEP` (30 days, a constant like restore points' `restore.KEEP`, not
+    a `config.yaml` key, so `ap2 config`'s output is unchanged) older than now, and kept at exactly 30 days. Any
+    other name (a scan session's own file, `notes.txt`), a hidden entry, a stamp that cannot be read (month 13) and
+    a stamp later than now are kept. Its `<stem>.report.json` goes with it: kept while the raw file is there, and
+    judged by the stamp in its own name once the raw file is gone. A file named in any card's `source.raw` (a
+    card keeps its first raw path), and its report, are kept however old. The cards are read once per run, only
+    when a file is old enough to remove; when they cannot be read (a damaged card file) nothing is removed and
+    the run has one error, `{"prune_raw": true, "error": ...}`. So once a card's first raw file is older than 30
+    days, that file stays, and every run reads the cards. No link is followed or removed: when
+    `sources` or `sources/.raw` is a link (the user's setup) nothing is pruned and gate.log says so in one line,
+    not an error; a `<source>` folder or file that is a link is skipped. Each folder is opened once without
+    following a link and every remove is relative to it (`dir_fd`), so a folder swapped for a link meanwhile
+    cannot send a remove elsewhere. A file that cannot be removed is one `{"prune_raw": <path>, "error": ...}`
+    and one gate.log line; the rest still go.
   - A read handles at most `engine.MAX_ITEMS` (10,000) items: a reply with more items, or a scan session with
     more `fill: ai` records, fails the read, and the error names the raw file it was saved as (a dry run saves
     none). No card is made or changed. This is the simplest limit to raise later; it keeps one read's time,
@@ -907,7 +925,9 @@ Calls the author made without asking (check them):
     ids], "errors": [...]}`; text in `errors` that UTF-8 cannot write (a file name that is not UTF-8) is written with
     backslash escapes. Every line of `<data>/gate.log` starts with the run's UTC time
     (`2026-11-10T14:30:05Z run: ...`), one line per routine action or error and one summary line; past 1 MB it is
-    renamed `gate.log.1` (one old file is kept). Each run calls `Store.prune()`.
+    renamed `gate.log.1` (one old file is kept). Each run calls `Store.prune()`, then prunes old raw source files
+    (see the source engine above): `pruned <N> raw source file(s) older than 30 days` in gate.log when N > 0
+    (N counts raw files and reports), not in `gate.json`, which keeps its five keys; its errors go in `errors`.
   - One run at a time: `<data>/.gate.lock` is taken with a non-blocking `flock`; a run that finds it held prints
     `{"locked": true, "lock": <path>}`, writes nothing and exits 0. A lock that cannot be taken for any other reason
     (`ENOLCK` on a network share) is a config error: one `ap2: cannot lock the gate ...` line and exit 1. The gate
@@ -941,7 +961,8 @@ Calls the author made without asking (check them):
   - `ap2 gate [--data PATH] [--now ISO]` runs once and prints the run as JSON. `--now` needs a zone (`Z` or an
     offset); a time without one is an argument error (exit 2). `--now` may not be later than the real time plus
     the 5-minute grace, also an argument error: a run writes `last_slot`, makes cards and prunes restore points,
-    so a run in the future would hold back every real slot until then and prune points that are only days old. A
+    so a run in the future would hold back every real slot until then and prune points and raw files that are only
+    days old. A
     year before 1971 (or a time too far out to turn into UTC) is an argument error too. A bad routine or watch is
     in `errors` and still exits 0 (launchd runs it again in a minute); a bad `config.yaml` or data folder is one
     `ap2: ...` line and exit 1. Nothing is installed: no launchd job is written in this slice.
@@ -1004,7 +1025,8 @@ Calls the author made without asking (check them):
     folder. Errors follow the other commands (one `ap2: ...` line, exit 1).
   - Later work: template versions (6: "the old version stays") and Claude's suggested changes are not built yet.
 - How the local server pushes updates to an open page (polling is fine).
-- Exact limits: idle timeout, grace for missed slots, page sizes.
+- Exact limits: idle timeout, grace for missed slots, page sizes. Decided so far: raw source files and their
+  reports are kept 30 days (`engine.RAW_KEEP`, section 12).
 
 ## Appendix: example files
 
