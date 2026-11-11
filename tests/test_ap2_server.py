@@ -671,6 +671,8 @@ class ManageTest(ServerCase):
     def test_settings_show_the_config_and_disk_use_without_following_links(self):
         self.add()
         (self.data / "attachments" / "a.bin").write_bytes(b"x" * 1000)
+        (self.data / "attachments" / "sub").mkdir()
+        (self.data / "attachments" / "sub" / "b.bin").write_bytes(b"z" * 2000)
         outside = self.tmp / "big.bin"
         outside.write_bytes(b"y" * 50000)
         (self.data / "attachments" / "link.bin").symlink_to(outside)
@@ -682,7 +684,8 @@ class ManageTest(ServerCase):
         self.assertEqual(body["url"], self.srv.url)
         self.assertEqual(set(body["disk"]), set(datadir.FOLDERS) | {"index.sqlite"})
         att = self.data / "attachments"
-        expect = (os.lstat(att).st_size + 1000 + os.lstat(att / "link.bin").st_size)
+        expect = (os.lstat(att).st_size + 1000 + os.lstat(att / "link.bin").st_size
+                  + os.lstat(att / "sub").st_size + 2000)
         self.assertEqual(body["disk"]["attachments"], expect)
         self.assertLess(body["disk"]["attachments"], 50000)
         self.assertEqual(body["disk"]["chat"], os.lstat(self.data / "chat").st_size)
@@ -755,10 +758,12 @@ class QuestionTest(ServerCase):
                 headers = {"Origin": origin} if origin else {}
                 status, _, body = self.ask(card["id"], "x" * 2000, headers)
                 self.assertEqual(status, 201, body)
+        status, _, body = self.ask(card["id"], "\u95ee" * 2000)
+        self.assertEqual(status, 201, body)
         status, _, _ = self.call("POST", f"/api/cards/{card['id']}/questions", json.dumps({"text": "ok"}).encode(),
                                  {"Content-Type": "application/json; charset=utf-8"})
         self.assertEqual(status, 201)
-        self.assertEqual(len(self.store().get(card["id"])["questions"]), 4)
+        self.assertEqual(len(self.store().get(card["id"])["questions"]), 5)
 
     def test_two_threads_posting_at_once_lose_nothing(self):
         card = self.add()
@@ -792,6 +797,7 @@ class QuestionTest(ServerCase):
             ("blank text", path, json.dumps({"text": " \n\t "}).encode(), {}, 400),
             ("text not text", path, json.dumps({"text": 5}).encode(), {}, 400),
             ("too long", path, json.dumps({"text": "x" * 2001}).encode(), {}, 400),
+            ("too long in characters", path, json.dumps({"text": "\u95ee" * 2001}).encode(), {}, 400),
             ("lone surrogate", path, b'{"text": "a \\ud800 b"}', {}, 400),
             ("not utf-8", path, b'{"text": "\xff"}', {}, 400),
             ("not json", path, b"text=hi", {}, 400),
