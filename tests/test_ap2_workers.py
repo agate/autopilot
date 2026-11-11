@@ -357,16 +357,24 @@ class ProjectSetupTest(WorkerCase):
         self.assertIn("mcp__Tracker__send_message", deny)  # outward tool: denied (v1 perms.denied_tools)
         self.assertNotIn("mcp__Tracker__read_issue", deny)
         # The data folder's own files, the user's templates and sources (design 6), and every card's settings files.
+        # The gate's heartbeat, SQLite's files next to the index (-wal, -shm, -journal), routines and chat as well.
         self.assertLessEqual({"config.yaml", "workers.json", ".workers.lock", ".store.lock", "index.sqlite",
                               "items/**", "restore/**", "projects/**", "templates/**", "sources/**",
-                              "sessions/**/settings-*.json"}, set(PROTECTED))
+                              "sessions/**/settings-*.json", "gate.json", "index.sqlite-*", "routines/**",
+                              "chat/**"}, set(PROTECTED))
         for name in PROTECTED:
             self.assertIn(f"Edit(/{self.data}/{name})", deny)
+        self.assertIn(f"Edit(/{self.data}/gate.json)", deny)
+        self.assertIn(f"Edit(/{self.data}/routines/**)", deny)
         self.assertIn("Bash(gh pr comment:*)", deny)
         self.assertEqual(settings["permissions"]["allow"], [f"Bash({ROOT / 'bin' / 'ap2'} worker park:*)"])
-        # The park hook runs before every tool call of the worker and its subagents (v1's `perms.park_hook` shape).
-        hooks = {"PreToolUse": [{"matcher": "*", "hooks": [
-            {"type": "command", "command": f"\"{ROOT / 'bin' / 'ap2'}\" hook-park", "timeout": 5}]}]}
+        # The park hook runs before every tool call of the worker and its subagents (v1's `perms.park_hook` shape),
+        # first; then the Bash guard (`ap2 hook-guard`) before every Bash call.
+        hooks = {"PreToolUse": [
+            {"matcher": "*", "hooks": [
+                {"type": "command", "command": f"\"{ROOT / 'bin' / 'ap2'}\" hook-park", "timeout": 5}]},
+            {"matcher": "Bash", "hooks": [
+                {"type": "command", "command": f"\"{ROOT / 'bin' / 'ap2'}\" hook-guard", "timeout": 5}]}]}
         self.assertEqual(settings["hooks"], hooks)
         self.assertEqual(workers_mod.floor("implement", {}, self.data, {})["hooks"], hooks)
         self.assertEqual({k: v for k, v in settings["env"].items() if k.startswith("AP2_")}, {k: v for k, v in env.items() if k.startswith("AP2_")})

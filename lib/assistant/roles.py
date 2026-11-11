@@ -17,7 +17,9 @@ FLOORS = MappingProxyType({
     "worker": "v1's worker floor (lib/autopilot/perms.py, generate(role='worker')): MCP tools that post, comment, "
               "reply, send or create are denied; the data folder's protected files and the plugin cannot be "
               "edited; `gh pr comment`, `gh pr review`, `gh issue comment`, `gh issue create` and adding PR "
-              "reviewers are denied; the usage park hook runs before every tool call. Added to v1's floor: the "
+              "reviewers are denied; the usage park hook runs before every tool call, and a Bash guard hook "
+              "denies a shell write into the data folder (but the worker's own run directory) or the plugin, "
+              "best effort, as v1's `ap hook-guard` does. Added to v1's floor: the "
               "user's templates and sources (`<data>/templates/`, `<data>/sources/`) cannot be edited, because "
               "changing a template or a source asks first (design 3.6); the worker sessions (slice 6) add these "
               "as Edit and Write deny rules.",
