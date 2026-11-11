@@ -735,6 +735,12 @@ class OversizedPayloadTest(ScanCase):
         self.assertTrue(mine)
         self.assertTrue(all(len(s) <= 100 for s in mine))  # nothing past the byte limit is handed to the decoder
 
+    def test_a_payload_within_the_cap_is_not_looked_ahead(self):
+        self.assertEqual(scan.save_raw(self.p["plan"], self.big_read()), {"kept": False, "tool_name": "Read"})
+        with self.assertRaisesRegex(ScanError, "tool_input must be a JSON object"):
+            scan.save_raw(self.p["plan"], b'{"tool_name": "Read", "tool_input": "x", "tool_response": ""}')
+        self.assertEqual(scan.read_log(Path(self.p["folder"])), ([], False))
+
 
 class TakeTest(ScanCase):
     """From a recorded session: a Slack search, a thread read and a Jira search, plus the records the model
