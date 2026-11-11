@@ -121,6 +121,18 @@ class Ap2GateCommandTest(unittest.TestCase):
         self.assertTrue(r.stderr.startswith("ap2: "), r.stderr)
         self.assertIn("mode", r.stderr)
 
+    def test_a_config_that_does_not_parse_leaves_a_fatal_line_in_gate_log(self):
+        self.data.mkdir()
+        (self.data / "config.yaml").write_text("mode: [\n")
+        r = self.run_ap2("gate", "--now", "2025-11-11T17:01:00Z")
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.stdout, "")
+        self.assertEqual(len(r.stderr.splitlines()), 1)
+        self.assertTrue(r.stderr.startswith("ap2: "), r.stderr)
+        error = r.stderr.strip()[len("ap2: "):]
+        lines = (self.data / "gate.log").read_text().splitlines()
+        self.assertEqual(lines[-1], f"2025-11-11T17:01:00Z fatal: {error}")
+
     def test_a_bad_routine_is_reported_and_the_run_still_exits_0(self):
         self.put_routine()
         self.put_routine("broken", tz="Nowhere/Land")
