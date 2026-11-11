@@ -442,10 +442,16 @@ def raw_for(call: dict, logged: list) -> Optional[str]:
     """The raw output of one planned call, from the log; None when no logged call matches.
     `fill: paths`: the text of the first call of its tool whose tool_input holds every planned argument with the
     same value. `fill: ai`: every text of its tools (a skill's: every logged text), in order, joined by a blank line,
-    with nothing added, so no id can match text that code wrote. A logged call is its tool's by `calls_tool`."""
+    with nothing added, so no id can match text that code wrote; a call whose tool_input holds a planned argument
+    with another value is left out (one with none of the planned argument names, such as a thread read, still
+    counts). A logged call is its tool's by `calls_tool`."""
 
     def mine(line):
         return call["via"] == "skill" or calls_tool(call, line["tool_name"])
+
+    def planned(line):
+        ti = line["tool_input"]
+        return call["via"] == "skill" or all(ti[k] == v for k, v in call["args"].items() if k in ti)
 
     if call["fill"] == "paths":
         for line in logged:
@@ -453,7 +459,7 @@ def raw_for(call: dict, logged: list) -> Optional[str]:
             if mine(line) and all(k in ti and ti[k] == v for k, v in call["args"].items()):
                 return line["text"]
         return None
-    texts = [line["text"] for line in logged if mine(line)]
+    texts = [line["text"] for line in logged if mine(line) and planned(line)]
     return "\n\n".join(texts) if texts else None
 
 

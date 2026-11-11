@@ -183,8 +183,15 @@ class PlanTest(ScanCase):
         self.user("bad-list", "source: bad-list\nbrings: messages\n"
                               'read: { via: connector, tools: [slack_read_thread, "slack read"] }\n'
                               "fill: ai\nform: { id: x, at: x, text: x }\nlink: none\nsort: { all: question }\n")
-        out = self.plan("slack-mentions", "jira-mine", "any-tool", "bad-list")
-        self.assertEqual([c["source"] for c in out["calls"]], ["slack-mentions"])
+        self.user("dotted", "extends: jira-ticket\n" + SETTINGS["jira-ticket"]
+                  + "read: { server: claude.ai_Atlassian }\n")
+        self.user("dashed", "source: dashed\nbrings: messages\n"
+                            "read: { via: mcp, server: my-vendor, tool: get-incident }\n"
+                            "fill: ai\nform: { id: x, at: x, text: x }\nlink: none\nsort: { all: question }\n")
+        out = self.plan("slack-mentions", "jira-mine", "any-tool", "bad-list", "dotted", "dashed")
+        self.assertEqual([c["source"] for c in out["calls"]], ["slack-mentions", "dashed"])
+        dashed = next(c for c in out["calls"] if c["source"] == "dashed")
+        self.assertEqual(dashed["allowed_tools"], ["mcp__my-vendor__get-incident"])
         errors = {e["source"]: e["error"] for e in out["errors"]}
         self.assertEqual(errors, {
             "jira-mine": "jira-mine: read.server must be the server's name as it appears in its tool names "
@@ -192,7 +199,9 @@ class PlanTest(ScanCase):
             "any-tool": "any-tool: read.tool must be the tool's name as it appears in its tool names "
                         "(mcp__<server>__<tool>), such as get_issue, not '*'",
             "bad-list": "bad-list: a read.tools entry must be the tool's name as it appears in its tool names "
-                        "(mcp__<server>__<tool>), such as get_issue, not 'slack read'"})
+                        "(mcp__<server>__<tool>), such as get_issue, not 'slack read'",
+            "dotted": "dotted: read.server must be the server's name as it appears in its tool names "
+                      "(mcp__<server>__<tool>), such as claude_ai_Atlassian, not 'claude.ai_Atlassian'"})
 
     def test_no_name_plans_every_scan_source_and_skips_command_sources(self):
         self.settings("slack-mentions")
@@ -261,7 +270,8 @@ class SaveRawTest(ScanCase):
     def test_a_source_that_names_its_server_keeps_only_that_servers_tool(self):
         self.settings("jira-ticket")
         p = self.plan("jira-ticket")
-        for name in ("mcp__other__get_issue", "mcp__Atlassian__get_issue"):  # another server's get_issue
+        for name in ("mcp__other__get_issue", "mcp__Atlassian__get_issue",
+                     "mcp__my_atlassian__get_issue"):  # another server's get_issue
             with self.subTest(name):
                 other = dict(json.loads(payload("hook-jira-object.json")), tool_name=name)
                 self.assertFalse(scan.save_raw(p["plan"], json.dumps(other).encode())["kept"])
@@ -274,6 +284,7 @@ class SaveRawTest(ScanCase):
                             "fill: ai\nform: { id: x, at: x, text: x }\nlink: none\nsort: { all: question }\n")
         p = self.plan("vendor")
         for name, kept in (("mcp__other__get_incident", False), ("mcp__Vendor__get_incident", False),
+                           ("mcp__other_vendor__get_incident", False),
                            ("mcp__vendor__get_incident", True)):
             with self.subTest(name):
                 hook = {"tool_name": name, "tool_input": {}, "tool_response": "incident 1"}
@@ -648,6 +659,45 @@ class TakeTest(ScanCase):
         slack = {r["source"]: r for r in out["reads"]}["slack-mentions"]
         self.assertEqual((self.data / slack["raw"]).read_text(), (SCAN / "slack-search.txt").read_text() + "\n\n"
                          + json.loads(payload("hook-slack-thread.json"))["tool_response"])
+
+    def test_an_ai_call_with_another_value_for_a_planned_argument_is_not_in_the_raw(self):
+        self.settings("slack-alerts")
+        p = self.plan("slack-alerts")
+        planned = {"tool_name": "mcp__claude_ai_Slack__slack_read_channel", "tool_input": {"channel_id": "C0444ALRT"},
+                   "tool_response": "Channel: #alerts (C0444ALRT)\nMessage_ts: 1730000500.000100\n"
+                                    "Text: checkout errors high\n"}
+        private = {"tool_name": "mcp__claude_ai_Slack__slack_read_channel", "tool_input": {"channel_id": "C0PRIVATE"},
+                   "tool_response": "Channel: #secret (C0PRIVATE)\nMessage_ts: 1730000600.000200\n"
+                                    "Text: payroll export failed\n"}
+        for hook in (planned, private):
+            self.assertTrue(scan.save_raw(p["plan"], json.dumps(hook).encode())["kept"])
+        records(p, "slack-alerts").write_text(json.dumps([
+            {"id": "1730000500.000100", "at": "1730000500.000100", "text": "checkout errors high",
+             "place_id": "C0444ALRT", "category": "alert"},
+            {"id": "1730000600.000200", "at": "1730000600.000200", "text": "payroll export failed",
+             "place_id": "C0PRIVATE", "category": "alert"}]))
+        out = self.take(p)
+        self.assertEqual(out["errors"], [])
+        [alerts] = out["reads"]
+        self.assertEqual((self.data / alerts["raw"]).read_text(), planned["tool_response"])
+        self.assertEqual(alerts["dropped"], [{"item": 1, "reason": "form.id '1730000600.000200' is not in the raw "
+                                                                   "output"}])
+        self.assertEqual([c["key"] for c in self.store().list()], ["C0444ALRT:1730000500.000100"])
+        self.assertNotIn("C0PRIVATE", json.dumps(self.store().list()))
+
+    def test_a_search_with_another_query_is_left_out_but_a_thread_read_still_counts(self):
+        other = json.loads(payload("hook-slack-search.json"))
+        other["tool_input"] = {"query": "in:#payments"}
+        other["tool_response"] = ("## Channel: #payments (C0123ABCD)\nFrom: U0EXAMPLE2\n"
+                                  "Message_ts: 1730000999.000001\nText: <@U0EXAMPLE1> please approve the deploy now\n")
+        self.assertTrue(scan.save_raw(self.p["plan"], json.dumps(other).encode())["kept"])
+        out = self.take(self.p)
+        slack = {r["source"]: r for r in out["reads"]}["slack-mentions"]
+        thread = json.loads(payload("hook-slack-thread.json"))
+        self.assertNotIn("query", thread["tool_input"])  # the thread read has none of the planned names: still in
+        self.assertEqual((self.data / slack["raw"]).read_text(), (SCAN / "slack-search.txt").read_text() + "\n\n"
+                         + thread["tool_response"])
+        self.assertIn({"item": 3, "reason": "form.id '1730000999.000001' is not in the raw output"}, slack["dropped"])
 
     def test_another_servers_tool_of_the_same_name_is_not_the_sources_raw(self):
         self.settings("jira-ticket")

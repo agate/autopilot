@@ -998,8 +998,10 @@ Calls the author made without asking (check them):
     `mcp__<server>__<tool>` when the source names its server, else ending in `__<tool>`); for `fill: paths`, the
     text of the first logged call of its tool whose `tool_input` holds every planned argument with the same value;
     for `fill: ai`, every logged text of its tools (a skill's: every logged text), in order, joined by a blank line,
-    with no header added, so nothing code wrote can match an id. Each raw file is
-    written to a temp file and renamed into place, so a symbolic link left at its path is replaced, never followed.
+    with no header added, so nothing code wrote can match an id; a logged call whose `tool_input` holds a planned
+    argument with another value is left out (a tool with none of the planned argument names still counts). Each
+    raw file is written to a temp file and renamed into place, so a symbolic link left at its path is replaced,
+    never followed.
     Then it calls `Engine.read_saved`, which copies the raw under `.raw/<source>/`, writes the report, checks word
     for word and makes the cards. Take first plans each call again from its source as it loads now and refuses one that differs
     from the plan's (`<name>: the plan's call does not match the source as it loads now`), since the session could
