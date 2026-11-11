@@ -36,6 +36,12 @@ class PlainWordsError(CardError):
     missing`."""
 
 
+class TooDeepError(CardError, RecursionError):
+    """A file or value is nested deeper than Python's JSON reader or writer can follow. A CardError, so every
+    caller that handles a damaged file handles this one; also a RecursionError, so a caller that already says
+    `nested too deeply` for a RecursionError (the raw prune) keeps its words."""
+
+
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -120,6 +126,8 @@ def check_unicode(value, what: str = "text") -> None:
         raise CardError(f"{what} is not valid JSON: NaN or Infinity") from None
     except TypeError as e:
         raise CardError(f"{what} is not JSON: {e}") from None
+    except RecursionError:
+        raise TooDeepError(f"{what} is not valid JSON: nested too deeply") from None
 
 
 def check_stored(card) -> None:

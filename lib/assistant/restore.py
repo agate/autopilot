@@ -14,7 +14,7 @@ import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from assistant.cards import CardError, new_id, parse_stamp, stamp
+from assistant.cards import CardError, TooDeepError, new_id, parse_stamp, stamp
 
 FOLDER = "restore"
 KEEP = timedelta(days=30)
@@ -50,6 +50,8 @@ def load(data: Path, point_id: str) -> dict:
         point = json.loads(p.read_text(encoding="utf-8"))
     except FileNotFoundError:
         raise CardError(f"no restore point {point_id} (points are kept {KEEP.days} days)") from None
+    except RecursionError:
+        raise TooDeepError(f"{p}: cannot read the restore point: nested too deeply") from None
     except (OSError, ValueError) as e:
         raise CardError(f"{p}: cannot read the restore point: {e}") from e
     if not (isinstance(point, dict) and point.get("kind") == "card" and isinstance(point.get("card"), dict)):
@@ -61,8 +63,8 @@ def load(data: Path, point_id: str) -> dict:
 
 
 def prune(data: Path, now: datetime) -> list:
-    """Remove the points older than 30 days at `now`; return their ids. A point whose time cannot be read is
-    kept (it is never silently lost)."""
+    """Remove the points older than 30 days at `now`; return their ids. A point whose time cannot be read (one
+    nested too deeply too) is kept (it is never silently lost)."""
     removed = []
     folder = Path(data) / FOLDER
     if not folder.is_dir():
@@ -72,7 +74,7 @@ def prune(data: Path, now: datetime) -> list:
             continue
         try:
             at = parse_stamp(json.loads(p.read_text(encoding="utf-8"))["at"])
-        except (OSError, ValueError, KeyError, TypeError):
+        except (OSError, ValueError, KeyError, TypeError, RecursionError):
             continue
         if now - at > KEEP:
             p.unlink(missing_ok=True)

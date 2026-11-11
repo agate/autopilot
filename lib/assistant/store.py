@@ -79,6 +79,8 @@ class Store:
     def _read(self, path: Path) -> dict:
         try:
             card = json.loads(path.read_text(encoding="utf-8"))
+        except RecursionError:
+            raise cards.TooDeepError(f"{path}: cannot read the card: nested too deeply") from None
         except (OSError, ValueError) as e:
             raise CardError(f"{path}: cannot read the card: {e}") from e
         if not (isinstance(card, dict) and card.get("id") == path.stem):
@@ -86,7 +88,8 @@ class Store:
         try:
             cards.check_stored(card)
         except CardError as e:
-            raise CardError(f"{path}: not a card file: {e}") from None
+            raise (cards.TooDeepError if isinstance(e, cards.TooDeepError) else CardError)(
+                f"{path}: not a card file: {e}") from None
         return card
 
     def _load(self, card_id: str) -> dict:
