@@ -328,8 +328,8 @@ class ScrubTest(PhoneCase):
                          "<data>/workers.json: cannot read; see '<data>/logs/x.log'")
 
     def test_a_data_path_next_to_chinese_becomes_data(self):
-        asked = self.ask(f"看{self.data}里的日志")
-        self.assertEqual(self.build()["full"][asked["id"]]["card"]["ask"]["text"], "看<data>里的日志")
+        asked = self.ask(f"看{self.data}里的log文件")
+        self.assertEqual(self.build()["full"][asked["id"]]["card"]["ask"]["text"], "看<data>里的log文件")
 
     def test_a_data_path_after_a_flag_or_inside_a_longer_path_becomes_data(self):
         flag = self.ask(f"ld: -L{self.data}/runs not found")
@@ -342,7 +342,10 @@ class ScrubTest(PhoneCase):
 
     def test_a_data_path_inside_markdown_marks_becomes_data(self):
         asked = self.ask(f"_{self.data}_ is full")
-        self.assertEqual(self.build()["full"][asked["id"]]["card"]["ask"]["text"], "_<data>_ is full")
+        dotted = self.ask(f"_{self.data}._ is full")
+        full = self.build()["full"]
+        self.assertEqual(full[asked["id"]]["card"]["ask"]["text"], "_<data>_ is full")
+        self.assertEqual(full[dotted["id"]]["card"]["ask"]["text"], "_<data>._ is full")
 
     def test_an_ask_text_that_is_not_a_string_has_each_string_scrubbed(self):
         per_lang = self.ask({"en": f"see {self.data}/x", "zh": f"看 {self.data}/x",
@@ -373,6 +376,8 @@ class ScrubTest(PhoneCase):
                 f"PATH=/usr/bin:{home}/bin": "PATH=/usr/bin:~/bin", f"/opt/a,{home}/b;{home}/c": "/opt/a,~/b;~/c",
                 f"{real}/repo{real}/repo/a": "~/repo~/repo/a", f"file://localhost{real}/a": "file://localhost~/a",
                 f"see _{real}_ or": "see _~_ or", f"~~{real}~~ was wrong": "~~~~~ was wrong",
+                f"_see {real}._": "_see ~._", f"~~{real}.~~ no": "~~~.~~ no", f"{real}的PR": "~的PR",
+                f"{real}._backup/a": f"{real}._backup/a",
                 f"{real}-a {real}@a {real}~a {real}$a {real}%a {real}#a {real}=a":
                     f"{real}-a {real}@a {real}~a {real}$a {real}%a {real}#a {real}=a"}
         rows = {text: self.ask(text) for text in kept}

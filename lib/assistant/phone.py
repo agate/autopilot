@@ -16,13 +16,14 @@ secondary_language, languages, settings, lanes, projects, heartbeat, cards, full
   `full[id].card.ask.text`, the data folder (as given and resolved) becomes `<data>` and then the home folder (as
   given and resolved) becomes `~`; the rest of each text stays. A folder's path is replaced wherever it sits, also
   inside a longer path (`/mnt/backup/Users/x/a` reads `/mnt/backup~/a`: a wrong label, never a leak), but only as a
-  whole name on its right side: a run of ASCII name characters (`_ - + @ ~ $ % # =`) right after it makes it a longer
-  name only when the run holds a letter or digit, and so does a dot and one name character (`/Users/xy`,
-  `/Users/x-old` and `/Users/x.old` stay for home `/Users/x`), so markdown marks like `_/Users/x_` or `~~/Users/x~~`
-  read `_~_` and `~~~~~` (a folder literally named `/Users/x_` would read `~_`: a wrong label, never a leak). Another
-  script next to a path (Chinese) does not stop it, so a folder `/Users/xé` reads `~é`: a wrong name, never a leak. An
-  ask text that is not a string (an object per language, a list) has each of its strings scrubbed, an object's keys
-  and values alike. A home of `/` is left alone. Other paths (`/private/var/...`) stay.
+  whole name on its right side: an optional dot and then a run of ASCII name characters (letters, digits and
+  `_ - + @ ~ $ % # =`) right after it make it a longer name only when the run holds a letter or digit (`/Users/xy`,
+  `/Users/x-old` and `/Users/x.old` stay for home `/Users/x`), so `/Users/x.` and markdown marks like `_/Users/x_`,
+  `_/Users/x._` or `~~/Users/x~~` read `~.`, `_~_`, `_~._` and `~~~~~` (a folder literally named `/Users/x_` would
+  read `~_`: a wrong label, never a leak). A non-ASCII character (Chinese, `é`) right next to a path does not stop
+  it, so a folder `/Users/xé` reads `~é`: a wrong name, never a leak. An ask text that is not a string (an object per
+  language, a list) has each of its strings scrubbed, an object's keys and values alike. A home of `/` is left
+  alone. Other paths (`/private/var/...`) stay.
 
 Building writes nothing (the store is read without its lock file, as the local page's GETs do), starts no process
 and opens no connection. Publishing the data is a later dispatcher step, live mode only.
@@ -60,12 +61,12 @@ class _Scrub:
         if not forms:
             return None
         # Longest first, so `/a/b/c` wins over `/a/b` when both forms start at the same spot; wherever it sits, but a
-        # whole path name only, not a longer name's start: a run of ASCII name characters that holds a letter or
-        # digit (or a dot and one name character) may not come next, so markdown marks (`_`, `~~`) still end it.
-        # ASCII only, so Chinese next to a path still ends it.
+        # whole path name only, not a longer name's start: an optional dot and then a run of ASCII name characters
+        # that holds a letter or digit may not come next, so a dot and markdown marks (`.`, `_`, `._`, `~~`) still
+        # end it. ASCII only, so a non-ASCII character (Chinese, `é`) next to a path still ends it.
         alts = "|".join(re.escape(f) for f in sorted(forms, key=len, reverse=True))
         name = r"[\w+@~$%#=-]"
-        return re.compile(rf"(?:{alts})(?!{name}*[A-Za-z0-9]|\.{name})", re.ASCII)
+        return re.compile(rf"(?:{alts})(?!\.?{name}*[A-Za-z0-9])", re.ASCII)
 
     def __call__(self, text):
         if isinstance(text, dict):  # an ask text that is not a string: each of its strings is scrubbed, keys too
