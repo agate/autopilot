@@ -1007,6 +1007,21 @@ class MovedIntoRepeatedHourTest(GateCase):
         d = routines.due(dataclasses.replace(r, moved_at=utc(2026, 11, 1, 5, 44)), now)
         self.assertEqual((d.slot, d.action), ("2026-11-01T01:45", "late"))
 
+    def test_an_on_time_slot_that_came_before_the_move_is_not_due(self):
+        # Chicago 01:01 (CDT) is 06:01 UTC, which is New York 01:01 (EST), the second pass. At 06:02 UTC the latest
+        # slot is 01:57, whose first pass was 05:57 UTC: 5 minutes ago, inside the grace, so it reads as on time.
+        # It came before the run, so it must not run.
+        p = self.put_moved(schedule={"days": "daily", "at": ["01:01", "01:57", "02:30"]},
+                           last_slot="2026-11-01T01:01")
+        r = routines.load(p)
+        self.assertEqual((r.last_slot, r.moved_at), ("2026-11-01T01:01", utc(2026, 11, 1, 6, 1)))
+        self.assertIsNone(routines.due(r, utc(2026, 11, 1, 6, 2)))
+        before = p.read_bytes()
+        out = self.gate(utc(2026, 11, 1, 6, 2))
+        self.assertEqual((out["routines"], out["errors"]), ([], []))
+        self.assertEqual(self.routine_cards(), [])
+        self.assertEqual(p.read_bytes(), before)
+
     # criterion 3: nothing changes without a move
 
     def test_the_same_schedule_with_no_move_gives_the_base_result(self):
