@@ -62,9 +62,11 @@ DIED = "died_twice"  # the `reason` of the ask a worker that died twice raises; 
 #   question - the worker's question (type answer). Closed by every start and finish; never by a stop, since the
 #              question path stops the session first and then raises it.
 WORKER_ASKS = ("attach", "paused", "question")
-# Files a worker may not edit in the data folder: everything but its own run directory's result files.
+# Files a worker may not edit in the data folder. Every card's run directory stays writable except its settings
+# files: a deny rule cannot keep one worker out of another card's result files. The user's templates and sources
+# are here as well (the worker floor in roles.py).
 PROTECTED = ("config.yaml", "workers.json", ".workers.lock", ".store.lock", "index.sqlite", "items/**",
-             "restore/**", "projects/**", "sessions/**/settings-*.json")
+             "restore/**", "projects/**", "templates/**", "sources/**", "sessions/**/settings-*.json")
 
 
 def package_root() -> Path:
@@ -434,6 +436,8 @@ class Workers:
                 state = self.classify(rec, listing)
                 entry = {"card": rec["card"], "role": rec["role"], "state": state, "did": "nothing"}
                 try:
+                    if not rec.get("session_id"):
+                        self._fill_session_id(rec, listing, by)
                     self._act(rec, state, records, entry, by, b, now)
                 except Exception as e:  # noqa: BLE001 - one worker's error must not cost the others their changes
                     # A shadow-mode refusal, a bad project file, a card or file error, a claude call that failed:
@@ -443,6 +447,14 @@ class Workers:
                         entry["error"] = type(e).__name__  # not one of ours: name it, so the gate can report it
                 out.append(entry)
         return out
+
+    def _fill_session_id(self, rec: dict, listing, by: str) -> None:
+        """The listing did not show the worker's session when it started: take its id from this listing, on the
+        record and the card, so a later stop saves and archives it and a later resume continues it."""
+        sid = (v1_sessions.find_by_id(rec.get("short_id"), listing) or {}).get("sessionId") or ""
+        if sid:
+            self._save_session(rec["card"], rec["role"], by, id=sid)
+            rec["session_id"] = sid
 
     def _act(self, rec: dict, state: str, records: list, entry: dict, by: str, b, now: datetime) -> None:
         card_id, role = rec["card"], rec["role"]
@@ -513,8 +525,17 @@ class Workers:
                 records.remove(rec)
         elif state == "parked":
             if b is not None and v1_park.resume_due(rec, now, {"budget": PARK_RULES}, b):
-                self._resume_dead(rec, "Usage is under the line again. Continue the task from where you parked.",
-                                  count=False)
+                try:
+                    self._resume_dead(rec, "Usage is under the line again. Continue the task from where you "
+                                           "parked.", count=False)
+                except WorkerError as e:
+                    # The resume cannot start (e.g. its worktree is gone): stop it as a worker that died twice, so
+                    # it never holds its slot forever. A shadow-mode refusal is not a WorkerError: it waits.
+                    why = f"could not resume after parking ({e}); look at its worktree, then start it again"
+                    entry.update(self._close(rec, "stopped", why, by), did="stopped", note=str(e))
+                    self._set_ask(card_id, {"type": "fix", "text": why, "role": role, "reason": DIED}, by)
+                    records.remove(rec)
+                    return
                 entry["did"] = "resumed"
 
     # -- answer, finish ------------------------------------------------------------------------------------------
@@ -575,12 +596,11 @@ class Workers:
         except config.ShadowModeError as e:
             note = f"{e} The originals are kept; the copies are made."
         if removed:
-            done = {}
-            for role, entry in sessions.items():
-                entry = dict(entry or {})
-                if set(entry.get("ids") or []) <= set(removed):  # every original of the role is gone
-                    entry.update(state="finished", removed=True)
-                done[role] = entry
+            done = dict(sessions)  # any other key, and a role with no ids, is kept as it is
+            for role in roles:
+                entry = sessions[role] or {}
+                if entry.get("ids") and set(entry["ids"]) <= set(removed):  # every original of the role is gone
+                    done[role] = dict(entry, state="finished", removed=True)
             self.store.update(card_id, {"sessions": done}, by=by, did="worker sessions removed")
         out = {"card": card_id, "archived": archived, "removed": removed}
         if failed:

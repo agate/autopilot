@@ -189,6 +189,23 @@ class PortsTest(WorkerCase):
         self.drop_agent(rec["short_id"])
         self.assertEqual(w.check()[0]["did"], "resumed")  # so its first death still gets its one resume
 
+    def test_a_parked_worker_that_cannot_resume_is_stopped(self):
+        w = self.workers()
+        a = self.start(w)
+        w.park(a["card"], "implement", "x", usage_file=usage_file(self.tmp / "u.json", 95))
+        shutil.rmtree(self.wt)  # its worktree is gone, so its resume cannot start
+        self.clock.advance(4 * 60)
+        fresh = usage_file(self.tmp / "fresh.json", 3, resets_at="2026-01-05T17:00:00+00:00", fetched=self.clock())
+        out = w.check(usage_file=fresh)[0]
+        self.assertEqual((out["state"], out["did"]), ("parked", "stopped"))
+        self.assertIn("cannot start the session", out["note"])
+        c = self.get(a["card"])
+        self.assertEqual((c["ask"]["type"], c["ask"]["reason"]), ("fix", DIED))
+        self.assertIn("could not resume after parking", c["ask"]["text"])
+        self.assertEqual(c["sessions"]["implement"]["state"], "stopped")
+        self.assertEqual(resources.Registry(self.data).read(), [])  # its slot, ports and resources are free
+        self.assertEqual(w.check(usage_file=fresh), [])
+
 
 # -- 2. single-use resources, needs and max_workers ---------------------------------------------------------------
 
@@ -301,6 +318,8 @@ class ProjectSetupTest(WorkerCase):
         self.assertNotIn("mcp__Tracker__read_issue", deny)
         self.assertIn(f"Edit(/{self.data}/items/**)", deny)
         self.assertIn(f"Edit(/{self.data}/config.yaml)", deny)
+        self.assertIn(f"Edit(/{self.data}/templates/**)", deny)  # the user's templates and sources (design 6)
+        self.assertIn(f"Edit(/{self.data}/sources/**)", deny)
         self.assertIn("Bash(gh pr comment:*)", deny)
         self.assertEqual(settings["permissions"]["allow"], [f"Bash({ROOT / 'bin' / 'ap2'} worker park:*)"])
         self.assertEqual(settings["env"], {k: v for k, v in env.items() if k.startswith("AP2_")})
@@ -515,6 +534,23 @@ class LifecycleTest(WorkerCase):
         self.assertEqual(rec["session_id"], "")
         self.assertEqual(self.get(cid)["sessions"]["implement"].get("ids", []), [])
         self.assertNotIn("id", self.get(cid)["sessions"]["implement"])
+
+    def test_a_session_id_the_listing_did_not_show_yet_is_filled_in(self):
+        w = self.workers()
+        a = self.start(w)
+        self.write_result(a["card"], "question.json", {"text": "Three or five?"})
+        w.check()
+        with mock.patch("autopilot.sessions.list_all", return_value=[]):  # the copy is not listed yet
+            self.assertEqual(w.answer(a["card"], "Three.")["session_id"], "")
+        new = self.agents()[-1]["sessionId"]
+        w.check()  # now it is listed
+        self.assertEqual(resources.Registry(self.data).read()[0]["session_id"], new)
+        saved = self.get(a["card"])["sessions"]["implement"]
+        self.assertEqual((saved["id"], saved["ids"], saved["state"]), (new, [a["session_id"], new], "running"))
+        self.write_result(a["card"], "question.json", {"text": "And the delay?"})
+        w.check()
+        w.answer(a["card"], "One second.")
+        self.assertEqual(self.bg_calls()[-1]["argv"][1:3], ["--resume", new])
 
     def test_an_unknown_listing_does_nothing(self):
         w = self.workers()
@@ -1132,6 +1168,21 @@ class TranscriptsTest(WorkerCase):
         self.assertEqual([p for p in self.tmp.rglob("*.gz") if self.data not in p.parents], [])
         with self.assertRaisesRegex(ValueError, "not a role"):
             transcripts.archive_path(self.data, a["card"], "..", a["session_id"])
+        with self.assertRaisesRegex(ValueError, "not a role"):
+            transcripts.archive_path(self.data, a["card"], "implement/../../x", a["session_id"])
+
+    def test_finish_marks_only_roles_whose_originals_are_gone(self):
+        w = self.workers()
+        a = self.start(w)
+        w.end(a["card"], "implement")
+        sessions = dict(self.get(a["card"])["sessions"], notes={"kept": "by the user"}, review={"state": "paused"},
+                        memo="a plain text")
+        Store(self.data, self.cfg, self.clock).update(a["card"], {"sessions": sessions}, by="test")
+        self.assertEqual(w.finish(a["card"])["removed"], [a["session_id"]])
+        done = self.get(a["card"])["sessions"]
+        self.assertEqual((done["notes"], done["review"], done["memo"]),
+                         ({"kept": "by the user"}, {"state": "paused"}, "a plain text"))
+        self.assertEqual((done["implement"]["state"], done["implement"]["removed"]), ("finished", True))
 
     def test_a_failed_claude_rm_is_not_listed_as_removed(self):
         w = self.workers()
@@ -1211,6 +1262,8 @@ class ShadowModeTest(WorkerCase):
         self.assertEqual((out["state"], out["did"]), ("dead", "nothing"))
         self.assertIn("shadow mode", out["note"])
         self.assertEqual(len(self.bg_calls()), 1)
+        self.assertEqual(resources.Registry(self.data).read()[0].get("resumes", 0), 0)  # a refusal is no resume
+        self.assertEqual(self.workers().check()[0]["did"], "nothing")
 
 
 if __name__ == "__main__":

@@ -520,7 +520,8 @@ Rules:
    save the session id on the card. Session state can be lost; the card cannot.
 2. **[decided, from v1]** Dead (no session, or its process is gone, with no result file): resume once with
    "you were interrupted; check your worktree and run files first". Dead twice: stop and ask the user. A resume
-   that cannot start (its worktree is gone) counts as that one resume.
+   that cannot start (its worktree is gone) counts as that one resume. A parked worker whose resume cannot start
+   is stopped at once and asks the user the same way.
 3. **[decided, open question 2]** No process waits for a human. A worker that needs the user writes
    `question.json` (`{"text": ...}`) in its run directory and ends its round; the gate stops it and frees its slot,
    and the question becomes the card's `ask` (`type: answer`, with the worker's text, role and session id). The
@@ -912,7 +913,8 @@ Calls the author made without asking (check them):
     line. The branch is the card's `branch`, else the pattern with the card's `key` (else its id) and the first
     three words of its title. The session gets them the way v1 passes setup: `--settings <run dir>/settings-<role>.json`
     (the permission floor: v1's outward-tool and Bash denials, plus `Edit` denials on the data folder's own files
-    and the package, and one allow rule, `Bash(<package>/bin/ap2 worker park:*)`, as v1 allows its park command) and env `AP2_ROLE`, `AP2_DATA`, `AP2_CARD`, `AP2_PROJECT`, `AP2_RUN_DIR`, `AP2_PORTS`,
+    (including the user's `templates/**` and `sources/**`, the rules the worker floor in `roles.py` promises; every
+    card's run directory stays writable except its settings files) and the package, and one allow rule, `Bash(<package>/bin/ap2 worker park:*)`, as v1 allows its park command) and env `AP2_ROLE`, `AP2_DATA`, `AP2_CARD`, `AP2_PROJECT`, `AP2_RUN_DIR`, `AP2_PORTS`,
     `AP2_BRANCH`, `AP2_EXTRA_HOSTS`, `AP2_MCP_SERVERS`, `AP2_HEALTH_CHECKS` (JSON), in both the process env and the
     settings' `env`. v1's `AUTOPILOT_*` variables are dropped, so v1's park hook never takes a v2 worker for its
     own. The prompt ends with the card, role, branch, port range, run directory, extra hosts, the result file to
@@ -936,7 +938,12 @@ Calls the author made without asking (check them):
     under the worker list's lock, so a start that lands during a check is never judged against a listing from
     before it. A dead worker whose resume cannot start (e.g. its worktree is gone) counts that try: the next
     check stops it as died twice and raises the `fix` ask, so it never holds its slot forever. A shadow-mode
-    refusal is not counted. Each clock runs only
+    refusal is not counted. A parked worker whose resume cannot start is stopped at once (`did: stopped`,
+    `sessions.<role>.state: stopped`) with the same `fix` ask (`reason: died_twice`, "could not resume after
+    parking"); a shadow-mode refusal leaves it parked. A session the listing did not show yet when it started
+    (`session_id` empty) gets its id from the next check's listing, on the record and the card's
+    `sessions.<role>` (`id` and `ids`), so a later stop archives it and a later resume continues it. Each clock
+    runs only
     while its state is seen without a break: a check that sees any other state (except unknown, which says
     nothing) resets `idle_since` / `blocked_since`, and a prompt that is gone takes its attach ask with it (only
     the ask this worker raised, marked `reason: permission_prompt`; the user's own ask is kept). A new prompt after
@@ -965,7 +972,7 @@ Calls the author made without asking (check them):
     live mode only, runs `claude rm` on each. A `claude rm` that exits non-zero raises with claude's message; `finish` lists
     it under `failed`, keeps that original (the next `finish` tries again) and marks a role `removed` only when
     every one of its originals is gone. `finish` acts only on the known roles (`implement`, `review`, `pr`) in
-    the card's `sessions`; any other key is skipped. An archive's role must be lowercase letters, else it is
+    the card's `sessions`; any other key, and a role with no ids, is left as it is on the card. An archive's role must be lowercase letters, else it is
     refused, so a card's keys never make a path outside the data folder.
   - Commands, each with `--data PATH` and `--by NAME`, JSON on stdout, one `ap2: ...` line and exit 1 on an error:
     `ap2 worker list`, `start CARD ROLE [--cwd P] [--prompt-file F] [--needs A,B] [--resume]`,
