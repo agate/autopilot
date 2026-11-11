@@ -107,6 +107,7 @@ found and first set up is in section 12.
 ├── sessions/          AI conversations per card, gzipped (see 3.5)
 ├── templates/         the user's templates; they win over built-in ones
 ├── sources/           the user's sources; they win over built-in ones
+│   └── .raw/          raw read output and reports, kept 30 days (a file a card links to is kept)
 ├── routines/          one file per routine (see 7.3)
 ├── restore/           restore points, kept 30 days
 ├── index.sqlite       search, rebuilt from items/ when missing
@@ -661,6 +662,10 @@ Calls the author made without asking (check them):
       (`"k" : v`), a `- ` list item inside a flow collection, a plain value holding `: ` (quote it), a plain value
       starting with `@`, `` ` ``, `%`, `]`, `}`, `,` or `? ` (quote it), hex, octal, `.inf` and `.nan` numbers
       (write a decimal number or quote it), and nesting too deep to read. The top level must be a map. Refusing is safer than guessing: a file either reads exactly as written or names its bad line.
+    - Its time grows in step with a line's length: the comment scan decides where a quote may open a string from
+      what it keeps while it scans (where the leading `- ` / `? ` indicators end, and the last two characters
+      that are not a space or tab), never by copying or searching the text before it again. A 1 MiB line
+      (`sources.MAX_SOURCE`) of quote characters reads in well under a second.
 - **[decided by the builder]** The data folder and its lookup. The folder is `--data <path>` if given, else the
   environment variable `AP2_DATA`, else `~/Documents/Assistant`. A folder inside `~/.claude` is refused (3.4),
   symlinks followed (by `resolve()`) and in any letter case (the name check ignores case, so `~/.CLAUDE` is
@@ -818,7 +823,11 @@ Calls the author made without asking (check them):
     add or update (a stored card edited by hand into a bad one) drops only that item, naming the card or key,
     and a dry run drops it the same way; a failure of the store itself (a file or index error) still stops the
     read with one `ap2:` line, and so does a card file the store cannot read at all (not JSON, or not a card),
-    as `ap2 card list` does.
+    as `ap2 card list` does. Since the read report is then not written, that line is the store's own message
+    followed by what the read already did: `(already written by this read: <card ids, in item order, each
+    once>; raw output saved as <raw file>)`, or `(no card written yet; raw output saved as <raw file>)` when the
+    store failed before any card (finding the cards by key included). It is still a `CardError` whose cause is
+    the store's error. A dry run writes nothing and saves no raw file, so its message is the store's alone.
   - Code-made plain words (no AI), per language, in `engine.PHRASES` (`en` and `zh`; a code like `zh-Hans`
     uses `zh`): what, "New from <source> by <author> in <place>: <first line of the text>"; where, "It was
     written at <at>. [Its status there is "<status>".] Nothing has been done with it yet."; do, "Read it at the
@@ -852,7 +861,29 @@ Calls the author made without asking (check them):
     is copied or parsed when it is larger than `engine.MAX_OUTPUT` (64 MiB), as a command's output past it would
     be. The `--records` file must hold a JSON list (`null` is refused, not read as no records). A saved file
     already in `.raw/<source>/` is named by that folder's path even when `.raw` is a link to another folder. A raw
-    save that fails (a full disk) removes the file it started. Old raw files are not pruned yet.
+    save that fails (a full disk) removes the file it started. When the read fails anyway (a nonzero exit, a
+    timeout, output past the cap, or output held open after the exit), a failed save keeps the read's own error
+    and says why the output was not kept in place of the file it was saved as: `vendor-status: read.run exited
+    with 3: it went wrong (the output was not saved: cannot save the raw output in <folder>: [Errno 28] No space
+    left on device)`, or `(the partial output was not saved: ...)` for a stopped read. A read whose command
+    worked fails with the save error itself.
+  - Old raw files. Each gate run calls `engine.prune_raw(data, now, store.list)`. A raw file is a regular file
+    directly in `<data>/sources/.raw/<source>/` named `<YYYYMMDDTHHMMSSZ>-<6 lowercase hex>.json`; its age is the
+    UTC stamp in its name, not its mtime, so a copy or a restored backup does not make it young again. It is
+    removed when it is more than `engine.RAW_KEEP` (30 days, a constant like restore points' `restore.KEEP`, not
+    a `config.yaml` key, so `ap2 config`'s output is unchanged) older than now, and kept at exactly 30 days. Any
+    other name (a scan session's own file, `notes.txt`), a hidden entry, a stamp that cannot be read (month 13) and
+    a stamp later than now are kept. Its `<stem>.report.json` goes with it: kept while the raw file is there, and
+    judged by the stamp in its own name once the raw file is gone. A file named in any card's `source.raw` (a
+    card keeps its first raw path), and its report, are kept however old. The cards are read once per run, only
+    when a file is old enough to remove; when they cannot be read (a damaged card file) nothing is removed and
+    the run has one error, `{"prune_raw": true, "error": ...}`. So once a card's first raw file is older than 30
+    days, that file stays, and every run reads the cards. No link is followed or removed: when
+    `sources` or `sources/.raw` is a link (the user's setup) nothing is pruned and gate.log says so in one line,
+    not an error; a `<source>` folder or file that is a link is skipped. Each folder is opened once without
+    following a link and every remove is relative to it (`dir_fd`), so a folder swapped for a link meanwhile
+    cannot send a remove elsewhere. A file that cannot be removed is one `{"prune_raw": <path>, "error": ...}`
+    and one gate.log line; the rest still go.
   - A read handles at most `engine.MAX_ITEMS` (10,000) items: a reply with more items, or a scan session with
     more `fill: ai` records, fails the read, and the error names the raw file it was saved as (a dry run saves
     none). No card is made or changed. This is the simplest limit to raise later; it keeps one read's time,
@@ -864,7 +895,9 @@ Calls the author made without asking (check them):
     `ap2 source list`, `ap2 source show <name>` (the merged file), `ap2 source read <name> [--raw FILE]
     [--records FILE] [--dry-run]`. `--dry-run` runs the read and prints each item with `action` (`add`,
     `update`, `unchanged`, `none`) and the card it would add (`would_add`) or the fields it would change
-    (`would_change`), and writes nothing, not even the data folder's layout.
+    (`would_change`), and writes nothing, not even the data folder's layout. `--records` without `--raw` is
+    refused first, before any file is read or the data folder is set up, so `--records /dev/stdin` does not
+    wait for input.
 - **[decided by the builder]** The gate and routines (slice 5, design 4.3 and 7.1 to 7.4). Modules:
   `lib/assistant/routines.py` (routine files, slots, missed runs) and `lib/assistant/gate.py` (one run).
   - Routine files are JSON, `<data>/routines/<name>.json`, not YAML: the gate writes `last_slot` back, and a JSON
@@ -909,7 +942,9 @@ Calls the author made without asking (check them):
     ids], "errors": [...]}`; text in `errors` that UTF-8 cannot write (a file name that is not UTF-8) is written with
     backslash escapes. Every line of `<data>/gate.log` starts with the run's UTC time
     (`2026-11-10T14:30:05Z run: ...`), one line per routine action or error and one summary line; past 1 MB it is
-    renamed `gate.log.1` (one old file is kept). Each run calls `Store.prune()`.
+    renamed `gate.log.1` (one old file is kept). Each run calls `Store.prune()`, then prunes old raw source files
+    (see the source engine above): `pruned <N> raw source file(s) older than 30 days` in gate.log when N > 0
+    (N counts raw files and reports), not in `gate.json`, which keeps its five keys; its errors go in `errors`.
   - One run at a time: `<data>/.gate.lock` is taken with a non-blocking `flock`; a run that finds it held prints
     `{"locked": true, "lock": <path>}`, writes nothing and exits 0. A lock that cannot be taken for any other reason
     (`ENOLCK` on a network share) is a config error: one `ap2: cannot lock the gate ...` line and exit 1. The gate
@@ -943,7 +978,8 @@ Calls the author made without asking (check them):
   - `ap2 gate [--data PATH] [--now ISO]` runs once and prints the run as JSON. `--now` needs a zone (`Z` or an
     offset); a time without one is an argument error (exit 2). `--now` may not be later than the real time plus
     the 5-minute grace, also an argument error: a run writes `last_slot`, makes cards and prunes restore points,
-    so a run in the future would hold back every real slot until then and prune points that are only days old. A
+    so a run in the future would hold back every real slot until then and prune points and raw files that are only
+    days old. A
     year before 1971 (or a time too far out to turn into UTC) is an argument error too. A bad routine or watch is
     in `errors` and still exits 0 (launchd runs it again in a minute); a bad `config.yaml` or data folder is one
     `ap2: ...` line and exit 1. Nothing is installed: no launchd job is written in this slice.
@@ -1082,7 +1118,8 @@ Calls the author made without asking (check them):
 - How the local server pushes updates to an open page (polling is fine).
   - **[decided by the builder]** Polling: the page asks `/api/state` every 10 seconds and redraws the top bar,
     the rail and the open list, so the heartbeat and new cards show without a reload.
-- Exact limits: idle timeout, grace for missed slots, page sizes.
+- Exact limits: idle timeout, grace for missed slots, page sizes. Decided so far: raw source files and their
+  reports are kept 30 days (`engine.RAW_KEEP`, section 12).
   - **[decided by the builder]** Page sizes: a card list returns at most `limit` rows, 500 by default and 5000 at
     most (a larger or smaller `limit` is a 400); `total` says how many matched.
 
