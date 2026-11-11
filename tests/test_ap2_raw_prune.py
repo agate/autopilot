@@ -340,7 +340,8 @@ class SymlinkTest(RawCase):
 
 
     def test_a_source_folder_swapped_for_a_link_between_its_stat_and_its_open_is_not_followed(self):
-        # The stat sees a folder; by the open it is a link. Opening without following a link (ELOOP) skips it.
+        # The stat sees a folder; by the open it is a link. Opening without following a link fails (ENOTDIR on macOS
+        # and Linux, where O_DIRECTORY is checked first), so it is skipped.
         out = self.outside()
         source = self.data / RAW / "linked-source"
         source.mkdir(parents=True)
