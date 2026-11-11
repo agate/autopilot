@@ -977,6 +977,16 @@ class MovedIntoRepeatedHourTest(GateCase):
         d = routines.due(r, utc(2026, 11, 1, 6, 46))
         self.assertEqual((d.slot, d.action), ("2026-11-01T01:45", "late"))
 
+    def test_a_move_from_the_old_zones_skipped_hour_keeps_the_jump_moment(self):
+        # New York 02:30 on 2026-03-08 does not happen: the clocks jump from 02:00 to 03:00 (EDT), 07:00 UTC. The old
+        # slot is in the hour New York skips, so its moment is the jump, London 07:00 (GMT). The London 07:15 slot
+        # after it must still run on time.
+        r = routines.load(self.put(tz="Europe/London", schedule={"days": "daily", "at": ["07:15"]},
+                                   last_slot="2026-03-08T02:30", last_slot_tz=self.NY))
+        self.assertEqual((r.last_slot, r.moved_at), ("2026-03-08T07:00", utc(2026, 3, 8, 7, 0)))
+        d = routines.due(r, utc(2026, 3, 8, 7, 16))
+        self.assertEqual((d.slot, d.action), ("2026-03-08T07:15", "run"))
+
     def test_a_slot_that_was_not_moved_has_no_moment(self):
         for label, over in (("no last_slot_tz", {"last_slot_tz": None}), ("no key", {}),
                             ("same zone", {"last_slot_tz": self.NY}),
