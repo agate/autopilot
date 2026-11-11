@@ -2483,6 +2483,7 @@ class DiscoveryOutsideTheLockTest(WorkerCase):
             out = w.check(usage_file=fresh)
         self.assertEqual(seen, [True])
         self.assertEqual((out[0]["state"], out[0]["did"]), ("parked", "resumed"))
+        self.assertIn("Usage is under the line again", self.bg_calls()[-1]["argv"][-1])
         self.assertIn("mcp__Tracker__send_message", self.deny(a["card"]))
         rec = resources.Registry(self.data).read()[0]
         self.assertEqual((rec["resumes"], rec["parked"], rec["ports"]), (0, None, a["ports"]))
