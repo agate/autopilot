@@ -680,6 +680,8 @@ class OversizedPayloadTest(ScanCase):
                                   len('{"session_id": "s"')),
             "cut after a comma": (('{"session_id": "s", "tool_name": "Read"' + tail).encode(),
                                   len('{"session_id": "s", ')),
+            "cut after the name's colon": (('{"session_id": "s", "tool_name": "Read"' + tail).encode(),
+                                           len('{"session_id": "s", "tool_name": ')),
         }
         for name, (data, lookahead) in cases.items():
             with self.subTest(name):
