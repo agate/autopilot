@@ -824,9 +824,13 @@ Calls the author made without asking (check them):
     not JSON; a read that passes `read.timeout` is stopped and its partial stdout is saved the same way (the
     error names the file, as it does for a nonzero exit; a dry run keeps nothing). The command runs in its own
     process group, and the whole group is killed on timeout, so the children it started stop too. An
-    interrupted read (Ctrl-C, or any error while waiting) kills the command's group too. A read stopped by
-    SIGTERM or SIGHUP (while it waits, in the main thread) kills the command's group too, then exits with 128 +
-    the signal number. After a timeout kill the engine waits at most 5 more seconds for the rest of the output,
+    interrupted read (Ctrl-C, or any error while waiting) kills the command's group too. While a read waits (in
+    the main thread), every signal in `engine.STOP_SIGNALS` (SIGHUP, SIGQUIT, SIGTERM, SIGUSR1, SIGUSR2, SIGALRM,
+    SIGVTALRM, SIGPROF, SIGXCPU) that is at its default action kills the command's group too, then ap2 exits with
+    128 + the signal number; one that is ignored or already handled is left alone, so nohup keeps working. Ctrl-C
+    does the same through KeyboardInterrupt. While the group is being killed, further signals are ignored, and
+    the previous handlers are put back when the read ends.
+    After a timeout kill the engine waits at most 5 more seconds for the rest of the output,
     then keeps what it has. A command that exited but left something it started holding its output open says so
     in the error, with its exit code. Then what the engine made of it goes next to it as `<same name>.report.json` (items, dropped).
     `mcp`, `connector` and `skill` reads are not run here: `Engine.read_saved(source, raw_path, records=None)`

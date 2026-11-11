@@ -40,6 +40,12 @@ LANE = {"messages": "needs", "work": "planned"}
 PRI = "P2"
 # Seconds a read waits for the rest of its output after its timeout kill.
 DRAIN = 5
+# The catchable signals whose default action ends the process and that a terminal, shell, supervisor or user may
+# send. While a read waits, those still at their default stop the command's group too (SIGINT does it through
+# KeyboardInterrupt). A missing one is skipped.
+STOP_SIGNALS = tuple(s for s in (getattr(signal, n, None) for n in (
+    "SIGHUP", "SIGQUIT", "SIGTERM", "SIGUSR1", "SIGUSR2", "SIGALRM", "SIGVTALRM", "SIGPROF", "SIGXCPU"))
+    if s is not None)
 # fill: ai fields that must appear word for word in the raw tool output (design 5.3).
 WORD_FOR_WORD = ("id", "thread_id", "at")
 
@@ -167,15 +173,21 @@ class Engine:
         previous = {}
         try:
             try:
-                # SIGTERM and SIGHUP to ap2's group do not reach the command's group either, and by default they
-                # end ap2 with no exception: turn them into SystemExit so the branch below stops the command.
+                # A signal to ap2's group does not reach the command's group. A stop signal at its default ends
+                # ap2 with no exception: turn it into SystemExit so the branch below stops the command. One that
+                # is ignored (nohup) or already handled is left alone.
                 if threading.current_thread() is threading.main_thread():
-                    for signum in (signal.SIGTERM, signal.SIGHUP):
-                        previous[signum] = signal.signal(signum, _exit_on_signal)
+                    previous[signal.SIGINT] = signal.getsignal(signal.SIGINT)  # held while the group is stopped
+                    for signum in STOP_SIGNALS:
+                        if signal.getsignal(signum) is signal.SIG_DFL:
+                            previous[signum] = signal.signal(signum, _exit_on_signal)
                 out, err = proc.communicate(timeout=timeout)
             except subprocess.TimeoutExpired as first:
+                held = _hold_signals() if previous else {}
                 code = proc.poll()
                 _stop(proc)
+                for signum, handler in held.items():
+                    signal.signal(signum, handler)
                 try:
                     out, _ = proc.communicate(timeout=DRAIN)
                 except subprocess.TimeoutExpired as late:
@@ -191,14 +203,21 @@ class Engine:
                 saved = "" if dry_run else f" (partial output saved as {self._save_raw(src, out or b'')})"
                 raise SourceError(f"{src.name}: read.run took longer than {timeout} seconds; stopped{saved}") from None
             except BaseException:
-                # Ctrl-C does not reach the command's own group, so an interrupted read stops it here.
+                # Ctrl-C does not reach the command's own group, so an interrupted read stops it here, and a
+                # second signal cannot cut that short.
+                if previous:
+                    _hold_signals()
                 _stop(proc)
                 proc.wait()
                 raise
         finally:
-            for signum, handler in previous.items():
+            # Ctrl-C last, so a new one cannot cut the others short; a failed restore never hides the read's error.
+            for signum, handler in reversed(list(previous.items())):
                 if handler is not None:  # None: set outside Python, so it cannot be put back from here
-                    signal.signal(signum, handler)
+                    try:
+                        signal.signal(signum, handler)
+                    except (OSError, ValueError):
+                        pass
         return subprocess.CompletedProcess(argv, proc.returncode, stdout=out, stderr=err)
 
     def _save_raw(self, src: sources.Source, raw: bytes) -> str:
@@ -431,7 +450,19 @@ class Engine:
 
 
 def _exit_on_signal(signum, frame) -> None:
+    _hold_signals()
     raise SystemExit(128 + signum)
+
+
+def _hold_signals() -> dict:
+    """While a read's group is being stopped, ignore Ctrl-C and the stop signals `_run` handles, so a second
+    signal cannot skip the stop; `_run` puts them back. Main thread only. Returns what each was before."""
+    held = {}
+    for signum in (signal.SIGINT, *STOP_SIGNALS):
+        handler = signal.getsignal(signum)
+        if handler is _exit_on_signal or (signum == signal.SIGINT and handler is not None):
+            held[signum] = signal.signal(signum, signal.SIG_IGN)
+    return held
 
 
 def _stop(proc: subprocess.Popen) -> None:

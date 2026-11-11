@@ -20,7 +20,7 @@ from tests.helpers import ROOT
 from assistant import datadir, sources
 from assistant.cards import CardError
 from assistant.config import Config, ShadowModeError
-from assistant.engine import Engine, plain_words, snippet
+from assistant.engine import STOP_SIGNALS, Engine, plain_words, snippet
 from assistant.sources import Loader, SourceError
 from assistant.store import Store
 
@@ -53,6 +53,11 @@ class Clock:
 def tree(folder: Path) -> dict:
     """Every file under `folder` with its bytes."""
     return {str(p.relative_to(folder)): p.read_bytes() for p in sorted(folder.rglob("*")) if p.is_file()}
+
+
+def handlers() -> dict:
+    """The handler of Ctrl-C and of every stop signal, to check a read puts them back."""
+    return {s: signal.getsignal(s) for s in (signal.SIGINT, *STOP_SIGNALS)}
 
 
 class EngineCase(unittest.TestCase):
@@ -101,7 +106,9 @@ class CommandReadTest(EngineCase):
         reply = self.reply_copy("status-incidents.json")
         cwd_file = self.tmp / "cwd.txt"
         self.status_source(reply, cwd_file)
+        before = handlers()
         result = self.engine().read("vendor-status")
+        self.assertEqual(handlers(), before)  # the handlers set while it waited are put back
         self.assertEqual(Path(cwd_file.read_text()).resolve(), self.data)  # the data folder is the working folder
         raw = self.data / result["raw"]
         self.assertRegex(result["raw"], r"^sources/\.raw/vendor-status/20261110T143005Z-[0-9a-f]{6}\.json$")
@@ -296,10 +303,12 @@ class CommandReadTest(EngineCase):
             link: none
             sort: {{ all: alert }}
             """)
+        before = handlers()
         with mock.patch.object(subprocess.Popen, "communicate", autospec=True, side_effect=interrupt):
             with self.assertRaises(KeyboardInterrupt):
                 self.engine().read("sleeper")
             self.assertLess(time.monotonic() - raised[0], 5)  # stopped, not waited out
+        self.assertEqual(handlers(), before)  # put back, Ctrl-C's too
         [pid] = started
         self.assertTrue(child_file.exists(), "the command never started its child")
         for what, p in (("command", pid), ("command's child", int(child_file.read_text()))):
@@ -316,16 +325,48 @@ class CommandReadTest(EngineCase):
                 self.fail(message)
             time.sleep(0.05)
 
-    def test_a_read_stopped_by_sigterm_or_sighup_stops_the_command(self):
-        driver = self.tmp / "driver.py"
+    def driver(self, name: str, before: str = "") -> Path:
+        """A script that reads the source in argv[3] in its own main thread, after running `before`."""
+        driver = self.tmp / f"{name}.py"
         driver.write_text(textwrap.dedent(f"""\
-            import sys
+            import signal, sys
             from pathlib import Path
             sys.path.insert(0, {str(ROOT / "lib")!r})
             from assistant.config import Config
             from assistant.engine import Engine
+            {before}
             Engine(Path(sys.argv[1]), cfg=Config(), plugin_dir=Path(sys.argv[2])).read(sys.argv[3])
             """))
+        return driver
+
+    def drive(self, driver: Path, name: str, pid_file: Path) -> subprocess.Popen:
+        """Start `driver` on source `name` in its own group (so a signal to that group never reaches the test
+        runner), with a cleanup that kills it and the command whose pid is in `pid_file`."""
+        proc = subprocess.Popen([sys.executable, str(driver), str(self.data), str(self.plugin), name],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, start_new_session=True)
+
+        def kill_left_over():
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            proc.wait()
+            try:
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+            except (OSError, ValueError):
+                pass
+
+        self.addCleanup(kill_left_over)
+        deadline = time.monotonic() + 10
+        while not pid_file.exists():
+            if proc.poll() is not None or time.monotonic() > deadline:
+                self.fail(f"the command never started (driver exit {proc.poll()})")
+            time.sleep(0.02)
+        return proc
+
+    def test_a_read_stopped_by_a_stop_signal_stops_the_command(self):
+        driver = self.driver("driver")
         script = self.tmp / "waiter.py"
         script.write_text(textwrap.dedent("""\
             import os, sys, time
@@ -334,7 +375,7 @@ class CommandReadTest(EngineCase):
             os.replace(sys.argv[1] + ".tmp", sys.argv[1])
             time.sleep(30)
             """))
-        for signum in (signal.SIGTERM, signal.SIGHUP):
+        for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT, signal.SIGUSR1):
             with self.subTest(signal=signum.name):
                 name = f"waiter-{signum.name.lower()}"
                 pid_file = self.tmp / f"{name}.pid"
@@ -347,33 +388,36 @@ class CommandReadTest(EngineCase):
                     link: none
                     sort: {{ all: alert }}
                     """)
-                # Its own group, so the signal goes to the driver's group and never to the test runner.
-                proc = subprocess.Popen([sys.executable, str(driver), str(self.data), str(self.plugin), name],
-                                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                        stderr=subprocess.DEVNULL, start_new_session=True)
-
-                def kill_left_over(proc=proc, pid_file=pid_file):
-                    try:
-                        os.killpg(proc.pid, signal.SIGKILL)
-                    except OSError:
-                        pass
-                    proc.wait()
-                    try:
-                        os.kill(int(pid_file.read_text()), signal.SIGKILL)
-                    except (OSError, ValueError):
-                        pass
-
-                self.addCleanup(kill_left_over)
-                deadline = time.monotonic() + 10
-                while not pid_file.exists():
-                    if proc.poll() is not None or time.monotonic() > deadline:
-                        self.fail(f"the command never started (driver exit {proc.poll()})")
-                    time.sleep(0.02)
+                proc = self.drive(driver, name, pid_file)
                 os.killpg(proc.pid, signum)
                 code = proc.wait(timeout=10)
                 pid = int(pid_file.read_text())
                 self.assertGone(pid, f"the command {pid} is still running after {signum.name}")
                 self.assertEqual(code, 128 + signum)
+
+    def test_an_ignored_sighup_leaves_the_read_running(self):
+        # As under nohup: a SIGHUP that was ignored before the read stays ignored, and the read finishes.
+        driver = self.driver("nohup-driver", before="signal.signal(signal.SIGHUP, signal.SIG_IGN)")
+        reply = self.reply_copy("status-incidents.json")
+        pid_file = self.tmp / "late.pid"
+        script = self.tmp / "late.py"
+        script.write_text(textwrap.dedent("""\
+            import os, sys, time
+            with open(sys.argv[1] + ".tmp", "w") as f:
+                f.write(str(os.getpid()))
+            os.replace(sys.argv[1] + ".tmp", sys.argv[1])
+            time.sleep(1.5)
+            sys.stdout.buffer.write(open(sys.argv[2], "rb").read())
+            """))
+        text = (FIXTURES / "user" / "vendor-status.yaml").read_text()
+        text = text.replace("run: curl -s https://status.example.com/api/v2/incidents/unresolved.json",
+                            f"run: '{sys.executable} {script} {pid_file} {reply}'")
+        self.user_source("late", text.replace("source: vendor-status", "source: late"))
+        proc = self.drive(driver, "late", pid_file)
+        os.killpg(proc.pid, signal.SIGHUP)
+        self.assertEqual(proc.wait(timeout=10), 0)
+        [raw] = (self.data / "sources" / ".raw" / "late").glob("*[0-9a-f].json")
+        self.assertEqual(raw.read_bytes(), reply.read_bytes())
 
     def test_a_helper_that_keeps_the_output_open_does_not_hold_the_read_past_the_drain_limit(self):
         pid_file = self.tmp / "helper.pid"
