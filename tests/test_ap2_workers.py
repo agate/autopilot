@@ -2627,6 +2627,42 @@ class DiscoveryOutsideTheLockTest(WorkerCase):
         self.assertEqual(recs[b["card"]]["idle_since"], "2026-01-05T09:00:00Z")
         self.assertEqual(w.check()[0]["did"], "resumed")  # the next check resumes it
 
+    def test_a_ctrl_c_in_the_first_step_runs_no_planned_resume(self):
+        # A's resume is planned in the first locked step; a Ctrl-C on B, later in that step, leaves the check
+        # there: A's tools are not listed and A is not resumed.
+        w = self.workers()
+        a, b = self.dead(w), self.start(w)
+        real = Workers.classify
+
+        def classify(self_, rec, listing):
+            if rec["card"] == b["card"]:
+                raise KeyboardInterrupt
+            return real(self_, rec, listing)
+
+        n = len(self.discovery_calls())
+        with mock.patch.object(Workers, "classify", classify):
+            with self.assertRaises(KeyboardInterrupt):
+                w.check()
+        self.assertEqual(len(self.discovery_calls()), n)
+        self.assertEqual(len(self.bg_calls()), 2)  # the two starts only
+        recs = {r["card"]: r for r in resources.Registry(self.data).read()}
+        self.assertEqual((recs[a["card"]]["short_id"], recs[a["card"]]["resumes"]), (a["short_id"], 0))
+
+    def test_a_ctrl_c_in_one_resume_starts_no_later_resume(self):
+        # Both resumes are planned and their tools listed; a Ctrl-C in A's resume, after its launch, stops the
+        # last locked step there: A's launch is on record, and B is neither stopped nor launched.
+        w = self.workers()
+        a, b = self.dead(w), self.dead(w)
+        with mock.patch.object(Workers, "_session_id", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                w.check()
+        recs = {r["card"]: r for r in resources.Registry(self.data).read()}
+        self.assertNotEqual(recs[a["card"]]["short_id"], a["short_id"])  # A's new session is on record
+        self.assertEqual(recs[a["card"]]["resumes"], 1)
+        self.assertEqual((recs[b["card"]]["short_id"], recs[b["card"]]["resumes"]), (b["short_id"], 0))
+        self.assertNotIn(["stop", b["short_id"]], [c["argv"] for c in self.calls()])
+        self.assertEqual(len(self.bg_calls()), 3)  # the two starts and A's resume
+
 
 class ShortIdOnRecordTest(WorkerCase):
     """The short id `claude --bg` prints is on the worker list before the listing is asked for the session id, so a
