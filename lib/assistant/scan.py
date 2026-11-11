@@ -19,6 +19,7 @@ what a scan costs.
 """
 from __future__ import annotations
 
+import codecs
 import errno
 import fcntl
 import json
@@ -48,6 +49,9 @@ OWN_WRITES = ("Write", "Edit", "MultiEdit", "NotebookEdit", "TodoWrite")
 # The line that marks a log cut short (past engine.MAX_OUTPUT in total).
 CUT = {"cut_short": True}
 VERSION = 1
+# How far into an oversized hook payload `save_raw` looks for its top-level `tool_name` (the hook's session_id,
+# transcript_path, cwd, permission_mode and hook_event_name come before it and are short).
+NAME_LOOKAHEAD = 1024 * 1024
 # The largest plan file `load_plan` reads (a plan is a few KiB; the cap only keeps a bad file from being read whole).
 MAX_PLAN = 16 * 1024 * 1024
 
@@ -343,10 +347,15 @@ def _names(value, words: tuple, paths: tuple) -> bool:
 def save_raw(plan_file, payload: bytes) -> dict:
     """The PostToolUse hook: log one tool call the plan names in the scan folder's calls.jsonl. A payload that is
     not a hook payload is refused (ScanError) and the log is left as it is. Past engine.MAX_OUTPUT in total (or a
-    payload larger than that), the log is marked cut short and nothing more is added."""
+    payload larger than that), the log is marked cut short and nothing more is added; but a larger payload whose
+    top-level `tool_name` (read from its start, `_leading_tool_name`) is no planned call's tool, in a plan that runs
+    no skill, is skipped and the log left as it is."""
     p, folder = load_plan(plan_file)
     cap = engine_module.MAX_OUTPUT
     if len(payload) > cap:
+        name = _leading_tool_name(payload)
+        if name is not None and not any(call["via"] == "skill" or calls_tool(call, name) for call in p["calls"]):
+            return {"kept": False, "tool_name": name, "too_large": True}  # a reply `keeps` refuses by name alone
         _append(folder, None, cap)
         raise ScanError(f"the hook payload is larger than {cap} bytes; the scan log {folder / LOG} is marked cut "
                         f"short")
@@ -369,6 +378,47 @@ def save_raw(plan_file, payload: bytes) -> dict:
     line = {"tool_name": name, "tool_input": tool_input, "text": response_text(hook["tool_response"])}
     kept = _append(folder, line, cap)
     return {"kept": kept, "tool_name": name, **({} if kept else {"cut_short": True})}
+
+
+_JSON_SPACE = re.compile(r"[ \t\n\r]*")
+
+
+def _leading_tool_name(payload: bytes) -> Optional[str]:
+    """The top-level `tool_name` of a payload too large to parse whole (it arrives cut off), or None when it cannot
+    be read. Only the first NAME_LOOKAHEAD bytes are looked at: the object's keys are read in order, one key and one
+    value at a time, until the `tool_name` key, whose value must be a non-empty text; nothing after that value is
+    parsed (the whole look-ahead must be valid UTF-8). Not a JSON object, bad UTF-8, a bad or cut-off key or value
+    before it, or a name that is not a text is None."""
+    try:
+        # Strict, but holds back a character cut in two at the limit instead of failing on it.
+        text = codecs.getincrementaldecoder("utf-8")().decode(payload[:NAME_LOOKAHEAD], final=False)
+    except UnicodeDecodeError:
+        return None
+    decoder, space = json.JSONDecoder(), _JSON_SPACE.match
+    at = space(text).end()
+    if text[at:at + 1] != "{":
+        return None
+    at = space(text, at + 1).end()
+    try:
+        while text[at:at + 1] == '"':
+            key, at = decoder.raw_decode(text, at)
+            at = space(text, at).end()
+            if text[at:at + 1] != ":":
+                return None
+            at = space(text, at + 1).end()
+            if key == "tool_name":
+                if text[at:at + 1] != '"':
+                    return None
+                name, _ = decoder.raw_decode(text, at)
+                return name or None
+            _, at = decoder.raw_decode(text, at)
+            at = space(text, at).end()
+            if text[at:at + 1] != ",":
+                return None
+            at = space(text, at + 1).end()
+    except (ValueError, RecursionError):
+        return None
+    return None
 
 
 def _append(folder: Path, line: Optional[dict], cap: int) -> bool:
