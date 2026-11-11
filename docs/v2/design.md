@@ -1362,9 +1362,13 @@ Calls the author made without asking (check them):
     page (`GET /api/cards/<id>`, `/api/state`) keep the full paths.
     - **[decided by the builder]** A path outside the data and home folders (`/private/var/...`, `/tmp/...`)
       stays as it is: it names neither the user nor the data folder's place. Easy to add later.
-    - **[decided by the builder]** A folder's path is replaced only as a whole path name: home `/Users/x` does
-      not change `/Users/xy/...`; a home of `/` (or none found) changes nothing. The data folder goes first, so
-      a data folder under home reads `<data>`, not `~/...`.
+    - **[decided by the builder]** A folder's path is replaced only as a whole path name: no ASCII name
+      character (a letter, digit, `_ - + @ ~ $ % # =`, or a dot and one) may come next, and no ASCII letter,
+      digit, `_`, `.` or `-` before, so home `/Users/x` does not change `/Users/xy/...` or `/Users/x.old/...`.
+      Text in another script (Chinese) right next to a path does not stop it, so a folder `/Users/xé` would
+      read `~é`: a wrong name, never a leak. An ask text that is not a string (an object per language, a list)
+      has each of its strings scrubbed. A home of `/` (or none found) changes nothing. The data folder goes
+      first, so a data folder under home reads `<data>`, not `~/...`.
     - **[decided by the builder]** Only these three texts are scrubbed; a card's own words (its title, plain
       words, questions) are what a person or a source wrote and stay as they are.
   - Read-only, in shadow and live mode alike: building writes nothing in the data folder (it reads the store

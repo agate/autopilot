@@ -14,8 +14,12 @@ secondary_language, languages, settings, lanes, projects, heartbeat, cards, full
   its full card (title and `plain.what` per language, `source.record` and the source block).
 - Local paths: in three texts that can name a file on this Mac, `full[id].template_error`, `heartbeat.error` and
   `full[id].card.ask.text`, the data folder (as given and resolved) becomes `<data>` and then the home folder (as
-  given and resolved) becomes `~`; the rest of each text stays. A prefix counts only as a whole path name (not
-  `/Users/xy` for home `/Users/x`); a home of `/` is left alone. Other paths (`/private/var/...`) stay.
+  given and resolved) becomes `~`; the rest of each text stays. A prefix counts only as a whole path name: no ASCII
+  name character (a letter, digit, `_ - + @ ~ $ % # =`, or a dot and one) may come next, and no ASCII letter, digit,
+  `_`, `.` or `-` before (not `/Users/xy` or `/Users/x.old` for home `/Users/x`). Another script next to a path
+  (Chinese) does not stop it, so a folder `/Users/xé` reads `~é`: a wrong name, never a leak. An ask text that is not
+  a string (an object per language, a list) has each of its strings scrubbed. A home of `/` is left alone. Other
+  paths (`/private/var/...`) stay.
 
 Building writes nothing (the store is read without its lock file, as the local page's GETs do), starts no process
 and opens no connection. Publishing the data is a later dispatcher step, live mode only.
@@ -52,11 +56,17 @@ class _Scrub:
     def _pattern(forms: list) -> Optional["re.Pattern"]:
         if not forms:
             return None
-        # Longest first, so `/private/var/x` wins over `/var/x`; a whole path name only, not a longer name's start.
+        # Longest first, so `/private/var/x` wins over `/var/x`; a whole path name only, not a longer name's start:
+        # no ASCII name character (or a dot and one) may come next. ASCII only, so Chinese next to a path still ends it.
         alts = "|".join(re.escape(f) for f in sorted(forms, key=len, reverse=True))
-        return re.compile(rf"(?<![\w.-])(?:{alts})(?![\w-])")
+        name = r"[\w+@~$%#=-]"
+        return re.compile(rf"(?<![\w.-])(?:{alts})(?!{name}|\.{name})", re.ASCII)
 
     def __call__(self, text):
+        if isinstance(text, dict):  # an ask text that is not a string: each of its strings is scrubbed
+            return {k: self(v) for k, v in text.items()}
+        if isinstance(text, list):
+            return [self(v) for v in text]
         if not isinstance(text, str):
             return text
         for pattern, by in self.steps:

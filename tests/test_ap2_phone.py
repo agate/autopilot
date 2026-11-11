@@ -309,7 +309,7 @@ class ScrubTest(PhoneCase):
         (self.data / "gate.json").write_text("{not json", encoding="utf-8")
         return self.add(kind="parcel")
 
-    def ask(self, text: str, **over) -> dict:
+    def ask(self, text, **over) -> dict:
         return self.add(ask={"type": "fix", "text": text, "role": "implement", "reason": "died"}, **over)
 
     def test_the_data_folder_becomes_data_as_given_and_resolved(self):
@@ -327,6 +327,19 @@ class ScrubTest(PhoneCase):
         self.assertEqual(data["full"][asked["id"]]["card"]["ask"]["text"],
                          "<data>/workers.json: cannot read; see '<data>/logs/x.log'")
 
+    def test_a_data_path_next_to_chinese_becomes_data(self):
+        asked = self.ask(f"看{self.data}里的日志")
+        self.assertEqual(self.build()["full"][asked["id"]]["card"]["ask"]["text"], "看<data>里的日志")
+
+    def test_an_ask_text_that_is_not_a_string_has_each_string_scrubbed(self):
+        per_lang = self.ask({"en": f"see {self.data}/x", "zh": f"看 {self.data}/x"})
+        listed = self.ask([f"see {self.data}/y", 3, None])
+        data = self.build()
+        self.assertEqual(data["full"][per_lang["id"]]["card"]["ask"]["text"],
+                         {"en": "see <data>/x", "zh": "看 <data>/x"})
+        self.assertEqual(data["full"][listed["id"]]["card"]["ask"]["text"], ["see <data>/y", 3, None])
+        self.assertNotIn(str(self.data), json.dumps(data, ensure_ascii=False))
+
     def test_the_home_folder_becomes_a_tilde_as_given_and_resolved(self):
         real = self.tmp / "Users" / "x"
         real.mkdir(parents=True)
@@ -336,8 +349,14 @@ class ScrubTest(PhoneCase):
                          f"worktree, then start it again")
         other = self.ask(f"see {real}/worktrees/b/log.txt, and {real}")
         sibling = self.ask(f"{real}y/worktrees/c is not under home")
+        kept = {f"{real}.old/a": f"{real}.old/a", f"{real}+old/a": f"{real}+old/a",
+                f"/mnt/backup{real}/a": f"/mnt/backup{real}/a", f"see {real}.": "see ~.",
+                f"请看{home}/worktrees/c 的日志": "请看~/worktrees/c 的日志"}
+        rows = {text: self.ask(text) for text in kept}
         with mock.patch.dict(os.environ, {"HOME": str(home)}):
             full = self.build()["full"]
+        for text, want in kept.items():
+            self.assertEqual(full[rows[text]["id"]]["card"]["ask"]["text"], want, text)
         self.assertEqual(full[asked["id"]]["card"]["ask"]["text"],
                          "could not resume after parking (no worktree at ~/worktrees/a); look at its worktree, "
                          "then start it again")
@@ -355,10 +374,11 @@ class ScrubTest(PhoneCase):
         self.assertNotIn(str(self.tmp), json.dumps(data, ensure_ascii=False))
 
     def test_a_home_at_the_root_changes_nothing(self):
-        asked = self.ask("/tmp/worktrees/a is gone")
+        text = "/tmp/worktrees/a is gone; cannot write to /"
+        asked = self.ask(text)
         with mock.patch.dict(os.environ, {"HOME": "/"}):
             full = self.build()["full"]
-        self.assertEqual(full[asked["id"]]["card"]["ask"]["text"], "/tmp/worktrees/a is gone")
+        self.assertEqual(full[asked["id"]]["card"]["ask"]["text"], text)
 
     def test_an_ask_without_text_and_other_fields_are_kept(self):
         asked = self.add(ask={"type": "answer", "text": None, "role": "implement"},
