@@ -1013,6 +1013,16 @@ class PageTest(ServerCase):
         for lane in cards.LANES:
             self.assertIn(f"lane.{lane}", labels["en"])
 
+    def test_a_source_that_extends_another_shows_its_origin_in_the_pages_language(self):
+        text = PAGE.read_text(encoding="utf-8")
+        labels = json.loads(re.search(r'<script type="application/json" id="labels">(.*?)</script>', text,
+                                      re.S).group(1))
+        for lang in ("en", "zh"):
+            with self.subTest(lang):
+                self.assertIn("{name}", labels[lang]["origin.extends"])
+        self.assertIn("/^user, extends (.+)$/", text)
+        self.assertRegex(text, r"""L\('origin\.extends', \{name: """)
+
     def test_the_pages_search_caps_match_the_servers(self):
         text = PAGE.read_text(encoding="utf-8")
         self.assertIn(f"const SEARCH_MAX_CHARS = {server.SEARCH_MAX_CHARS};", text)

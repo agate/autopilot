@@ -327,6 +327,7 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     "btn.child": "adds a child card of kind {kind}",
     "origin.builtin": "Built in",
     "origin.user": "Yours",
+    "origin.extends": "Yours, extends {name}",
     "settings.hint": "Read-only here. To change them, edit config.yaml in the data folder.",
     "settings.config": "Config",
     "settings.mode": "Mode",
@@ -455,6 +456,7 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     "btn.child": "添加一张 {kind} 类型的子卡片",
     "origin.builtin": "内置",
     "origin.user": "你的",
+    "origin.extends": "你的，基于 {name}",
     "settings.hint": "这里只能查看。要修改，请编辑数据文件夹里的 config.yaml。",
     "settings.config": "配置",
     "settings.mode": "模式",
@@ -854,6 +856,8 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
   function originLabel(origin) {
     if (origin === 'builtin' || origin === 'built-in') return L('origin.builtin');
     if (origin === 'user') return L('origin.user');
+    const ext = /^user, extends (.+)$/.exec(String(origin || ''));
+    if (ext) return L('origin.extends', {name: ext[1]});
     return text(origin);
   }
   async function drawSources(name) {
