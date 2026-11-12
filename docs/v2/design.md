@@ -1915,7 +1915,8 @@ Calls the author made without asking (check them):
      (`<transcript dir>/<session id>/subagents/agent-*.jsonl`) count with it. It keeps v1's per-file cache keyed by
      `(mtime_ns, size)`, the request-owner dedupe across resumed copies (a request belongs to the session that has
      it first), settle, and `totals(data, projects, now, mode, listing)` with exactly the keys `today`, `week` (from
-     Monday), `month` (calendar), `unknown`, `unknown_today`, `unknown_models`, `unknown_launches`. An aware `now`
+     Monday), `month` (calendar), `unknown`, `unknown_today`, `unknown_models`, `unknown_launches`. A week that
+     started last month counts its days from last month too; `month` and `unknown` stay calendar-month. An aware `now`
      cuts the days at its fixed offset; a naive or missing one (`ap2 spend`) puts each moment on its day by this
      computer's local rules at that moment, so a daylight saving change keeps a request on its local day. It drops v1's
      `remember` / `remembered` (no prompt hook reads totals yet), v1's `record_session` for `-p` runs and its

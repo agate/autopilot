@@ -19,7 +19,8 @@ import hashlib
 import json
 import os
 import re
-from datetime import datetime, timedelta
+import stat
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -39,6 +40,9 @@ _RETRY_S = 600  # retry resolving one short id at most this often
 _YOUNG_RETRY_S = 60  # ... and this often while its launch is younger than GRACE_S
 _GIVE_UP_S = 2 * 86400  # and stop trying once its launch is older than this
 COPY_SLACK_S = 300  # a request older than its session's first launch minus this is a copy of an older session's
+# A request time outside these cannot be shown as a date in every zone (datetime ends at year 9999): unknown spend.
+_MIN_TS = 86400.0
+_MAX_TS = datetime(9998, 12, 31, tzinfo=timezone.utc).timestamp()
 
 Listing = Optional[Callable[[], Optional[list]]]
 
@@ -168,11 +172,14 @@ def _cost(table: dict, model, u: dict):
         return None
     cc = u.get("cache_creation") if isinstance(u.get("cache_creation"), dict) else {}
     c1 = int(cc.get("ephemeral_1h_input_tokens") or 0)
-    c5 = int(cc["ephemeral_5m_input_tokens"] or 0) if "ephemeral_5m_input_tokens" in cc \
-        else int(u.get("cache_creation_input_tokens") or 0) - c1
+    c5_raw = int(cc["ephemeral_5m_input_tokens"] or 0) if "ephemeral_5m_input_tokens" in cc else None
+    c_all = int(u.get("cache_creation_input_tokens") or 0)
     tok = {"input": int(u.get("input_tokens") or 0), "output": int(u.get("output_tokens") or 0),
-           "cache_read": int(u.get("cache_read_input_tokens") or 0), "cache_write_5m": max(c5, 0),
-           "cache_write_1h": c1}
+           "cache_read": int(u.get("cache_read_input_tokens") or 0), "cache_write_1h": c1}
+    if min(list(tok.values()) + [c_all, c5_raw or 0]) < 0:
+        return None  # a negative count: unknown, never a discount
+    # v1's rule: without the 5m count, the rest of the cache tokens are 5m ones (none when the 1h kind is more).
+    tok["cache_write_5m"] = c5_raw if c5_raw is not None else max(c_all - c1, 0)
     if "over_100k" in p and (tok["input"] + tok["cache_read"] + tok["cache_write_5m"] + tok["cache_write_1h"]
                              > _LONG_PROMPT_TOKENS):
         p = p["over_100k"]
@@ -193,10 +200,18 @@ def _parse_file(path: Path, table: dict) -> list:
     """One file's requests as {"id", "ts", "model", "usd"}; streaming writes several lines per requestId with
     growing counts, so only the last usage seen for each counts. `id` is the requestId (or message id) that a
     resumed copy repeats, or a "~<line>" key local to this file. A line without a usable timestamp keeps ts None and
-    usd None: unknown spend, never dropped."""
+    usd None: unknown spend, never dropped. Only a regular file is read (checked on the open file, so a FIFO or a
+    device swapped in after a check never blocks the read)."""
     per_req = {}
     try:
-        lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    except OSError:
+        return []
+    try:
+        with os.fdopen(fd, "rb") as f:
+            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+                return []
+            lines = f.read().decode("utf-8", errors="replace").splitlines()
     except OSError:
         return []
     for n, raw in enumerate(lines):
@@ -212,6 +227,8 @@ def _parse_file(path: Path, table: dict) -> list:
             ts = datetime.fromisoformat(str(d.get("timestamp")).replace("Z", "+00:00")).timestamp()
         except (ValueError, OverflowError):
             ts = None
+        if not _usable_ts(ts):
+            ts = None
         model = msg.get("model")
         rid = str(d.get("requestId") or msg.get("id") or f"~{n}")
         try:
@@ -224,8 +241,9 @@ def _parse_file(path: Path, table: dict) -> list:
 
 
 def _files(main: Path) -> list:
-    """A session's transcript and its subagents' (`<dir>/<session id>/subagents/agent-*.jsonl`)."""
-    return [main] + sorted((main.parent / main.stem / "subagents").glob("agent-*.jsonl"))
+    """A session's transcript and its subagents' (`<dir>/<session id>/subagents/agent-*.jsonl`), only the ones that
+    are regular files (a link is followed: one to a FIFO or a device is left out)."""
+    return [main] + sorted(p for p in (main.parent / main.stem / "subagents").glob("agent-*.jsonl") if p.is_file())
 
 
 def _find(projects, sid) -> Optional[Path]:
@@ -234,8 +252,19 @@ def _find(projects, sid) -> Optional[Path]:
     return transcripts.find(projects, sid)
 
 
-def _day(ts: float, tz) -> str:
-    return datetime.fromtimestamp(ts, tz).strftime("%Y-%m-%d")
+def _usable_ts(ts) -> bool:
+    return _number(ts) and _MIN_TS <= ts <= _MAX_TS
+
+
+def _day(ts, tz) -> Optional[str]:
+    """The day `ts` is in, in `tz`; None for a time that is not one a date can show (a ledger row an older version
+    wrote)."""
+    if not _usable_ts(ts):
+        return None
+    try:
+        return datetime.fromtimestamp(ts, tz).strftime("%Y-%m-%d")
+    except (ValueError, OverflowError, OSError):
+        return None
 
 
 def request_costs(data, path, tz=None) -> list:
@@ -245,8 +274,7 @@ def request_costs(data, path, tz=None) -> list:
     out = []
     for f in _files(Path(path)):
         for it in _parse_file(f, table):
-            out.append({"day": _day(it["ts"], tz) if it["ts"] is not None else None, "model": it["model"],
-                        "usd": it["usd"]})
+            out.append({"day": _day(it["ts"], tz), "model": it["model"], "usd": it["usd"]})
     return out
 
 
@@ -315,7 +343,7 @@ def _cached_reqs(c: dict, f: Path, table: dict, since: float, seen: set) -> dict
         ent = {"stamp": stamp, "reqs": _reqs(_parse_file(f, table), since)}
         c["files"][str(f)] = ent
         c["dirty"] = True
-    elif any(v[0] is not None and v[0] < since for v in ent["reqs"].values()):  # the month rolled over
+    elif any(v[0] is not None and v[0] < since for v in ent["reqs"].values()):  # the month or the week moved on
         ent["reqs"] = {k: v for k, v in ent["reqs"].items() if v[0] is None or v[0] >= since}
         c["dirty"] = True
     seen.add(str(f))
@@ -396,10 +424,10 @@ def settle(data, projects, short: str = "", session_id: str = "", listing: Listi
 
 
 def totals(data, projects, now: Optional[datetime] = None, mode: str = "gateway", listing: Listing = None) -> dict:
-    """Dollars spent today, this week (from Monday) and this calendar month on sessions launched in `mode`. `now`'s
-    timezone decides where the days begin. A naive (or no) `now` is local time, and then each moment is put on its
-    day by this computer's local rules at that moment, so a daylight saving change keeps every request on its local
-    day. Keys:
+    """Dollars spent today, this week (from Monday; a week that began last month counts its days from last month
+    too) and this calendar month on sessions launched in `mode`. `now`'s timezone decides where the days begin. A
+    naive (or no) `now` is local time, and then each moment is put on its day by this computer's local rules at that
+    moment, so a daylight saving change keeps every request on its local day. Keys:
 
     - today, week, month: dollars.
     - unknown: a request this month had no price, or a launch this month cannot be matched to its session (its spend
@@ -414,15 +442,21 @@ def totals(data, projects, now: Optional[datetime] = None, mode: str = "gateway"
     for it, and not unknown."""
     if now is None or now.tzinfo is None:  # local rules per moment: tz None buckets by the local time of each one
         now = now or datetime.now()
-        tz, since = None, datetime(now.year, now.month, 1).timestamp()
+        monday = (now - timedelta(days=now.weekday())).date()
+        tz = None
+        since = min(datetime(now.year, now.month, 1), datetime(monday.year, monday.month, monday.day)).timestamp()
         zone = "local" + datetime(now.year, now.month, 1).astimezone().strftime("%z")
     else:  # the caller's fixed zone
         tz, zone = now.tzinfo, now.strftime("%z")
-        since = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp()
+        midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        since = min(midnight.replace(day=1), midnight - timedelta(days=now.weekday())).timestamp()
+    # `since` (the earlier of the month's and the week's start) never moves back as `now` moves on, so the cache
+    # only ever drops requests from before it.
     now_ts = now.timestamp()
     today = now.strftime("%Y-%m-%d")
     week_start = (now - timedelta(days=now.weekday())).strftime("%Y-%m-%d")
     month_start = now.strftime("%Y-%m-01")
+    first_day = min(week_start, month_start)
 
     rows = [r for r in _read_lines(data, LAUNCHES) if isinstance(r.get("short"), str) and r["short"]]
     last_launch = {}  # short -> launch; the last line wins
@@ -482,14 +516,15 @@ def totals(data, projects, now: Optional[datetime] = None, mode: str = "gateway"
                                  ln.get("kind"))
 
     def add(day: str, usd, unknown) -> None:
-        if not (month_start <= day <= today):
+        if not (first_day <= day <= today):
             return
-        if unknown:
+        if unknown and day >= month_start:  # unknown is this month's
             out["unknown"] = True
             if day == today:
                 out["unknown_today"] = True
         if usd:
-            out["month"] += usd
+            if day >= month_start:
+                out["month"] += usd
             if day >= week_start:
                 out["week"] += usd
             if day == today:
@@ -536,11 +571,11 @@ def totals(data, projects, now: Optional[datetime] = None, mode: str = "gateway"
         for rid, rec in reqs.items():
             if owner[rid][2] != sid:
                 continue  # a copy of a request another session made
-            ts, cost = rec[0], rec[1] if _number(rec[1]) else None
-            day = _day(ts, tz) if ts is not None else None
+            cost = rec[1] if _number(rec[1]) else None
+            day = _day(rec[0], tz)
             if cost is None and (day == today or (day is None and launched_today)):
                 models.add(rec[2] if len(rec) > 2 and rec[2] else "an unnamed model")
-            if ts is None:  # no usable time: unknown spend, on the day the session was launched
+            if day is None:  # no usable time: unknown spend, on the day the session was launched
                 out["unknown"] = True
                 out["unknown_today"] = out["unknown_today"] or launched_today
                 continue

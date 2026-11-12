@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -33,7 +34,9 @@ SID = "11111111-0000-0000-0000-00000000aaaa"
 SID_B = "22222222-0000-0000-0000-00000000bbbb"
 SID2 = "22222222-0000-0000-0000-00000000cccc"
 SHORT = "abcd1234"
-HAIKU = json.loads((ROOT / "lib" / "assistant" / "prices.json").read_text())["models"]["claude-haiku-4-5"]
+SHIPPED = json.loads((ROOT / "lib" / "assistant" / "prices.json").read_text())["models"]
+HAIKU = SHIPPED["claude-haiku-4-5"]
+LONG = SHIPPED["claude-haiku-5-5"]  # a model with an over_100k tier
 # SHA-256 of v1's lib/autopilot/prices.json at commit 519346b, for a checkout that does not hold that commit.
 V1_PRICES_DIGEST = "88886fe049d8e3697ac0126de26fc1738527e30a390bbc85628396d19fb7b97f"
 TOTALS_KEYS = {"today", "week", "month", "unknown", "unknown_today", "unknown_models", "unknown_launches"}
@@ -130,6 +133,20 @@ class RequestCostsTest(SpendCase):
             "message": {"model": "claude-haiku-5-5", "usage": {"input_tokens": 200000, "output_tokens": 0}}}) + "\n")
         self.assertAlmostEqual(self.costs()[0]["usd"], 0.2 * 0.5)
 
+    def test_long_prompt_tier_counts_the_whole_prompt_and_starts_over_the_limit(self):
+        def ln(rid, **u):
+            return json.dumps({"type": "assistant", "requestId": rid, "timestamp": "2026-11-10T15:00:00Z",
+                               "message": {"model": "claude-haiku-5-5", "usage": dict(u, output_tokens=0)}})
+        self.transcript.parent.mkdir(parents=True)
+        self.transcript.write_text("\n".join([
+            ln("over", input_tokens=1000, cache_read_input_tokens=100_000),  # 101,000 prompt tokens
+            ln("at", input_tokens=50_000, cache_read_input_tokens=50_000),  # exactly 100,000: not over
+        ]) + "\n")
+        over, at = LONG["over_100k"], LONG
+        self.assertEqual(len(self.costs()), 2)
+        self.assertAlmostEqual(self.costs()[0]["usd"], (1000 * over["input"] + 100_000 * over["cache_read"]) / 1e6)
+        self.assertAlmostEqual(self.costs()[1]["usd"], (50_000 * at["input"] + 50_000 * at["cache_read"]) / 1e6)
+
     def test_synthetic_lines_are_ignored(self):
         self.put("synthetic.jsonl")
         self.launch()
@@ -166,6 +183,99 @@ class RequestCostsTest(SpendCase):
         t = self.totals()
         self.assertEqual(t["month"], 0.0)
         self.assertEqual((t["unknown"], t["unknown_today"]), (True, True))
+
+    def test_a_negative_count_is_unknown_never_a_discount(self):
+        self.transcript.parent.mkdir(parents=True)
+
+        def neg(rid, **u):
+            return dict(NEW, requestId=rid, message=dict(NEW["message"], usage=u))
+        lines = [NEW, neg("r_in", input_tokens=-10_000_000_000, output_tokens=1),
+                 neg("r_out", input_tokens=10, output_tokens=-1),
+                 neg("r_read", input_tokens=10, cache_read_input_tokens=-1),
+                 neg("r_cc", input_tokens=10, cache_creation_input_tokens=-1),
+                 neg("r_1h", input_tokens=10, cache_creation={"ephemeral_1h_input_tokens": -1}),
+                 neg("r_5m", input_tokens=10, cache_creation={"ephemeral_5m_input_tokens": -1}),
+                 # Fewer cache tokens in all than in the 1h kind is v1's rule, not a negative count: priced.
+                 neg("r_ok", input_tokens=10, cache_creation_input_tokens=100,
+                     cache_creation={"ephemeral_1h_input_tokens": 200})]
+        self.transcript.write_text("".join(json.dumps(x) + "\n" for x in lines))
+        items = self.costs()
+        self.assertAlmostEqual(items[0]["usd"], 1.0)
+        self.assertEqual([i["usd"] for i in items[1:-1]], [None] * 6)
+        self.assertAlmostEqual(items[-1]["usd"], usd(input=10, cache_write_1h=200))
+        self.launch()
+        t = self.totals()
+        self.assertAlmostEqual(t["month"], 1.0 + usd(input=10, cache_write_1h=200))
+        self.assertEqual((t["unknown"], t["unknown_today"]), (True, True))
+
+    def test_a_timestamp_past_what_a_date_can_show_is_unknown_not_an_error(self):
+        self.transcript.parent.mkdir(parents=True)
+        far = dict(NEW, requestId="r_far", timestamp="9999-12-31T23:59:59-14:00")
+        old = dict(NEW, requestId="r_old", timestamp="1970-01-01T00:00:00Z")
+        self.transcript.write_text("".join(json.dumps(x) + "\n" for x in (NEW, far, old)))
+        self.assertEqual([(i["day"], i["usd"]) for i in self.costs()],
+                         [("2026-11-11", 1.0), (None, None), (None, None)])
+        self.launch()
+        for now in (NOW, datetime(2026, 11, 11, 12, 0), None):  # aware, naive and no `now`
+            t = spend.totals(self.data, self.projects, now, listing=self.lister)
+            self.assertIs(t["unknown"], True, now)
+        t = self.totals()
+        self.assertAlmostEqual(t["month"], 1.0)
+        self.settle(short=SHORT)
+        self.transcript.unlink()
+        t = self.totals()
+        self.assertAlmostEqual(t["month"], 1.0)
+        self.assertIs(t["unknown"], True)
+
+    def test_a_settled_timestamp_past_what_a_date_can_show_is_unknown_not_an_error(self):
+        self.launch()
+        self.settle(session_id=SID)  # no transcript: unsettled; then a row as an older version wrote it
+        far = datetime(9999, 12, 31, 23, 59, 59, tzinfo=timezone(timedelta(hours=-14))).timestamp()
+        with (self.data / "spend" / "settled.jsonl").open("a") as f:
+            f.write(json.dumps({"batch": spend._iso(NOW), "session": SID, "short": SHORT,
+                                "reqs": {"r_far": [far, 5.0], "r_inf": [1e400, 5.0], "r_ok": [NOW.timestamp(), 1.0]}})
+                    + "\n")
+        for now in (NOW, datetime(2026, 11, 11, 12, 0)):
+            t = spend.totals(self.data, self.projects, now, listing=self.lister)
+            self.assertIs(t["unknown"], True, now)
+        t = self.totals()
+        self.assertAlmostEqual(t["month"], 1.0)
+        self.assertEqual((t["unknown"], t["unknown_today"]), (True, False))
+
+    def test_a_subagent_path_that_is_not_a_regular_file_never_blocks(self):
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("os.mkfifo is not available")
+        self.put()
+        d = self.transcript.parent / SID / "subagents"
+        d.mkdir(parents=True)
+        fifo = d / "agent-x.jsonl"
+        os.mkfifo(fifo)
+        (d / "agent-y.jsonl").symlink_to(fifo)
+        if Path("/dev/zero").exists():
+            (d / "agent-z.jsonl").symlink_to("/dev/zero")
+        self.launch()
+        self.assertEqual(spend._files(self.transcript), [self.transcript])
+        out = {}
+
+        def run():
+            out["parse"] = spend._parse_file(fifo, spend.prices(self.data))
+            out["settle"] = self.settle(short=SHORT)
+            out["totals"] = self.totals()
+        th = threading.Thread(target=run, daemon=True)
+        th.start()
+        th.join(5)
+        blocked = th.is_alive()
+        if blocked:  # give the blocked reader an end of file, so it does not outlive the test
+            for _ in range(50):
+                try:
+                    os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+                except OSError:
+                    pass
+                th.join(0.1)
+        self.assertFalse(blocked, "blocked on a FIFO")
+        self.assertEqual(out["parse"], [])
+        self.assertEqual(sorted(out["settle"]["reqs"]), ["req_1"])
+        self.assertAlmostEqual(out["totals"]["month"], STREAMING_USD)
 
     def test_model_keys_drop_the_context_tag_and_the_date(self):
         self.assertEqual(spend._model_key("claude-haiku-4-5[1m]"), "claude-haiku-4-5")
@@ -239,6 +349,54 @@ class TotalsTest(SpendCase):
         self.assertEqual(t["week"], 0.0)
         self.assertAlmostEqual(t["month"], STREAMING_USD + 1.0)
         self.assertEqual(self.totals(datetime(2026, 12, 1, 9, 0, tzinfo=TZ))["month"], 0.0)
+
+    def across_a_month_start(self):
+        def at(day, rid, model="claude-haiku-4-5"):  # noon here, $1.00 for a priced model
+            return dict(NEW, requestId=rid, timestamp=f"{day}T17:00:00Z", message=dict(NEW["message"], model=model))
+        self.transcript.parent.mkdir(parents=True)
+        self.transcript.write_text("".join(json.dumps(x) + "\n" for x in (
+            at("2026-09-29", "r_tue"), at("2026-09-30", "r_wed"), at("2026-10-01", "r_thu"),
+            at("2026-09-30", "r_wed_u", "claude-nonesuch-9"))))
+        self.launch(at=datetime(2026, 9, 28, 8, 0, tzinfo=TZ))  # Monday
+
+    def test_a_week_that_began_last_month_counts_its_days_from_last_month(self):
+        self.across_a_month_start()
+        thu = datetime(2026, 10, 1, 18, 0, tzinfo=TZ)
+        t = self.totals(thu)
+        self.assertAlmostEqual(t["week"], 3.0)
+        self.assertAlmostEqual(t["month"], 1.0)
+        self.assertAlmostEqual(t["today"], 1.0)
+        self.assertIs(t["unknown"], False)  # September's unpriced request is not this month's
+        self.settle(short=SHORT, now=thu)
+        self.transcript.unlink()
+        t = self.totals(thu)
+        self.assertEqual((round(t["week"], 6), round(t["month"], 6), round(t["today"], 6), t["unknown"]),
+                         (3.0, 1.0, 1.0, False))
+
+    def test_a_cache_built_last_month_keeps_the_weeks_days(self):
+        self.across_a_month_start()
+        t = self.totals(datetime(2026, 9, 30, 18, 0, tzinfo=TZ))
+        self.assertEqual((round(t["week"], 6), round(t["month"], 6), t["unknown"]), (2.0, 2.0, True))
+        with mock.patch("assistant.spend._parse_file", side_effect=AssertionError("re-read")):
+            t = self.totals(datetime(2026, 10, 1, 18, 0, tzinfo=TZ))
+        self.assertEqual((round(t["week"], 6), round(t["month"], 6), round(t["today"], 6), t["unknown"]),
+                         (3.0, 1.0, 1.0, False))
+        t = self.totals(datetime(2026, 10, 5, 9, 0, tzinfo=TZ))  # the next Monday: a new week
+        self.assertEqual((t["week"], round(t["month"], 6)), (0.0, 1.0))
+        self.assertEqual(sorted(list(self.cache()["files"].values())[0]["reqs"]), ["r_thu"])
+
+    def test_a_naive_now_counts_a_week_across_a_month_start(self):
+        if not hasattr(time, "tzset"):
+            self.skipTest("time.tzset is not available")
+        patch = mock.patch.dict(os.environ, {"TZ": "America/Chicago"})
+        patch.start()
+        self.addCleanup(time.tzset)  # runs last: after the zone is restored
+        self.addCleanup(patch.stop)
+        time.tzset()
+        self.across_a_month_start()
+        t = self.totals(datetime(2026, 10, 1, 18, 0))  # naive: local time, CDT
+        self.assertEqual((round(t["week"], 6), round(t["month"], 6), round(t["today"], 6), t["unknown"]),
+                         (3.0, 1.0, 1.0, False))
 
     def test_unknown_model_marks_unknown(self):
         self.put("unknown.jsonl")
@@ -356,6 +514,8 @@ class ResolveTest(SpendCase):
         self.assertEqual(self.cache()["shorts"], {SHORT: SID})
 
     def test_unresolved_retry_is_rate_limited_and_gives_up(self):
+        self.assertEqual((spend.GRACE_S, spend._RETRY_S, spend._YOUNG_RETRY_S, spend._GIVE_UP_S, spend.COPY_SLACK_S),
+                         (900, 600, 60, 2 * 86400, 300))
         self.listing.clear()
         self.launch(session="")
         self.totals()
@@ -373,6 +533,7 @@ class ResolveTest(SpendCase):
     def test_unresolved_launch_from_earlier_month_is_not_unknown(self):
         self.listing.clear()
         self.launch(session="")
+        self.launch("efgh5678", session=SID_B)  # resolved, but no transcript and nothing settled
         self.assertIs(self.totals(datetime(2026, 12, 2, 9, 0, tzinfo=TZ))["unknown"], False)
 
     def test_a_row_with_a_session_id_needs_no_listing(self):
@@ -513,7 +674,9 @@ class SettleTest(SpendCase):
         self.settle(short=SHORT, session_id=SID)  # the stop found its session id
         self.transcript.unlink()  # removed, and no longer listed
         (self.data / "spend" / "cache.json").unlink(missing_ok=True)
-        t = spend.totals(self.data, self.projects, NOW, listing=lambda: [])
+        before = self.listed
+        t = self.totals()
+        self.assertEqual(self.listed, before)  # the settled row names the session: no listing is asked
         self.assertAlmostEqual(t["month"], STREAMING_USD)
         self.assertEqual((t["unknown"], t["unknown_launches"]), (False, 0))
 
