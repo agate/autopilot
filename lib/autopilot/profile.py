@@ -168,7 +168,7 @@ def save(p: dict, known: list = None) -> None:
 
 
 def load(name: str) -> dict:
-    f = path(name) if paths.valid_name(name or "") else None
+    f = path(name) if _PROFILE_NAME.match(name or "") else None
     if f is not None and f.exists():
         return {**_blank(name), **json.loads(f.read_text())}
     if name == SUBSCRIPTION:
