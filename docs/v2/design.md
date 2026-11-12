@@ -540,10 +540,11 @@ How it is built (`lib/assistant/prloop.py`):
   v1's own stop rule in the same prompt). The check reviewers are the shipped `reviewer-angle` role: no new role,
   no new tools.
 - **[decided by the builder]** The round limit. `ROUND_LIMIT = 20` (the user's answer for this autopilot's v1
-  loops: "keep looping until a round is clean, at most 20 rounds"); it is also the most allowed. A record or a
-  caller may set a lower `limit`, a whole number from 1 to 20 (a bool is refused); `decide(record, limit)` takes
-  the record's `limit`, else the call's, else 20, and refuses a call limit that differs from the record's. The
-  check of the fix is not a round and does not count toward it.
+  loops: "keep looping until a round is clean, at most 20 rounds"); it is also the most allowed. A record may set a
+  lower `limit`, a whole number from 1 to 20 (a bool is refused); a caller that wants a lower limit writes it into
+  the record before the first round; `decide(record, limit)` only checks a call limit against the record's (its
+  `limit`, else 20) and refuses one that differs, so every function reads the same limit. The check of the fix is
+  not a round and does not count toward it.
 - **[decided by the builder]** The record, v2's `prloop.json`. v1's top-level keys (`result`, `reason`, `head`,
   `ci`, `rounds`, `followups`, `questions`) keep their meaning; v2 adds `limit`, `fix_check` and `ended_by`
   (`round`, `converged`, `fix_check`, `stop`). Each round is `{"n", "angles", "findings", "commit", "ci", "stop"}`:

@@ -61,6 +61,22 @@ def _show(value) -> str:
     return text if len(text) <= _SHOWN else text[:_SHOWN] + "..."
 
 
+class _Deep:
+    """Turns a RecursionError (a record nested too deep for Python to walk: a repr, a deep copy or a comparison of a
+    deep value) into a PrLoopError naming `where`."""
+
+    def __init__(self, where: str):
+        self.where = where
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, kind, exc, tb):
+        if kind is not None and issubclass(kind, RecursionError):
+            raise PrLoopError(f"{self.where}: nested too deep") from None
+        return False
+
+
 def _plural(n: int, word: str) -> str:
     return f"{n} {word}" + ("" if n == 1 else "s")
 
@@ -291,11 +307,13 @@ def _check(record, c: _Checker, limit=None) -> int:
     own = record.get("limit")
     if own is not None:
         c.limit("limit", own)
+    lim = own if own is not None else ROUND_LIMIT
     if limit is not None:
         _Checker("decide").limit("limit", limit)
-        if own is not None and own != limit:
-            c.fail("limit", f"the record's limit is {own}, not {limit}")
-    lim = own if own is not None else (limit if limit is not None else ROUND_LIMIT)
+        if limit != lim:
+            said = f"the record's limit is {own}" if own is not None else f"the record has no limit, so it is {lim}"
+            c.fail("limit", f"{said}, not {limit}; a caller that wants a lower limit writes it into the record "
+                            "before the first round")
     c.choice("result", record.get("result"), RESULTS, null=True)
     c.choice("ended_by", record.get("ended_by"), ENDED_BY, null=True)
     if record.get("reason") is not None:
@@ -355,7 +373,10 @@ def read(path) -> dict:
         raise PrLoopError(f"{where}: not JSON: {e}") from None
     if not isinstance(record, dict):
         raise PrLoopError(f"{where}: must be a JSON object, not {type(record).__name__}")
-    _check(record, _Checker(where))
+    try:
+        _check(record, _Checker(where))
+    except RecursionError:
+        raise PrLoopError(f"{where}: not JSON a loop record can hold: nested too deep") from None
     return record
 
 
@@ -390,19 +411,23 @@ def _decide(record: dict, limit: int) -> dict:
 def decide(record: dict, limit: Optional[int] = None) -> dict:
     """What the loop does after its last recorded step: {"next", "result", "ended_by", "reason", "plan"}, `next`
     one of `round`, `check` (with `plan`, see `plan`) or `end` (with `result`, `ended_by` and `reason`). The limit
-    is the record's `limit`, else `limit`, else ROUND_LIMIT; a record with a check of the fix only ever ends."""
-    lim = _check(record, _Checker("the record"), limit)
-    return _decide(record, lim)
+    is the record's `limit`, else ROUND_LIMIT, the same limit every function here reads: a caller that wants a lower
+    one writes it into the record before the first round. `limit` is only a check: a call limit that differs from
+    the record's is refused. A record with a check of the fix only ever ends."""
+    with _Deep("the record"):
+        lim = _check(record, _Checker("the record"), limit)
+        return _decide(record, lim)
 
 
 def plan(record: dict) -> list:
     """Who checks the last round's fix: one entry per angle with a `fix` finding in that round, in its `angles`
     order, each {"angle": <the picked angle>, "commit", "answers": [its fix findings, verbatim]}. A CI finding
     (angle null) goes to Correctness. An angle with no `fix` finding gets no check reviewer."""
-    _check(record, _Checker("the record"))
-    if not record["rounds"]:
-        raise PrLoopError("the record: rounds: the loop has no rounds yet")
-    return _plan(record["rounds"])
+    with _Deep("the record"):
+        _check(record, _Checker("the record"))
+        if not record["rounds"]:
+            raise PrLoopError("the record: rounds: the loop has no rounds yet")
+        return _plan(record["rounds"])
 
 
 # --- the check reviewer's brief ---------------------------------------------------------------------------------
@@ -467,34 +492,37 @@ def record_check(record: dict, results: dict, ci: str) -> dict:
     and `ci` set from the end it gives. Refuses a record that already has a check, that is not at its round limit
     with fixes and no stop, and results that miss a planned angle or add one."""
     c = _Checker("the record")
-    lim = _check(record, c)
-    if record.get("fix_check") is not None:
-        c.fail("fix_check", "the record already has a check of the fix; it runs at most once per loop")
-    rounds = record["rounds"]
-    no = _no_check(rounds, lim)
-    if no is not None:
-        c.fail(no[0], f"no check of the fix: {no[1]}")
+    with _Deep("the record"):
+        lim = _check(record, c)
+        if record.get("fix_check") is not None:
+            c.fail("fix_check", "the record already has a check of the fix; it runs at most once per loop")
+        rounds = record["rounds"]
+        no = _no_check(rounds, lim)
+        if no is not None:
+            c.fail(no[0], f"no check of the fix: {no[1]}")
+        planned = _plan(rounds)
     r = _Checker("record_check")
-    r.choice("ci", ci, CI)
-    planned = _plan(rounds)
-    want = [e["angle"]["name"] for e in planned]
-    if not isinstance(results, dict):
-        r.fail("results", f"must map each planned angle to its findings, not {_show(results)}")
-    missing = [n for n in want if n not in results]
-    extra = [n for n in results if n not in want]
-    if missing or extra:
-        r.fail("results", "must hold exactly the planned angles (" + ", ".join(want) + ")"
-               + (f"; missing: {', '.join(map(str, missing))}" if missing else "")
-               + (f"; not planned: {', '.join(map(str, extra))}" if extra else ""))
-    reviewers = []
-    for e in planned:
-        name = e["angle"]["name"]
-        found = _findings(r, f"results[{name!r}]", results[name], None, reviewer=name)
-        reviewers.append({"angle": name, "answers": copy.deepcopy(e["answers"]),
-                          "findings": [dict(copy.deepcopy(f), angle=name) for f in found]})
-    new = copy.deepcopy(record)
-    new["fix_check"] = {"commit": planned[0]["commit"], "ci": ci, "reviewers": reviewers}
-    d = _decide(new, lim)
+    with _Deep("record_check: results"):
+        r.choice("ci", ci, CI)
+        want = [e["angle"]["name"] for e in planned]
+        if not isinstance(results, dict):
+            r.fail("results", f"must map each planned angle to its findings, not {_show(results)}")
+        missing = [n for n in want if n not in results]
+        extra = [n for n in results if n not in want]
+        if missing or extra:
+            r.fail("results", "must hold exactly the planned angles (" + ", ".join(want) + ")"
+                   + (f"; missing: {', '.join(map(str, missing))}" if missing else "")
+                   + (f"; not planned: {', '.join(map(str, extra))}" if extra else ""))
+        reviewers = []
+        for e in planned:
+            name = e["angle"]["name"]
+            found = _findings(r, f"results[{name!r}]", results[name], None, reviewer=name)
+            reviewers.append({"angle": name, "answers": copy.deepcopy(e["answers"]),
+                              "findings": [dict(copy.deepcopy(f), angle=name) for f in found]})
+    with _Deep("the record"):
+        new = copy.deepcopy(record)
+        new["fix_check"] = {"commit": planned[0]["commit"], "ci": ci, "reviewers": reviewers}
+        d = _decide(new, lim)
     new.update(result=d["result"], ended_by=d["ended_by"], reason=d["reason"], head=planned[0]["commit"], ci=ci)
     return new
 
@@ -514,57 +542,60 @@ def _next_text(d: dict, rounds: list) -> str:
 def report(record: dict) -> str:
     """The last lines of the loop's last round report: `Fix:` and `Next:`, and on a check of the fix, the line
     that says how it went and where its findings are."""
-    lim = _check(record, _Checker("the record"))
-    d = _decide(record, lim)
-    rounds = record["rounds"]
-    lines = [f"Fix: {rounds[-1].get('commit') or 'none'}"] if rounds else []
-    fc = record.get("fix_check")
-    if fc is None:
-        return "\n".join(lines + [f"Next: {_next_text(d, rounds)}"])
-    n, _ = _found_text(fc)
-    names = ", ".join(r["angle"] for r in fc["reviewers"])
-    said = "found nothing: clean" if not n else f"found {n}: asking you"
-    return "\n".join(lines + ["Next: check of the fix",
-                              f"Check of the fix · commit {fc['commit'][:SHORT]} · reviewers: {names} · {said}",
-                              f"Findings: {FILE} fix_check.reviewers"])
+    with _Deep("the record"):
+        lim = _check(record, _Checker("the record"))
+        d = _decide(record, lim)
+        rounds = record["rounds"]
+        lines = [f"Fix: {rounds[-1].get('commit') or 'none'}"] if rounds else []
+        fc = record.get("fix_check")
+        if fc is None:
+            return "\n".join(lines + [f"Next: {_next_text(d, rounds)}"])
+        n, _ = _found_text(fc)
+        names = ", ".join(r["angle"] for r in fc["reviewers"])
+        said = "found nothing: clean" if not n else f"found {n}: asking you"
+        return "\n".join(lines + ["Next: check of the fix",
+                                  f"Check of the fix · commit {fc['commit'][:SHORT]} · reviewers: {names} · {said}",
+                                  f"Findings: {FILE} fix_check.reviewers"])
 
 
 def summary(record: dict) -> dict:
     """The card's `prloop` field: how the loop ended (`result`, `ended_by`, `reason`, all null while it runs),
     `next`, `limit`, the round count, and the check of the fix with its findings (or null)."""
-    lim = _check(record, _Checker("the record"))
-    d = _decide(record, lim)
-    ended = d["next"] == "end"
-    fc = record.get("fix_check")
-    check = None
-    if fc is not None:
-        n, _ = _found_text(fc)
-        check = {"commit": fc["commit"], "ci": fc["ci"], "found": n,
-                 "reviewers": [{"angle": r["angle"], "answers": [f["id"] for f in r["answers"]],
-                                "findings": copy.deepcopy(r["findings"])} for r in fc["reviewers"]]}
-    return {"result": d["result"] if ended else None, "ended_by": d["ended_by"] if ended else None,
-            "reason": d["reason"] if ended else None, "next": d["next"], "limit": lim,
-            "rounds": len(record["rounds"]), "fix_check": check}
+    with _Deep("the record"):
+        lim = _check(record, _Checker("the record"))
+        d = _decide(record, lim)
+        ended = d["next"] == "end"
+        fc = record.get("fix_check")
+        check = None
+        if fc is not None:
+            n, _ = _found_text(fc)
+            check = {"commit": fc["commit"], "ci": fc["ci"], "found": n,
+                     "reviewers": [{"angle": r["angle"], "answers": [f["id"] for f in r["answers"]],
+                                    "findings": copy.deepcopy(r["findings"])} for r in fc["reviewers"]]}
+        return {"result": d["result"] if ended else None, "ended_by": d["ended_by"] if ended else None,
+                "reason": d["reason"] if ended else None, "next": d["next"], "limit": lim,
+                "rounds": len(record["rounds"]), "fix_check": check}
 
 
 def ask(record: dict) -> Optional[dict]:
     """The card's ask for how the loop ended: none while it runs or when it ended clean or converged; `approve`
     for a check of the fix that found something; `answer` with the reason for any other stop."""
-    lim = _check(record, _Checker("the record"))
-    d = _decide(record, lim)
-    if d["next"] != "end" or d["result"] != "stopped":
-        return None
-    if d["ended_by"] == "fix_check":
-        fc = record["fix_check"]
-        found, _ = _outcome(fc)
-        n, what = _found_text(fc)
-        return {"type": "approve", "from": FROM, "role": ROLE, "reason": "fix_check", "commit": fc["commit"],
-                "findings": copy.deepcopy(found),
-                "text": f"The check of the fix found {_plural(n, 'thing')} in {fc['commit'][:SHORT]} ({what}); "
-                        "nothing more is fixed until you decide. The findings are on this card."}
-    n = len(record["rounds"])
-    return {"type": "answer", "from": FROM, "role": ROLE, "reason": d["ended_by"],
-            "text": f"The PR loop stopped after round {n}: {d['reason']}. What should it do?"}
+    with _Deep("the record"):
+        lim = _check(record, _Checker("the record"))
+        d = _decide(record, lim)
+        if d["next"] != "end" or d["result"] != "stopped":
+            return None
+        if d["ended_by"] == "fix_check":
+            fc = record["fix_check"]
+            found, _ = _outcome(fc)
+            n, what = _found_text(fc)
+            return {"type": "approve", "from": FROM, "role": ROLE, "reason": "fix_check", "commit": fc["commit"],
+                    "findings": copy.deepcopy(found),
+                    "text": f"The check of the fix found {_plural(n, 'thing')} in {fc['commit'][:SHORT]} ({what}); "
+                            "nothing more is fixed until you decide. The findings are on this card."}
+        n = len(record["rounds"])
+        return {"type": "answer", "from": FROM, "role": ROLE, "reason": d["ended_by"],
+                "text": f"The PR loop stopped after round {n}: {d['reason']}. What should it do?"}
 
 
 def apply(store, card_id: str, record: dict, by: str) -> bool:

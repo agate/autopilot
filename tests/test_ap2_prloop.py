@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -56,6 +57,14 @@ def at_limit(**top):
     top.setdefault("limit", 3)
     return record(rnd(1, [R1_FINDING], commit=SHA1), rnd(2, [R2_FINDING], commit=SHA2),
                   rnd(3, [CI_FINDING, CORR_FINDING, TEST_FINDING, ACC_FINDING], commit=SHA3, ci="red"), **top)
+
+
+def deep(n):
+    """A list nested `n` deep."""
+    value = []
+    for _ in range(n):
+        value = [value]
+    return value
 
 
 def no_findings():
@@ -138,14 +147,9 @@ class AtLimitTest(unittest.TestCase):
     """At the limit, a check, not a round."""
 
     def test_check_with_its_plan(self):
-        for name, rec, limit in [("limit in the call", at_limit(limit=None), 3), ("limit in the record", at_limit(),
-                                                                                      None)]:
+        for name, limit in [("limit in the record", None), ("the same limit in the record and the call", 3)]:
             with self.subTest(name):
-                if limit is None:
-                    d = prloop.decide(rec)
-                else:
-                    rec.pop("limit")
-                    d = prloop.decide(rec, limit=limit)
+                d = prloop.decide(at_limit(), limit=limit)
                 self.assertEqual((d["next"], d["result"], d["ended_by"]), ("check", None, None))
                 self.assertEqual([e["angle"]["name"] for e in d["plan"]], ["Correctness", "Test value"])
                 self.assertEqual([e["commit"] for e in d["plan"]], [SHA3, SHA3])
@@ -183,8 +187,28 @@ class AtLimitTest(unittest.TestCase):
                     prloop.decide(at_limit(limit=bad))
 
     def test_call_limit_must_match_the_record(self):
-        with self.assertRaisesRegex(PrLoopError, "limit"):
-            prloop.decide(at_limit(), limit=5)
+        limitless = at_limit()
+        limitless.pop("limit")
+        with self.subTest("a call limit that differs from the record's"):
+            with self.assertRaisesRegex(PrLoopError, "limit"):
+                prloop.decide(at_limit(), limit=5)
+        with self.subTest("a lower call limit on a record with no limit"):
+            with self.assertRaisesRegex(PrLoopError, "the record has no limit, so it is 20, not 3"):
+                prloop.decide(limitless, limit=3)
+        with self.subTest("the default limit in the call on a record with no limit"):
+            self.assertEqual(prloop.decide(limitless, limit=20)["next"], "round")
+
+    def test_decide_and_record_check_read_the_same_limit(self):
+        limitless = at_limit()
+        limitless.pop("limit")
+        with self.subTest("no limit in the record: 20"):
+            self.assertEqual(prloop.decide(limitless)["next"], "round")
+            with self.assertRaisesRegex(PrLoopError, "below the round limit"):
+                prloop.record_check(limitless, no_findings(), "green")
+        with self.subTest("limit 3 in the record"):
+            rec = dict(limitless, limit=3)
+            self.assertEqual(prloop.decide(rec)["next"], "check")
+            self.assertEqual(prloop.record_check(rec, no_findings(), "green")["result"], "clean")
 
     def test_limit_round_with_no_fix_and_red_ci_ends(self):
         rec = record(rnd(1, [R1_FINDING], commit=SHA1), rnd(2, [ACC_FINDING], ci="red"), limit=2)
@@ -494,13 +518,51 @@ class ReadTest(unittest.TestCase):
             prloop.read(self.dir / "nosuch.json")
 
     def test_deep_nesting_is_refused(self):
+        # json.loads may refuse this itself (RecursionError) or parse it and leave the checker to hit the limit:
+        # either way it is a PrLoopError naming the file.
         path = self.write(b'{"rounds": ' + b"[" * 100000 + b"]" * 100000 + b"}")
-        with self.assertRaisesRegex(PrLoopError, str(path)):
+        with self.subTest("as this Python parses it"):
+            with self.assertRaisesRegex(PrLoopError, re.escape(str(path))):
+                prloop.read(path)
+        with self.subTest("parsed, so the checker hits the limit"):
+            with mock.patch.object(prloop.json, "loads", return_value={"rounds": deep(100000)}):
+                with self.assertRaisesRegex(PrLoopError, re.escape(str(path)) + ": .*nested too deep"):
+                    prloop.read(path)
+
+    def test_deep_extra_key_on_an_angle_is_refused(self):
+        rec = at_limit()
+        rec["rounds"][2]["angles"][0]["extra"] = deep(900)
+        path = self.write(rec, "deep.json")
+        with self.assertRaises(PrLoopError) as cm:
             prloop.read(path)
+        self.assertIn(str(path), str(cm.exception))
+        self.assertIn("nested too deep", str(cm.exception))
 
     def test_error_is_a_value_error(self):
         self.assertTrue(issubclass(PrLoopError, ValueError))
         self.assertEqual(prloop.BUCKETS, ("fix", "out_of_scope", "invalid", "owner"))
+
+
+class DeepRecordTest(unittest.TestCase):
+    """A record in memory nested too deep is a PrLoopError, not a RecursionError."""
+
+    def test_every_function_refuses_it(self):
+        rec = at_limit()
+        rec["rounds"][2]["angles"][0]["extra"] = deep(5000)
+        calls = [("decide", lambda: prloop.decide(rec)), ("plan", lambda: prloop.plan(rec)),
+                 ("record_check", lambda: prloop.record_check(rec, no_findings(), "green")),
+                 ("report", lambda: prloop.report(rec)), ("summary", lambda: prloop.summary(rec)),
+                 ("ask", lambda: prloop.ask(rec))]
+        for name, call in calls:
+            with self.subTest(name):
+                with self.assertRaisesRegex(PrLoopError, "^the record: nested too deep$"):
+                    call()
+
+    def test_deep_check_results_are_refused(self):
+        # Only a repr walks this value, and some Pythons repr 5000 deep: 100000 is past every one's limit.
+        results = {"Correctness": [{"id": "check-1", "bucket": "fix", "text": deep(100000)}], "Test value": []}
+        with self.assertRaisesRegex(PrLoopError, "^record_check: results: nested too deep$"):
+            prloop.record_check(at_limit(), results, "green")
 
 
 class PurityTest(unittest.TestCase):
