@@ -260,26 +260,29 @@ class WorkerProfileLaunchTest(WorkerCase):
         self.assertEqual(self.get(a["card"])["sessions"]["implement"]["profile"], "g1")
 
     def test_the_profile_is_read_once_per_resume(self):
-        """A `use` while an in-place resume lists its tools (the lock free, between `_plan_resume` and
-        `_resume_dead`) changes nothing in this resume: the probe, the floor, the process env, the record and the
-        card all take the profile `_plan_resume` read."""
+        """A `use` that lands at the start of an in-place resume's lock-free step (after `_plan_resume`, before
+        `_resume_tools` picks its profile) changes nothing in this resume: the probe, the floor, the process env,
+        the record and the card all take the profile `_plan_resume` read."""
         a = self.start()  # on the subscription, so every field below must change to g1
         self.use_gateway("g2", url=OTHER_URL, model="m2", effort="low")
         self.use_gateway("g1", model="m1", effort="high")
         self.drop_agent(a["short_id"])  # dead: an in-place resume
         probe = transcripts.run_dir(self.data, a["card"]) / "settings-discover-implement.json"
-        real = Workers._tools
+        real_resume_tools, real_tools = Workers._resume_tools, Workers._tools
         switched, probes = [], []
 
-        def tools(self_, *args):
+        def resume_tools(self_, plan):
             if not switched:
                 switched.append(profiles.use(self.data, "g2"))
-            found = real(self_, *args)
+            return real_resume_tools(self_, plan)
+
+        def tools(self_, *args):
+            found = real_tools(self_, *args)
             probes.append(json.loads(probe.read_text()))  # what this resume's own discovery ran on
             return found
 
         before = len(self.discovery_calls())
-        with mock.patch.object(Workers, "_tools", tools):
+        with mock.patch.object(Workers, "_resume_tools", resume_tools), mock.patch.object(Workers, "_tools", tools):
             self.assertEqual(self.workers().check()[0]["did"], "resumed")
         self.assertEqual(switched, [{"active": "g2", "was": "g1"}])
         self.assertGreater(len(self.discovery_calls()), before)  # the resume ran its own discovery
