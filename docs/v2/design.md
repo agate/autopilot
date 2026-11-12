@@ -2191,15 +2191,21 @@ Calls the author made without asking (check them):
      lock. Parked before its stop, a worker that a `check` sees while the stops run is parked, never dead (so never
      closed as one that died twice). Then, under the lock, a record whose stop worked and whose park is still this
      one has its card's session state set to `parked`; a record whose stop failed is unparked again (only when its
-     park is still this one). So a worker whose stop failed stays unparked (it still shows as running); every
+     park is still this one) only when one more listing, taken under that lock, shows its session still running
+     (`_session_running`). So a worker whose stop failed stays unparked (it still shows as running); every
      live `check` while `paused.json` holds `reason: cap` runs `cap_stop` again first, and the line of a stop that
-     failed again says so. A stop loop cut short (Ctrl-C, any other exception) still runs that last step, and
-     unparks every worker this call parked and did not stop (its stop failed or never ran), then the exception goes
-     on. A process killed outright runs nothing more, so `cap_stop` also takes a worker that is already cap-parked
-     (no close started) whose session the listing still shows `running` (classified with its park left out): it is
-     stopped again with its park kept, and unparked like the rest when that stop fails. Only `running`: a stopped
-     session that still lists (idle, blocked) is not stopped again every check, and a listing that failed never
-     stops one again. One failed stop never blocks the rest; `paused.json` is written before any stop. A worker
+     failed again says so. One whose session no longer runs (another `cap_stop` that ran meanwhile stopped it, or
+     its own stop landed before it timed out) keeps its park and is marked `parked` like a stopped one, so an
+     overlapping call never unparks a worker the other call stopped (a check would then take it for dead and close
+     one that died twice); a listing that failed counts as not running, and the next retry stops it again if it
+     does run. A stop loop cut short (Ctrl-C, any other exception) still runs that last step, and unparks, by the
+     same rule, every worker this call parked and did not stop (its stop failed or never ran), then the exception
+     goes on. A process killed outright runs nothing more, so `cap_stop` also takes a worker that is already
+     cap-parked (no close started) whose session the listing still shows running (`_session_running`): it is
+     stopped again with its park kept, and unparked like the rest when that stop fails. Running means `classify`
+     says `running` with the park left out, and the listing does not mark the session `state: stopped`: the CLI
+     keeps a stopped session on its listing (no pid, no status), so a stopped session that still lists (stopped,
+     idle, blocked) is not stopped again every check, and a listing that failed never stops one again. One failed stop never blocks the rest; `paused.json` is written before any stop. A worker
      that one listing shows dead is not stopped or parked: it is left to `check`, which closes one that died twice
      (`died`, its fix ask) and refuses a dead worker's one resume while paused, so the pause never gives it an uncounted run (a
      listing that failed says unknown, and that worker is stopped and parked as before). In shadow

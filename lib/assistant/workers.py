@@ -311,16 +311,25 @@ class Workers:
         except Exception:  # noqa: BLE001 - a run folder that cannot be read: stopped and parked as before
             return False
 
-    def _cap_parked_running(self, rec: dict, listing) -> bool:
-        """The record is cap-parked, yet the listing shows its session running: a pause put the park on and was
-        killed before it stopped the session. Only `running`: a stopped session that still lists (idle, blocked)
-        is not stopped again, and a listing that failed (unknown) never is."""
-        if (rec.get("parked") or {}).get("kind") != "cap":
-            return False
+    def _session_running(self, rec: dict, listing) -> bool:
+        """The listing shows the record's session running (classified with its park left out). Only `running`, and
+        never a session the listing marks `state: stopped`: the CLI keeps a stopped session on the listing (no pid,
+        no status), which `classify` alone would call running. A listing that failed (unknown) is not running."""
         try:
-            return self.classify(dict(rec, parked=None), listing) == "running"
+            if self.classify(dict(rec, parked=None), listing) != "running":
+                return False
+            s = v1_sessions.find_by_id(rec.get("short_id"), listing) or v1_sessions.find(rec["session_name"], listing)
+            return (s or {}).get("state") != "stopped"
         except Exception:  # noqa: BLE001 - a run folder that cannot be read: not running, as in `_dead`
             return False
+
+    def _cap_parked_running(self, rec: dict, listing) -> bool:
+        """The record is cap-parked, yet the listing shows its session running (`_session_running`): a pause put
+        the park on and was killed before it stopped the session. A stopped session that still lists (stopped,
+        idle, blocked) is not stopped again, and a listing that failed (unknown) never is."""
+        if (rec.get("parked") or {}).get("kind") != "cap":
+            return False
+        return self._session_running(rec, listing)
 
     def cap_stop(self, by: str = BY) -> dict:
         """The cap pause: park every worker on the list that is not parked (`kind: cap`, no `resume_at`) under the
@@ -329,9 +338,13 @@ class Workers:
         sees each one as parked, never as a session that died (and closes one that died twice). The list and the
         listing are read under the lock, so a launch that was committing under it (a start, or an in-place resume in
         `check`) is on the list, and its session in the listing. Never call it while holding the lock. A worker
-        whose stop failed is unparked again (when its park is still this one), so it still shows as running, and
-        the next `check` while paused tries again. One stop that fails never blocks the rest. A stop loop cut short
-        (Ctrl-C, any other exception) still unparks every worker it parked and did not stop, then the exception goes
+        whose stop failed is unparked again (when its park is still this one) only when one more listing, taken
+        under the lock, shows its session still running (`_session_running`), so it still shows as running, and
+        the next `check` while paused tries again. One whose session no longer runs (another call's stop landed, or
+        its own stop landed and timed out; a stopped session that still lists counts as stopped; a listing that
+        failed says not running) keeps its park and is marked parked like a stopped one: the next retry stops it
+        again if it does run. One stop that fails never blocks the rest. A stop loop cut short (Ctrl-C, any other
+        exception) still unparks, by the same rule, every worker it parked and did not stop, then the exception goes
         on. A cap-parked worker whose session the listing still shows running (a pause killed outright, before its
         stops ran) is stopped again, keeping its park; unparked like the rest when that stop fails. A dead worker
         (by one listing; a listing that failed says unknown, so it is stopped) is left to `check`: it closes one
@@ -373,14 +386,16 @@ class Workers:
                                            "next `ap2 worker check` tries again"})
         finally:
             # Also when the loop was cut short: a worker parked here and not stopped (its stop failed, or never ran)
-            # is unparked, so it still shows as running and the next `check` while paused stops it.
+            # is unparked when its session still runs, so it still shows as running and the next `check` while
+            # paused stops it. One whose session no longer runs (another call stopped it) keeps its park.
             parks = {key(r): r["parked"] for r in running}
             with self.registry.locked() as records:
+                listing = self._listing() if any(key(r) not in done for r in running) else None
                 for w in records:
                     k = key(w)
                     if k not in parks or not ours(w, parks[k]):
                         continue
-                    if k not in done:
+                    if k not in done and self._session_running(w, listing):
                         w["parked"] = None  # not stopped: still running, as far as anyone can tell
                     elif not w.get("closing"):
                         parked.append({"card": w["card"], "role": w["role"]})

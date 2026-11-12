@@ -694,6 +694,110 @@ class PauseTest(CapWorkerCase):
         self.workers().check()  # its session is gone: no more stops
         self.assertEqual([c["argv"][1] for c in self.calls() if c["argv"][:1] == ["stop"]], [a["short_id"]])
 
+    def test_a_cap_parked_worker_stopped_again_is_marked_parked_on_its_card(self):
+        a = self.start()
+        park = {"kind": "cap", "reason": "cap", "model": None, "percent": None, "resets_at": None,
+                "resume_at": None, "note": cap.PAUSE_NOTE, "parked_at": cards.stamp(self.clock())}
+        with resources.Registry(self.data).locked() as records:
+            records[0]["parked"] = dict(park)
+        cap.pause(self.data, self.clock())
+        self.clock.advance(5)  # this call's own park would carry another stamp
+        out = self.workers().cap_stop()
+        self.assertEqual([w["card"] for w in out["stopped"]], [a["card"]])
+        self.assertEqual(self.get(a["card"])["sessions"]["implement"]["state"], "parked")
+        self.assertEqual(self.records()[0]["parked"], park)
+
+    def cli_stops(self, on_stop=None, idle=(), gone=False):
+        """Patch `subprocess.run` so `claude stop <id>` acts as the real CLI does: the session stays on the listing
+        as `state: stopped`, with no pid and no status (the fake takes it off). A stop of an id in `idle` leaves
+        its row listed as `status: idle` instead; with `gone`, the fake's own stop runs (the row goes). Every
+        stop's id goes on the list this returns; `on_stop(id)` (when given) runs first, and a stop it raises in
+        never lands."""
+        real, seen = subprocess.run, []
+
+        def run(argv, *args, **kw):
+            if argv[1:2] != ["stop"]:
+                return real(argv, *args, **kw)
+            seen.append(argv[2])
+            if on_stop is not None:
+                on_stop(argv[2])
+            if gone:
+                return real(argv, *args, **kw)
+            if argv[2] in idle:
+                self.set_agent(argv[2], status="idle")
+            else:
+                rows = self.agents()
+                for row in rows:
+                    if row["id"] == argv[2]:
+                        row["state"] = "stopped"
+                        row.pop("pid", None)
+                        row.pop("status", None)
+                (self.fake_home / "agents.json").write_text(json.dumps(rows))
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+        return mock.patch("assistant.workers.subprocess.run", side_effect=run), seen
+
+    def test_a_stopped_session_that_still_lists_is_not_stopped_again(self):
+        self.use_gateway()
+        a, b, c = self.start(), self.start(), self.start()
+        patch, seen = self.cli_stops(idle=(c["short_id"],))
+        with patch:
+            self.pause()
+            first = list(seen)
+            audits = {x["card"]: len(self.get(x["card"])["audit"]) for x in (a, b, c)}
+            for _ in range(2):
+                self.clock.advance(5)  # a card written again would get a new entry
+                entries = self.workers().check()
+                self.assertEqual({e["state"] for e in entries}, {"parked"})
+        self.assertEqual(sorted(first), sorted(x["short_id"] for x in (a, b, c)))
+        self.assertEqual(seen, first)  # no stop again
+        self.assertEqual({x["card"]: len(self.get(x["card"])["audit"]) for x in (a, b, c)}, audits)
+        self.assertEqual([r["parked"]["kind"] for r in self.records()], ["cap", "cap", "cap"])
+        rows = {x["id"]: x for x in self.agents()}
+        self.assertEqual(rows[a["short_id"]]["state"], "stopped")  # still listed, as the real CLI lists it
+        self.assertEqual(rows[c["short_id"]]["status"], "idle")
+
+    def overlapping_pause(self, gone=False):
+        """Pause (call A) with two workers that were resumed once; A's first stop runs a whole `cap_stop` (call B,
+        a check's retry) and then times out. Returns the two workers and the list of stops."""
+        self.use_gateway()
+        a, b = self.start(), self.start()
+        with resources.Registry(self.data).locked() as records:
+            for r in records:
+                r["resumes"] = 1  # resumed once: a death closes it
+        inner = []
+
+        def on_stop(short):
+            if not inner:  # A's first stop (B's own stops come back here, with `inner` set)
+                inner.append(None)
+                inner[0] = self.workers().cap_stop()
+                raise subprocess.TimeoutExpired(["claude", "stop", short], 60)
+        patch, seen = self.cli_stops(on_stop=on_stop, gone=gone)
+        with patch:
+            out = self.pause()
+            self.assertEqual(len(inner[0]["stopped"]), 2)  # B stopped both
+            self.assertIn(a["card"], json.dumps(out["failed"]))  # A's own stop of it raised
+            recs = self.records()
+            self.assertEqual([(r["parked"] or {}).get("kind") for r in recs], ["cap", "cap"])  # what B stopped
+            self.assertEqual(len({r["parked"]["parked_at"] for r in recs}), 1)
+            stops = list(seen)
+            self.clock.advance(5)
+            entries = {e["card"]: e for e in self.workers().check()}
+            self.assertEqual(seen, stops)
+        self.assertEqual({k: e["state"] for k, e in entries.items()}, {a["card"]: "parked", b["card"]: "parked"})
+        self.assertEqual(len(self.records()), 2)  # neither closed as died twice
+        for x in (a, b):
+            self.assertNotEqual((self.get(x["card"]).get("ask") or {}).get("reason"), workers_mod.DIED)
+            self.assertEqual(self.get(x["card"])["sessions"]["implement"]["state"], "parked")
+        cap.resume(self.data)
+        out = {e["card"]: e["did"] for e in self.workers().check()}
+        self.assertEqual(out, {a["card"]: "resumed", b["card"]: "resumed"})
+
+    def test_an_overlapping_pause_never_unparks_a_worker_the_other_stopped(self):
+        self.overlapping_pause()
+
+    def test_an_overlapping_pause_never_unparks_a_worker_whose_row_is_gone(self):
+        self.overlapping_pause(gone=True)
+
     def test_a_check_during_the_pause_never_closes_a_stopped_worker(self):
         self.use_gateway()
         a, b = self.start(), self.start()
