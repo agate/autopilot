@@ -538,9 +538,11 @@ class Engine:
 
     def _card(self, src, kind: str, record: dict, link, key: str, raw, old: Optional[dict] = None) -> dict:
         """The card a record makes. A PR review card's words come from its review too (design 6.2), so a same-key
-        re-read passes the card it has (`old`) and keeps its TL;DR."""
+        re-read passes the card it has (`old`) and keeps its TL;DR. The words follow the card's own feed (this
+        source for a new card), so the user's own PRs (github-my-prs) get their own words, and a re-read by the
+        other GitHub source keeps them, as `prreview.apply` does."""
         if kind == PR_REVIEW:
-            plain = pr_review_words(record, {**(old or {}), "key": key}, self.languages)
+            plain = pr_review_words(record, {"feed": src.name, **(old or {}), "key": key}, self.languages)
         else:
             plain = plain_words(src, record, link, self.languages)
         card = {"kind": kind, "lane": LANE[src.brings], "feed": src.name, "links": [], "pri": PRI,

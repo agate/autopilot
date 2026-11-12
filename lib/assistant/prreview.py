@@ -66,7 +66,7 @@ PR_FILES = """query($owner:String!, $name:String!, $n:Int!, $after:String){ repo
   files(first:100, after:$after){ pageInfo{ hasNextPage endCursor } nodes{ path } } } } }"""
 # A delta's commits since the last review: how they relate to it, and which of them are merges.
 SINCE_JQ = "{status: .status, merges: [.commits[] | select(.parents | length > 1) | .sha]}"
-SYNC_FIELDS = "state,headRefOid,reviewRequests,latestReviews"
+SYNC_FIELDS = "state,headRefOid,reviewRequests,latestReviews,author"
 
 _GIT_ENV = {"GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": "", "GIT_TERMINAL_PROMPT": "0"}
 
@@ -654,11 +654,29 @@ PHRASES = {
            "do_one": "看一下这 1 条发现，然后自己在 GitHub 上批准或要求修改。",
            "do_zero": "看一下审查结果，然后自己在 GitHub 上批准或要求修改。"},
 }
+# The user's own open PRs (the github-my-prs source sorts them into pr-review too): the card's `feed` tells them
+# apart. These keys replace PHRASES' on such a card; the rest (where_none, do_none) are shared.
+OWN_FEED = "github-my-prs"
+OWN_PHRASES = {
+    "en": {"what": "Your PR #{id}: {title}",
+           "do_many": "Read the {n} findings, then fix the ones you agree with on your branch.",
+           "do_one": "Read the 1 finding, then fix it on your branch if you agree.",
+           "do_zero": "Read the review; nothing needs fixing."},
+    "zh": {"what": "你的 PR #{id}：{title}",
+           "do_many": "看一下这 {n} 条发现，然后在你的分支上修好你认同的那些。",
+           "do_one": "看一下这 1 条发现，你认同的话就在你的分支上修好它。",
+           "do_zero": "看一下审查结果；没有要修的。"},
+}
 TITLE_MAX = 120
 
 
-def phrases(lang: str) -> Optional[dict]:
-    return PHRASES.get(lang) or PHRASES.get(lang.split("-")[0])
+def phrases(lang: str, own: bool = False) -> Optional[dict]:
+    """The phrases of `lang` (or its base language), with the own-PR keys over them when `own`."""
+    base = lang.split("-")[0]
+    p = PHRASES.get(lang) or PHRASES.get(base)
+    if p is None or not own:
+        return p
+    return {**p, **(OWN_PHRASES.get(lang) or OWN_PHRASES.get(base) or {})}
 
 
 def _first_line(text, limit: int = TITLE_MAX) -> str:
@@ -671,7 +689,8 @@ def _first_line(text, limit: int = TITLE_MAX) -> str:
 def plain_for(record, card, langs) -> dict:
     """The plain words of a PR review card in each language (design 6.2 point 4). What: who asked for the review of
     which PR. Where: "Not reviewed yet.", or the last review's TL;DR. Do: wait, or read the open findings and review
-    on GitHub yourself. `card` is the card as it is (or {} for a new one): its `verdict` and `findings` blocks."""
+    on GitHub yourself. `card` is the card as it is (or {} for a new one): its `feed`, `verdict` and `findings`. A
+    card whose feed is OWN_FEED is the user's own PR: "Your PR #<id>: ..." and fix the findings on the branch."""
     record = record if isinstance(record, dict) else {}
     card = card if isinstance(card, dict) else {}
     block = card.get("verdict") if isinstance(card.get("verdict"), dict) else None
@@ -683,9 +702,10 @@ def plain_for(record, card, langs) -> dict:
         m = KEY.match(card.get("key") or "") if isinstance(card.get("key"), str) else None
         number = m.group(2) if m else "?"
     author = record.get("author") if isinstance(record.get("author"), str) and record["author"].strip() else None
+    own = card.get("feed") == OWN_FEED
     out = {line: {} for line in cards.PLAIN_LINES}
     for lang in langs:
-        p = phrases(lang)
+        p = phrases(lang, own)
         if p is None:
             raise ReviewError(f"no plain words for PR review cards in {lang} yet (built in: {', '.join(PHRASES)})")
         title = (_first_line(record.get("text")) or _first_line(cards.title_for(card, lang, langs[0]))
@@ -770,7 +790,8 @@ SYNC_DONE = {"merged": "the PR was merged", "closed": "the PR was closed",
 def sync(data, card_id: str, by: str = "ap2 review", cfg=None, run=None) -> dict:
     """Where the PR stands on GitHub (design 6.2 points 5-6): merged, closed, reviewed (the user has a review),
     request_removed (neither the user nor a team is asked any more), not_reviewed, new_commits (a delta is due) or
-    current. The first four move the card to done; every state records the head. Only the card changes."""
+    current. The first four move the card to done; every state records the head. Only the card changes. The user's
+    own PR (its author's login is the user's) is never reviewed or request_removed: only merged and closed end it."""
     data = Path(data)
     cfg = cfg if cfg is not None else config.load(data)
     store = Store(data, cfg=cfg)
@@ -790,11 +811,15 @@ def sync(data, card_id: str, by: str = "ap2 review", cfg=None, run=None) -> dict
     asked = any(r.get("login") == me for r in requests)
     team = any(r.get("__typename") == "Team" or ("slug" in r and "login" not in r) for r in requests)
     mine = any(isinstance(r.get("author"), dict) and r["author"].get("login") == me for r in reviews)
+    author = view.get("author")
+    own = isinstance(author, dict) and author.get("login") == me  # no author (older reply, deleted account): not own
     state = str(view.get("state") or "").upper()
     if state == "MERGED":
         out = "merged"
     elif state == "CLOSED":
         out = "closed"
+    elif own:
+        out = "not_reviewed" if reviewed is None else "new_commits" if head != reviewed else "current"
     elif mine:
         out = "reviewed"
     elif not asked and not team:
