@@ -46,15 +46,31 @@ class ProfileSettingsTest(unittest.TestCase):
             self.assertEqual(got["apiKeyHelper"], "echo SECRET123")
 
     def test_no_key_value_in_settings(self):
-        with TempData() as d:
-            profile.save(gateway("echo SECRET123"))
+        import os
+        import stat
+        import tempfile
+        from pathlib import Path
+        with TempData() as d, tempfile.TemporaryDirectory() as tools:
+            script = Path(tools) / "key.sh"
+            script.write_text("#!/bin/sh\necho SECRET123\n")
+            script.chmod(script.stat().st_mode | stat.S_IXUSR)
+            profile.save(gateway(str(script)))
             profile.use("g")
             write_files()
             profile.apply()
-            for f in d.rglob("*.json"):
-                if "profiles" in f.parts:
-                    continue
-                self.assertNotIn("SECRET123", f.read_text().replace("echo SECRET123", ""), f)
+            self.assertIn(str(script), (paths.ap_dir("a") / "settings.json").read_text())
+            for f in d.rglob("*"):
+                if f.is_file():
+                    self.assertNotIn("SECRET123", f.read_text(), f)
+
+    def test_subscription_blanks_win_over_profile_env(self):
+        with TempData():
+            p = profile.load("subscription")
+            p["env"] = {k: "https://x.example.com" for k in BLANKED}
+            p["settings"] = {"env": {k: "https://y.example.com" for k in BLANKED}}
+            ov = profile.overlay(p)
+            for k in BLANKED:
+                self.assertEqual(ov["env"][k], "")
 
     def test_subscription_overlay_blanks_gateway_env(self):
         with TempData():
@@ -88,7 +104,6 @@ class ProfileSettingsTest(unittest.TestCase):
             write_files()
             profile.apply()
             for f in (d / "settings-dispatcher.json", profile.light_settings()):
-                self.assertEqual(f, f)
                 self.assertNotIn(URL, f.read_text())
                 self.assertNotIn("apiKeyHelper", read(f))
                 self.assertEqual(read(f)["env"]["AUTOPILOT_PROFILE"], "subscription")
