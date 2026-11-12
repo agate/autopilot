@@ -111,8 +111,8 @@ class _Checker:
         self.fail(field, f"must be valid Unicode text, not {_show(value)}")
 
     def one_line(self, field: str, value, empty: bool = False) -> str:
-        if not isinstance(value, str) or (not empty and not value.strip()) or any(
-                ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        # angles' rule: no control character, line or paragraph separator, or bidi override or isolate
+        if not isinstance(value, str) or (not empty and not value.strip()) or not angles._one_line(value):
             self.fail(field, f"must be one line of text, not {_show(value)}")
         return self.unicode(field, value)
 

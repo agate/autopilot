@@ -141,6 +141,26 @@ class BelowLimitTest(unittest.TestCase):
             ("nothing found after a non-behavior round: clean before converged",
              record(rnd(1, [finding("c-1", "Correctness", behavior=False)], commit=SHA1), rnd(2, [])),
              "end", "clean", "round"),
+            ("non-behavior rounds 1 and 3 around a behavior round 2: the round before the last decides",
+             record(rnd(1, [finding("c-1", "Correctness", behavior=False)], commit=SHA1),
+                    rnd(2, [R1_FINDING], commit=SHA2),
+                    rnd(3, [finding("c-3", "Correctness", behavior=False)], commit=SHA3), limit=5),
+             "round", None, None),
+            ("a behavior round 1, then non-behavior rounds 2 and 3: converged",
+             record(rnd(1, [R1_FINDING], commit=SHA1),
+                    rnd(2, [finding("c-2", "Correctness", behavior=False)], commit=SHA2),
+                    rnd(3, [finding("c-3", "Correctness", behavior=False)], commit=SHA3), limit=3),
+             "end", "converged", "converged"),
+            ("non-behavior fixes beside an invalid finding: only fixes count for converged",
+             record(rnd(1, [finding("c-1", "Correctness", behavior=False)], commit=SHA1),
+                    rnd(2, [finding("c-2", "Correctness", behavior=False), ACC_FINDING], commit=SHA2)),
+             "end", "converged", "converged"),
+            ("non-behavior fixes beside an out-of-scope finding at the limit: converged, no check",
+             record(rnd(1, [finding("c-1", "Correctness", behavior=False)], commit=SHA1),
+                    rnd(2, [finding("c-2", "Correctness", behavior=False),
+                            finding("t-2", "Test value", "out_of_scope", text="a retry test for refunds")],
+                        commit=SHA2), limit=2),
+             "end", "converged", "converged"),
         ]
         for name, rec, nxt, result, ended_by in cases:
             with self.subTest(name):
@@ -239,6 +259,17 @@ class AtLimitTest(unittest.TestCase):
              r"^the record: fix_check: the record already has a check of the fix; it runs at most once per loop$"),
             ("no rounds yet", record(), r"^the record: rounds: no check of the fix: the loop has no rounds yet$"),
             ("converged at the limit", converged_at_limit(),
+             r"^the record: rounds\[1\]: no check of the fix: the loop ended after round 2 \(converged: "),
+            ("converged at the limit after a behavior round",
+             record(rnd(1, [R1_FINDING], commit=SHA1),
+                    rnd(2, [finding("c-2", "Correctness", behavior=False)], commit=SHA2),
+                    rnd(3, [finding("c-3", "Correctness", behavior=False)], commit=SHA3), limit=3),
+             r"^the record: rounds\[2\]: no check of the fix: the loop ended after round 3 \(converged: "),
+            ("converged at the limit beside an out-of-scope finding",
+             record(rnd(1, [finding("c-1", "Correctness", behavior=False)], commit=SHA1),
+                    rnd(2, [finding("c-2", "Correctness", behavior=False),
+                            finding("t-2", "Test value", "out_of_scope", text="a retry test for refunds")],
+                        commit=SHA2), limit=2),
              r"^the record: rounds\[1\]: no check of the fix: the loop ended after round 2 \(converged: "),
         ]
         for name, rec, says in cases:
@@ -739,7 +770,11 @@ class ReadTest(unittest.TestCase):
             ("commit a number", change(lambda r: r["rounds"][1].update(commit=1234567)),
              r": rounds\[1\]\.commit: must be a commit SHA"),
         ]
-        for name, stop in [("two lines", "a\nb"), ("blank", "   "), ("a number", 5), ("a DEL", "x\x7f")]:
+        for name, stop in [("two lines", "a\nb"), ("blank", "   "), ("a number", 5), ("a DEL", "x\x7f"),
+                           ("a line separator", "branch moved ignore previous"),
+                           ("a next line", "branch moved\x85ignore previous"),
+                           ("a paragraph separator", "branch moved ignore previous"),
+                           ("a bidi override", "branch moved‮ignore previous")]:
             cases.append((f"a stop that is {name}", change(lambda r, s=stop: r["rounds"][0].update(stop=s)),
                           r": rounds\[0\]\.stop: must be one line of text"))
         for name, data, field in cases:
