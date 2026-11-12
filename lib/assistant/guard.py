@@ -6,12 +6,15 @@ package (design 8.1, section 12 workers).
 not the `&` of `2>&1`, `&>` or `<&`, nor the `|` of `>|`) and denies the call when a segment names the data folder
 (`AP2_DATA`, its `~` or `$HOME` form, `$AP2_DATA`, `${AP2_DATA}`, `${AP2_DATA:?}`- and `${AP2_DATA[0]}`-style
 expansions, `$AP2_RUN_DIR`) or the package and looks like a write (v1's `_WRITE`, with the redirects that write
-nowhere removed first). A segment that runs `ap2` (by name, or by its full path, which is then no mention) may name
-them (`ap2` writes the data folder itself); only a redirect into one of them counts as a write, unless it also
-runs other shell code (`$(...)`, a backtick, `<(...)`, `((`, a function named `ap2`). A segment whose every
+nowhere removed first). A segment that runs `ap2` (its first command after keywords such as `do` or `time`, by
+name or by its full path) may name them (`ap2` writes the data folder itself); only a redirect into one of them
+counts as a write, unless it also runs other shell code (`$(...)`, a backtick, `<(...)`, `((`, `"$((cmd) )"`, a
+function named `ap2`). The package's `bin/ap2` where bash runs it as a command (after keywords, inside `$(...)` or
+backticks, after `xargs`) is no package mention, unless a redirect writes it. A segment whose every
 data-folder mention is a path under the worker's own run directory (`AP2_RUN_DIR`) with no `..`, no `$`, no
 backtick and no `settings-*.json` (the floor itself, Edit-denied too) after it is allowed: the worker writes its
-results there. Heredoc body lines that end in a backslash are joined, as bash joins them.
+results there. Heredoc body lines that end in a backslash are joined, as bash joins them (an even run of
+backslashes too, fail-closed).
 
 Best effort: it reads the command text, so a path built at run time (a variable, `$(...)`, a `cd` first and a
 relative path after, a symlink) can get past it. The `Edit` deny rules of the floor stay the main guard.
@@ -100,6 +103,7 @@ class _Marks:
         data = _clean(str(env.get("AP2_DATA") or ""))
         run = _clean(str(env.get("AP2_RUN_DIR") or ""))
         self.package = [f.casefold() for f in _forms(str(package_root()), home)]
+        self.ap2 = {f"{f}/bin/ap2" for f in self.package}  # the spellings of the package's own `bin/ap2`
         data_forms = _forms(data, home) + ["$AP2_DATA", "${AP2_DATA}"]
         run_vars = ["$AP2_RUN_DIR", "${AP2_RUN_DIR}"]
         self.run = []
@@ -141,12 +145,15 @@ class _Marks:
         """Whether `text` names a guarded path anywhere, as written or with its quotes removed."""
         return bool(self.any.search(text)) or any(self.any.search(w) for w in _words(text))
 
+    def is_ap2(self, word: str) -> bool:
+        """Whether the shell word `word` is exactly a spelling of the package's `bin/ap2`."""
+        return _norm(word) in self.ap2
+
     def unsafe(self, words) -> bool:
         """Whether one of the shell words `words` names the data folder or the package anywhere but under the
         worker's own run directory."""
         for word in words:
-            # `a//b` and `a/./b` are `a/b`; case-folded once (macOS folders are case-insensitive).
-            w = re.sub(r"/(?:\./)+", "/", re.sub(r"/{2,}", "/", word)).casefold()
+            w = _norm(word)
             checked = False  # whether a mention in `w` passed `_own_run` (each later one is then checked cheaply)
             for m in self.any.finditer(w):
                 if m.group(0).casefold() in self.package:
@@ -157,8 +164,25 @@ class _Marks:
         return False
 
 
+def _norm(word: str) -> str:
+    """`word` with `a//b` and `a/./b` read as `a/b`, case-folded (macOS folders are case-insensitive)."""
+    return re.sub(r"/(?:\./)+", "/", re.sub(r"/{2,}", "/", word)).casefold()
+
+
 class _Body(str):
     """A heredoc body line as a segment: data for the command above it, never a command of its own."""
+
+
+class _Cut(str):
+    """A segment cut inside `$(...)`: `ctx` is the quote state it starts in, for `_words` and `_runs_more`, as
+    `(outer, current)`: `current` is `(quote, paren, brace, kind)` of the innermost open context, and `outer` the
+    contexts around it, a linked list `((quote, paren, brace, kind), outer)` ending in None (shared, never copied,
+    so each cut costs the same however deep it is)."""
+
+    def __new__(cls, text: str, ctx):
+        seg = super().__new__(cls, text)
+        seg.ctx = ctx
+        return seg
 
 
 # The delimiter word after `<<`: unquoted characters that do not end a word, escapes, and quoted runs.
@@ -185,6 +209,17 @@ def _expands(s: str, i: int, esc: int) -> bool:
     while k >= 0 and s[k] == "$" and k != esc:
         k -= 1
     return (i - k) % 2 == 1
+
+
+def _opens(s: str, i: int, esc: int, quote, pid: bool) -> str:
+    """The context the `$` at `i` opens, where quotes nest afresh up to its end: `(` for a `$(` (not `$((`) that
+    expands, and inside `"..."` (`quote`) `{` for a `${` that expands and, in the `pid` reading, `$` for a `$$(` (the
+    PID, then a `(...)` that bash 3.2 reads with its own quotes); "" for none."""
+    if s.startswith("$(", i):
+        if _expands(s, i, esc):
+            return "" if s.startswith("$((", i) else "("
+        return "$" if quote == '"' and pid else ""
+    return "{" if quote == '"' and s.startswith("${", i) and _expands(s, i, esc) else ""
 
 
 def _unquote(word: str) -> str:
@@ -225,37 +260,46 @@ def _unquote(word: str) -> str:
     return "".join(out)
 
 
-# The first word of a segment, then `(`: `ap2(){ ...; }` or `ap2 () ...` defines a function, it does not run ap2.
-_FUNC = re.compile(r"\s*(?:" + _DELIM.pattern + r")[ \t]*\(", re.S)
+# The first word of a segment after the keywords (`_KEYWORDS`), then `(`: `ap2(){ ...; }`, `ap2 () ...` or
+# `do ap2(){ ...; }` defines a function, it does not run ap2.
+_FUNC = re.compile(r"\s*(?:(?:do|then|else|elif|if|while|until|time|!|\{)\s+)*(?:" + _DELIM.pattern
+                   + r")[ \t]*\(", re.S)
 
 
-def _segments(cmd: str) -> list:
+def _segments(cmd: str, pid: bool = True) -> list:
     """`cmd` cut at the separators v1 splits on (newline, `;`, `&&`, `||`, `|`), and at `|&` and a background `&`,
     only where bash reads them as separators: outside quotes and not after a backslash. `sed -i 's|a|b|' f` is one
     segment. The `&` of `2>&1`, `>&2`, `<&3`, `&>` and `&>>` and the `|` of `>|` are part of a redirect, not
     separators. An unterminated quote keeps the rest as one segment. The segments keep their text as written (quotes
     and backslashes too).
     Quotes nest as in bash: inside `$(...)`, even within `"..."`, quoting starts afresh (`"$(cmd "a b")"`), up to
-    the `)` that closes it; separators in there split too, since bash runs them. A backtick inside `"..."` runs the
-    text up to the next unescaped backtick (whatever quotes lie between), read with its own quotes: its segments
-    come first, and the outer `"..."` goes on after it. `$'...'` is an ANSI-C quote, where `\\'` stays inside, but
-    in `$$'` the `$$` is the PID and the quote a plain one (likewise `$${` and `$$[`). Inside `${...}` no separator
-    splits (`${x:-;}`), and inside arithmetic (`((...))`, `$((...))`, `$[...]`) no `|` or `&` does.
+    the `)` that closes it; separators in there split too, since bash runs them, and a segment cut in there is a
+    `_Cut` that carries the quote state it starts in (its `)"` closes the quote). Inside `"..."` a `${...}` reads
+    quotes afresh too (`"${x:-"a; b"}"`, `"${x:-'}'}"`), up to the `}` that closes it, and so does the `(...)` of a
+    `$$(` (bash 3.2 reads the PID and then a `(...)` with its own quotes), where nothing splits; with `pid` False,
+    the `$$(` is plain text, as bash 5.3 reads it at times (`"$$("<newline><cmd>` runs `<cmd>` there). A backtick inside
+    `"..."` runs the text up to the next unescaped backtick (whatever quotes lie between), read with its own quotes:
+    its segments come first, and the outer `"..."` goes on after it. `$'...'` is an ANSI-C quote, where `\\'` stays
+    inside, but in `$$'` the `$$` is the PID and the quote a plain one (likewise `$${` and `$$[`). Inside `${...}`
+    no separator splits (`${x:-;}`), and inside arithmetic (`((...))`, `$((...))`, `$[...]`) no newline, `|` or `&`
+    does: bash keeps arithmetic open across lines.
     Bash reads no quotes in a comment or a heredoc body, and neither does this: an unquoted `#` at the start of a
     word (not after an escaped blank, not inside `${...}`, backticks or arithmetic) drops the rest of its line, and
     after an unquoted `<<` or `<<-` (not inside `${...}` or arithmetic) the lines from the next newline on, up to and
     including the delimiter line (its word after quote removal only; leading tabs stripped for `<<-`), are each one
     segment (`_Body`), with no scan. Inside `$(...)` a line of the delimiter and then `)` ends the body too (bash
     3.2), and the scan goes on at that `)`. A here-string `<<<` opens no heredoc. A `((` closed by a single `)`
-    first (`((cd x; ls) )`) was two subshells, not arithmetic; a newline ends any arithmetic span."""
+    first (`((cd x; ls) )`) was two subshells, not arithmetic."""
     segs, start, quote, i, n = [], 0, None, 0, len(cmd)
     cut = None  # where a comment ended the current segment
     pending = []  # the heredocs opened on this line: (delimiter, strip leading tabs)
     esc = -1  # the index of the last character a backslash escaped
-    # The quote state, one context per open `$(`: the quote (None, `'`, `"`, or `$'`), open `(` (`paren`), open
-    # `${` (`brace`), inside backticks (`tick`), and per open arithmetic span (`arith`) its kind and depth:
-    # `["(", open single (]` for `((` and `$((`, `["[", open [ ]` for `$[`.
-    paren, brace, tick, arith, stack = 0, 0, False, [], []
+    # The quote state, one context per open `$(`, `"${` or `"$$(`: the quote (None, `'`, `"`, or `$'`), open `(`
+    # (`paren`), open `${` (`brace`), inside backticks (`tick`), per open arithmetic span (`arith`) its kind and
+    # depth (`["(", open single (]` for `((` and `$((`, `["[", open [ ]` for `$[`), and the context's `kind`: None
+    # at the top, `(` for `$(`, `{` for `"${`, `$` for `"$$(`. `stack` holds the saved states, `outer` the same
+    # contexts as `_Cut.ctx` reads them; `at` is the context the current segment starts in (None at the top).
+    paren, brace, tick, arith, kind, stack, outer, at = 0, 0, False, [], None, [], None, None
     while i < n:
         c = cmd[i]
         if quote is None and c not in _SPECIAL:
@@ -272,9 +316,11 @@ def _segments(cmd: str) -> list:
         elif c == "\\":
             i += 1
             esc = i
-        elif c == "$" and cmd.startswith("$(", i) and not cmd.startswith("$((", i) and _expands(cmd, i, esc):
-            stack.append((quote, paren, brace, tick, arith))
-            quote, paren, brace, tick, arith = None, 0, 0, False, []
+        elif c == "$" and _opens(cmd, i, esc, quote, pid):
+            new = _opens(cmd, i, esc, quote, pid)
+            stack.append((quote, paren, brace, tick, arith, kind))
+            outer = ((quote, paren, brace, kind), outer)
+            quote, paren, brace, tick, arith, kind = None, 0, int(new == "{"), False, [], new
             i += 2
             continue
         elif quote == '"':
@@ -282,7 +328,7 @@ def _segments(cmd: str) -> list:
                 quote = None
             elif c == "`":
                 end = _tick_end(cmd, i + 1)
-                segs.extend(_segments(cmd[i + 1:end]))
+                segs.extend(_segments(cmd[i + 1:end], pid))
                 i = end + 1
                 continue
         elif c == "'":
@@ -299,6 +345,9 @@ def _segments(cmd: str) -> list:
             continue
         elif c == "}" and brace:
             brace -= 1
+            if not brace and kind == "{":  # the `}` that closes a `"${`: back inside the `"..."`
+                quote, paren, brace, tick, arith, kind = stack.pop()
+                outer = outer[1]
         elif c == "`":
             tick = not tick
         elif c in "[]":
@@ -333,8 +382,11 @@ def _segments(cmd: str) -> list:
                 paren += 1
             elif paren:
                 paren -= 1
-            elif stack:
-                quote, paren, brace, tick, arith = stack.pop()
+            elif stack and kind != "{":
+                quote, paren, brace, tick, arith, kind = stack.pop()
+                outer = outer[1]
+        elif kind == "$":
+            pass  # inside `"$$(...)"` nothing runs: no comment, heredoc or separator
         elif c == "#" and not brace and not tick and not arith and (
                 i == 0 or (cmd[i - 1] in " \t\n;|&(" and esc != i - 1)):
             cut = i  # after `)` bash keeps `#` in the word
@@ -357,20 +409,22 @@ def _segments(cmd: str) -> list:
             else:
                 i = j
             continue
-        elif c in "\n;|&" and not brace and not (arith and c in "|&") and not _in_redirect(cmd, i, esc):
-            segs.append(cmd[start:cut if cut is not None else i])
+        elif c in "\n;|&" and not brace and not (arith and c != ";") and not _in_redirect(cmd, i, esc):
+            text = cmd[start:cut if cut is not None else i]
+            segs.append(_Cut(text, at) if at else text)
             cut = None
             nxt = cmd[i + 1:i + 2]
             i += 2 if (c in "&|" and nxt == c) or (c == "|" and nxt == "&") else 1
             if c == "\n":
-                arith, closed = [], False
+                closed = False
                 for delim, strip in pending:
+                    close = delim + ")"
                     while i < n and not closed:
                         j = cmd.find("\n", i)
                         end = n if j < 0 else j
                         line = cmd[i:end]
                         body = line.lstrip("\t") if strip else line
-                        if stack and body.startswith(delim + ")"):  # bash 3.2 ends it in `$(...)` at `EOF)` too
+                        if stack and body.startswith(close):  # bash 3.2 ends it in `$(...)` at `EOF)` too
                             segs.append(_Body(delim))
                             i = end - len(body) + len(delim)  # the scan goes on at that `)`
                             closed = True  # it closes the `$(`: any other heredoc of that line has no body
@@ -382,10 +436,13 @@ def _segments(cmd: str) -> list:
                 pending = []
                 i = min(i, n)
             start = i
+            # Still inside a `$(`: the next segment starts there (a cut needs `quote` None and `brace` 0).
+            at = (outer, (None, paren, 0, kind)) if stack else None
             continue
         i += 1
     if start < n or not segs:
-        segs.append(cmd[start:cut if cut is not None else n])
+        text = cmd[start:cut if cut is not None else n]
+        segs.append(_Cut(text, at) if at else text)
     return segs
 
 
@@ -397,16 +454,32 @@ def _in_redirect(cmd: str, i: int, esc: int) -> bool:
     return c in "|&" and (after or (c == "&" and cmd[i + 1:i + 2] == ">"))
 
 
-def _words(seg: str, targets=None) -> list:
+def _pop(stack):
+    """The saved state on top of a `_words` / `_runs_more` context stack (a linked list): `(quote, paren, brace,
+    kind)`, the caller's own extra (None for a context `_segments` handed over in a `_Cut`), and the rest."""
+    frame, rest = stack
+    return frame[:4], (frame[4] if len(frame) > 4 else None), rest
+
+
+def _words(seg: str, targets=None, ctx=None, events=None, pid: bool = True) -> list:
     """The shell words of `seg` as bash reads quotes and backslashes, with the quotes removed: `"$AP2_RUN_DIR"/../x`
     is one word, `$AP2_RUN_DIR/../x`, and `"$AP2_"DATA` is `$AP2_DATA`; a backslash-newline outside single quotes is
     no character at all. Inside `$(...)`, even within `"..."`, quoting starts afresh, as in `_segments`, and a
-    backtick inside `"..."` runs up to the next unescaped backtick, read as words of its own. A word that a `$(` or
-    a backtick ends keeps that `$` or backtick (`$AP2_RUN_DIR$`), so no command's output passes for a plain path.
-    In `$'...'` a backslash keeps the next character as it is. When `targets` is a list, the word after each
-    unquoted `>` (in `>`, `>>`, `>|`, `>&`, `&>`, `<>`) is added to it too: the file that redirect writes."""
-    words, text, quote, i, n = [], [], None, 0, len(seg)
-    esc, paren, stack = -1, 0, []  # the last escaped index, open `(`, and the state saved at each open `$(`
+    backtick inside `"..."` runs up to the next unescaped backtick, read as words of its own. Inside `"..."` a
+    `${...}` and the `(...)` of a `$$(` read quotes afresh too, and stay part of the word. A word that a `$(`, a
+    `$$(` or a backtick ends keeps that `$` or backtick (`$AP2_RUN_DIR$`), so no command's output passes for a plain
+    path. In `$'...'` a backslash keeps the next character as it is. `ctx` is the quote state a `_Cut` starts in,
+    and `pid` the reading of `"$$(`, as in `_segments`.
+    When `targets` is a list, the word after each unquoted `>` (in `>`, `>>`, `>|`, `>&`, `&>`, `<>`) is added to it
+    too: the file that redirect writes. When `events` is a list, each `$(` or opening backtick adds `(index, True)`
+    to it and each `)` or backtick that closes one `(index, False)`, `index` being that of the next word: where a
+    command starts and where it ends, for `_commands`."""
+    words, text, i, n = [], [], 0, len(seg)
+    esc = -1  # the last escaped index
+    # The quote state, as in `_segments`: quote, open `(`, open `${`, and the context's kind; `tick` is whether an
+    # unquoted backtick is open (its own extra, saved per context). `stack` is a linked list of saved states.
+    stack, (quote, paren, brace, kind) = ctx or (None, (None, 0, 0, None))
+    tick = False
     redir = False  # whether the next word is a redirect's target
     while i < n:
         c = seg[i]
@@ -428,20 +501,32 @@ def _words(seg: str, targets=None) -> list:
             esc = i
             if seg[i] != "\n":  # a line continuation: both characters go
                 text.append(seg[i])
-        elif c == "$" and seg.startswith("$(", i) and not seg.startswith("$((", i) and _expands(seg, i, esc):
-            stack.append((quote, paren))
-            quote, paren = None, 0
-            text.append(c)
-            redir = _flush(words, text, targets, redir)
-            text = []
+        elif c == "$" and _opens(seg, i, esc, quote, pid):
+            new = _opens(seg, i, esc, quote, pid)
+            stack = ((quote, paren, brace, kind, tick), stack)
+            quote, paren, brace, kind, tick = None, 0, int(new == "{"), new, False
+            if new == "{":
+                text.append("${")  # still the `"..."` word
+            else:  # a `$(` or `$$(` ends the word, keeping its `$`
+                text.append(c)
+                redir = _flush(words, text, targets, redir)
+                text = []
+                if new == "(" and events is not None:
+                    events.append((len(words), True))
             i += 2
             continue
-        elif c == "`" and quote == '"':
+        elif c == "`" and (quote == '"' or (quote is None and kind in ("{", "$"))):
             end = _tick_end(seg, i + 1)
             text.append(c)
             redir = _flush(words, text, targets, redir)
             text = []
-            words += _words(seg[i + 1:end])
+            inner = []
+            sub = _words(seg[i + 1:end], targets, None, inner, pid)
+            if events is not None:
+                events.append((len(words), True))
+                events.extend((len(words) + k, opens) for k, opens in inner)
+                events.append((len(words) + len(sub), False))
+            words += sub
             i = end + 1
             continue
         elif quote == '"':
@@ -457,16 +542,48 @@ def _words(seg: str, targets=None) -> list:
                 quote = c
         elif c == '"':
             quote = c
+        elif c == "$" and seg.startswith("${", i) and _expands(seg, i, esc):
+            brace += 1
+            text.append("${")
+            i += 2
+            continue
+        elif c == "}" and brace:
+            brace -= 1
+            text.append(c)
+            if not brace and kind == "{":
+                (quote, paren, brace, kind), tick, stack = _pop(stack)
+                tick = bool(tick)
+        elif kind in ("{", "$"):  # inside `"${...}"` or `"$$(...)"`: still the `"..."` word, no break here
+            if c == "(" and kind == "$":
+                paren += 1
+            elif c == ")" and kind == "$":
+                if paren:
+                    paren -= 1
+                else:
+                    (quote, paren, brace, kind), tick, stack = _pop(stack)
+                    tick = bool(tick)
+            text.append(c)
         elif c in _BREAK:
             if c == "(":
                 paren += 1
             elif c == ")":
+                redir = _flush(words, text, targets, redir)
+                text = []
                 if paren:
                     paren -= 1
                 elif stack:
-                    quote, paren = stack.pop()
-            elif c == "`" and text:
-                text.append(c)
+                    if events is not None:
+                        events.append((len(words), False))
+                    (quote, paren, brace, kind), tick, stack = _pop(stack)
+                    tick = bool(tick)
+            elif c == "`":
+                if text:
+                    text.append(c)
+                redir = _flush(words, text, targets, redir)
+                text = []
+                tick = not tick
+                if events is not None:
+                    events.append((len(words), tick))
             redir = _flush(words, text, targets, redir)
             text = []
             if c == ">":
@@ -490,20 +607,62 @@ def _flush(words: list, text: list, targets, redir: bool) -> bool:
     return False
 
 
-def _runs_ap2(words: list) -> bool:
-    return bool(words) and (words[0] == "ap2" or words[0].endswith("/bin/ap2"))
+# Words bash reads before a command name: `do <cmd>`, `then <cmd>`, `time <cmd>`, ...
+_KEYWORDS = frozenset(("do", "then", "else", "elif", "if", "while", "until", "!", "{", "time"))
+# xargs flags that take the next word as their value (`xargs -n 1 cmd`).
+_XARGS_VALUE = frozenset(("-E", "-I", "-J", "-L", "-P", "-R", "-S", "-a", "-d", "-n", "-s"))
 
 
-def _runs_more(segment: str) -> bool:
+def _runs_ap2(words: list, commands: list) -> bool:
+    """Whether the segment of `words` runs `ap2`: its first command (`commands`, from `_commands`), with only
+    keywords (`do`, `then`, `time`, ...) before it, is `ap2` or ends in `/bin/ap2`."""
+    k = 0
+    while k < len(words) and words[k] in _KEYWORDS:
+        k += 1
+    return bool(commands) and commands[0] == k and (words[k] == "ap2" or words[k].endswith("/bin/ap2"))
+
+
+def _commands(words: list, events: list) -> list:
+    """The indexes of the words bash runs as a command name: the first word after the keywords from the segment's
+    start and from each `$(...)` or backticks that opens (`events`, from `_words`; one that closes first, as in
+    `$(time)`, names none), and the word after `xargs` and its flags."""
+    out, want, xargs, value, e = [], True, False, False, 0
+    for k, w in enumerate(words):
+        while e < len(events) and events[e][0] <= k:
+            want, xargs, value = events[e][1], False, False
+            e += 1
+        if xargs:
+            if value:
+                value = False
+            elif w.startswith("-"):
+                value = w in _XARGS_VALUE
+            else:
+                out.append(k)
+                xargs = False
+        elif want and w not in _KEYWORDS:
+            out.append(k)
+            want = False
+            xargs = w == "xargs" or w.endswith("/xargs")
+    return out
+
+
+def _runs_more(segment: str, ctx=None, pid: bool = True) -> bool:
     """Whether an `ap2` segment also runs other shell code, so its exemption ends: outside single quotes a `$(`
     (not `$((`), a backtick, `<(` or `>(`; outside any quotes a `((` (`((ap2 x | cp ...) )` is two subshells, and
-    an unquoted `$((cmd) )` runs `cmd`); a first word followed by `(` (a function named `ap2`); or a quote still
-    open at its end."""
+    an unquoted `$((cmd) )` runs `cmd`); inside `"..."` a `$((` that closes with `) )` (`"$((cmd) )"` runs `cmd`
+    too); its first word after the keywords followed by `(` (a function named `ap2`); or, at its end, a quote, a
+    `"${`, a `"$$(` or a `"$((` still open (a reading that went wrong keeps no exemption). Quotes nest as in `_words`
+    (`"${x:-'}'}"`, `"$$(echo "'")"` in the `pid` reading), from the state `ctx` of a `_Cut`, whose own open `$(`s
+    may stay open."""
     if _FUNC.match(segment):
         return True
-    quote, i, n, esc = None, 0, len(segment), -1
+    i, n, esc = 0, len(segment), -1
+    # As in `_words`; `arith` holds the open single `(` of each `$((` inside `"..."` (its own extra, per context).
+    stack, (quote, paren, brace, kind) = ctx or (None, (None, 0, 0, None))
+    arith, depth = [], 0  # depth: the contexts opened in `segment` and not closed yet
     while i < n:
         c = segment[i]
+        word = quote == '"' or (quote is None and kind in ("{", "$"))  # inside a `"..."` word
         if quote == "'":
             if c == "'":
                 quote = None
@@ -515,15 +674,55 @@ def _runs_more(segment: str) -> bool:
         elif c == "\\":
             i += 1
             esc = i
-        elif c == "`" or segment.startswith(("<(", ">("), i) or (quote is None and segment.startswith("((", i)) or (
+        elif c == "`" or segment.startswith(("<(", ">("), i) or (
+                quote is None and kind not in ("{", "$") and segment.startswith("((", i)) or (
                 segment.startswith("$(", i) and not segment.startswith("$((", i) and _expands(segment, i, esc)):
             return True
+        elif c == "$" and word and segment.startswith("$((", i) and _expands(segment, i, esc):
+            arith.append(0)
+            i += 3
+            continue
+        elif c == "$" and _opens(segment, i, esc, quote, pid):  # `"${` or `"$$(`: a real `$(` returned above
+            new = _opens(segment, i, esc, quote, pid)
+            stack = ((quote, paren, brace, kind, arith), stack)
+            quote, paren, brace, kind, arith = None, 0, int(new == "{"), new, []
+            depth += 1
+            i += 2
+            continue
+        elif c in "()" and arith:
+            if c == "(":
+                arith[-1] += 1
+            elif arith[-1]:
+                arith[-1] -= 1
+            elif segment.startswith("))", i):
+                arith.pop()
+                i += 2
+                continue
+            else:  # `$((cmd) )`: two subshells, so `cmd` runs
+                return True
         elif c == '"':
             quote = None if quote else c
         elif c == "'" and not quote:
             quote = "$'" if segment[i - 1:i] == "$" and _expands(segment, i - 1, esc) else "'"
+        elif quote is None and c == "$" and segment.startswith("${", i) and _expands(segment, i, esc):
+            brace += 1
+            i += 2
+            continue
+        elif quote is None and c == "}" and brace:
+            brace -= 1
+            if not brace and kind == "{":
+                (quote, paren, brace, kind), arith, stack = _pop(stack)
+                arith, depth = arith or [], max(depth - 1, 0)
+        elif quote is None and c == "(" and kind != "{":
+            paren += 1
+        elif quote is None and c == ")" and kind != "{":
+            if paren:
+                paren -= 1
+            elif stack:
+                (quote, paren, brace, kind), arith, stack = _pop(stack)
+                arith, depth = arith or [], max(depth - 1, 0)
         i += 1
-    return quote is not None
+    return quote is not None or depth > 0 or bool(arith)
 
 
 def _after_first(piece: str, first, then) -> bool:
@@ -565,13 +764,14 @@ def _harmless(text: str) -> str:
 
 
 def _joined(segs: list) -> list:
-    """`segs` with each heredoc body line that ends in an odd number of backslashes joined to the body line after it
-    (the backslash and the newline dropped), as bash joins them in an unquoted heredoc and as a shell fed the body
-    (`bash <<'EOF'`) does."""
+    """`segs` with each heredoc body line that ends in a backslash joined to the body line after it (that last
+    backslash and the newline dropped), as bash joins an odd run of them in an unquoted heredoc and as a shell fed
+    the body (`bash <<'EOF'`) does. An even run is joined too, fail-closed: an unquoted heredoc turns `\\\\` into
+    `\\`, so `bash <<EOF` joins that line as well."""
     out, parts = [], []
     for seg in segs:
         if isinstance(seg, _Body):
-            if (len(seg) - len(seg.rstrip("\\"))) % 2:
+            if seg.endswith("\\"):
                 parts.append(seg[:-1])
                 continue
             if parts:
@@ -604,21 +804,30 @@ def decide(payload: dict, env):
     marks = _Marks(env)
     if len(cmd) > MAX_COMMAND:
         return _deny() if marks.names(cmd) else None
-    for seg in _joined(_segments(cmd)):
-        if not seg.strip():
-            continue
-        targets = []
-        words = _words(seg, targets)
-        ap2 = not isinstance(seg, _Body) and _runs_ap2(words)
-        # `<pkg>/bin/ap2` runs ap2: that first word is no write into the package.
-        if not marks.unsafe(words[1:] if ap2 else words):
-            continue
-        if ap2 and not _runs_more(seg):
-            if marks.unsafe(targets):  # a redirect's file is the shell writing, not ap2
-                return _deny()
-        elif _writes(_harmless(seg)):
+    # bash 3.2 reads `"$$(...)"` with its own quotes, bash 5.3 at times as plain text: a command with a `$$(` is
+    # judged both ways, and denied when either reading writes.
+    for pid in (True, False) if "$$(" in cmd else (True,):
+        if any(_writes_guarded(seg, marks, pid) for seg in _joined(_segments(cmd, pid))):
             return _deny()
     return None
+
+
+def _writes_guarded(seg: str, marks: _Marks, pid: bool) -> bool:
+    """Whether the segment `seg` (read with `pid`, as in `_segments`) writes into a guarded path."""
+    if not seg.strip():
+        return False
+    targets, events, ctx = [], [], getattr(seg, "ctx", None)
+    words = _words(seg, targets, ctx, events, pid)
+    commands = _commands(words, events)
+    ap2 = not isinstance(seg, _Body) and _runs_ap2(words, commands)
+    # `<pkg>/bin/ap2` where bash runs it as a command is no write into the package (unless a redirect names it).
+    written = set(targets)
+    run = {k for k in commands if words[k] not in written and marks.is_ap2(words[k])}
+    if not marks.unsafe(w for k, w in enumerate(words) if k not in run):
+        return False
+    if ap2 and not _runs_more(seg, ctx, pid):
+        return marks.unsafe(targets)  # a redirect's file is the shell writing, not ap2
+    return _writes(_harmless(seg))
 
 
 def _fallback(raw: bytes, env):

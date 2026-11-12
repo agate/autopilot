@@ -119,19 +119,32 @@ class DecideTest(unittest.TestCase):
         self.check(["cat <<-EOF > /tmp/x\n\tbody\n\tEOF\n" + f"{PKG}/bin/ap2 card note C1 'rm it'"], deny=False)
 
     def test_a_heredoc_opens_and_ends_where_bash_opens_and_ends_it(self):
-        """No heredoc inside `${...}` or `$[...]`; the delimiter keeps its backticks; a body line that ends in an odd
-        number of backslashes joins the next one, as bash joins them; inside `$(...)` a `EOF)` line ends the body."""
+        """No heredoc inside `${...}` or `$[...]`; the delimiter keeps its backticks; a body line that ends in a
+        backslash joins the next one, as bash joins an odd run of them (an unquoted heredoc turns `\\\\` into `\\`, so
+        the shell fed the body joins an even run too); inside `$(...)` a `EOF)` line ends the body."""
         self.check(['echo ${x/<</y}\nrm -rf \\\n"$AP2_DATA/victim"',
                     'echo $[1<<2]\nrm -rf \\\n"$AP2_DATA/victim"',
                     'cat <<a`b`\nhi\na`b`\nrm -rf \\\n"$AP2_DATA/victim"',
                     'cat <<EOF\nrm -rf \\\n"$AP2_DATA/victim"\nEOF',
                     'bash <<EOF\nrm -rf \\\n\\\n$AP2_DATA/victim\nEOF',
-                    'x=$(cat <<EOF\nhi\nEOF)\ncp a $AP2_DATA/config.yaml'], deny=True)
-        self.check(['cat <<EOF\nls \\\\\n$AP2_DATA/x\nEOF',
+                    'bash <<EOF\nrm -rf \\\\\n$AP2_DATA/victim\nEOF',
+                    "bash <<'EOF'\nrm -rf $AP2_\\\nDATA/victim\nEOF", "bash <<'EOF'\nrm -rf $AP2_DA\\\nTA/victim\nEOF",
+                    # An unterminated heredoc: its last line still counts.
+                    'bash <<EOF\nrm -rf $AP2_DATA/victim \\',
+                    # `EOF)` ends a body only inside `$(...)`.
+                    "cat <<EOF\nEOF); ap2 x '\nEOF\ncp a $AP2_DATA/c #'",
+                    'x=$(cat <<EOF\nhi\nEOF)\ncp a $AP2_DATA/config.yaml',
+                    'cat <<"a\\b"\nab\nap2 card note C1 \'\na\\b\ncp a $AP2_DATA/config.yaml # \''], deny=True)
+        # Joined (`ls \$AP2_DATA/x`, a fail-closed read of the even run), but `ls` writes nothing.
+        self.check(['cat <<EOF\nls \\\\\n$AP2_DATA/x\nEOF', "cat <<'EOF'\nls \\\\\n$AP2_DATA/x\nEOF",
                     'x=$(cat <<EOF\nhi\nEOF)\nls $AP2_DATA; echo "$x" > /tmp/y',
                     'x=$(cat <<-EOF\nhi\n\tEOF)\nls $AP2_DATA; echo "$x" > /tmp/y'], deny=False)
         self.assertEqual(guard._segments("cat <<a`b`\nhi\na`b`\nz"), ["cat <<a`b`", "hi", "a`b`", "z"])
         self.assertEqual(guard._segments('cat <<"a\\$b"\nhi\na$b\nz'), ['cat <<"a\\$b"', "hi", "a$b", "z"])
+        # Inside `"..."` a backslash before `b` is kept: the delimiter is `a\b`, so `ab` does not end the body.
+        segs = guard._segments('cat <<"a\\b"\nab\na\\b\nz')
+        self.assertEqual(segs, ['cat <<"a\\b"', "ab", "a\\b", "z"])
+        self.assertIs(type(segs[-1]), str)
         self.assertEqual(guard._segments("x=$(cat <<E\nhi\nE)\nz"), ["x=$(cat <<E", "hi", "E", ")", "z"])
         self.assertIs(type(guard._segments("x=$(cat <<E\nhi\nE)\nz")[-1]), str)
         self.assertEqual(guard._segments("echo ${x/<</y}\nz"), ["echo ${x/<</y}", "z"])
@@ -154,6 +167,63 @@ class DecideTest(unittest.TestCase):
                     # `$$` is the PID, so `$${` opens no expansion: bash splits at the `;`.
                     f"ap2 status $${{x:-; cp a {DATA}/config.yaml"], deny=True)
         self.assertEqual(guard._segments("a ${x:-;|&} b; c"), ["a ${x:-;|&} b", " c"])
+        # A newline inside `${...}` does not split either.
+        self.check(["rm -rf ${x:-\n} $AP2_DATA/victim"], deny=True)
+
+    def test_a_parameter_expansion_inside_double_quotes_holds_its_own_quotes(self):
+        """In `"${x:-...}"` bash reads quotes afresh (`"${x:-'}'}"` prints `'}'`, `"${x:-"a; b"}"` holds a nested
+        quote), up to the `}` that closes it."""
+        self.check(['rm -f "${x:-"a; b"}" $AP2_DATA/items/keep', 'cp a "${x:-"z|y"}" $AP2_DATA/items/',
+                    'rm -rf "${x:-" #"}" $AP2_DATA/items',
+                    'touch "${OUT:-"$AP2_RUN_DIR/x"}" "${x:-"; "}" $AP2_DATA/items/new',
+                    "ap2 card list --q \"${q:-'\"'}\"\nrm -rf $AP2_DATA/items\necho '",
+                    "ap2 card list \"${x:-'\"'}\"; cp a $AP2_DATA/items/ # '",
+                    'ap2 card list "${x:-$(cp a $AP2_DATA/c)}"',
+                    # A `"${` or `"$$(` the reading leaves open keeps no exemption.
+                    'ap2 card list "${x:-\ncp a $AP2_DATA/c', 'ap2 card list "$$(\ncp a $AP2_DATA/c'], deny=True)
+        self.check(['cp a "${HOME}/x" && ls $AP2_DATA', 'echo "${#arr[@]}" > /tmp/x; ls $AP2_DATA',
+                    'echo "${x//\\"/}" > /tmp/x; ls $AP2_DATA', 'echo "${x:-a b}" > "$AP2_RUN_DIR/x.txt"',
+                    'ap2 card note C1 --data $AP2_DATA --text "${msg:-"a; b"} done"'], deny=False)
+        self.assertEqual(guard._segments('a "${x:-"b; c"}"; d'), ['a "${x:-"b; c"}"', " d"])
+        self.assertEqual(guard._words('a "${x:-"b c"} d" e'), ["a", "${x:-b c} d", "e"])
+
+    def test_a_segment_cut_inside_a_command_substitution_keeps_its_quotes(self):
+        """A separator inside `"$(...)"` splits, and the next segment starts inside that `$(`: its `)"` closes the
+        quote, it opens none."""
+        self.check(['echo "n=$(ls | wc -l)" > "$AP2_RUN_DIR/count.txt" 2>"$AP2_RUN_DIR/err.txt"',
+                    'jq -n --arg pr "$(gh pr view --json url | jq -r .url)" \'{status: "done", pr: $pr}\' '
+                    '> "$AP2_RUN_DIR/handback.json" 2>"$AP2_RUN_DIR/jq.err"',
+                    'x="$(ls; echo "${y:-$(date; true)}")" && echo "$x" > "$AP2_RUN_DIR/a" 2>"$AP2_RUN_DIR/b"'],
+                   deny=False)
+        self.check(['echo "$(ls | cp a $AP2_DATA/c)" > "$AP2_RUN_DIR/x"',
+                    'echo "$(ls; ap2 card list > $AP2_DATA/c)" > /tmp/x',
+                    'echo "$(ls; cp a "$AP2_DATA/c")" > /tmp/x'], deny=True)
+        segs = guard._segments('a "$(b; c)" d')
+        self.assertEqual(segs, ['a "$(b', ' c)" d'])
+        self.assertEqual(guard._words(segs[1], ctx=segs[1].ctx), ["c", "d"])
+
+    def test_ap2_by_its_full_path_in_command_position_is_no_package_mention(self):
+        """After a keyword, inside `$(...)` or after `xargs`, `<pkg>/bin/ap2` is run, not written."""
+        self.check([f"for c in C1 C2; do {PKG}/bin/ap2 card show $c > /tmp/$c.json; done",
+                    f"if [ -f x ]; then {PKG}/bin/ap2 card show C1 > /tmp/c.json; fi",
+                    f"time {PKG}/bin/ap2 card list > /tmp/x",
+                    f"echo \"$({PKG}/bin/ap2 card show C1 --json)\" > /tmp/card.json",
+                    f"echo `{PKG}/bin/ap2 card show C1` > /tmp/card.json",
+                    f"{PKG}/bin/ap2 card list --ids | xargs -n1 {PKG}/bin/ap2 card show > $AP2_RUN_DIR/all.txt",
+                    f"{PKG}/bin/ap2 card list --ids | xargs -n 1 -P 4 {PKG}/bin/ap2 card show > /tmp/all.txt",
+                    f"while true; do ap2 card list --data $AP2_DATA > /tmp/x; done"], deny=False)
+        self.check([f"cp x {PKG}/bin/ap2", f"echo x > {PKG}/bin/ap2", f"sed -i s/a/b/ {PKG}/bin/ap2",
+                    f"> {PKG}/bin/ap2 echo x", f"echo \"$(> {PKG}/bin/ap2 true)\"", f"cp \"$()\" {PKG}/bin/ap2",
+                    f"xargs cp x {PKG}/bin/ap2", f"do ap2 card list > $AP2_DATA/x",
+                    # A `$(...)` or backticks that close before a command name leave the next word an argument.
+                    f"tee \"$(time)\" {PKG}/bin/ap2 < x", f"tee \"`time`\" {PKG}/bin/ap2 < x",
+                    f"do ap2(){{ cp a {DATA}/config.yaml; }}; ap2", f"then {{ ap2 () {{ rm -rf {DATA}/items; }}; }}"],
+                   deny=True)
+
+    def test_a_redirect_before_the_command_is_still_a_write(self):
+        self.check(['>"$AP2_DATA/gate.json"', "> $AP2_DATA/config.yaml echo x", ">$AP2_DATA/x ap2 card list"],
+                   deny=True)
+        self.check(["ap2 card list > /tmp/cards.txt --data $AP2_DATA"], deny=False)
 
     def test_a_backtick_inside_double_quotes_reads_its_own_quotes(self):
         self.check(['echo "`echo " #"`"; rm -rf $AP2_DATA/items',
@@ -180,10 +250,17 @@ class DecideTest(unittest.TestCase):
                     # Old-style `$[...]` arithmetic: its `<<` is a shift, its `|` no pipe.
                     'echo $[1<<2]\nrm -rf \\\n"$AP2_DATA/victim"', 'rm -rf $[1|0] "$AP2_DATA/victim"',
                     # `$$` is the PID, so `$$[` opens nothing: bash runs the `|` as a pipe.
-                    f"ap2 status $$[1| cp a {DATA}/config.yaml"],
+                    f"ap2 status $$[1| cp a {DATA}/config.yaml",
+                    'rm -rf $[a[1]|0] "$AP2_DATA/victim"', "echo \"$(echo $[(1)]) ; ap2 x '\" ; cp a $AP2_DATA/c #'",
+                    "ap2 x $[(1)] | cp a $AP2_DATA/c", "ap2 card note C1 $[(n+1)*2] && cp a $AP2_DATA/config.yaml",
+                    # Bash keeps arithmetic open across a newline: the `#` there starts no comment.
+                    "((1\n#)); rm -rf $AP2_DATA/x", "(( n +\n#)) || rm -rf $AP2_DATA/x"],
                    deny=True)
         self.check([f"x=$((a<<b)); cat <<EOF\nit's\nEOF\nls {DATA}/items",
-                    f"echo $(( (1+2) << 1 )) $(((1+2)))\ncat <<EOF\nit's\nEOF\nls {DATA}"], deny=False)
+                    f"echo $(( (1+2) << 1 )) $(((1+2)))\ncat <<EOF\nit's\nEOF\nls {DATA}",
+                    f"(( n = 1 +\n2 ))\n{PKG}/bin/ap2 card note C1 'rm it'",
+                    f"(( n = 1 <<\n2 )); cat <<EOF\nit's\nEOF\nls {DATA}/items"], deny=False)
+        self.assertEqual(guard._segments("((1\n#)); b"), ["((1\n#))", " b"])
 
     def test_a_background_ampersand_splits_but_a_redirect_does_not(self):
         self.check([f"ap2 card list & cp y {DATA}/config.yaml",
@@ -247,8 +324,26 @@ class DecideTest(unittest.TestCase):
                     "ap2 card note C1 --data $AP2_DATA --text \"can't rm the lock; needs a human\"",
                     "ap2 card note C1 --data $AP2_DATA --text $'can\\'t rm the lock'",
                     "ap2 card note C1 --data $AP2_DATA --text can\\'t-rm",
-                    "ap2 card note C1 --data $AP2_DATA --text \"rm step $((n+1)) failed\""], deny=False)
-        self.check(["ap2 card note C1 --data $AP2_DATA --text \"$(cp a b)\""], deny=True)
+                    "ap2 card note C1 --data $AP2_DATA --text \"rm step $((n+1)) failed\"",
+                    "ap2 card note C1 --data $AP2_DATA --text \"x=$(( (n+1) * 2 ))\"",
+                    # `$$` is the PID: in `"$$(cp)"` the `(cp)` is text, nothing runs.
+                    'ap2 card note C1 --data $AP2_DATA --text "pid $$(cp)"'], deny=False)
+        self.check(["ap2 card note C1 --data $AP2_DATA --text \"$(cp a b)\"",
+                    # Inside `"..."` too, a `$((` that closes with `) )` runs a command: `$((cmd) )`.
+                    'ap2 card add --title "$((cp a $AP2_DATA/c) )"'], deny=True)
+
+    def test_a_pid_before_a_paren_inside_double_quotes_still_reads_its_quotes(self):
+        """bash 3.2 reads `"$$(...)"` as the PID and then a `(...)` that still holds its own quotes, so the `"'"`
+        in there does not open a single quote; bash 5.3 at times reads it as plain text, so both readings count."""
+        self.check(["ap2 x \"$$(echo \"'\")\" ; cp a $AP2_DATA/c #'",
+                    # A plain `$$'` quote (no ANSI-C escape) and an escaped `\$'`, with a real `$(` after it.
+                    "ap2 status $$'\\' > $AP2_DATA/config.yaml #'",
+                    "ap2 x $$'\\' \"$(cp a $AP2_DATA/c)\" \"$(echo \"'\")\"",
+                    "ap2 x \\$'\\' \"$(cp a $AP2_DATA/c)\" \"$(echo \"'\")\"",
+                    # Nothing in `"$$(...)"` runs or splits: the `;` there is text, the write is one command.
+                    "cp a \"$$(;)\" $AP2_DATA/x",
+                    # bash 5.3 reads this `"$$("` as plain text and runs the next line: both readings are judged.
+                    'ap2 x "$$("\ncp a $AP2_DATA/c\necho ")"'], deny=True)
 
     def test_a_parameter_expansion_of_the_data_folder_is_a_mention(self):
         self.check(["rm -rf \"${AP2_DATA:?}/items\"", "rm -rf \"${AP2_DATA:?}\"/items",
@@ -329,7 +424,9 @@ class DecideTest(unittest.TestCase):
                     "cp x $AP2_RUN_DIR/.*/config.yaml", "cp x $AP2_RUN_DIR/.*/.*/config.yaml",
                     "cp x $AP2_RUN_DIR/{..,a}/config.yaml",
                     # `//` and `/./` read as `/`, so they do not hide the top level.
-                    "rm $AP2_RUN_DIR//*", "rm $AP2_RUN_DIR/./settings*"], deny=True)
+                    "rm $AP2_RUN_DIR//*", "rm $AP2_RUN_DIR/./settings*",
+                    # A glob past 64 characters at the top level is denied outright.
+                    "rm $AP2_RUN_DIR/" + "*" * 65, "rm $AP2_RUN_DIR/settings-" + "?" * 60 + "*"], deny=True)
         # The settings files live at the run directory's top level only: a glob below it is fine.
         self.check(["rm $AP2_RUN_DIR/media/*.png", "cp a.png $AP2_RUN_DIR/media/shot-?.png",
                     "rm -f $AP2_RUN_DIR/media/*", "cp $AP2_RUN_DIR/media/* /tmp/out/"], deny=False)
@@ -433,7 +530,12 @@ class DecideTest(unittest.TestCase):
                   '"`': fill('"`a #`" '), "\\newline": fill("a\\\n"), "$$'": fill("$$'a' "),
                   "${;": fill("${x:-;"), "((|": fill("((a|b)) "), "heredoc \\": fill("a\\\n", "cat <<E\n"),
                   "ap2 >": fill("> $AP2_DATA ", "ap2 "), "[": "cat $AP2_RUN_DIR/" + "[" * (size - 20) + "/x",
-                  "*": "cat $AP2_RUN_DIR/" + "*[" * ((size - 20) // 2)}
+                  "*": "cat $AP2_RUN_DIR/" + "*[" * ((size - 20) // 2),
+                  '"${': fill('"${x:-'), '"${"': fill('"${x:-"'), '"${\'': fill("\"${x:-'}' "),
+                  '"$$(': fill('"$$(a '), '"$((': fill('"$((a '), '"$(() )': fill('"$((a) ) ', "ap2 "),
+                  "$( cut": fill('"$(a; '), "$( cut ap2": fill('"$(ap2 x; '), "${ $( cut": fill('"${x:-$(a; '),
+                  "keywords": fill("do "), "keywords ap2": "do " * ((size - 10) // 3) + "ap2 x" + tail,
+                  "xargs": fill("-n ", "xargs "), "$( ap2": fill(f'"$({PKG}/bin/ap2 ')}
         for name, cmd in shapes.items():
             with self.subTest(name):
                 self.assertLessEqual(len(cmd), guard.MAX_COMMAND)
