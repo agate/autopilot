@@ -1601,7 +1601,7 @@ class RecordedCallsTest(unittest.TestCase):
     def test_the_since_filter_lists_only_merge_commits(self):
         merge, plain = "e5f6a7b8" * 5, "f6a7b8c9" * 5
         commits = [{"sha": plain, "parents": [{"sha": A}]}, {"sha": merge, "parents": [{"sha": plain}, {"sha": BASE}]}]
-        for total, more in ((2, False), (300, True)):
+        for total, more in ((2, False), (100, True), (300, True)):
             with self.subTest(total_commits=total):
                 # GitHub's compare lists at most 250 commits but counts them all in total_commits.
                 reply = {"status": "ahead", "ahead_by": total, "total_commits": total, "commits": commits}
