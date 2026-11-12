@@ -715,6 +715,41 @@ class ImportV1Test(unittest.TestCase):
         card = self.by_key()["v1:shop:D1"]
         cards.validate(card, ("en", "zh"))
 
+    def test_a_question_card_closed_again_drops_invisible_words_in_a_language_no_longer_configured(self):
+        # cards.blank: a zh slot of only U+FEFF has no words, so it is dropped like an empty one, not kept.
+        for where_zh, want_where in (("\ufeff", None), ("\ufeff \x1c", None), ("这里有字", "这里有字")):
+            with self.subTest(where_zh=where_zh):
+                self.setUp()  # a fresh temp v1 and data folder: D1 must still be in state.json
+                self.set_config("secondary_language: zh\n")
+                self.ok("--project", "shop")
+                self.edit_state("projects/shop", lambda s: s["decisions"].pop(0))
+                self.ok("--project", "shop")  # D1 is closed
+                d1 = self.by_key()["v1:shop:D1"]
+                path = Store(self.data).path(d1["id"])
+                old = json.loads(path.read_text(encoding="utf-8"))
+                old["plain"]["what"]["zh"] = "\ufeff"  # a hand-edited old card
+                old["plain"]["where"]["zh"] = where_zh
+                old["title"] = old["plain"]["what"]["en"]  # as the old import left it, so the import closes it again
+                path.write_text(json.dumps(old), encoding="utf-8")
+                self.set_config("")
+                report = self.ok("--project", "shop")
+                self.assertEqual(self.actions(report)["v1:shop:D1"], "update")
+                card = self.by_key()["v1:shop:D1"]
+                self.assertEqual(card["plain"]["what"], {"en": old["plain"]["what"]["en"]})
+                self.assertEqual(card["title"], {"en": old["plain"]["what"]["en"]})
+                want = {"en": old["plain"]["where"]["en"], **({"zh": want_where} if want_where else {})}
+                self.assertEqual(card["plain"]["where"], want)
+                # The old do.zh has words, so the zh closed phrase is still written there.
+                self.assertEqual(card["plain"]["do"]["zh"], importv1.PHRASES["zh"]["do_closed"])
+                cards.validate(card, ("en",))
+
+    def test_kept_keeps_only_extra_language_texts_with_words(self):
+        make = importv1._Maker("shop", self.v1 / "projects" / "shop", ("en",), importv1.Labels(self.v1))
+        old = {"en": "old", "zh": "\ufeffKept", "ja": "\ufeff", "de": " \ufeff\x1c", "fr": "", "pt": 3, "it": None,
+               "ko": "\u200b"}
+        self.assertEqual(make.kept(old, {"en": "new"}), {"en": "new", "zh": "\ufeffKept", "ko": "\u200b"})
+        self.assertEqual(make.kept("not a map", {"en": "new"}), {"en": "new"})
+
     def test_an_open_question_closed_in_a_language_no_longer_configured_says_it_is_closed_there(self):
         self.set_config("secondary_language: zh\n")
         self.ok("--project", "shop")
