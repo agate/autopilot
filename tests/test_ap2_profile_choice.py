@@ -410,6 +410,19 @@ class AddCliTest(CliCase):
         self.assert_one_error(*self.add_gateway("--model", "gpt-x", "--effort", "turbo"), text="turbo")
         self.assertFalse(self.file().exists())
 
+    def test_a_model_flag_alone_is_checked_before_anything_is_saved(self):
+        before = runs(self.tmp)
+        self.assert_one_error(*self.add_gateway("--model", "claude-nope-1"),
+                              text="model 'claude-nope-1' is not offered")
+        self.assertEqual(runs(self.tmp) - before, 1)
+        self.assertFalse(self.file().exists())
+        self.assert_one_error(*self.add_gateway("--model", "claude-nope-1", tty=True, answers=["1", "1"]),
+                              text="claude-nope-1")
+        self.assertFalse(self.file().exists())
+        self.assert_one_error(*self.run_cli("add", "s", "--subscription", "--model", "bogus"),
+                              text="model 'bogus' is not offered")
+        self.assertFalse(self.file("s").exists())
+
     def test_both_flags_on_a_subscription_profile(self):
         code, out, err = self.run_cli("add", "s", "--subscription", "--model", "default", "--effort", "low")
         self.assertEqual((code, err), (0, ""))

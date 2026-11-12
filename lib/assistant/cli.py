@@ -405,7 +405,7 @@ def _profile_add(data, args) -> int:
     if errs:
         raise profiles.ProfileError("; ".join(errs))
     models = profiles.model_choices(data, p)
-    if p["chosen_at"]:
+    if args.model is not None:  # a flag value not offered is refused before anything is saved, asked or printed
         profiles.check_model(args.model, models)
     saved = profiles.save(data, p, models)
     if not profiles.needs_choice(data, saved):

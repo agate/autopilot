@@ -627,7 +627,7 @@ class ProfileCliTest(unittest.TestCase):
         self.fails("add", "h", "--subscription", "--base-url", URL, text="are for a --gateway profile")
         self.fails("add", "h", "--gateway", "--base-url", URL, "--key-command", "echo k", "--small-model", "s",
                    "--model", "m", "--daily-cap", "1", "--models-command", "printf '[\"s\"]'",
-                   text="model: m is not offered by the gateway")
+                   text="model 'm' is not offered")  # checked against the fetched list before the save
         self.assertFalse((self.data / "profiles" / "h.json").exists())
         extra = self.tmp / "extra.json"
         extra.write_text(json.dumps({"pluginConfigs": {"p": {}}}))
