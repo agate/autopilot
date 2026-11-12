@@ -1864,6 +1864,9 @@ Calls the author made without asking (check them):
     `--model` and `ANTHROPIC_MODEL` alike.
     - **[decided by the builder]** `small_model` may end in `[1m]` too (the same check for all three fields, as in
       v1), and only the exact lowercase `[1m]` is stripped: `[2m]` or `[1M]` must be listed as written.
+    - **[decided by the builder]** The `[1m]` launch check sits in `tests/test_ap2_profiles.py` and imports `opt`
+      from `tests.test_ap2_profile_launch` inside the test (a top-level import would be circular: that module imports
+      this one).
   - Overlay and merge (v1's, with `AP2_PROFILE` for `AUTOPILOT_PROFILE`). `overlay(p)` is the settings a profile
     owns, never `permissions` or `hooks`. The subscription blanks `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`,
     `ANTHROPIC_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL` and `ANTHROPIC_API_KEY`, and

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -341,7 +342,15 @@ class ProfileNameAndLongContextTest(WorkerCase):
             profiles.save(self.data, self.long_context(name="h", model="claude-opus-5-5",
                                                        small_model="claude-haiku-9[1m]"))
         self.assertIn("small_model: claude-haiku-9[1m] is not offered", str(cm.exception))
-        self.assertEqual(profiles.names(self.data), ["g", "subscription"])
+        # A name the gateway lists with its marker is offered as written.
+        p = self.long_context(name="lc", model="m[1m]")
+        p["gateway"]["models_command"] = "printf '[\"m[1m]\", \"claude-haiku-4-5\"]'"
+        self.assertEqual(profiles.save(self.data, p)["model"], "m[1m]")
+        # small_model is checked without its marker too.
+        saved = profiles.save(self.data, self.long_context(name="sm", model="claude-opus-5-5",
+                                                           small_model="claude-haiku-4-5[1m]"))
+        self.assertEqual(saved["small_model"], "claude-haiku-4-5[1m]")
+        self.assertEqual(profiles.names(self.data), ["g", "lc", "sm", "subscription"])
 
     def test_a_long_context_model_is_stored_and_passed_as_written(self):
         profiles.save(self.data, self.long_context(model="claude-opus-5-5[1m]", effort="high"))
@@ -368,6 +377,12 @@ class ProfileNameAndLongContextTest(WorkerCase):
         # An unhashable item (a list in the list) is refused the same way, never a traceback.
         p["gateway"]["models_command"] = "printf '[[\"claude-x\"], \"claude-x\"]'"
         with self.assertRaisesRegex(ProfileError, "must print a JSON list of model names"):
+            profiles.save(self.data, p)
+        # A list nested too deep to parse is refused the same way, never a traceback.
+        deep = self.tmp / "deep.json"
+        deep.write_text("[" * 100000 + "]" * 100000)
+        p["gateway"]["models_command"] = "cat " + shlex.quote(str(deep))
+        with self.assertRaisesRegex(ProfileError, r"^gateway\.models_command: must print a JSON list of model names$"):
             profiles.save(self.data, p)
         self.assertEqual(profiles.names(self.data), ["subscription"])
 

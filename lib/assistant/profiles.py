@@ -211,7 +211,7 @@ def _model_errors(p: dict) -> list:
         return [f"gateway.models_command: failed (exit {r.returncode})"]
     try:
         known = json.loads(r.stdout)
-    except ValueError:
+    except (ValueError, RecursionError):
         known = None
     if not (isinstance(known, list) and all(isinstance(m, str) for m in known)):
         return ["gateway.models_command: must print a JSON list of model names"]
