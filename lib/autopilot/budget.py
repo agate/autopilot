@@ -112,11 +112,11 @@ def read_fast(path: Path = None, now_ms: int = None, stale_min: int = 60) -> dic
     return _parse(cache, now_ms, stale_min)
 
 
-def workers_allowance(b: dict, cfg: dict, now: datetime) -> tuple:
-    """(active profile, spend totals or None, what the budget allows new workers). Only a gateway profile
-    pays for spend parsing."""
+def workers_allowance(b: dict, cfg: dict, now: datetime, p: dict = None) -> tuple:
+    """(profile, spend totals or None, what the budget allows new workers) for `p`, default the active
+    profile. Only a gateway profile pays for spend parsing."""
     from autopilot import profile, spend
-    p = profile.active()
+    p = p or profile.active()
     if p.get("mode") != "gateway":
         return p, None, allowance(b, cfg, now)
     s = spend.totals(now.astimezone())

@@ -73,7 +73,13 @@ def resume_due(worker: dict, now: datetime, cfg: dict, b: dict, ap: str = None) 
         return False
     if ap is not None and (paths.ap_dir(ap) / "paused").exists():
         return False   # a pause lasts until the user resumes, also past midnight
-    p, _, workers = budget.workers_allowance(b, cfg, now)
+    own = None
+    if worker.get("profile"):
+        try:
+            own = profile.load(worker["profile"])   # the profile the worker runs on, not the active one
+        except (KeyError, ValueError, OSError):
+            pass
+    p, _, workers = budget.workers_allowance(b, cfg, now, own)
     return budget.parking(b, cfg, p) is None and workers["allow"] != 0
 
 

@@ -238,6 +238,35 @@ class WorkerProfileTest(Base):
                 workers.park("alpha", "T-1", "implement", "n", DAY.astimezone())
 
 
+class ResumeProfileTest(Base):
+    LATER = (DAY + timedelta(days=1)).astimezone()
+
+    def parked(self, name):
+        return {"profile": name, "task": "T-1", "role": "implement",
+                "parked": {"kind": "cap", "resume_at": None, "reason": "cap"}}
+
+    def test_a_gateway_worker_ignores_a_full_subscription_window_after_a_switch(self):
+        budget.DEFAULT_PATH = usage_file(97)
+        profile.use("subscription")
+        with mock.patch.object(spend, "totals", return_value=totals(0)):
+            self.assertTrue(park.resume_due(self.parked("gw"), self.LATER, self.gcfg, budget.read()))
+
+    def test_a_subscription_worker_waits_for_the_window_after_a_switch_to_gateway(self):
+        budget.DEFAULT_PATH = usage_file(97)
+        with mock.patch.object(spend, "totals", return_value=totals(0)):
+            self.assertFalse(park.resume_due(self.parked("subscription"), self.LATER, self.gcfg, budget.read()))
+            self.assertTrue(park.resume_due(self.parked("gw"), self.LATER, self.gcfg, budget.read()))
+
+    def test_a_worker_without_a_profile_uses_the_active_one(self):
+        w = self.parked("gw")
+        del w["profile"]
+        budget.DEFAULT_PATH = usage_file(97)
+        with mock.patch.object(spend, "totals", return_value=totals(0)):
+            self.assertTrue(park.resume_due(w, self.LATER, self.gcfg, budget.read()))   # active = gateway
+            profile.use("subscription")
+            self.assertFalse(park.resume_due(w, self.LATER, self.gcfg, budget.read()))
+
+
 class GateTest(Base):
     def test_reports_still_run_at_cap(self):
         write_ap(self.data, "alpha", report_times=["00:00"])
