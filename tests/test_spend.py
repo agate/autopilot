@@ -17,6 +17,7 @@ TZ = timezone(timedelta(hours=-5))
 NOW = datetime(2026, 11, 11, 12, 0, tzinfo=TZ)
 SID = "11111111-0000-0000-0000-00000000aaaa"
 SHORT = "abcd1234"
+BEFORE = datetime(2026, 11, 10, 8, 0, tzinfo=TZ)   # before every request in the fixtures
 HAIKU = json.loads((ROOT / "lib" / "autopilot" / "prices.json").read_text())["models"]["claude-haiku-4-5"]
 
 
@@ -61,8 +62,17 @@ class SpendCase(unittest.TestCase):
             d.mkdir(parents=True, exist_ok=True)
             shutil.copy(FIX / sub, d / "agent-1.jsonl")
 
-    def launch(self, short=SHORT, p=None):
+    def launch(self, short=SHORT, p=None, at: datetime = None):
+        """Record a launch now, or at `at` (a session's requests come after its launch)."""
+        if at is None:
+            spend.record_launch(short, "worker", "checkout", p or profile())
+            return
+        now, self.clock = self.clock, at.timestamp()
         spend.record_launch(short, "worker", "checkout", p or profile())
+        self.clock = now
+
+    def past_grace(self):
+        self.clock += spend._NEW_GRACE_S + 1
 
 
 class RequestCostsTest(SpendCase):
@@ -106,7 +116,7 @@ class RequestCostsTest(SpendCase):
 class TotalsTest(SpendCase):
     def test_totals_windows(self):
         self.put("days.jsonl")
-        self.launch()
+        self.launch(at=BEFORE)
         t = spend.totals(NOW)
         # 2026-11-10 (Tue) is this week and month; 2026-11-11 is today. Haiku 4.5 input is $1/Mtok, 1M tokens each.
         self.assertAlmostEqual(t["today"], 1.0)
@@ -116,7 +126,7 @@ class TotalsTest(SpendCase):
 
     def test_week_starts_monday_and_month_is_calendar(self):
         self.put()
-        self.launch()
+        self.launch(at=BEFORE)
         t = spend.totals(datetime(2026, 11, 16, 9, 0, tzinfo=TZ))  # next Monday
         self.assertEqual(t["week"], 0.0)
         self.assertAlmostEqual(t["month"], STREAMING_USD)
@@ -124,37 +134,37 @@ class TotalsTest(SpendCase):
 
     def test_unknown_model_marks_unknown(self):
         self.put("unknown.jsonl")
-        self.launch()
+        self.launch(at=BEFORE)
         t = spend.totals(NOW)
         self.assertIs(t["unknown"], True)
         self.assertEqual(t["month"], 0.0)
 
     def test_subscription_launches_excluded(self):
         self.put()
-        self.launch(p=profile("sub", "subscription"))
+        self.launch(p=profile("sub", "subscription"), at=BEFORE)
         self.assertEqual(spend.totals(NOW, mode="gateway")["month"], 0.0)
         self.assertAlmostEqual(spend.totals(NOW, mode="subscription")["month"], STREAMING_USD)
 
     def test_switching_gateway_profiles_sums(self):
         self.put()
-        self.launch(p=profile("g1"))
+        self.launch(p=profile("g1"), at=BEFORE)
         other = self.home / ".claude" / "projects" / "-tmp-x" / "22222222-0000-0000-0000-00000000bbbb.jsonl"
         shutil.copy(FIX / "days.jsonl", other)
         self.listing.append({"id": "efgh5678", "sessionId": "22222222-0000-0000-0000-00000000bbbb"})
-        self.launch("efgh5678", profile("g2"))
+        self.launch("efgh5678", profile("g2"), at=BEFORE)
         self.assertAlmostEqual(spend.totals(NOW)["month"], STREAMING_USD + 2.0)
 
     def test_resumed_session_counts_once(self):
         self.put()
-        self.launch()
+        self.launch(at=BEFORE)
         self.listing.append({"id": "zzzz9999", "sessionId": SID})
-        self.launch("zzzz9999")
+        self.launch("zzzz9999", at=BEFORE)
         self.assertAlmostEqual(spend.totals(NOW)["month"], STREAMING_USD)
 
     def test_unresolved_short_id_is_unknown_then_found(self):
         self.put()
         self.listing.clear()
-        self.launch()
+        self.launch(at=BEFORE)
         t = spend.totals(NOW)
         self.assertEqual(t["month"], 0.0)
         self.assertIs(t["unknown"], True)
@@ -173,18 +183,20 @@ class TotalsTest(SpendCase):
     def test_unresolved_retry_is_rate_limited_and_gives_up(self):
         self.listing.clear()
         self.launch()
+        self.past_grace()
         with mock.patch("autopilot.sessions.list_all", return_value=[]) as la:
             spend.totals(NOW)
+            self.assertEqual(la.call_count, 1)
             self.clock += 300
             spend.totals(NOW)
-            self.assertEqual(la.call_count, 0)  # tried at launch time, next try 10 minutes later
+            self.assertEqual(la.call_count, 1)  # past its first minutes: the next try 10 minutes later
             self.clock += 400
             spend.totals(NOW)
-            self.assertEqual(la.call_count, 1)
+            self.assertEqual(la.call_count, 2)
             self.clock += 3 * 86400
             spend.totals(NOW)
             spend.totals(NOW)
-            self.assertEqual(la.call_count, 1)  # the launch is older than 2 days: no more tries
+            self.assertEqual(la.call_count, 2)  # the launch is older than 2 days: no more tries
             self.assertIs(spend.totals(NOW)["unknown"], True)
 
     def test_unresolved_launch_from_earlier_month_is_not_unknown(self):
@@ -194,11 +206,13 @@ class TotalsTest(SpendCase):
 
     def test_missing_transcript_without_settled_lines_is_unknown(self):
         self.launch()
+        self.past_grace()
         self.assertIs(spend.totals(NOW)["unknown"], True)
 
     def test_unknown_today_only_counts_what_is_dated_today(self):
         self.listing.clear()
         self.launch()                                            # an unresolved launch made today
+        self.past_grace()
         t = spend.totals(NOW)
         self.assertIs(t["unknown_today"], True)
 
@@ -206,6 +220,7 @@ class TotalsTest(SpendCase):
         self.listing.clear()
         self.clock = datetime(2026, 11, 10, 8, 0, tzinfo=TZ).timestamp()
         self.launch()
+        self.past_grace()
         t = spend.totals(NOW)
         self.assertIs(t["unknown"], True)
         self.assertIs(t["unknown_today"], False)
@@ -213,12 +228,14 @@ class TotalsTest(SpendCase):
     def test_missing_transcript_unknown_today_follows_the_launch_day(self):
         self.clock = datetime(2026, 11, 10, 8, 0, tzinfo=TZ).timestamp()
         self.launch()
+        self.past_grace()
         t = spend.totals(NOW)
         self.assertEqual((t["unknown"], t["unknown_today"]), (True, False))
         self.launch("efgh5678")
         self.listing.append({"id": "efgh5678", "sessionId": "22222222-0000-0000-0000-00000000bbbb"})
         self.clock = datetime(2026, 11, 11, 8, 0, tzinfo=TZ).timestamp()
         self.launch("efgh5678")
+        self.past_grace()
         self.assertIs(spend.totals(NOW)["unknown_today"], True)
 
     def test_cache_holds_the_files_requests_of_this_month_only(self):
@@ -263,7 +280,7 @@ class TotalsTest(SpendCase):
 
     def test_cache_rereads_only_changed_files(self):
         self.put()
-        self.launch()
+        self.launch(at=BEFORE)
         spend.totals(NOW)
         with mock.patch("autopilot.spend._parse_file", side_effect=AssertionError("re-read")):
             self.assertAlmostEqual(spend.totals(NOW)["month"], STREAMING_USD)
@@ -286,7 +303,7 @@ class TotalsTest(SpendCase):
 
     def test_settle_keeps_unknown_flag(self):
         self.put("unknown.jsonl")
-        self.launch()
+        self.launch(at=BEFORE)
         spend.settle(SHORT)
         self.transcript.unlink()
         self.assertIs(spend.totals(NOW)["unknown"], True)
@@ -294,6 +311,7 @@ class TotalsTest(SpendCase):
     def test_settle_without_transcript_records_unsettled_and_stays_unknown(self):
         self.listing.clear()
         self.launch()
+        self.past_grace()
         spend.settle(SHORT)
         line = json.loads((self.data / "spend" / "settled.jsonl").read_text().splitlines()[0])
         self.assertIs(line["unsettled"], True)
@@ -335,7 +353,7 @@ class TotalsTest(SpendCase):
 
     def test_resumed_copy_counts_shared_requests_once(self):
         self.put("days.jsonl")
-        self.launch()
+        self.launch(at=BEFORE)
         self.copy(self.SID2, [self.NEW])
         self.listing.append({"id": "zzzz9999", "sessionId": self.SID2})
         self.clock += 60
@@ -346,7 +364,7 @@ class TotalsTest(SpendCase):
 
     def test_subscription_history_resumed_under_a_gateway_stays_subscription(self):
         self.put("days.jsonl")
-        self.launch(p=profile("sub", "subscription"))
+        self.launch(p=profile("sub", "subscription"), at=BEFORE)
         self.copy(self.SID2, [self.NEW])
         self.listing.append({"id": "zzzz9999", "sessionId": self.SID2})
         self.clock += 60
@@ -356,7 +374,7 @@ class TotalsTest(SpendCase):
 
     def test_dedupe_survives_the_original_being_settled_and_removed(self):
         self.put("days.jsonl")
-        self.launch()
+        self.launch(at=BEFORE)
         self.copy(self.SID2, [self.NEW])
         self.listing.append({"id": "zzzz9999", "sessionId": self.SID2})
         self.clock += 60
@@ -398,7 +416,7 @@ class TotalsTest(SpendCase):
 
     def test_totals_name_the_unpriced_models_of_today(self):
         self.put("unknown.jsonl")
-        self.launch()
+        self.launch(at=BEFORE)
         self.assertEqual(spend.totals(NOW)["unknown_models"], [])   # its request is dated yesterday
         self.assertEqual(spend.totals(datetime(2026, 11, 10, 20, 0, tzinfo=TZ))["unknown_models"], ["claude-nonesuch-9"])
 
@@ -434,6 +452,131 @@ class TotalsTest(SpendCase):
     def test_record_launch_rejects_unknown_kind(self):
         with self.assertRaises(ValueError):
             spend.record_launch(SHORT, "bogus", None, profile())
+
+
+def req(rid, at: datetime, tokens=1_000_000):
+    """One Haiku 4.5 request line: 1M input tokens cost $1."""
+    return {"type": "assistant", "requestId": rid, "timestamp": at.astimezone(timezone.utc).isoformat(),
+            "message": {"model": "claude-haiku-4-5", "usage": {"input_tokens": tokens, "output_tokens": 0}}}
+
+
+class NewLaunchGraceTest(SpendCase):
+    """A launch only minutes old is not unknown spend yet: the listing or its transcript may not show it."""
+
+    def test_an_unresolved_launch_in_its_first_minutes_is_not_unknown(self):
+        self.listing.clear()
+        self.launch()
+        t = spend.totals(NOW)
+        self.assertEqual((t["unknown"], t["unknown_today"], t["unknown_launches"]), (False, False, 0))
+        self.clock += spend._NEW_GRACE_S + 1
+        t = spend.totals(NOW)
+        self.assertEqual((t["unknown"], t["unknown_today"], t["unknown_launches"]), (True, True, 1))
+
+    def test_a_resolved_launch_without_a_transcript_yet_is_not_unknown_in_its_first_minutes(self):
+        self.launch()
+        t = spend.totals(NOW)
+        self.assertEqual((t["unknown"], t["unknown_today"], t["unknown_launches"]), (False, False, 0))
+        self.clock += spend._NEW_GRACE_S + 1
+        t = spend.totals(NOW)
+        self.assertEqual((t["unknown"], t["unknown_today"], t["unknown_launches"]), (True, True, 1))
+
+    def test_a_young_launch_is_retried_every_minute(self):
+        self.listing.clear()
+        self.launch()
+        with mock.patch("autopilot.sessions.list_all", return_value=[]) as la:
+            self.clock += 30
+            spend.totals(NOW)
+            self.assertEqual(la.call_count, 0)   # tried at launch time
+            self.clock += 31
+            spend.totals(NOW)
+            self.assertEqual(la.call_count, 1)
+            self.clock += 61
+            spend.totals(NOW)
+            self.assertEqual(la.call_count, 2)
+            self.clock = self.clock - 122 + spend._NEW_GRACE_S + 1   # past the grace: every 10 minutes again
+            spend.totals(NOW)
+            self.assertEqual(la.call_count, 3)
+            self.clock += 61
+            spend.totals(NOW)
+            self.assertEqual(la.call_count, 3)
+
+    def test_a_launch_found_in_its_first_minutes_is_priced(self):
+        self.listing.clear()
+        self.launch()
+        self.put()
+        self.listing.append({"id": SHORT, "sessionId": SID})
+        self.clock += 61
+        self.assertEqual(spend.totals(NOW)["unknown"], False)
+        self.assertEqual(json.loads((self.data / "spend" / "cache.json").read_text())["shorts"], {SHORT: SID})
+
+    def test_a_row_without_a_session_id_gets_no_grace(self):
+        spend.record_session("", "worker", "checkout", profile())
+        self.assertIs(spend.totals(NOW)["unknown_today"], True)
+
+
+class CopiedHistoryTest(SpendCase):
+    """A resumed copy starts with the old conversation's requests, under the new session id and with their old
+    times. Requests from before the session's first launch are that copy, not new spend."""
+
+    def write(self, lines, path=None):
+        path = path or self.transcript
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(json.dumps(x) + "\n" for x in lines))
+
+    def at(self, minutes: float) -> datetime:
+        return datetime.fromtimestamp(self.clock, TZ) + timedelta(minutes=minutes)
+
+    def test_requests_from_before_the_first_launch_are_not_counted(self):
+        self.write([req("old_1", self.at(-300)), req("old_2", self.at(-30)), req("near", self.at(-2)),
+                    req("new_1", self.at(10))])
+        self.launch()
+        t = spend.totals(NOW)
+        self.assertAlmostEqual(t["today"], 2.0)   # near (inside the skew) and new_1
+        self.assertAlmostEqual(t["month"], 2.0)
+        self.assertFalse(t["unknown"])
+
+    def test_an_unpriced_copied_request_does_not_make_spend_unknown(self):
+        old = req("old_1", self.at(-60))
+        old["message"]["model"] = "claude-nonesuch-9"
+        self.write([old, req("new_1", self.at(10))])
+        self.launch()
+        t = spend.totals(NOW)
+        self.assertAlmostEqual(t["today"], 1.0)
+        self.assertEqual((t["unknown"], t["unknown_today"], t["unknown_models"]), (False, False, []))
+
+    def test_the_first_launch_of_the_session_decides(self):
+        # The same session launched again later (resumed under its own id): its requests in between count.
+        self.write([req("a", self.at(10)), req("b", self.at(70))])
+        self.launch()
+        self.clock += 3600
+        self.listing.append({"id": "zzzz9999", "sessionId": SID})
+        self.launch("zzzz9999")
+        self.assertAlmostEqual(spend.totals(NOW)["today"], 2.0)
+
+    def test_settled_requests_drop_the_copy_too(self):
+        self.write([req("old_1", self.at(-60)), req("new_1", self.at(10))])
+        self.launch()
+        spend.settle(SHORT)
+        self.transcript.unlink()
+        t = spend.totals(NOW)
+        self.assertAlmostEqual(t["today"], 1.0)
+        self.assertFalse(t["unknown"])
+
+    def test_a_p_run_recorded_after_it_ended_keeps_its_requests(self):
+        # `claude -p` rows are written when the run ends, so its requests come before the row.
+        self.write([req("p_1", self.at(-20))])
+        spend.record_session(SID, "discover", "checkout", profile())
+        self.assertAlmostEqual(spend.totals(NOW)["today"], 1.0)
+
+    def test_a_copy_of_a_session_with_no_launch_row_bills_only_its_own_requests(self):
+        # The original ran before launches were recorded; the copy runs on a gateway.
+        sid2 = "22222222-0000-0000-0000-00000000cccc"
+        self.write([req("old_1", self.at(-400)), req("old_2", self.at(-100))])
+        self.write([req("old_1", self.at(-400)), req("old_2", self.at(-100)), req("new_1", self.at(5))],
+                   self.transcript.parent / f"{sid2}.jsonl")
+        self.listing.append({"id": "zzzz9999", "sessionId": sid2})
+        self.launch("zzzz9999")
+        self.assertAlmostEqual(spend.totals(NOW)["today"], 1.0)
 
 
 if __name__ == "__main__":

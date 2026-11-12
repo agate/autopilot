@@ -19,6 +19,9 @@ KINDS = ("worker", "dispatcher", "replies", "refresh", "discover", "oneoff")
 _PRICE_KEYS = ("input", "output", "cache_read", "cache_write_5m", "cache_write_1h")
 _LONG_PROMPT_TOKENS = 100_000
 _RETRY_S = 600          # retry resolving one short id at most this often
+_NEW_GRACE_S = 900      # a launch this young may not be listed or have a transcript yet: not unknown spend yet
+_NEW_RETRY_S = 60       # and its short id is retried this often meanwhile
+_COPY_SKEW_S = 300      # a request this much older than its session's first launch is a resumed copy's history
 _GIVE_UP_S = 2 * 86400  # and stop trying once its launch is older than this
 _P_KINDS = ("discover", "oneoff")   # `-p` runs: the only kinds whose no-id row stops holding the cap
 _NO_ID_HOLD_S = 1800    # a launch with no session id holds the daily cap this long
@@ -303,10 +306,15 @@ def _session_reqs(files_reqs: list, sid: str) -> dict:
 def _resolve(c: dict, launched: dict, force: bool = False) -> None:
     """Fill c["shorts"] (short id -> full session id) for the ones not known yet, from one `claude agents`
     listing. `launched` maps a short id to its launch time (epoch). One short is retried at most every
-    _RETRY_S, and no more once its launch is older than _GIVE_UP_S; `force` skips both limits."""
+    _RETRY_S (every _NEW_RETRY_S while its launch is younger than _NEW_GRACE_S), and no more once its launch is
+    older than _GIVE_UP_S; `force` skips these limits."""
     now = _clock()
+
+    def every(at: float) -> int:
+        return _NEW_RETRY_S if now - at < _NEW_GRACE_S else _RETRY_S
+
     due = [s for s, at in launched.items() if s not in c["shorts"]
-           and (force or (now - c["tries"].get(s, 0) >= _RETRY_S and now - at <= _GIVE_UP_S))]
+           and (force or (now - c["tries"].get(s, 0) >= every(at) and now - at <= _GIVE_UP_S))]
     if not due:
         return
     from autopilot import workers
@@ -359,7 +367,10 @@ def totals(now: datetime, mode: str = "gateway") -> dict:
     `now`'s timezone decides where the days begin. unknown is True when a request this month had no price, or
     when a launch this month cannot be matched to its session (its spend is not counted, and that shows).
     unknown_today is the same, but only for cost dated today or a launch made today: it is what the daily cap
-    trips on, so a gap from an earlier day does not block today."""
+    trips on, so a gap from an earlier day does not block today. A launch younger than _NEW_GRACE_S that is not
+    listed yet, or has no transcript yet, is not unknown: it has spent next to nothing, and after the grace it is
+    unknown as before. A request dated more than _COPY_SKEW_S before its session's first launch is the history
+    a resumed copy starts with, not this session's spend."""
     if now.tzinfo is None:
         now = now.astimezone()
     tz = now.tzinfo
@@ -368,7 +379,8 @@ def totals(now: datetime, mode: str = "gateway") -> dict:
     month_start = now.strftime("%Y-%m-01")
 
     last_launch = {}  # short -> launch; the last line wins
-    for ln in _read_lines("launches.jsonl"):
+    rows = _read_lines("launches.jsonl")
+    for ln in rows:
         if ln.get("short"):
             last_launch[ln["short"]] = ln
     mine = {s: ln for s, ln in last_launch.items() if ln.get("mode") == mode}
@@ -386,8 +398,12 @@ def totals(now: datetime, mode: str = "gateway") -> dict:
     def this_month(ln: dict) -> bool:
         return launch_day(ln) >= month_start
 
+    def young(at: float) -> bool:   # too new to be listed, or to have written its transcript, for sure
+        return _clock() - at < _NEW_GRACE_S
+
     for s, ln in mine.items():
-        if s not in c["shorts"] and this_month(ln):
+        # A launch in its first minutes may just not be listed yet; a row with no session id never will be.
+        if s not in c["shorts"] and this_month(ln) and (s.startswith("unknown-") or not young(_launch_epoch(ln))):
             out["unknown"] = True
             # A `-p` run that gave no session id can never be matched; after 30 minutes it stops holding today.
             # A worker or dispatcher row with no id keeps holding it for the rest of the day: it may still run.
@@ -403,6 +419,16 @@ def totals(now: datetime, mode: str = "gateway") -> dict:
         if sid:
             session_mode[sid] = (ln.get("mode"), this_month(ln), launch_day(ln) == today, _launch_epoch(ln),
                                  ln.get("kind"))
+    # The first and the newest launch of each session over every launch row. A `-p` row (keyed by the full
+    # session id) is written after its run ended, so it says nothing about when the session began.
+    first_at, newest_at = {}, {}
+    for ln in rows:
+        sid = c["shorts"].get(ln.get("short"))
+        if sid:
+            at = _launch_epoch(ln)
+            newest_at[sid] = max(newest_at.get(sid, at), at)
+            if ln["short"] != sid:
+                first_at[sid] = min(first_at.get(sid, at), at)
 
     settled = {}
     for ln in _read_lines("settled.jsonl"):
@@ -442,12 +468,18 @@ def totals(now: datetime, mode: str = "gateway") -> dict:
             continue
         t = usage.find_transcript(sid)
         if not t:
-            if m == mode:   # launched this month but neither a transcript nor settled lines remain
+            if m == mode and not young(newest_at.get(sid, 0.0)):   # neither a transcript nor settled lines remain
                 out["unknown"] = out["unknown"] or recent
                 out["unknown_today"] = out["unknown_today"] or launched_today
                 launches += 1 if launched_today else 0
             continue
         per_session[sid] = _session_reqs([_cached_reqs(c, f, table, since, seen) for f in _files(t)], sid)
+
+    # A resumed copy starts with the old conversation: its requests keep their old times, from before the copy's
+    # first launch. They are not this session's spend (and unpriced ones do not make it unknown).
+    for sid in [s for s in per_session if s in first_at]:
+        cut = first_at[sid] - _COPY_SKEW_S
+        per_session[sid] = {k: v for k, v in per_session[sid].items() if v[0] is None or v[0] >= cut}
 
     # A request belongs to the session that has it first (by its line's time; the earlier launch on a tie).
     owner = {}
