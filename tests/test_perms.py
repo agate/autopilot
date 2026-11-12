@@ -77,6 +77,12 @@ class PermsTest(unittest.TestCase):
         deny = perms.generate([])["permissions"]["deny"] + perms.static_settings("worker")["permissions"]["deny"]
         self.assertEqual([d for d in deny if d.startswith("Write(")], [])
 
+    def test_profile_cap_and_spend_files_are_protected(self):
+        deny = perms.deny_rules("/D", "/P")
+        for rule in ("Edit(/D/profiles/*.json)", "Edit(/D/cap-state.json)", "Edit(/D/profile-*.json)",
+                     "Edit(/D/spend/**)", "Edit(/D/replies-applied.json)"):
+            self.assertIn(rule, deny)
+
     def test_package_dispatcher_fallback_carries_the_subscription_blanks(self):
         env = json.loads((ROOT / "settings" / "dispatcher.json").read_text())["env"]
         self.assertEqual(env["AUTOPILOT_PROFILE"], "subscription")

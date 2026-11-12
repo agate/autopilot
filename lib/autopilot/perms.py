@@ -19,7 +19,9 @@ DENY_TOOL_PATTERNS = [re.compile(p, re.I) for p in (
     r"^execute[_-]?(write|destructive)$",
 )]
 PROTECTED = ("RULES.md", "config.json", "settings*.json", "oneoff-*.json", "state.json", "page.json", "gate.json",
-             "tick.json", "lock", "state.lock", "access.json")
+             "tick.json", "lock", "state.lock", "access.json",
+             # Who pays and how much: the profiles, the cap's answer, the key checks, the spend ledger.
+             "profiles/*.json", "cap-state.json", "profile-*.json", "spend/**", "replies-applied.json")
 ONEOFF_TIMEOUT_S = 600
 BASH_DENY = ["Bash(gh pr comment:*)", "Bash(gh pr review:*)", "Bash(gh issue comment:*)", "Bash(gh issue create:*)",
              "Bash(gh pr edit --add-reviewer:*)"]
