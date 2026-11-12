@@ -291,7 +291,8 @@ def cmd_restore(args) -> int:
 
 # -- ap2 profile (access profiles, design section 12) -----------------------------------------------------------------
 # A profile says how workers reach Claude: the subscription, or a gateway through a key command. `use` writes only
-# <data>/active-profile.json, so it works in shadow mode; `list` and `show` create nothing.
+# inside <data> (active-profile.json, and the profile's file when it asks for a choice), so it works in shadow mode;
+# `list` and `show` create nothing.
 
 def _profile_parser(sub) -> None:
     pr = sub.add_parser("profile", help="list, show, add, choose, use or remove access profiles",

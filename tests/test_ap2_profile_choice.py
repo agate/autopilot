@@ -429,6 +429,20 @@ class ChooseCliTest(CliCase):
             self.assertTrue(err.endswith("ap2: no choice made; nothing changed\n"), err)
         self.assertEqual(self.file().read_bytes(), before)
 
+    def test_a_command_that_lists_no_model_name_is_one_line_and_asks_nothing(self):
+        # Without this refusal the prompt would show no options and ask again until the input ends. The profile is
+        # saved against a list of its own (`known`), as the command lists no small model it could save with.
+        for listed in ("[]", '["bad name"]'):
+            with self.subTest(listed=listed):
+                p = gateway("g", model=None, effort=None, small_model="claude-haiku-4-5")
+                p["gateway"]["models_command"] = counting(self.tmp, listed)
+                profiles.save(self.data, p, known=["claude-haiku-4-5"])
+                before = self.file().read_bytes()
+                code, out, err = self.run_cli("choose", "g", tty=True, answers=["1"])
+                self.assert_one_error(code, out, err, "listed no models")
+                self.assertNotIn("Model for", err)
+                self.assertEqual(self.file().read_bytes(), before)
+
     def test_without_a_terminal_it_prints_the_choices_and_exits_3(self):
         self.gateway()
         before = self.file().read_bytes()
@@ -671,6 +685,21 @@ class UseCliTest(CliCase):
         self.assertNotIn("Traceback", err)
         self.assertTrue(err.endswith("\nap2: no choice made; nothing changed\n"), err)
         self.assertEqual((self.active.read_bytes(), self.file().read_bytes()), before)
+
+    def test_a_broken_active_profile_file_still_asks_before_switching_to_an_unchosen_profile(self):
+        self.gateway()
+        self.active.write_text("{nope")
+        code, out, err = self.run_cli("use", "g")
+        self.assertEqual(code, profiles.NEEDS_CHOICE, err)
+        self.assertEqual(json.loads(out)["profile"], "g")
+        self.assertIn("nothing switched", err)
+        self.assertEqual(self.active.read_bytes(), b"{nope")
+        code, out, err = self.run_cli("use", "g", tty=True, answers=["", ""])
+        self.assertEqual(code, 0, err)
+        self.assertIn("Model for g:", err)
+        p = profiles.active(self.data)
+        self.assertEqual(p["name"], "g")
+        self.assertFalse(profiles.needs_choice(self.data, p))
 
     def test_a_chosen_profile_the_active_one_and_the_subscription_ask_nothing(self):
         self.gateway("c", model="gpt-x", effort="high", chosen_at=WHEN)
