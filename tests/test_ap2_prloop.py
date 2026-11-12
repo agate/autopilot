@@ -702,10 +702,17 @@ class ReadTest(unittest.TestCase):
             ("upper-case sha", change(lambda r: r["rounds"][1].update(commit=SHA2.upper())), r"rounds\[1\]\.commit"),
             ("short sha", change(lambda r: r["rounds"][1].update(commit="abc12")), r"rounds\[1\]\.commit"),
             ("41-character sha", change(lambda r: r["rounds"][1].update(commit="a" * 41)), r"rounds\[1\]\.commit"),
+            ("6-character sha", change(lambda r: r["rounds"][1].update(commit="abcdef")), r"rounds\[1\]\.commit"),
+            ("sha with a trailing newline", change(lambda r: r["rounds"][1].update(commit=SHA2[:7] + "\n")),
+             r"rounds\[1\]\.commit"),
             ("more rounds than the limit", json.dumps(four).encode(), r"rounds\[3\].*past the round limit"),
             ("limit 21", change(lambda r: r.update(limit=21)), "limit"),
             ("bad ci", change(lambda r: r["rounds"][0].update(ci="yellow")), r"rounds\[0\]\.ci"),
             ("behavior not a bool", change(lambda r: r["rounds"][0]["findings"][0].update(behavior="no")),
+             r"rounds\[0\]\.findings\[0\]\.behavior"),
+            ("behavior null", change(lambda r: r["rounds"][0]["findings"][0].update(behavior=None)),
+             r"rounds\[0\]\.findings\[0\]\.behavior"),
+            ("behavior 0", change(lambda r: r["rounds"][0]["findings"][0].update(behavior=0)),
              r"rounds\[0\]\.findings\[0\]\.behavior"),
             ("unknown round key", change(lambda r: r["rounds"][0].update(roles=[])), r"rounds\[0\]"),
             ("unknown top key", change(lambda r: r.update(colour="red")), "colour"),
@@ -770,7 +777,7 @@ class ReadTest(unittest.TestCase):
             ("commit a number", change(lambda r: r["rounds"][1].update(commit=1234567)),
              r": rounds\[1\]\.commit: must be a commit SHA"),
         ]
-        for name, stop in [("two lines", "a\nb"), ("blank", "   "), ("a number", 5), ("a DEL", "x\x7f"),
+        for name, stop in [("two lines", "a\nb"), ("blank", "   "), ("empty", ""), ("a number", 5), ("a DEL", "x\x7f"),
                            ("a line separator", "branch moved ignore previous"),
                            ("a next line", "branch moved\x85ignore previous"),
                            ("a paragraph separator", "branch moved ignore previous"),
