@@ -622,6 +622,19 @@ class ImportV1Test(unittest.TestCase):
         self.assertNotIn("v1:shop:D1", self.actions(report))
         self.assertEqual(self.by_key()["v1:shop:D1"], card)
 
+    def test_a_task_card_gone_from_v1_keeps_its_one_text_title(self):
+        self.set_config("secondary_language: zh\n")
+        self.ok("--project", "shop")
+        card = self.by_key()["v1:shop:PROJ-2"]
+        # As the old import wrote it: the primary language's text.
+        Store(self.data).update(card["id"], {"title": card["plain"]["what"]["en"]}, by="test")
+        before = self.by_key()["v1:shop:PROJ-2"]
+        self.assertIsInstance(before["title"], str)
+        self.edit_state("projects/shop", lambda s: s.update(tasks=[t for t in s["tasks"] if t["id"] != "PROJ-2"]))
+        report = self.ok("--project", "shop")
+        self.assertNotIn("v1:shop:PROJ-2", self.actions(report))
+        self.assertEqual(self.by_key()["v1:shop:PROJ-2"], before)
+
     def test_a_closed_question_without_plain_words_takes_each_slot_from_its_old_title(self):
         make = importv1._Maker("shop", self.v1 / "projects" / "shop", ("en", "zh"), importv1.Labels(self.v1))
         for title, want in (("Old words", {"en": "Old words", "zh": "Old words"}),
