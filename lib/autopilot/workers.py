@@ -223,6 +223,11 @@ def end(ap: str, task: str, role: str) -> None:
                 hit = sessions.find_by_id(w["short_id"], sessions.list_all(claude_bin(gcfg)))
                 sid = (hit or {}).get("sessionId") or w.get("session_id")
                 tokens = usage.session_tokens(sid)
+                try:
+                    profile.note_session_end(sid, w.get("profile") or profile.active()["name"],
+                                             datetime.now(timezone.utc))
+                except Exception:  # noqa: BLE001 - key bookkeeping must not stop a worker from ending
+                    pass
                 subprocess.run([claude_bin(gcfg), "stop", w["short_id"]], capture_output=True, timeout=60)
                 _settle(w["short_id"])
                 for t in st["tasks"]:

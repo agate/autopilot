@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from autopilot import cli, config, events, paths
@@ -253,6 +255,141 @@ def migrate_from_config() -> bool:
     return True
 
 
+# ---- key health, refresh and rotation ----
+# A gateway key reaches a session only through the profile's key command (Claude Code runs it as apiKeyHelper).
+# autopilot runs that command to learn whether it works, and throws the output away: no key is ever read,
+# logged or stored.
+
+KEY_TTL = timedelta(minutes=10)
+KEY_FIX = "Run the key command in a terminal (sign in again if it asks), then the next gate tick starts work."
+_AUTH_TEXT = re.compile(r"\b40[13]\b|authentication[_ ]error|authentication[_ ]failed|invalid[ _-]*(x-)?api[ _-]*key",
+                        re.IGNORECASE)
+_AUTH_FIELDS = ("authentication_failed", "authentication_error", "invalid_api_key")
+
+
+def _key_file() -> Path:
+    return paths.data_root() / "profile-key.json"
+
+
+def _refresh_file() -> Path:
+    return paths.data_root() / "profile-refresh.json"
+
+
+def _read(f: Path) -> dict:
+    try:
+        d = json.loads(f.read_text())
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _fresh(rec: dict, now: datetime):
+    try:
+        at = datetime.fromisoformat(rec["at"])
+        if at.tzinfo is None:
+            at = at.astimezone()
+        return abs(now - at) < KEY_TTL if now.tzinfo else abs(now.astimezone() - at) < KEY_TTL
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _run_silent(cmd: str, timeout: int) -> str:
+    """Run a command with its output thrown away. Returns "" on success, else a short reason (never output)."""
+    try:
+        r = subprocess.run(cmd, shell=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as e:
+        return type(e).__name__
+    return "" if r.returncode == 0 else f"exit {r.returncode}"
+
+
+def check_key(p: dict, now: datetime):
+    """The key command's error text, or None when it works (or the profile is the subscription). The answer is
+    cached 10 minutes in <data>/profile-key.json as {at, ok, error}."""
+    if p.get("mode") != "gateway":
+        return None
+    rec = _read(_key_file())
+    if rec.get("profile") == p["name"] and _fresh(rec, now):
+        return None if rec.get("ok") else rec.get("error") or "key command failed"
+    why = _run_silent(p["gateway"]["key_command"], 60)
+    err = f"the key command failed ({why})" if why else None
+    config._write(_key_file(), {"at": now.isoformat(), "ok": not err, "error": err, "profile": p["name"]})
+    return err
+
+
+def rotate(name: str) -> None:
+    """Run the profile's rotate command (output thrown away), forget the cached key check, re-apply settings."""
+    cmd = (load(name).get("gateway") or {}).get("rotate_command")
+    if not cmd:
+        raise ValueError(f"{name} has no rotate_command")
+    why = _run_silent(cmd, 120)
+    if why:
+        raise RuntimeError(f"rotate_command failed ({why})")   # its output may hold a key, so it is never shown
+    _key_file().unlink(missing_ok=True)
+    apply()
+
+
+def session_auth_failed(session_id: str) -> bool:
+    """True when the end of a session's transcript holds an API authentication failure (HTTP 401/403). Claude
+    Code writes an API error as an assistant line flagged isApiErrorMessage (model <synthetic>); the check is
+    tolerant: that flag, an auth `error` field, or a synthetic message, and the text must name the failure."""
+    from autopilot import usage
+    f = usage.find_transcript(session_id)
+    if not f:
+        return False
+    try:
+        with open(f, "rb") as h:
+            h.seek(0, 2)
+            h.seek(max(0, h.tell() - 65536))
+            lines = h.read().decode("utf-8", "replace").splitlines()[-12:]
+    except OSError:
+        return False
+    for line in lines:
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(e, dict) or e.get("type") not in ("assistant", "system"):
+            continue
+        msg = e.get("message") if isinstance(e.get("message"), dict) else {}
+        err = e.get("error")
+        flagged = (e.get("isApiErrorMessage") is True or msg.get("model") == "<synthetic>"
+                   or (isinstance(err, str) and err in _AUTH_FIELDS))
+        if not flagged:
+            continue
+        content = msg.get("content")
+        parts = [c.get("text", "") for c in content if isinstance(c, dict)] if isinstance(content, list) else [str(content or "")]
+        text = " ".join(parts + [str(e.get("content") or ""), err if isinstance(err, str) else ""])
+        if _AUTH_TEXT.search(text):
+            return True
+    return False
+
+
+def note_session_end(session_id: str, profile_name: str, now: datetime) -> bool:
+    """A gateway session ended: when its transcript shows an authentication failure, run the refresh command
+    (else the key command) once and re-apply the settings. A second failure within 10 minutes sets the key
+    error, which blocks new workers until the key command works again. True when a failure was found."""
+    try:
+        p = load(profile_name)
+    except (KeyError, ValueError, OSError):
+        return False
+    if p.get("mode") != "gateway" or not session_auth_failed(session_id):
+        return False
+    last = _read(_refresh_file())
+    if last.get("profile") == p["name"] and _fresh(last, now):
+        config._write(_key_file(), {"at": now.isoformat(), "ok": False, "profile": p["name"],
+                                    "error": "the gateway rejected the key again right after a refresh"})
+        events.append_global("key_error", {"profile": p["name"]})
+        return True
+    gw = p["gateway"]
+    _run_silent(gw.get("refresh_command") or gw["key_command"], 60)
+    config._write(_refresh_file(), {"at": now.isoformat(), "profile": p["name"]})
+    _key_file().unlink(missing_ok=True)
+    events.append_global("key_refreshed", {"profile": p["name"]})
+    apply()
+    return True
+
+
 # ---- ap profile ----
 
 def _fail(msg: str) -> int:
@@ -325,12 +462,11 @@ def main(argv: list) -> int:
     elif a.cmd == "use":
         use(a.name)
     elif a.cmd == "rotate":
-        cmd = (p.get("gateway") or {}).get("rotate_command")
-        if not cmd:
-            return _fail(f"{a.name} has no rotate_command")
-        r = subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
-        print(f"rotate_command exited {r.returncode}")   # its output may hold a key, so it is never shown
-        return 0 if r.returncode == 0 else 1
+        try:
+            rotate(a.name)
+        except (ValueError, RuntimeError) as e:
+            return _fail(str(e))
+        print("rotate_command succeeded; settings re-applied")
     elif a.cmd == "remove":
         if a.name == SUBSCRIPTION:
             return _fail("the subscription profile cannot be removed")

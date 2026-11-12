@@ -122,6 +122,8 @@ def _access(cur: dict, now: datetime) -> dict:
         except Exception:
             acc["broken_profiles"].append({"name": n, "error": "unreadable"})
     if p.get("mode") == "gateway":
+        if cur["workers"].get("reason") == "key":
+            acc["key_error"] = {"error": cur["workers"].get("error"), "fix": profile.KEY_FIX}
         spent = spent or {}
         limit = cap.today_limit(p, now)
         acc["usage"] = {"today": spent.get("today", 0.0), "week": spent.get("week", 0.0), "month": spent.get("month", 0.0),

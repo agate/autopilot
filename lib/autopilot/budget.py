@@ -53,7 +53,10 @@ def allowance(b: dict, cfg: dict, now: datetime, p: dict = None, spent: dict = N
     A gateway profile `p` with its `spent` totals replaces the subscription rules (windows, credits and
     staleness) by the daily dollar cap alone."""
     if p is not None and p.get("mode") == "gateway":
-        from autopilot import cap
+        from autopilot import cap, profile
+        key_error = profile.check_key(p, now)
+        if key_error:   # never a silent fallback to the subscription: workers wait until the key works
+            return {"allow": 0, "paused_until": None, "reason": "key", "error": key_error}
         spent = spent or {}
         unknown = bool(spent.get("unknown_today"))
         if unknown or (spent.get("today") or 0) >= cap.today_limit(p, now):

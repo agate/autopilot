@@ -186,6 +186,8 @@
   "access_switch_note": "Switching takes up to a minute, up to 30 minutes between 22:00 and 06:00.",
   "access_switch_pending": "Switching to {name}. {note}",
   "access_current": "in use",
+  "access_key_error": "Gateway key not working: {error}. New workers are paused.",
+  "access_key_fix": "Run the key command in a terminal.",
   "cap_card_title": "Daily spend limit reached",
   "cap_card_body": "Spent ${spent} of today's ${limit} limit. Running workers keep going. No new worker starts until you choose.",
   "cap_raise50": "Raise today's limit by 50%",
