@@ -46,7 +46,8 @@ GH_PR_FILES = """query($owner:String!, $name:String!, $n:Int!, $after:String){ r
  pullRequest(number:$n){ headRefOid baseRefOid additions deletions
   files(first:100, after:$after){ pageInfo{ hasNextPage endCursor } nodes{ path } } } } }"""
 GH_SINCE_JQ = ("{status: .status, merges: [.commits[] | select(.parents | length > 1) | .sha], "
-               "more: (.total_commits > (.commits | length))}")
+               "more: (if (.total_commits | type) == \"number\" then .total_commits > (.commits | length) "
+               "else null end)}")
 GH_SYNC_FIELDS = "state,headRefOid,reviewRequests,latestReviews,author"
 
 
@@ -1607,6 +1608,11 @@ class RecordedCallsTest(unittest.TestCase):
                 out = subprocess.run([shutil.which("jq"), "-c", GH_SINCE_JQ], input=json.dumps(reply), text=True,
                                      capture_output=True, timeout=30, check=True).stdout
                 self.assertEqual(json.loads(out), {"status": "ahead", "merges": [merge], "more": more})
+        with self.subTest("a reply without total_commits gives more: null, which whole_pr_reason refuses"):
+            reply = {"status": "ahead", "ahead_by": 2, "commits": commits}
+            out = subprocess.run([shutil.which("jq"), "-c", GH_SINCE_JQ], input=json.dumps(reply), text=True,
+                                 capture_output=True, timeout=30, check=True).stdout
+            self.assertEqual(json.loads(out), {"status": "ahead", "merges": [merge], "more": None})
 
 
 # --- criterion 8: nothing is posted ------------------------------------------------------------------------------

@@ -586,9 +586,9 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   `compare` is `repos/<repo>/compare/<reviewed>...<head>` and `whole_pr` is null, or, after a merge commit, a
   rewrite (status `diverged` or `behind`), a 404 on the reviewed commit, or more new commits than the compare reply
   lists (its `total_commits` above the 250 it lists, so a merge past them cannot be ruled out), `compare` starts at
-  `base_sha` and `whole_pr` gives the reason. A compare reply without a boolean `more` is an error, not a delta. A
-  delta keeps the last review's angle names that the current table still has, in their order, as the table has
-  them now; when fewer than 2 remain it picks anew.
+  `base_sha` and `whole_pr` gives the reason. A compare reply without a boolean `more` (as when it has no
+  `total_commits`) is an error, not a delta. A delta keeps the last review's angle names that the current table
+  still has, in their order, as the table has them now; when fewer than 2 remain it picks anew.
 - **[decided by the builder]** The findings and the verdict (`ap2 review verdict --file FILE|- [--data PATH]`,
   secretary's `review verdict`): four groups `confirmed`, `out_of_scope`, `rejected`, `questions`; each finding has
   `id` (lowercase words joined by `-`, unique across the groups), `severity` (`blocker`, `should-fix`, `nit`),

@@ -65,9 +65,10 @@ PR_FILES = """query($owner:String!, $name:String!, $n:Int!, $after:String){ repo
  pullRequest(number:$n){ headRefOid baseRefOid additions deletions
   files(first:100, after:$after){ pageInfo{ hasNextPage endCursor } nodes{ path } } } } }"""
 # A delta's commits since the last review: how they relate to it, which of them are merges, and whether there are
-# more than the reply lists (GitHub's compare lists at most 250 commits but counts them all in total_commits).
+# more than the reply lists (GitHub's compare lists at most 250 commits but counts them all in total_commits). With
+# no number in total_commits, more is null (jq orders null below every number, so a bare `>` would say false).
 SINCE_JQ = ("{status: .status, merges: [.commits[] | select(.parents | length > 1) | .sha], "
-            "more: (.total_commits > (.commits | length))}")
+            "more: (if (.total_commits | type) == \"number\" then .total_commits > (.commits | length) else null end)}")
 COMPARE_LISTS = 250
 SYNC_FIELDS = "state,headRefOid,reviewRequests,latestReviews,author"
 
