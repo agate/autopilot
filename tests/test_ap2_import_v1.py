@@ -599,12 +599,36 @@ class ImportV1Test(unittest.TestCase):
         self.assertEqual(set(card["title"]), {"en", "zh"})
         cards.check_title(card, ("en", "zh"))
 
+    def test_a_question_card_the_old_import_closed_moves_to_one_text_per_language_once(self):
+        self.set_config("secondary_language: zh\n")
+        self.ok("--project", "shop")
+        self.edit_state("projects/shop", lambda s: s["decisions"].pop(0))
+        self.ok("--project", "shop")  # D1 is closed
+        store = Store(self.data)
+        d1 = self.by_key()["v1:shop:D1"]
+        self.assertEqual((d1["lane"], d1["ask"]), ("done", None))
+        store.update(d1["id"], {"title": d1["plain"]["what"]["en"]}, by="test")  # as the old import left it
+        before = self.by_key()["v1:shop:D1"]
+        self.assertIsInstance(before["title"], str)
+        report = self.ok("--project", "shop")
+        self.assertEqual(self.actions(report)["v1:shop:D1"], "update")
+        card = self.by_key()["v1:shop:D1"]
+        self.assertEqual(card["title"], before["plain"]["what"])
+        self.assertEqual(set(card["title"]), {"en", "zh"})
+        self.assertEqual((card["id"], card.get("parent")), (before["id"], before.get("parent")))
+        self.assertEqual((card["lane"], card["ask"]), ("done", None))
+        cards.check_title(card, ("en", "zh"))
+        report = self.ok("--project", "shop")
+        self.assertNotIn("v1:shop:D1", self.actions(report))
+        self.assertEqual(self.by_key()["v1:shop:D1"], card)
+
     def test_a_closed_question_without_plain_words_takes_each_slot_from_its_old_title(self):
         make = importv1._Maker("shop", self.v1 / "projects" / "shop", ("en", "zh"), importv1.Labels(self.v1))
         for title, want in (("Old words", {"en": "Old words", "zh": "Old words"}),
                             ({"en": "Old", "zh": "旧"}, {"en": "Old", "zh": "旧"}),
                             ({"en": "Old"}, {"en": "Old", "zh": "Old"}),
-                            (None, {"en": "D1", "zh": "D1"})):
+                            (None, {"en": "D1", "zh": "D1"}),
+                            ("  ", {"en": "D1", "zh": "D1"})):
             with self.subTest(title=title):
                 old = {"key": "v1:shop:D1", "kind": "question", "title": title, "plain": {"what": {"zh": " "}},
                        "parent": "abc", "source": {"name": "v1-import", "record": {}}}
@@ -612,6 +636,14 @@ class ImportV1Test(unittest.TestCase):
                 self.assertEqual(card["title"], want)
                 self.assertEqual(card["plain"]["what"], want)
                 cards.check_title(card, ("en", "zh"))
+        # A primary language that is not English: a slot the old title lacks falls back to the primary's text.
+        make = importv1._Maker("shop", self.v1 / "projects" / "shop", ("zh", "en"), importv1.Labels(self.v1))
+        old = {"key": "v1:shop:D1", "kind": "question", "title": {"zh": "旧"}, "plain": {"what": {"en": " "}},
+               "parent": "abc", "source": {"name": "v1-import", "record": {}}}
+        card = make.closed(old)["card"]
+        self.assertEqual(card["title"], {"zh": "旧", "en": "旧"})
+        self.assertEqual(card["plain"]["what"], {"zh": "旧", "en": "旧"})
+        cards.check_title(card, ("zh", "en"))
 
     def test_the_title_is_the_primary_languages_text_when_it_is_not_english(self):
         self.set_config("primary_language: zh\nsecondary_language: en\n")

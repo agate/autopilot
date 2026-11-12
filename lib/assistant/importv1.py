@@ -345,8 +345,13 @@ class _Maker:
         fresh = self.say("question_where", project=self.name, about="")
         source = old.get("source") if isinstance(old.get("source"), dict) else {}
         decision = old["key"].rsplit(":", 1)[-1]
-        words = {lang: (what[lang] if isinstance(what.get(lang), str) and what[lang].strip()
-                        else cards.title_for(old, lang, self.langs[0]) or decision) for lang in self.langs}
+        words = {}
+        for lang in self.langs:
+            if isinstance(what.get(lang), str) and what[lang].strip():
+                words[lang] = what[lang]
+                continue
+            text = cards.title_for(old, lang, self.langs[0])  # a one-text title is returned as it is, blank or not
+            words[lang] = text if isinstance(text, str) and text.strip() else decision
         entry = self.card("question", old["key"], "done", words,
                           {lang: where.get(lang) or fresh[lang] for lang in self.langs}, self.say("do_closed"),
                           source.get("record"), None, ask=None)
@@ -376,13 +381,13 @@ def plan(name: str, folder: Path, langs: tuple, labels: Labels, existing: dict, 
             continue
         out.append(make.question(d, task_ids, True))
     # v1 removes a decision from state.json only when it archives it, and it archives only settled ones: a question
-    # card still open whose decision is gone is closed too.
+    # card still open whose decision is gone is closed too, and so is a closed one whose title is still one text.
     ids = task_ids | {d["id"] for d in decisions}
     prefix = f"v1:{name}:"
     for key in sorted(own):
         old = existing[key]
         if (key.startswith(prefix) and key[len(prefix):] not in ids and old.get("kind") == "question"
-                and (old.get("lane") != "done" or old.get("ask") is not None)):
+                and (old.get("lane") != "done" or old.get("ask") is not None or isinstance(old.get("title"), str))):
             out.append(make.closed(old))
     for entry in out:
         try:
