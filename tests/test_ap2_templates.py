@@ -587,7 +587,7 @@ class TitleBriefTest(TempFolder):
 
     def test_a_text_title_of_only_invisible_characters_is_missing(self):
         # cards.blank: U+FEFF counts as white space, so it is not filled in as an invisible title.
-        for title in ("\ufeff", "\ufeff \x1c"):
+        for title in ("\ufeff", "\ufeff \x1c", " \ufeff"):
             with self.subTest(title=title):
                 with self.assertRaises(BriefError) as e:
                     templates.fill_brief("In {title}.", {"title": title})
