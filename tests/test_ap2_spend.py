@@ -503,6 +503,14 @@ class TotalsTest(SpendCase):
         json.dumps(t).encode("utf-8")
         ", ".join(t["unknown_models"]).encode("utf-8")  # what ap2 spend prints
 
+    def test_a_non_ascii_model_name_is_an_unnamed_model(self):
+        wide = {"model": "claude-\u6a21\u578b", "usage": {"input_tokens": 10, "output_tokens": 0}}
+        self.put(extra=[dict(NEW, requestId="req_w", message=wide)])
+        self.launch()
+        t = self.totals()
+        self.assertEqual(t["unknown_models"], ["an unnamed model"])
+        ", ".join(t["unknown_models"]).encode("ascii")  # ap2 spend prints it under any locale
+
     def test_a_naive_now_is_local_time(self):
         self.put()
         self.launch()

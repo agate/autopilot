@@ -237,7 +237,8 @@ def _parse_file(path: Path, table: dict) -> list:
             cost = _cost(table, model, u) if ts is not None else None
         except (TypeError, ValueError, OverflowError):  # a count that is not a number: unknown, never $0
             cost = None
-        name = model if isinstance(model, str) and model.isprintable() else ""  # never printed raw: an unnamed model
+        # Never printed raw: a name that is not printable ASCII is an unnamed model (stdout may not be UTF-8).
+        name = model if isinstance(model, str) and model.isascii() and model.isprintable() else ""
         per_req[rid] = {"id": rid, "ts": ts, "model": _model_key(name), "usd": cost}
     return list(per_req.values())
 
