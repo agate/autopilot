@@ -122,15 +122,18 @@ class ProfileStoreTest(WorkerCase):
 
     def test_names_lists_only_valid_profile_names(self):
         """names() lists a stored file only when its stem is a valid profile name: never one `load` would refuse
-        by name (an upper-case letter, a space, a leading digit, a trailing newline) or a file that is not .json."""
+        by name (an upper-case letter, a space, a leading digit, more than 40 characters, a trailing newline) or a
+        file that is not .json."""
         profiles.save(self.data, gateway())
         folder = self.data / "profiles"
-        others = ["Bad.json", "a b.json", "1x.json", "x.json.bak", "notes.txt"]
+        others = ["Bad.json", "a b.json", "1x.json", "x" + "y" * 40 + ".json", "x.json.bak", "notes.txt"]
         for n in others:
             (folder / n).write_text("{}")
         try:
             (folder / "h\n.json").write_text("{}")
-        except OSError:  # a filesystem that refuses a newline in a name: that one entry is skipped
+        except OSError:
+            # a filesystem that refuses a newline in a name: that entry is skipped, and a "$" in place of "\Z" in
+            # PROFILE_NAME then goes uncaught
             pass
         else:
             others.append("h\n.json")
