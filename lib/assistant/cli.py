@@ -661,7 +661,7 @@ def cmd_cap(args) -> int:
     limit = "none (a subscription profile has no daily cap)" if out["limit"] is None else f"${out['limit']:,.2f}"
     lines = [f"daily cap, {out['day']} (local time):", f"  profile  {out['profile']} ({out['mode']})",
              f"  limit    {limit}" + (f" (+{out['raise_pct']}% today)" if out["raise_pct"] else ""),
-             f"  spent    ${out['spent_today']:,.2f} on gateway profiles today"
+             f"  spent    {cap._usd(out['spent_today'])} on gateway profiles today"  # a clamped total: a marker
              + (", some of it cannot be priced" if out["unknown_today"] else ""),
              f"  card     {out['card'] or 'none'}" + (f" ({out['card_id']})" if out["card_id"] else "")]
     if out["accept_unknown"]:
