@@ -514,6 +514,11 @@ def buckets(**over):
     return out
 
 
+# The word each verdict's en TL;DR starts with, as commands/pr-review.md tells the role, written here rather than
+# read from prreview so a changed word fails.
+TLDR_WORD = {"approve": "Approve", "changes": "Changes", "question": "Question"}
+
+
 def en_only(obj):
     """A copy of `obj` with every {en, zh} text reduced to its en text."""
     if isinstance(obj, dict):
@@ -669,6 +674,19 @@ class CheckTest(Case):
         self.assertEqual(self.errors(rep), [])
         rep["tldr"]["en"] += "x"
         self.assertEqual(self.errors(rep), ["tldr.en: 201 characters; at most 200"])
+        # zh counts characters, not bytes: 200 of them is 600 bytes and still passes.
+        rep["tldr"] = {"en": "Changes: x.", "zh": "一" * 200}
+        self.assertEqual(self.errors(rep), [])
+        rep["tldr"]["zh"] += "一"
+        self.assertEqual(self.errors(rep), ["tldr.zh: 201 characters; at most 200"])
+
+    def test_a_question_report_starts_with_question(self):
+        q = {k: v for k, v in good_finding(id="q-1", severity="nit").items() if k != "checked"}
+        q["question"] = {"en": "Should a retry wait longer?", "zh": "重试要不要等更久？"}
+        rep = self.report("report-review.json", self.cid)
+        rep.update(findings=buckets(questions=[q]), verdict="question",
+                   tldr={"en": "Question: should a retry wait longer?", "zh": "问题：重试要不要等更久？"})
+        self.assertEqual(self.errors(rep), [])
 
     def test_a_good_delta_report_passes(self):
         self.put_report(self.cid, self.report("report-review.json", self.cid))
@@ -745,6 +763,11 @@ class CheckTest(Case):
                 ("markup after the svg", bad(diagram='<svg></svg><iframe src="https://example.com/x"></iframe>'),
                  "diagram: must be one inline <svg>"),
                 ("a missing block", bad(problem=None), "problem: missing"),
+                ("no tldr", bad(tldr=None), "tldr: missing"),
+                ("no solution", bad(solution=None), "solution: missing"),
+                ("no reply_draft", bad(reply_draft=None), "reply_draft: missing"),
+                ("a tldr that is a plain string", bad(tldr="Changes: x."),
+                 "tldr: must be a text object with en, zh"),
                 ("a text missing zh", bad(background={"en": "x"}), "background.zh: missing"),
                 ("a bad time", bad(reviewed_at="2026-11-11 09:30"), "reviewed_at: must be a UTC time"),
                 ("a bad ci", bad(checks={"ci": "yellow", "notes": good["checks"]["notes"]}), "checks.ci: must be"),
@@ -837,7 +860,7 @@ class CheckTest(Case):
             if findings is not None:
                 r["findings"] = buckets(**findings)
                 r["verdict"] = prreview.verdict(r["findings"])
-                word = prreview.VERDICT_WORD[r["verdict"]]
+                word = TLDR_WORD[r["verdict"]]
                 r["tldr"] = {"en": f"{word}: see the findings.", "zh": "看发现。"}
             for k in drop:
                 r.pop(k)
@@ -929,7 +952,7 @@ class ApplyTest(Case):
         rep.update(head_sha=head, reviewed_at=at, earlier=earlier, findings=buckets(**(findings or {})))
         rep["verdict"] = prreview.verdict(rep["findings"])
         if rep["verdict"] != "approve":
-            word = prreview.VERDICT_WORD[rep["verdict"]]
+            word = TLDR_WORD[rep["verdict"]]
             rep["tldr"] = {"en": f"{word}: see the findings.", "zh": "看发现。"}
         self.put_report(cid, rep)
         return rep
