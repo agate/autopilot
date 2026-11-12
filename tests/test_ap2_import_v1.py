@@ -646,6 +646,27 @@ class ImportV1Test(unittest.TestCase):
         card = self.by_key()["v1:shop:D1"]
         cards.validate(card, ("en", "zh"))
 
+    def test_an_open_question_closed_in_a_language_no_longer_configured_says_it_is_closed_there(self):
+        self.set_config("secondary_language: zh\n")
+        self.ok("--project", "shop")
+        before = self.by_key()["v1:shop:D1"]
+        self.assertEqual(before["plain"]["do"]["zh"], importv1.PHRASES["zh"]["do_question"])
+        self.set_config("")
+        self.edit_state("projects/shop", lambda s: s["decisions"].pop(0))
+        report = self.ok("--project", "shop")
+        self.assertEqual(self.actions(report)["v1:shop:D1"], "update")
+        card = self.by_key()["v1:shop:D1"]
+        self.assertEqual((card["lane"], card["ask"]), ("done", None))
+        self.assertEqual(card["plain"]["do"], {lang: importv1.PHRASES[lang]["do_closed"] for lang in ("en", "zh")})
+        for field in ("what", "where"):
+            self.assertEqual(card["plain"][field]["zh"], before["plain"][field]["zh"])
+        # With the language added back, the card is valid and still says there is nothing to do.
+        self.set_config("secondary_language: zh\n")
+        self.ok("--project", "shop")
+        card = self.by_key()["v1:shop:D1"]
+        cards.validate(card, ("en", "zh"))
+        self.assertEqual(card["plain"]["do"]["zh"], importv1.PHRASES["zh"]["do_closed"])
+
     def test_a_task_card_gone_from_v1_keeps_its_one_text_title(self):
         self.set_config("secondary_language: zh\n")
         self.ok("--project", "shop")

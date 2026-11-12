@@ -344,8 +344,9 @@ class _Maker:
         """The closed question card for `old`, a question card whose decision has left state.json: as `question`
         makes it with `open_=False`, keeping the old card's words, `where`, source and parent. Each language's
         `what` (and title slot) is the old `plain.what` text, else the old title in that language (a one-text title
-        the old import wrote, or an object title), else the decision id. The old words in a language no longer
-        configured are kept, as v1 cannot make them again."""
+        the old import wrote, or an object title), else the decision id. In a language no longer configured, the old
+        `what` and `where` words are kept, as v1 cannot make them again, and `do` is the closed phrase (none in a
+        language without phrases)."""
         plain = old.get("plain") if isinstance(old.get("plain"), dict) else {}
         what = plain.get("what") if isinstance(plain.get("what"), dict) else {}
         where = plain.get("where") if isinstance(plain.get("where"), dict) else {}
@@ -359,9 +360,13 @@ class _Maker:
                 continue
             text = cards.title_for(old, lang, self.langs[0])  # a one-text title is returned as it is, blank or not
             words[lang] = text if isinstance(text, str) and text.strip() else decision
-        entry = self.card("question", old["key"], "done", self.kept(what, words),
-                          self.kept(where, {lang: where.get(lang) or fresh[lang] for lang in self.langs}),
-                          self.kept(plain.get("do"), self.say("do_closed")), source.get("record"), None, ask=None)
+        what = self.kept(what, words)
+        where = self.kept(where, {lang: where.get(lang) or fresh[lang] for lang in self.langs})
+        do = self.say("do_closed")
+        for lang in sorted({*what, *where, *self.kept(plain.get("do"), {})} - set(self.langs)):
+            if phrases(lang):  # the old `do` may still say to go answer it: write the closed phrase instead
+                do[lang] = phrases(lang)["do_closed"]
+        entry = self.card("question", old["key"], "done", what, where, do, source.get("record"), None, ask=None)
         if old.get("parent"):
             entry["card"]["parent"] = old["parent"]
         return entry
