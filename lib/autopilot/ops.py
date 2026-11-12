@@ -49,7 +49,9 @@ def _sync(ap: str, st: dict, tasks: list) -> None:
             if "status" in t:
                 cur["status"] = _merge_status(cur["status"], t["status"])
     for t in st["tasks"]:
-        if t["origin"] == "source" and t["id"] not in incoming and t["status"] != "skipped":
+        # A task the source left out is skipped, unless it is already done: finished work stays done (a
+        # sync that lists only open tasks must not relabel merged work, and dependents wait for "done").
+        if t["origin"] == "source" and t["id"] not in incoming and t["status"] not in ("skipped", "done"):
             t["status"] = "skipped"
             events.append(ap, "task_removed_from_source", {"task": t["id"]})
 

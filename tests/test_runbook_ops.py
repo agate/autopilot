@@ -105,3 +105,30 @@ class RunbookOpsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SyncKeepsFinishedWorkTest(unittest.TestCase):
+    """A sync whose list leaves out a finished task must not relabel it: finished work stays done, and
+    dependents that wait for "done" keep moving."""
+
+    def setUp(self):
+        self.td = TempData()
+        self.data = self.td.__enter__()
+        write_ap(self.data, "checkout")
+
+    def tearDown(self):
+        self.td.__exit__(None, None, None)
+
+    def _status(self, tid):
+        return next(t["status"] for t in state.load("checkout")["tasks"] if t["id"] == tid)
+
+    def test_a_done_task_left_out_of_the_source_stays_done(self):
+        ops.tasks_sync("checkout", [src("PROJ-1"), src("PROJ-2")])
+        ops.task_set("checkout", "PROJ-1", {"status": "done"})
+        ops.tasks_sync("checkout", [src("PROJ-2")])
+        self.assertEqual(self._status("PROJ-1"), "done")
+
+    def test_an_open_task_left_out_of_the_source_is_still_skipped(self):
+        ops.tasks_sync("checkout", [src("PROJ-1"), src("PROJ-2")])
+        ops.tasks_sync("checkout", [src("PROJ-2")])
+        self.assertEqual(self._status("PROJ-1"), "skipped")
