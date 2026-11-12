@@ -285,24 +285,49 @@ def ensure_light() -> Path:
     return f
 
 
-def apply(act: dict = None) -> list:
-    """Re-merge the overlays into the settings files already written, without rediscovering tools: worker and
-    one-off files for `act` (default the active profile), page files for the subscription."""
-    from autopilot import perms
-    root, done = paths.data_root(), []
+class SettingsUnreadable(RuntimeError):
+    """apply() could not read or merge some settings files. `done` are the files it rewrote, `skipped` the
+    (path, exception class) pairs it left alone."""
 
-    def remerge(f: Path, floor: dict, p: dict) -> None:
-        perms._write(f, merge(floor, overlay(p)))
+    def __init__(self, done: list, skipped: list):
+        self.done, self.skipped = done, skipped
+        names = ", ".join(str(f) for f, _ in skipped)
+        super().__init__(f"could not read or merge these settings files: {names}. "
+                         "Fix or delete them, then run `ap perms write <ap>` for each autopilot.")
+
+
+def apply(act: dict = None) -> list:
+    """Re-merge the overlays into the settings files already written, without rediscovering tools: the page files
+    (dispatcher, light) for the subscription first, then worker and one-off files for `act` (default the active
+    profile). A file that cannot be read or merged is skipped and logged (settings_unreadable); the rest are still
+    rewritten, and SettingsUnreadable is raised at the end naming every skipped file."""
+    from autopilot import perms
+    root, done, skipped = paths.data_root(), [], []
+
+    def remerge(f: Path, floor, p: dict) -> None:
+        try:
+            if callable(floor):
+                floor = floor()
+            perms._write(f, merge(floor, overlay(p)))
+        except (ValueError, KeyError, AttributeError, TypeError) as e:   # JSONDecodeError is a ValueError
+            skipped.append((f, type(e).__name__))
+            try:
+                events.append_global("settings_unreadable", {"path": str(f), "error": type(e).__name__})
+            except Exception:  # noqa: BLE001 - logging must not hide the skip
+                pass
+            return
         done.append(f)
 
     act, page = act or active(), page_profile()
-    files = sorted((root / "projects").glob("*/settings.json")) + sorted((root / "projects").glob("*/oneoff-*.json"))
-    for f in files:
-        remerge(f, json.loads(f.read_text()), act)
     disp = root / "settings-dispatcher.json"
     if disp.exists():
-        remerge(disp, json.loads(disp.read_text()), page)
-    remerge(light_settings(), perms.static_settings("light"), page)
+        remerge(disp, lambda: json.loads(disp.read_text()), page)
+    remerge(light_settings(), lambda: perms.static_settings("light"), page)
+    files = sorted((root / "projects").glob("*/settings.json")) + sorted((root / "projects").glob("*/oneoff-*.json"))
+    for f in files:
+        remerge(f, lambda f=f: json.loads(f.read_text()), act)
+    if skipped:
+        raise SettingsUnreadable(done, skipped)
     return done
 
 
@@ -320,7 +345,14 @@ def migrate_from_config() -> bool:
     if errs:
         raise ValueError("; ".join(errs))
     if cfg.get("active_profile") in (None, SUBSCRIPTION):
-        apply(p)
+        try:
+            apply(p)
+        except SettingsUnreadable as e:
+            # Only worker and one-off files may be left out: the page files must carry the profile, or fail.
+            page = {str(root / n) for n in ("settings-dispatcher.json", "settings-light.json")
+                    for root in (paths.data_root(),)}
+            if any(str(f) in page for f, _ in e.skipped):
+                raise
     save(p)
     for key, _ in _MOVED:
         config.reset_setting(key)

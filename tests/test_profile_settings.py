@@ -173,3 +173,48 @@ class ProfileSettingsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UnreadableSettingsTest(unittest.TestCase):
+    def test_a_corrupt_worker_file_does_not_stop_the_page_files(self):
+        with TempData() as d:
+            write_files()
+            bad = paths.ap_dir("b") / "settings.json"
+            bad.parent.mkdir(parents=True, exist_ok=True)
+            bad.write_text("{nope")
+            profile.save(gateway())
+            with self.assertRaises(RuntimeError) as cm:
+                profile.use("g")
+            self.assertIn(str(bad), str(cm.exception))
+            self.assertIn("ap perms write", str(cm.exception))
+            for f in (d / "settings-dispatcher.json", d / "settings-light.json"):
+                self.assertEqual(read(f)["env"]["AUTOPILOT_PROFILE"], "subscription", f)
+            self.assertEqual(profile.active()["name"], "subscription")   # not switched: a worker file is stale
+            ev = [json.loads(x) for x in (d / "events-global.jsonl").read_text().splitlines()]
+            got = [e["data"] for e in ev if e["type"] == "settings_unreadable"]
+            self.assertEqual((got[0]["path"], got[0]["error"]), (str(bad), "JSONDecodeError"))
+
+    def test_other_shapes_are_skipped_too_and_good_files_are_still_merged(self):
+        with TempData():
+            write_files()
+            good = paths.ap_dir("a") / "settings.json"
+            for name, text in (("c", "[1]"), ("e", "{}")):
+                f = paths.ap_dir(name) / "settings.json"
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_text(text)
+            profile.save(gateway())
+            with self.assertRaises(RuntimeError) as cm:
+                profile.apply(profile.load("g"))
+            for n in ("c", "e"):
+                self.assertIn(str(paths.ap_dir(n) / "settings.json"), str(cm.exception))
+            self.assertEqual(read(good)["env"]["AUTOPILOT_PROFILE"], "g")
+
+    def test_migration_saves_the_profile_when_only_worker_files_were_skipped(self):
+        with TempData() as d:
+            write_files()
+            bad = paths.ap_dir("b") / "settings.json"
+            bad.parent.mkdir(parents=True, exist_ok=True)
+            bad.write_text("{nope")
+            self.assertTrue(profile.migrate_from_config())
+            self.assertTrue(profile.path("subscription").exists())
+            self.assertEqual(read(d / "settings-light.json")["env"]["AUTOPILOT_PROFILE"], "subscription")
