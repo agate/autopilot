@@ -1201,7 +1201,8 @@ class PrKeyTest(EngineCase):
         raw = ("Message_ts: 1730000000.123456 Channel: C0123ABCD\n"
                "Text: PTAL https://github.com/example/widgets/pull/42/files and example/gadgets#7, "
                "also see example/tools#123 and evilgithub.com/example/evil/pull/9 and "
-               "https:\\/\\/github.com\\/example\\/escaped\\/pull\\/3\n")
+               "https:\\/\\/github.com\\/example\\/escaped\\/pull\\/3 and my-github.com/example/dash/pull/5 and "
+               "githubXcom/example/dotted/pull/6\n")
         base = {"id": "1730000000.123456", "at": "1730000000.123456", "text": "PTAL", "place_id": "C0123ABCD",
                 "category": "review_request"}
         cases = [
@@ -1211,6 +1212,8 @@ class PrKeyTest(EngineCase):
             ("example/widgets#4", "form.pr 'example/widgets#4' is not in the raw output"),  # pull/42, not /4
             ("example/tools#12", "form.pr 'example/tools#12' is not in the raw output"),    # not a whole token
             ("example/evil#9", "form.pr 'example/evil#9' is not in the raw output"),        # not github.com
+            ("example/dash#5", "form.pr 'example/dash#5' is not in the raw output"),        # my-github.com, not github.com
+            ("example/dotted#6", "form.pr 'example/dotted#6' is not in the raw output"),    # githubXcom: the dot is a dot
             ("other/widgets#42", "form.pr 'other/widgets#42' is not in the raw output"),
             ("example/widgets#042", "form.pr 'example/widgets#042' is not <owner>/<repo>#<number>"),
             ("https://github.com/example/widgets/pull/42",
