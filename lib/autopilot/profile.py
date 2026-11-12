@@ -12,7 +12,16 @@ from pathlib import Path
 from autopilot import cli, config, events, paths
 
 SUBSCRIPTION = "subscription"
-FORBIDDEN_SETTINGS = ("permissions", "hooks")
+FORBIDDEN_SETTINGS = ("permissions", "hooks", "apiKeyHelper")
+_CREDENTIAL_WORDS = ("KEY", "TOKEN", "SECRET", "PASSWORD")
+_CREDENTIAL_NAMES = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")
+
+
+def _credential_env(env) -> list:
+    if not isinstance(env, dict):
+        return []
+    return [k for k in env if isinstance(k, str)
+            and (k.upper() in _CREDENTIAL_NAMES or any(w in k.upper() for w in _CREDENTIAL_WORDS))]
 GATEWAY_FIELDS = ("base_url", "key_command", "refresh_command", "rotate_command", "models_command")
 
 # The settings that moved into the subscription profile: (config key, profile field).
@@ -69,10 +78,15 @@ def validate(p: dict) -> list:
     else:
         for k in FORBIDDEN_SETTINGS:
             if k in settings:
-                errs.append(f"settings.{k}: not allowed in a profile")
+                errs.append(f"settings.{k}: not allowed in a profile"
+                            + (" (put the key command in gateway.key_command)" if k == "apiKeyHelper" else ""))
+        for k in _credential_env(settings.get("env")):
+            errs.append(f"settings.env.{k}: looks like a credential; a profile stores commands, never keys")
     env = p.get("env") or {}
     if not isinstance(env, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items()):
         errs.append("env: must map names to strings")
+    for k in _credential_env(env):
+        errs.append(f"env.{k}: looks like a credential; a profile stores commands, never keys")
     return errs
 
 

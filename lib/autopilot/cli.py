@@ -42,12 +42,15 @@ FAST = {"hook-prompt": "autopilot.snapshot", "hook-guard": "autopilot.guard",
 
 
 def main(argv: list) -> int:
-    from autopilot import profile
-    profile.migrate_from_config()
     if argv and argv[0] in FAST:
         importlib.import_module(FAST[argv[0]])
     else:
         load_all()
+        try:
+            from autopilot import profile
+            profile.migrate_from_config()
+        except Exception as e:   # a failed migration must not break the command
+            print(f"ap: could not migrate settings to the subscription profile: {e}", file=sys.stderr)
     if not argv or argv[0] not in COMMANDS:
         print(usage(), file=sys.stderr)
         return 2

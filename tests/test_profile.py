@@ -35,6 +35,31 @@ class ProfileTest(unittest.TestCase):
             errs = profile.validate({"name": "s", "mode": "subscription", "settings": bad})
             self.assertTrue(errs, bad)
 
+    def test_rejects_credential_env(self):
+        for name in ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "my_secret", "DB_Password", "X_TOKEN"):
+            errs = profile.validate({"name": "s", "mode": "subscription", "env": {name: "v"}})
+            self.assertTrue(errs, name)
+        self.assertEqual(profile.validate({"name": "s", "mode": "subscription", "env": {"A": "b"}}), [])
+
+    def test_rejects_credential_in_settings_env(self):
+        for settings in ({"env": {"ANTHROPIC_AUTH_TOKEN": "x"}}, {"env": {"api_key": "x"}}, {"apiKeyHelper": "echo k"}):
+            errs = profile.validate({"name": "s", "mode": "subscription", "settings": settings})
+            self.assertTrue(errs, settings)
+
+    def test_fast_command_skips_migration(self):
+        from unittest import mock
+        with TempData(), mock.patch.object(profile, "migrate_from_config") as m, \
+                mock.patch("sys.stdin", io.StringIO("{}")), contextlib.redirect_stdout(io.StringIO()):
+            cli.main(["hook-park"])
+            m.assert_not_called()
+
+    def test_migration_failure_only_warns(self):
+        from unittest import mock
+        with TempData(), mock.patch.object(profile, "migrate_from_config", side_effect=OSError("disk")):
+            code, _, err = run("profile", "list")
+            self.assertEqual(code, 0)
+            self.assertIn("disk", err)
+
     def test_models_checked_against_models_command(self):
         with TempData():
             p = {"name": "g", "mode": "gateway", "model": "claude-opus-5-5", "small_model": "claude-haiku-4-5",
