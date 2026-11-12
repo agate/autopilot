@@ -141,6 +141,17 @@ class ProfileNameTest(unittest.TestCase):
             errs = profile.validate({"name": name, "mode": "subscription"})
             self.assertFalse([e for e in errs if e.startswith("name:")], name)
 
+    def test_a_profile_with_an_underscore_saves_loads_and_lists(self):
+        with TempData():
+            profile.save({"name": "team_project", "mode": "subscription", "label": "team_project",
+                          "model": None, "effort": "high", "env": {}, "settings": {}})
+            self.assertEqual(profile.load("team_project")["name"], "team_project")
+            self.assertIn("team_project", profile.names())
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(cli.main(["profile", "list"]), 0)
+            self.assertIn("team_project", out.getvalue())
+
     def test_bad_profile_names_are_refused(self):
         for name in ("", "Team", "_x", "1x", "a/b", "a.b", "a b", "x" * 41):
             errs = profile.validate({"name": name, "mode": "subscription"})
