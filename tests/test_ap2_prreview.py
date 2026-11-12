@@ -604,7 +604,8 @@ class VerdictTest(Ap2Case):
                 ("a text in a language not configured",
                  buckets(confirmed=[good_finding(impact={"en": "x", "zh": "x", "fr": "x"})]),
                  "findings.confirmed[0].impact.fr: not a configured language (en, zh)"),
-                ("not four buckets", {"confirmed": []}, "findings: must be an object")):
+                ("not four buckets", {"confirmed": []}, "findings: must be an object"),
+                ("an extra bucket", {**buckets(), "nits": []}, "findings: must be an object")):
             with self.subTest(name):
                 code, out = self.verdict(obj)
                 self.assertEqual(code, 1)
@@ -650,6 +651,11 @@ class CheckTest(Case):
             prreview.check(missing, self.cid, cfg=self.cfg)
         self.assertFalse(missing.exists())
 
+    def test_a_pending_ci_passes(self):
+        rep = self.report("report-review.json", self.cid)
+        rep["checks"]["ci"] = "pending"
+        self.assertEqual(self.errors(rep), [])
+
     def test_a_tldr_of_200_characters_passes(self):
         rep = self.report("report-review.json", self.cid)
         rep["tldr"]["en"] = "Changes: " + "x" * 191
@@ -694,6 +700,8 @@ class CheckTest(Case):
 
         script = '<svg viewBox="0 0 10 10"><script>alert(1)</script></svg>'
         for name, rep, words in (
+                ("an unknown verdict", bad(verdict="request_changes"),
+                 "verdict: must be one of approve|changes|question"),
                 ("a verdict the findings do not give", bad(verdict="approve",
                                                            tldr={"en": "Approve: fine.", "zh": "没问题。"}),
                  "verdict: must be changes (it follows the findings)"),
