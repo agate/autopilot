@@ -12,6 +12,18 @@ secondary_language, languages, settings, lanes, projects, heartbeat, cards, full
 - `phone_hide_quotes`: a card made from a source record shows "Ana wrote a message in #team" (engine's
   HIDDEN_PHRASES) instead of the record's words, in its row (`title: null`, `title_hidden` per language) and in
   its full card (title and `plain.what` per language, `source.record` and the source block).
+- Local paths: in three texts that can name a file on this Mac, `full[id].template_error`, `heartbeat.error` and
+  `full[id].card.ask.text`, the data folder (as given and resolved) becomes `<data>` and then the home folder (as
+  given and resolved) becomes `~`; the rest of each text stays. A folder's path is replaced wherever it sits, also
+  inside a longer path (`/mnt/backup/Users/x/a` reads `/mnt/backup~/a`: a wrong label, never a leak), but only as a
+  whole name on its right side: an optional dot and then a run of ASCII name characters (letters, digits and
+  `_ - + @ ~ $ % # =`) right after it make it a longer name only when the run holds a letter or digit (`/Users/xy`,
+  `/Users/x-old` and `/Users/x.old` stay for home `/Users/x`), so `/Users/x.` and markdown marks like `_/Users/x_`,
+  `_/Users/x._` or `~~/Users/x~~` read `~.`, `_~_`, `_~._` and `~~~~~` (a folder literally named `/Users/x_` would
+  read `~_`: a wrong label, never a leak). A non-ASCII character (Chinese, `é`) right next to a path does not stop
+  it, so a folder `/Users/xé` reads `~é`: a wrong name, never a leak. An ask text that is not a string (an object per
+  language, a list) has each of its strings scrubbed, an object's keys and values alike. A home of `/` is left
+  alone. Other paths (`/private/var/...`) stay.
 
 Building writes nothing (the store is read without its lock file, as the local page's GETs do), starts no process
 and opens no connection. Publishing the data is a later dispatcher step, live mode only.
@@ -19,6 +31,8 @@ and opens no connection. Publishing the data is a later dispatcher step, live mo
 from __future__ import annotations
 
 import copy
+import os
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -28,6 +42,60 @@ from assistant.config import ConfigError
 from assistant.sources import Loader, SourceError
 
 MAC_ONLY = ("sessions",)  # card fields that stay on the Mac (and `source.raw`, a path to a file on it)
+
+
+class _Scrub:
+    """Replaces the data folder with `<data>` and then the home folder with `~` in a text (see the module's words)."""
+
+    def __init__(self, data: Path):
+        self.steps = [(self._pattern(_forms(data)), "<data>")]
+        try:
+            home = Path.home()
+        except (RuntimeError, KeyError, OSError):  # no HOME and no password entry: nothing to replace
+            home = None
+        if home is not None:
+            self.steps.append((self._pattern(_forms(home)), "~"))
+
+    @staticmethod
+    def _pattern(forms: list) -> Optional["re.Pattern"]:
+        if not forms:
+            return None
+        # Longest first, so `/a/b/c` wins over `/a/b` when both forms start at the same spot; wherever it sits, but a
+        # whole path name only, not a longer name's start: an optional dot and then a run of ASCII name characters
+        # that holds a letter or digit may not come next, so a dot and markdown marks (`.`, `_`, `._`, `~~`) still
+        # end it. ASCII only, so a non-ASCII character (Chinese, `é`) next to a path still ends it.
+        alts = "|".join(re.escape(f) for f in sorted(forms, key=len, reverse=True))
+        name = r"[\w+@~$%#=-]"
+        return re.compile(rf"(?:{alts})(?!\.?{name}*[A-Za-z0-9])", re.ASCII)
+
+    def __call__(self, text):
+        if isinstance(text, dict):  # an ask text that is not a string: each of its strings is scrubbed, keys too
+            return {self(k): self(v) for k, v in text.items()}
+        if isinstance(text, list):
+            return [self(v) for v in text]
+        if not isinstance(text, str):
+            return text
+        for pattern, by in self.steps:
+            if pattern is not None:
+                text = pattern.sub(by, text)
+        return text
+
+
+def _forms(path: Path) -> list:
+    """The path as given and resolved, each without a trailing slash; the root and empty paths are left out."""
+    out = []
+    for p in (str(path), _resolved(path)):
+        p = p.rstrip("/") if p else p
+        if p and p not in out and os.path.isabs(p):
+            out.append(p)
+    return out
+
+
+def _resolved(path: Path) -> str:
+    try:
+        return str(path.resolve())
+    except (OSError, RuntimeError):
+        return ""
 
 
 def on_phone(card: dict, cfg: config.Config, now: datetime) -> bool:
@@ -113,6 +181,7 @@ def build(data, cfg: Optional[config.Config] = None, now: Optional[datetime] = N
         return phone_row(by_id[r["id"]]) if r["id"] in by_id else {"id": r["id"], "off_phone": True}
 
     catalog = _once(lambda: templates.catalog(data))
+    scrub = _Scrub(data)
     full = {}
     for c in shown:
         out = copy.deepcopy(server.full_card(store, data, c, langs, found=found, catalog=catalog))
@@ -130,6 +199,10 @@ def build(data, cfg: Optional[config.Config] = None, now: Optional[datetime] = N
             card["source"]["record"] = record
             out["source_block"]["text"] = None
             out["source_block"]["record"] = copy.deepcopy(record)
+        if "template_error" in out:
+            out["template_error"] = scrub(out["template_error"])
+        if isinstance(card.get("ask"), dict) and "text" in card["ask"]:
+            card["ask"]["text"] = scrub(card["ask"]["text"])
         out["children"] = [neighbour(r) for r in out["children"]]
         out["links"] = [neighbour(r) for r in out["links"]]
         full[c["id"]] = out
@@ -155,8 +228,15 @@ def build(data, cfg: Optional[config.Config] = None, now: Optional[datetime] = N
             "secondary_language": cfg.secondary_language, "languages": list(langs),
             "settings": {"history_days": cfg.phone_history_days, "lanes": list(cfg.phone_lanes),
                          "hide_quotes": cfg.phone_hide_quotes},
-            "lanes": lanes, "projects": projects, "heartbeat": server.heartbeat(data, now),
+            "lanes": lanes, "projects": projects, "heartbeat": _scrubbed_heartbeat(data, now, scrub),
             "cards": [phone_row(c) for c in shown], "full": full}
+
+
+def _scrubbed_heartbeat(data: Path, now: datetime, scrub: _Scrub) -> dict:
+    out = server.heartbeat(data, now)
+    if "error" in out:
+        out["error"] = scrub(out["error"])
+    return out
 
 
 def _once(fn):

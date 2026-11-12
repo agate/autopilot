@@ -363,7 +363,7 @@ A user template, or one Claude drafts, can combine roles and write briefs. It ca
 role keeps the tools and permission floor it ships with. Which folder a role runs in comes from the card (its repo
 worktree, or the data folder).
 
-### 6.1 Review angles **[proposed]**
+### 6.1 Review angles **[decided]**
 
 What a code review checks lives in one place, and the user can extend it without code. Today it lives in two
 tables that do not know about each other: v1's PR loop (`commands/pr-loop.md`, "Roles to add beside Correctness")
@@ -392,6 +392,101 @@ the PR loop on the user's own PRs and the PR review of other people's PRs.
 - name: Accessibility & UX
   off: true            # this repo has no UI
 ```
+
+How it is built (`lib/assistant/angles.py`, the table in `review/angles.yaml`):
+
+- **[decided by the builder]** Files. Built in: `<plugin>/review/angles.yaml` (the repo root's `review/`, next to
+  `sources/`). The user's: `<data>/review/angles.yaml`. The repo's: `.autopilot/review.yaml` read from the reviewed
+  commit, never the working tree, read-only (`git rev-parse --show-toplevel` to name the file from the repo root,
+  where it is read, so a subfolder given as the repo still names the root's file, and a bare repo keeps the path
+  given; `git rev-parse` to pin the commit, `git ls-tree --full-tree` to find the file and its size from the repo
+  root, `git cat-file blob`). The path missing at that commit is no layer; any
+  other git failure (no such repo or commit, a commit name starting with `-`, a folder or link at the path) is an
+  `AngleError`. Every git call runs with `GIT_NO_LAZY_FETCH=1` (git 2.44 and later; an older git ignores it and
+  starts the fetch), `GIT_ALLOW_PROTOCOL=` (no transport at all, git 2.12 and later, so a fetch an older git starts
+  cannot reach the remote) and `GIT_TERMINAL_PROMPT=0`, so a partial clone does not get the file's blob from its
+  remote. A blob the clone lacks is refused as "not in this clone (a partial clone)" (on an older git, whose fetch
+  fails inside `ls-tree`, as "cannot list the commit's files" with git's "could not fetch ... from promisor
+  remote"); one that is there but that git lists with no size is refused as "may be corrupt". A missing user file is no layer; an empty file holds no angles. Each file is a YAML list of maps of
+  at most `sources.MAX_SOURCE` bytes (a leading BOM is dropped), read with `yamlish` (as the list under one wrapper
+  key, so line numbers stay the file's own). A file that is not a list (a map, a flow list such as `[]`, a bare
+  word, or a top-level `angles:` beside its items) is refused as "must be a list of angles".
+- **[decided by the builder]** Limits, since a repo's file comes from a PR author: a line whose `[` / `{` nest more
+  than 32 deep, or that starts with more than 32 `- ` list items (`MAX_NESTING`; a real angle needs a few), is
+  refused, naming the line, before the file is parsed, since each nested level costs the parser memory (a key path
+  per nested key, a copy of the rest of the line per item); at most 200 globs in the whole file, across every
+  `when.paths`, an `extends` without its own `when` counting the globs it takes from its base (`MAX_GLOBS`, refused
+  at the entry that passes it); at most 256 characters in one glob (`MAX_GLOB`); no glob or kind twice in one
+  `when`. The picker's time is then linear in the total length of the changed paths times the number of globs, plus
+  a cost per angle that does not grow with path length, whatever the globs: it reads each path once per glob, a few
+  integer steps per character, so a repo file adds at most 200 such reads per changed file, and up to 200 more for
+  the globs of the angles it picks, which are read once more to write their `why`. It decides every match first, without writing anything, then
+  writes a `why` only for the at most `count() - 1` angles it picks, and each PR kind's example files once per pick.
+  So its memory is linear in the total length of the changed paths plus a cost per angle that does not grow with
+  path length, and kinds-only angles, which no cap bounds, add only that per-angle cost each. Measured with 200
+  globs each kept alive to the end of every path and matching nothing: about 50 to 65 microseconds per
+  character of changed paths, so 0.5 s for four crafted files of 2,559 characters, 3 s for twenty,
+  and 13 s for one path of 256,000 characters; a picked angle whose globs match only at the very end reads the
+  paths a second time, so the worst case is about twice these. Changed paths are the caller's data and are not capped; their total
+  length sets the cost. A `why` writes out at most three reasons and only counts the rest. Brackets are counted as
+  `yamlish` reads them (its comment scan: a comment ends the line, a quote opens a string only where a value starts,
+  a bracket opens a collection only where a value starts or inside an open one), so brackets it reads as text are
+  not counted, and the count is never below its real depth.
+- **[decided by the builder]** An angle's keys: `name` (non-empty text, unique in its file, compared as written),
+  `question` and `brief` (non-empty text, which may span lines), `when`, plus `extends` and `off`. A `name`, an
+  `extends` target and a glob must be one line of text, since each is shown on one line: a control character
+  (Unicode category Cc, such as a newline, a tab or an escape), a line or paragraph separator (Zl, Zp) or a bidi
+  override or isolate (U+202A to U+202E, U+2066 to U+2069, which make text read in another order) is refused; any
+  other character is text (a joined emoji, a no-break space). A `question` or `brief` refuses the same characters
+  but a newline and a tab, since a picked angle hands them on as they are. Any other key is refused, naming the file, line and
+  key. Text from the file in an error (a key, name, kind or glob) is shown as its repr, control characters escaped,
+  cut to 80 characters. A key in `templates.WIDEN` (compared with `templates._norm`, so `allowedTools`,
+  `allowed-tools` and `allowed_tools` are one key), at any depth, is refused first with an `AngleWidenError`: an
+  angle cannot add tools or permissions. `AngleError` and `AngleWidenError` are `ConfigError`s; a broken angle file
+  stops the load with a clear error, like a broken template (D19).
+- **[decided by the builder]** `when` is `always`, or a map with `paths` (a non-empty list of globs) and/or `kinds`
+  (a non-empty list of `data`, `infra`, `api`, `ci`, `ui`, `tests`, `docs`), neither holding an entry twice. Kinds
+  come from file paths with secretary's patterns (`AREAS`, `TESTS`, `DOCS`), copied into `angles.py`; as in
+  secretary, the five code kinds are read only from files that are neither tests nor docs (`api/test_x.py` is
+  `tests`, not `api`). A glob matches the whole repo-relative path: `**` is any number of folders (a final `**` is
+  everything under its folder), `*` and `?` stay inside one path segment, and every other character is itself (`[`
+  included). A glob starting with `/` is refused, since it could never match. A glob comes from a file a PR author
+  can write, so the matcher never backtracks: each glob is compiled once per pick into a bit-parallel automaton
+  (one bit per glob character, all its states in one integer), and a path is read once, character by character, a
+  few integer steps each. An angle matches when any changed file matches one of its globs, or the PR has one of its
+  kinds.
+- **[decided by the builder]** Layers: built in, then the user's, then the repo's; the later one wins on the same
+  name. An entry with neither `extends` nor `off` is a whole angle (all of `name`, `question`, `when`, `brief`) and
+  adds or replaces; a replaced angle keeps its place in the table and a new one goes last. `extends: <name>` merges
+  the entry's fields over the angle of that name as the earlier layers left it (fields replaced, never merged
+  deeper); the result takes the entry's `name`, which may be left out and then is the `extends` name (so `- extends:
+  Portability` with one `brief:` line is enough). Extending a name no earlier layer has is refused, naming the file
+  and line (an angle added earlier in the same file does not count), and extending a name an earlier layer turned
+  off says which file and line turned it off. `off: true`, with only `name` beside it, removes that angle; an `off`
+  naming no earlier angle is not an error (a repo file can outlive a rename) and lands in the table's `unknown_off`
+  with its file and line. Correctness can be extended or replaced, never turned off; the built-in file must hold it.
+- **[decided by the builder]** Origin: every loaded angle says where it came from, `built-in`, `user`, `repo`,
+  `user, extends <name>` or `repo, extends <name>`, and the file that set it (the repo's as `<repo root>/.autopilot/
+  review.yaml at <commit>`).
+- **[decided by the builder]** The picker, `pick(table, files, mode, changed_lines)`, with `mode` `loop` or
+  `review`. Correctness always first, whatever its `when`. Then the matching angles: the repo's, then the user's,
+  then built in; inside one layer, file order (the built-in file is ordered riskiest first: data, infra, api, ci,
+  ui, tests, docs, as secretary's `AREAS`, then `TESTS`, `DOCS`). Count: the PR loop takes 2 to 4 reviewers in all
+  (Correctness plus up to 3); a PR review takes 3, or 2 when every file is docs or it changes fewer than 30 lines
+  (`SMALL_LINES`, secretary's `review_small_lines`). When only Correctness is picked, the fallback angles fill to 2:
+  Failure modes & observability, then Test value (secretary's `CODE_ROLES`), whichever is loaded and not off, as
+  loaded. Each picked angle carries `name`, `question`, `brief`, `origin`, `file` and a one-line `why`: the globs
+  or kinds that matched with up to three of their files (at most three such reasons, then `(+N more)`), `always`,
+  or `fallback`. A file's name in it has the characters a name may not hold escaped (`\n`), so it stays one line.
+- **[decided by the builder]** The built-in table merges v1's and secretary's, one angle per point of view, with
+  secretary's question for each and a short brief from both: Correctness (always); Data correctness & backfill,
+  Performance & locking (data); Blast radius & rollback, Security & least privilege (infra); API contract & backward
+  compatibility, Failure modes & observability (api); Portability, Security of secrets & permissions (ci);
+  Cross-platform parity, Accessibility & UX (ui); Test value, Flakiness & isolation (tests); Accuracy, Reader
+  clarity (docs). v1's "A tool or harness other teams use" row folds into Blast radius & rollback (its question
+  asks who else runs it) and Flakiness & isolation (its brief: a harness other teams run counts double).
+- Not built here: running the angles (the PR loop and the `pr-review` role, 6.2 and 6.3) and showing on the page
+  that a built-in angle the user changed was updated.
 
 ### 6.2 PR review cards **[proposed]**
 
@@ -719,12 +814,13 @@ Calls the author made without asking (check them):
   briefs) and `roles.py` (the shipped roles and their tools); the source engine: `sources.py` (loading,
   `extends:`, checks), `form.py` (the form, the path language, `{field}` patterns and derived fields) and
   `engine.py` (read, fill, check, link and key, sort, card); scan sessions: `scan.py` (the plan, the brief, the
-  save-raw hook and the take); for workers, `workers.py`, `resources.py`, `transcripts.py` and `projects.py`
-  (see the workers entry below); and the local page: `server.py` (the server, its JSON routes and the request
-  guard, run by `ap2 serve`) and `builtin/page/local.html` (the one page, inline CSS and JS, found from
-  `server.py`'s own path); and the phone page's data: `phone.py` (`build`, run by `ap2 phone build`).
-  `ap2 config [--data PATH]` prints the effective config and `data_dir` as JSON.
-  With stdout
+  save-raw hook and the take); review angles: `angles.py` (the three layers, kinds, globs and the picker,
+  design 6.1) with the built-in table in `review/angles.yaml` at the plugin root; for workers, `workers.py`,
+  `resources.py`, `transcripts.py` and `projects.py` (see the workers entry below); the local page:
+  `server.py` (the server, its JSON routes and the request guard, run by `ap2 serve`) and
+  `builtin/page/local.html` (the one page, inline CSS and JS, found from `server.py`'s own path); and the
+  phone page's data: `phone.py` (`build`, run by `ap2 phone build`). `ap2 config [--data PATH]` prints the
+  effective config and `data_dir` as JSON. With stdout
   closed, `ap2 config` sets up the folder, prints nothing and exits 0; when its reader goes away
   (`ap2 config | true`) it exits 1 with nothing on stderr; when a write fails (a full disk) it prints one line,
   `ap2: cannot write the output: ...`, and exits 1. `ap2` with no arguments prints the usage, listing the
@@ -1338,13 +1434,15 @@ Calls the author made without asking (check them):
   - The document: `{generated_at, mode, primary_language, secondary_language, languages, settings:
     {history_days, lanes, hide_quotes}, lanes, projects, heartbeat, cards, full}`. `lanes` (all four keys) counts
     only the cards on the phone; `projects` is the local page's project list over those cards (each `title` per
-    language, as there), `done`/`total` from the children on the phone; `heartbeat` is the local page's; `cards`
-    are the local page's rows in its order. These are the JSON shapes of the local page entry above.
+    language, as there), `done`/`total` from the children on the phone; `heartbeat` is the local page's (its
+    `error` scrubbed, see Local paths); `cards` are the local page's rows in its order. These are the JSON shapes of
+    the local page entry above.
   - `full` maps each card id in `cards` to the local page's full card (`GET /api/cards/<id>`), built by the
-    same function, `server.full_card`, with two changes only: the card's `sessions` and `source.raw` (a path to
-    a file on this Mac) are removed, and a child or link that is not on the phone (outside the window or the
-    lanes) is `{id, off_phone: true}` with no title or words, so old history does not reach the phone through a
-    link. A link to a card that is gone stays `{id, missing: true}`. Questions and their answers stay (9.4).
+    same function, `server.full_card`, with these changes only (plus hiding and the Local paths scrub below): the
+    card's `sessions` and `source.raw` (a path to a file on this Mac) are removed, and a child or link that is not
+    on the phone (outside the window or the lanes) is `{id, off_phone: true}` with no title or words, so old
+    history does not reach the phone through a link. A link to a card that is gone stays `{id, missing: true}`.
+    Questions and their answers stay (9.4).
   - Hiding what people wrote (`phone_hide_quotes: true`), for every card with a source record: the row has `title:
     null` and `title_hidden: {<language>: text}` for each configured language, so the page shows the chosen language
     only (anti-goal 1); the full card's `title` is the text per language, like `title_hidden`, `plain.what` is the
@@ -1359,6 +1457,32 @@ Calls the author made without asking (check them):
     unchanged.
   - **[decided by the builder]** Once titles have one slot per language, a hidden card's full-card `title` holds
     the phrase per language, so one screen never shows both languages.
+  - Local paths: three texts can name a file on this Mac, `full[id].template_error` (a bad user template's
+    file), `heartbeat.error` (`<data>/gate.json`) and `full[id].card.ask.text` (a worker's ask, such as a parked
+    worker's worktree). In the phone's copy of each, the data folder's path (as given and resolved) becomes
+    `<data>`, then the home folder's (`Path.home()`, as given and resolved) becomes `~`, so
+    `/Users/x/worktrees/a` reads `~/worktrees/a`; the file's name and the reason stay. The store and the local
+    page (`GET /api/cards/<id>`, `/api/state`) keep the full paths.
+    - **[decided by the builder]** A path that does not contain the data or home folder's path
+      (`/private/var/...`, `/tmp/...`) stays as it is: it names neither the user nor the data folder's place. Easy
+      to add later.
+    - **[decided by the builder]** A folder's path is replaced only as a whole name on its right side: an
+      optional dot and then a run of ASCII name characters (letters, digits and `_ - + @ ~ $ % # =`) right after
+      the folder make it a longer name only when the run holds a letter or digit, so home `/Users/x` does not
+      change `/Users/xy/...`, `/Users/x-old/...` or `/Users/x.old/...`, while `/Users/x.` and markdown marks like
+      `_/Users/x_`, `_/Users/x._` or `~~/Users/x~~` read `~.`, `_~_`, `_~._` and `~~~~~`; a folder literally
+      named `/Users/x_` would read `~_`: a wrong label, never a leak. A non-ASCII character (Chinese, `é`) right
+      next to a path does not stop it, so a folder `/Users/xé` would read `~é`: a wrong name, never a leak. An ask
+      text that is not a string (an object per language, a list) has each of its strings scrubbed, an object's
+      keys and values alike. A home of `/` (or none found) changes nothing. The data folder goes first, so a data
+      folder under home reads `<data>`, not `~/...`.
+    - **[decided by the builder]** On its left side there is no exception: a folder's path is replaced wherever
+      it sits, also inside a longer path, so `/mnt/backup/Users/x/a` reads `/mnt/backup~/a` and
+      `/Users/x/repo/Users/x/repo/a` reads `~/repo~/repo/a`. The folder's path in any spot still names the user or
+      the data folder's place; a path that looks odd is a wrong label, never a leak; and each left-side rule tried
+      let a realistic text through.
+    - **[decided by the builder]** Only these three texts are scrubbed; a card's own words (its title, plain
+      words, questions) are what a person or a source wrote and stay as they are.
   - Read-only, in shadow and live mode alike: building writes nothing in the data folder (it reads the store
     without its lock file, as the local page's GETs do, and never builds `index.sqlite`), starts no process and
     opens no connection. The command writes only to stdout or `--out` (inside the data folder is allowed, since
@@ -1430,7 +1554,22 @@ Calls the author made without asking (check them):
     ports picked under the lock (when another start took the planned range meanwhile, the next free one; the tools
     found are kept, since the ports do not change which tools a folder loads). A folder that changed meanwhile (a
     parked record that moved) refuses the start ("start it again"): its tools were found elsewhere. An in-place
-    resume of a dead or parked worker still discovers under the lock, since `check` holds it for the whole pass.
+    resume of a dead or parked worker discovers outside the lock too: `check` runs in three steps. Under the lock
+    it classifies and acts on every worker as before, except that a resume (dead with its one resume left, or
+    parked and due) is only planned, after the shadow-mode check; with the lock free it checks each planned
+    resume's folder and data folder and lists its tools (a failure is kept, not raised); under the lock again it
+    finds each record by card and role and resumes it (floor, stop, launch, record), or runs today's failure path
+    (a dead worker's one resume counted, a parked worker stopped). A record that changed meanwhile (gone, a new
+    short id or folder, a close started, or a classification that no longer says dead with its resume left or
+    parked and due) is not touched: its line says it changed while its tools were listed, its floor is not
+    rewritten, and the next check looks at it again. A Ctrl-C while the tools are listed starts no resume; the
+    first step's changes are already written back.
+    **[decided by the builder]** The re-check classifies the record as it is under the second lock (its fields,
+    result and question files are read again) with the session listing of the first step, not a new one: a dead
+    session does not come back, and any new session puts a new short id on the record, which the re-check
+    compares. This saves one `claude agents` call per pass that resumes.
+    **[decided by the builder]** A changed record is skipped with a note and no count, also when its discovery
+    failed: the failure belonged to the old record, so the new one's `resumes` and slot are left alone.
     The outward MCP tools are always denied. If they cannot be listed (no init event, claude failed, could not
     start or timed out), nothing starts: the `WorkerError` says to list them in `projects/<name>.yaml` `tools`. On a dead
     worker's resume that counts as its one resume; a parked worker is stopped as when its resume cannot start. An in-place resume first
