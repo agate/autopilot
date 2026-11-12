@@ -3186,6 +3186,19 @@ class ApiStopIgnoredTest(ApiStopCase):
         self.assertIsNotNone(rec["blocked_since"])
         self.assertIn("claude attach", self.get(a["card"])["ask"]["text"])
 
+    def test_a_closing_record_is_finished_not_parked(self):
+        # An end whose stop timed out keeps its `closing` mark; the next check finishes that end, whatever the
+        # transcript ends on.
+        w = self.workers()
+        a = self.start(w)
+        say(self.fake_home, a["session_id"], limit_line(iso(self.clock())))
+        with StoppedLeavesTheListTest.stop_lands_late():
+            with self.assertRaises(subprocess.TimeoutExpired):
+                w.end(a["card"], "implement")
+        self.assertEqual(self.rec()["closing"]["path"], "end")
+        self.assertEqual(w.check()[0]["did"], "ended")
+        self.assertEqual(resources.Registry(self.data).read(), [])
+
     def test_an_error_that_is_neither_kind_leaves_todays_dead_path(self):
         w = self.workers()
         a = self.start(w)

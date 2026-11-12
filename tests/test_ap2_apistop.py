@@ -117,6 +117,15 @@ class TailTest(Case):
         self.assertEqual(t["errors"], [])
         self.assertEqual(t["reply_at"], datetime(2026, 11, 12, 3, 0, tzinfo=timezone.utc))
 
+    def test_a_system_line_after_an_error_is_not_a_reply(self):
+        # The line after an API error is usually a turn_duration system line: it neither clears nor dates a reply.
+        self.transcript([limit_line(), {"type": "system", "subtype": "turn_duration", "durationMs": 1,
+                                        "timestamp": "2026-11-12T03:00:00Z"}])
+        t = self.tail()
+        self.assertEqual(len(t["errors"]), 1)
+        self.assertIsNone(t["reply_at"])
+        self.assertEqual(apistop.stop(t, SINCE)["kind"], "limit")
+
     def test_a_raw_line_separator_inside_a_reply_does_not_split_its_line(self):
         # The transcript writer leaves U+2028 raw inside a JSON string; only "\n" ends a line.
         raw = json.dumps(reply("2026-11-12T03:00:00Z", text="one two"), ensure_ascii=False)
@@ -189,6 +198,7 @@ class StopTest(Case):
                             ([error_line(REFUSED_TEXT)], "gateway_refused"),  # 400 in the text only
                             ([error_line("Request blocked by safety guard", apiErrorStatus=400)], "gateway_refused"),
                             ([error_line("Request blocked by safety guard")], None),  # no 400 anywhere
+                            ([error_line("Request blocked by safety guard", apiErrorStatus=403)], None),
                             ([error_line("API Error: 400 bad request", apiErrorStatus=400)], None),
                             ([limit_line(), reply("2026-11-12T03:00:00Z")], None)):
             got = self.stop(lines)
