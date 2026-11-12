@@ -345,6 +345,13 @@ class PlainWordsTest(Case):
             card = {"feed": prreview.OWN_FEED, "key": "o/r#5", "title": {"en": "Fix it", "zh": "修好它"}}
             self.assertEqual(prreview.plain_for(None, card, LANGS)["what"],
                              {"en": "Your PR #5: Fix it", "zh": "你的 PR #5：修好它"})
+        with self.subTest("a regional language uses its base language's own words"):
+            record = {"id": "42", "text": TITLE}
+            self.assertEqual(prreview.plain_for(record, own, ("en", "zh-TW"))["what"]["zh-TW"],
+                             f"你的 PR #42：{TITLE}")
+            card = dict(own, verdict={"tldr": tldr}, findings={"confirmed": [f]})
+            self.assertEqual(prreview.plain_for(record, card, ("en", "zh-TW"))["do"]["zh-TW"],
+                             "看一下这 1 条发现，你认同的话就在你的分支上修好它。")
 
     def test_any_other_feed_keeps_the_review_request_words(self):
         f = fixture("report-review.json")["findings"]["confirmed"][0]
@@ -387,6 +394,23 @@ class PlainWordsTest(Case):
         self.assertEqual(card["plain"]["what"]["en"], "Your PR #42: Retry failed card payments once, 5 seconds later")
         self.assertEqual(card["plain"]["where"], fixture("report-review.json")["tldr"])
         self.assertEqual(card["plain"]["do"]["en"], "Read the 1 finding, then fix it on your branch if you agree.")
+
+    def assert_reread_keeps_words(self, first, second, en):
+        """Both GitHub sources key a PR as place#id, so one PR read by both shares one card. Its words follow the
+        card's own feed (the source that made it), so they do not flip from read to read."""
+        card = self.card(first)
+        self.assertEqual((card["feed"], card["plain"]["what"]["en"]), (first, en))
+        self.read_request(source=second)
+        again = self.store().get(card["id"])
+        self.assertEqual(again["feed"], first)
+        self.assertEqual(again["plain"]["what"], card["plain"]["what"])
+
+    def test_a_my_prs_reread_of_a_review_request_keeps_its_words(self):
+        self.assert_reread_keeps_words("github-review-requests", "github-my-prs",
+                                       f"octo-dev asked you to review PR #42: {TITLE}")
+
+    def test_a_review_requests_reread_of_an_own_pr_keeps_its_words(self):
+        self.assert_reread_keeps_words("github-my-prs", "github-review-requests", f"Your PR #42: {TITLE}")
 
     def test_a_long_title_is_cut_at_120_characters(self):
         words = prreview.plain_for({"id": "7", "author": "octo-dev", "text": "x" * 300 + "\nsecond line"}, {},

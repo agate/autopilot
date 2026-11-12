@@ -635,8 +635,8 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   ("你的 PR #<id>：<title>"); its `where` line is the same as any PR review card's; its `do` line before a review is
   the same wait, and after one is "Read the <n> findings, then fix the ones you agree with on your branch.", "Read
   the 1 finding, then fix it on your branch if you agree." or, with none open, "Read the review; nothing needs
-  fixing." (`prreview.OWN_PHRASES`, in `en` and `zh`). `engine.py` passes the source's name as the feed, so a new
-  card and a same-key re-read both get them. For `sync`, by the PR's author: when the reply's `author.login` is the
+  fixing." (`prreview.OWN_PHRASES`, in `en` and `zh`). The words follow the card's own `feed` (the source that
+  made it); a re-read by the other GitHub source keeps it, so the words do not flip. For `sync`, by the PR's author: when the reply's `author.login` is the
   `gh api user` login, the user is never in their own `reviewRequests` and a comment they leave shows in
   `latestReviews`, so `reviewed` and `request_removed` are never given; only `merged` and `closed` move the card to
   `done`, else it is `not_reviewed`, `new_commits` or `current`. A reply with no author (an older recording, or a
