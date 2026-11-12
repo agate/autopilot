@@ -685,6 +685,8 @@ class ImportV1Test(unittest.TestCase):
         for title, want in (("Old words", {"en": "Old words", "zh": "Old words"}),
                             ({"en": "Old", "zh": "旧"}, {"en": "Old", "zh": "旧"}),
                             ({"en": "Old"}, {"en": "Old", "zh": "Old"}),
+                            # A slot that sorts before the primary ("de") must not fill the missing zh slot.
+                            ({"de": "Alt", "en": "Old"}, {"en": "Old", "zh": "Old"}),
                             (None, {"en": "D1", "zh": "D1"}),
                             ("  ", {"en": "D1", "zh": "D1"})):
             with self.subTest(title=title):
@@ -694,9 +696,11 @@ class ImportV1Test(unittest.TestCase):
                 self.assertEqual(card["title"], want)
                 self.assertEqual(card["plain"]["what"], want)
                 cards.check_title(card, ("en", "zh"))
-        # A primary language that is not English: a slot the old title lacks falls back to the primary's text.
+        # A primary language that is not English: a slot the old title lacks falls back to the primary's text,
+        # and a slot that sorts before the primary ("de") must not fill the gap.
         make = importv1._Maker("shop", self.v1 / "projects" / "shop", ("zh", "en"), importv1.Labels(self.v1))
-        old = {"key": "v1:shop:D1", "kind": "question", "title": {"zh": "旧"}, "plain": {"what": {"en": " "}},
+        old = {"key": "v1:shop:D1", "kind": "question", "title": {"zh": "旧", "de": "Alt"},
+               "plain": {"what": {"en": " "}},
                "parent": "abc", "source": {"name": "v1-import", "record": {}}}
         card = make.closed(old)["card"]
         self.assertEqual(card["title"], {"zh": "旧", "en": "旧"})
