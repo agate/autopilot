@@ -417,14 +417,16 @@ def plan(data, card_id: str, stage: str = "review", checkout=None, cfg=None, run
 # --- findings and verdict ----------------------------------------------------------------------------------------
 
 def text_problems(value, langs, where: str) -> list:
-    """A text the reader reads: {<lang>: text} holding exactly the configured languages, each non-empty."""
+    """A text the reader reads: {<lang>: text} holding exactly the configured languages, each non-empty. Non-empty
+    means `cards.blank` is false: a slot of only white space or only invisible U+FEFF counts as empty, the same rule
+    the store's plain-words check uses."""
     if not isinstance(value, dict):
         return [f"{where}: must be a text object with {', '.join(langs)}"]
     out = []
     for lang in langs:
         if lang not in value:
             out.append(f"{where}.{lang}: missing")
-        elif not (isinstance(value[lang], str) and value[lang].strip()):
+        elif cards.blank(value[lang]):
             out.append(f"{where}.{lang}: must be non-empty text")
     out += [f"{where}.{k}: not a configured language ({', '.join(langs)})" for k in value if k not in langs]
     return out

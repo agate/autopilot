@@ -825,6 +825,17 @@ class CheckCliTest(Ap2Case):
         self.assertEqual(r.stderr, f"ap2: no data folder at {missing}\n")
         self.assertFalse(missing.exists())
 
+    def test_check_refuses_a_tldr_of_only_invisible_characters(self):
+        cid = self.card()["id"]
+        self.plan(cid, table(fixture("graphql-head-a.json")))
+        rep = self.report("report-review.json", cid)
+        rep["tldr"]["zh"] = "\ufeff"
+        self.put_report(cid, rep)
+        r = self.ap2("review", "check", cid)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertEqual(json.loads(r.stdout), {"ok": False, "errors": ["tldr.zh: must be non-empty text"]})
+        self.assertIn('"tldr.zh: must be non-empty text"', r.stdout)
+
 
 class VerdictCliDataTest(Ap2Case):
     def test_verdict_leaves_a_missing_data_folder_alone(self):
@@ -1077,6 +1088,46 @@ class CheckTest(Case):
                     at = at[k]
                 at[path[-1]] = value
                 self.assertIn(want, self.errors(rep))
+
+    def test_a_text_of_only_invisible_characters_is_empty(self):
+        # U+FEFF survives str.strip(), so a slot of it alone reads as words but shows nothing; cards.blank calls
+        # it empty, and the check refuses it with the same line as a slot of spaces.
+        good = self.report("report-review.json", self.cid)
+        r = {k: v for k, v in good_finding(id="r-1", severity="nit").items() if k != "checked"}
+        r["reason"] = {"en": "Not a bug.", "zh": "不是问题。"}
+        good["findings"]["rejected"] = [r]
+        self.assertEqual(self.errors(good), [])
+        for path in (("tldr", "zh"), ("background", "en"), ("findings", "rejected", 0, "reason", "zh"),
+                     ("angles", 0, "why", "en"), ("checks", "notes", "zh")):
+            where = ".".join(str(k) for k in path).replace(".0.", "[0].")
+            for value in ("\ufeff", "\ufeff \n"):
+                with self.subTest(where=where, value=value):
+                    rep = copy.deepcopy(good)
+                    at = rep
+                    for k in path[:-1]:
+                        at = at[k]
+                    at[path[-1]] = value
+                    self.put_report(self.cid, rep)
+                    out = prreview.check(self.data, self.cid, cfg=self.cfg)
+                    self.assertIs(out["ok"], False)
+                    self.assertIn(f"{where}: must be non-empty text", out["errors"])
+
+    def test_a_delta_since_last_of_only_invisible_characters_is_empty(self):
+        self.put_report(self.cid, self.report("report-review.json", self.cid))
+        prreview.apply(self.data, self.cid, cfg=self.cfg)
+        self.plan(self.cid, table(fixture("graphql-head-b.json"), head=B, since="since_clean"), stage="delta")
+        rep = self.report("report-delta.json", self.cid)
+        rep["since_last"]["en"] = "\ufeff"
+        self.assertEqual(self.errors(rep), ["since_last.en: must be non-empty text"])
+
+    def test_words_next_to_invisible_characters_are_still_words(self):
+        # Pins that only an all-invisible slot moved: U+FEFF before words, and a zero-width space (U+200B, which
+        # neither strip() nor trim() removes), still pass.
+        for value in ("\ufeffWords", "\u200b"):
+            with self.subTest(value=value):
+                rep = self.report("report-review.json", self.cid)
+                rep["background"]["en"] = value
+                self.assertEqual(self.errors(rep), [])
 
     def test_files_that_cannot_be_read(self):
         path = prreview.run_dir(self.data, self.cid) / prreview.REPORT_FILE
