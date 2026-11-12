@@ -284,6 +284,14 @@ class AddCliTest(unittest.TestCase):
             self.assertEqual(profile.names(), ["subscription"])
 
 
+    def test_add_in_a_terminal_left_without_a_choice_says_it_is_saved(self):
+        with TempData() as d:
+            code, _, err = add_gateway(d, tty=True, answers=[])
+            self.assertEqual(code, 1)
+            self.assertIn("ap profile choose g", err)
+            self.assertTrue(profile.needs_choice(profile.load("g")))
+
+
 class UseCliTest(unittest.TestCase):
     def test_use_without_a_terminal_refuses_until_chosen(self):
         with TempData() as d:

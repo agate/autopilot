@@ -793,7 +793,11 @@ def main(argv: list) -> int:
         if p.get("chosen_at"):
             return 0
         if _tty():
-            return _prompt_choose(a.name, a.model, a.effort)
+            code = _prompt_choose(a.name, a.model, a.effort)
+            if code:
+                print(f"ap profile: {a.name} is saved without a chosen model and effort; run "
+                      f"`ap profile choose {a.name}` to choose them", file=sys.stderr)
+            return code
         _print_choices(p, f"{a.name} is saved, but its model and effort are not chosen yet: run "
                           f"`ap profile choose {a.name} --model <model> --effort <effort>` with values from the list above")
         return 0
