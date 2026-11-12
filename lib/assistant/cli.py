@@ -83,6 +83,7 @@ def _parser() -> argparse.ArgumentParser:
     _worker_parser(sub)
     _profile_parser(sub)
     _spend_parser(sub)
+    _cap_parser(sub)
     _serve_parser(sub)
     _phone_parser(sub)
     sub.add_parser("hook-park", help="a worker's PreToolUse hook: at the usage line, deny all but its park")
@@ -591,10 +592,89 @@ def cmd_spend(args) -> int:
     return 0
 
 
+# -- ap2 cap (the daily cap, design section 12) -----------------------------------------------------------------------
+# Today's cap state, the cap card's answers and the pause. Writes only inside the data folder.
+
+def _cap_parser(sub) -> None:
+    cp = sub.add_parser("cap", help="show or answer the daily cap of a gateway profile",
+                        description="Print today's daily cap state: the active profile and its cap, today's raise "
+                                    "and limit, today's gateway spend, the cap card and the pause. `answer` answers "
+                                    "the cap card; `resume` lifts the pause. Writes only inside the data folder.")
+    cp.add_argument("--json", action="store_true", help="print the state as JSON")
+    cp.add_argument("--transcripts", metavar="PATH", help=TRANSCRIPTS_HELP)
+    cp.add_argument("--data", metavar="PATH", help=DATA_HELP)
+    cs = cp.add_subparsers(dest="cap_command", metavar="<cap command>", title="cap commands")
+    an = cs.add_parser("answer", help="answer the cap card",
+                       description="raise50 / raise100 raise today's limit by 50% / 100% (until local midnight); "
+                                   "accept_unknown counts today's unpriced cost as $0 until midnight; pause stops "
+                                   "and parks every running worker (live mode only) and refuses every start until "
+                                   "`ap2 cap resume`. Prints JSON.")
+    an.add_argument("option", metavar="OPTION", help="raise50, raise100, accept_unknown or pause")
+    re_ = cs.add_parser("resume", help="lift the cap pause",
+                        description="Remove the pause, so workers may start and resume again. Prints JSON.")
+    for c in (an, re_):  # SUPPRESS: given before the subcommand, the value is kept
+        c.add_argument("--transcripts", metavar="PATH", default=argparse.SUPPRESS, help=TRANSCRIPTS_HELP)
+        c.add_argument("--data", metavar="PATH", default=argparse.SUPPRESS, help=DATA_HELP)
+
+
+def cmd_cap(args) -> int:
+    import shutil
+    from datetime import datetime
+
+    from assistant import cap, profiles, spend, transcripts
+
+    data = datadir.ensure(datadir.resolve(args.data))
+    now = datetime.now().astimezone()  # the local day, at this moment's offset
+    if args.cap_command == "resume":
+        _print_json(cap.resume(data))
+        return 0
+    if args.cap_command == "answer":
+        cfg = config.load(data)
+        w = None
+        if cfg.mode == "live":  # the pause stops workers in live mode only
+            from assistant.workers import Workers
+            w = Workers(data, cfg=cfg, transcripts_dir=args.transcripts)
+        _print_json(cap.answer(data, args.option, now, workers=w))
+        return 0
+    from autopilot import sessions as v1_sessions
+
+    p = profiles.active(data)
+    projects = Path(args.transcripts) if args.transcripts else transcripts.default_projects()
+    claude = shutil.which("claude")
+    listing = (lambda: v1_sessions.list_all(claude)) if claude else None
+    try:
+        t = spend.totals(data, projects, now, "gateway", listing)
+    except OSError as e:
+        raise spend.SpendError(f"cannot read or update the spend ledger in {data / spend.FOLDER}: {e}") from e
+    s = cap.state(data, now)
+    pz = cap.paused(data)
+    out = {"day": s["day"], "profile": p["name"], "mode": p["mode"], "daily_cap_usd": p.get("daily_cap_usd"),
+           "raise_pct": s["raise_pct"], "limit": cap.today_limit(data, p, now), "spent_today": t["today"],
+           "unknown_today": t["unknown_today"], "unknown_models": t["unknown_models"],
+           "unknown_launches": t["unknown_launches"], "card": s["card"], "card_id": s.get("card_id"),
+           "accept_unknown": s.get("accept_unknown") is True, "paused": pz is not None, "pause": pz}
+    if args.json:
+        _print_json(out)
+        return 0
+    limit = "none (a subscription profile has no daily cap)" if out["limit"] is None else f"${out['limit']:,.2f}"
+    lines = [f"daily cap, {out['day']} (local time):", f"  profile  {out['profile']} ({out['mode']})",
+             f"  limit    {limit}" + (f" (+{out['raise_pct']}% today)" if out["raise_pct"] else ""),
+             f"  spent    ${out['spent_today']:,.2f} on gateway profiles today"
+             + (", some of it cannot be priced" if out["unknown_today"] else ""),
+             f"  card     {out['card'] or 'none'}" + (f" ({out['card_id']})" if out["card_id"] else "")]
+    if out["accept_unknown"]:
+        lines.append("  today's unpriced cost is accepted as $0")
+    if pz is not None:
+        lines.append("  paused: no worker starts or resumes until `ap2 cap resume`")
+    _write_out("\n".join(lines))
+    return 0
+
+
 COMMANDS = {"config": cmd_config, "card": cmd_card, "search": cmd_search, "restore": cmd_restore}
 COMMANDS["worker"] = cmd_worker
 COMMANDS["profile"] = cmd_profile
 COMMANDS["spend"] = cmd_spend
+COMMANDS["cap"] = cmd_cap
 
 
 # -- ap2 source (the source engine, design 5) ---------------------------------------------------------------------

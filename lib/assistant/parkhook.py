@@ -4,10 +4,14 @@
 subagents. While a usage window is at the park line (v1's `budget.parking` with `PARK_RULES`) it denies every tool
 call except the worker's own `ap2 worker park <card> <role> [--note TEXT]`, and the deny reason names that command.
 It acts only on a v2 worker (`AP2_ROLE` one of `ROLES`, `AP2_CARD` set): v1 workers, dispatchers and the user's own
-sessions get no opinion. It writes nothing and never breaks a session: any error is no output and exit 0.
+sessions get no opinion, and neither does a worker whose own profile (`AP2_PROFILE`) is a gateway profile: the
+gateway's daily cap (`cap.py`) holds it instead. It looks only at the 5-hour and weekly windows, not at extra
+credits. It writes nothing and never breaks a session: any error is no output and exit 0.
 
-It runs before every tool call, so it imports only what it needs; `workers.py`, `store.py` and `config.py` are too
-heavy. `PARK_RULES` and `ROLES` are copies of `workers.PARK_RULES` and `workers.ROLES`, kept equal by a test.
+It runs before every tool call, so it imports only what it needs: on the common path (under the line) only `json`,
+`os`, `shlex`, `pathlib` and v1's `budget`; at the park line it also imports `profiles` (and with it `store` and
+`config`) to read the worker's own profile; never `workers`, `spend` or `cap`. `PARK_RULES` and `ROLES` are copies
+of `workers.PARK_RULES` and `workers.ROLES`, kept equal by a test.
 """
 from __future__ import annotations
 
@@ -36,6 +40,20 @@ def _worker(env) -> tuple:
     if role not in ROLES or not card:
         return None
     return card, role
+
+
+def _gateway(env) -> bool:
+    """The worker's own profile (`AP2_PROFILE` in the data folder `AP2_DATA`) loads as a gateway profile. Read only
+    at the park line, so the import stays off the common path. A profile that cannot be read is not a gateway one:
+    the subscription's rule stays (parking stops work, it never spends more)."""
+    data, name = env.get("AP2_DATA"), env.get("AP2_PROFILE")
+    if not data or not name:
+        return False
+    try:
+        from assistant import profiles
+        return profiles.load(data, name).get("mode") == "gateway"
+    except Exception:  # noqa: BLE001 - any error keeps the subscription's rule
+        return False
 
 
 def is_park_command(cmd: str, card: str, role: str) -> bool:
@@ -82,6 +100,8 @@ def decide(payload: dict, env, usage: dict, rules: dict = None):
     card, role = who
     p = v1_budget.parking(usage, {"budget": rules or PARK_RULES})
     if p is None:
+        return None
+    if _gateway(env):  # the subscription's windows never park a gateway worker (its cap is the daily cap's job)
         return None
     if payload.get("tool_name") == "Bash" and is_park_command((payload.get("tool_input") or {}).get("command") or "",
                                                               card, role):
