@@ -2231,7 +2231,7 @@ Calls the author made without asking (check them):
      today, this week and this month in dollars with two decimals, and, when `unknown` is set, a line saying so with
      the unpriced model ids and the unmatched launches of today. A total clamped to `sys.float_info.max` (item 10)
      prints as `too large to show` with no `$`, never a 309-digit amount; a finite total below the clamp prints in
-     full. `--json` prints the `totals()` dict. Exit 0; a
+     full (the daily cap's text does the same, daily cap item 11). `--json` prints the `totals()` dict. Exit 0; a
      ledger file that cannot be read (or a symlink) prints one `ap2: ...` line and exits 1. Any other `OSError`
      names the side that failed when the error names its file (under the transcripts folder: "cannot read the
      transcripts in <projects>"; under the data folder: the ledger), else both folders, still one line, exit 1.
@@ -2391,7 +2391,10 @@ Calls the author made without asking (check them):
       credits (left open in v1 too); the transcript check of the API-stops slice is the safety net.
   11. `ap2 cap [--json] [--transcripts P] [--data PATH]` prints today's state: the day, the active profile and its
       mode and cap, `raise_pct`, today's limit, today's gateway spend (and what is unknown), the card's state and
-      id, `accept_unknown` and the pause; `--json` prints it as JSON, else a few plain lines. It reads only, apart
+      id, `accept_unknown` and the pause; `--json` prints it as JSON, else a few plain lines. A spend total clamped
+      to `sys.float_info.max` (spend ledger item 10) prints as `too large to show` with no `$` (`太大，无法显示` in
+      Chinese card words), in `ap2 cap`, on the cap card and in the refusal line, never a 309-digit amount; a finite
+      total below the clamp prints in full, and `--json` keeps the number. It reads only, apart
       from the ledger's cache and, on first use, the data folder's layout. `ap2 cap answer OPTION` and `ap2 cap
       resume` print JSON. Exit 0; an error is one `ap2: ...` line and exit 1. All write only inside the data folder, so they work in shadow mode, except that
       `answer pause` stops workers only in live mode.

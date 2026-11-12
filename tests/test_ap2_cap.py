@@ -6,8 +6,10 @@ pause, the pause stops and parks every running worker, and parking is split by m
 from __future__ import annotations
 
 import contextlib
+import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -300,6 +302,63 @@ class CardTest(CapCase):
         tomorrow = datetime(2026, 11, 12, 9, 0, tzinfo=TZ)
         self.allow(now=tomorrow)
         self.assertEqual(sorted(c["key"] for c in self.cap_cards()), ["cap:2026-11-11", "cap:2026-11-12"])
+
+    def test_a_clamped_spend_total_reads_too_large_to_show_on_the_card(self):
+        # `spend.totals` clamps a sum too big for a number to `sys.float_info.max`: the card says so plainly, with
+        # no `$`, instead of a 309-digit amount that looks real. The limit is a real number and reads as before.
+        self.spent = totals(sys.float_info.max, unknown_today=True)
+        self.allow()
+        [c] = self.cap_cards()
+        cards.validate(c, ("en", "zh"))
+        self.assertEqual(c["cause"], "spent")  # over the limit: `spent` wins over `unknown`
+        self.assertIn("too large to show", c["ask"]["text"])
+        unknown = {lang: cap._words(lang, 500.0, "unknown", self.spent, "g", self.data / spend.PRICES)
+                   for lang in ("en", "zh")}  # the `unknown` words, which a clamped total never reaches on a card
+        for lang, marker in (("en", "too large to show"), ("zh", "太大，无法显示")):
+            for cause, words in (("spent", {line: c["plain"][line][lang] for line in cards.PLAIN_LINES}),
+                                 ("unknown", unknown[lang])):
+                with self.subTest(lang=lang, cause=cause):
+                    text = " ".join(words[line] for line in cards.PLAIN_LINES)
+                    self.assertIn(marker, text)
+                    self.assertIn("$500.00", text)
+                    for line in cards.PLAIN_LINES:
+                        for amount in re.findall(r"\$[\d,]+", words[line]):
+                            self.assertLessEqual(sum(ch.isdigit() for ch in amount), 40, (line, amount))
+
+    def test_a_large_finite_spend_total_prints_in_full_on_the_card(self):
+        self.spent = totals(1e20)
+        self.allow()
+        [c] = self.cap_cards()
+        cards.validate(c, ("en", "zh"))
+        for lang in ("en", "zh"):
+            words = " ".join(c["plain"][line][lang] for line in cards.PLAIN_LINES)
+            self.assertIn("$100,000,000,000,000,000,000.00", words, lang)
+            self.assertNotIn("too large to show", words, lang)
+            self.assertNotIn("太大，无法显示", words, lang)
+
+    def test_usd_marks_only_the_clamp_value(self):
+        for x, lang, want in ((sys.float_info.max, "en", "too large to show"),
+                              (sys.float_info.max, "zh", "太大，无法显示"),
+                              (sys.float_info.max, "zh-CN", "太大，无法显示"),
+                              (sys.float_info.max, "fr", "too large to show"),
+                              (1e20, "zh", "$100,000,000,000,000,000,000.00"), (512.5, "en", "$512.50"),
+                              (0, "zh", "$0.00"), (None, "en", "$?"), (True, "en", "$?"), ("5", "zh", "$?")):
+            with self.subTest(x=x, lang=lang):
+                self.assertEqual(cap._usd(x, lang), want)
+        self.assertEqual(cap._usd(sys.float_info.max), "too large to show")  # English by default
+
+    def test_refusal_with_a_clamped_spend_total_reads_too_large_to_show(self):
+        for cause, want in (("spent", "today's gateway spend is too large to show of today's limit $500.00"),
+                            ("unknown", "(too large to show priced, today's limit $500.00)")):
+            with self.subTest(cause=cause):
+                a = {"allow": 0, "reason": "cap", "cause": cause, "limit": 500.0,
+                     "spent": totals(sys.float_info.max, unknown_today=cause == "unknown")}
+                line = cap.refusal(a)
+                self.assertIn(want, line)
+                self.assertNotIn("\n", line)
+                self.assertLessEqual(len(line), 400, line)
+        a = {"allow": 0, "reason": "cap", "cause": "spent", "limit": 500.0, "spent": totals(1e20)}
+        self.assertIn("today's gateway spend is $100,000,000,000,000,000,000.00 of", cap.refusal(a))
 
     def test_unknown_card_names_models_and_launches(self):
         self.spent = totals(3.0, unknown_today=True, models=["mystery-1", "mystery-2"], launches=2)
@@ -1345,6 +1404,38 @@ class CapCliTest(unittest.TestCase):
         self.json_of(self.ap2("answer", "pause"))
         self.assertEqual(self.json_of(self.ap2("resume")), {"paused": False, "was": True})
         self.assertFalse((self.data / cap.PAUSED).exists())
+
+    def main(self, *args, today=0.0, unknown_today=False):
+        """`ap2 cap` in this process, with `spend.totals` patched to return `today` and no `claude` on PATH."""
+        from assistant import cli
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(spend, "totals", return_value=totals(today, unknown_today=unknown_today)), \
+                mock.patch("shutil.which", return_value=None), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli.main(["cap", "--data", str(self.data), "--transcripts", str(self.projects), *args])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_cap_text_with_a_clamped_spend_total_says_too_large(self):
+        for unknown, suffix in ((True, ", some of it cannot be priced"), (False, "")):
+            with self.subTest(unknown_today=unknown):
+                code, out, err = self.main(today=sys.float_info.max, unknown_today=unknown)
+                self.assertEqual((code, err), (0, ""))
+                lines = out.splitlines()
+                self.assertIn(f"  spent    too large to show on gateway profiles today{suffix}", lines)
+                self.assertIn("  limit    $500.00", lines)
+                for ln in lines:
+                    self.assertLessEqual(len(ln), 120, ln)
+        code, out, err = self.main("--json", today=sys.float_info.max, unknown_today=True)
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(json.loads(out)["spent_today"], sys.float_info.max)  # --json keeps the number
+
+    def test_cap_text_prints_a_large_finite_total_in_full(self):
+        for today, line in ((1e20, "  spent    $100,000,000,000,000,000,000.00 on gateway profiles today"),
+                            (512.5, "  spent    $512.50 on gateway profiles today")):
+            with self.subTest(today=today):
+                code, out, err = self.main(today=today)
+                self.assertEqual((code, err), (0, ""))
+                self.assertIn(line, out.splitlines())
 
     def test_cap_is_in_the_usage(self):
         r = subprocess.run([sys.executable, AP2, "--help"], capture_output=True, text=True, timeout=60)

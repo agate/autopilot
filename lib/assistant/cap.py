@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -188,8 +189,14 @@ def resume(data) -> dict:
 
 # -- the card ----------------------------------------------------------------------------------------------------------
 
-def _usd(x) -> str:
-    return f"${x:,.2f}" if isinstance(x, (int, float)) and not isinstance(x, bool) else "$?"
+def _usd(x, lang: str = "en") -> str:
+    """A dollar amount with two decimals, `$?` for a non-number. A total `spend.totals` clamped (a sum too big for a
+    number, `sys.float_info.max`) is a marker with no `$`, not a 309-digit amount that looks real."""
+    if not isinstance(x, (int, float)) or isinstance(x, bool):
+        return "$?"
+    if x == sys.float_info.max:
+        return "太大，无法显示" if lang.split("-")[0] == "zh" else "too large to show"
+    return f"${x:,.2f}"
 
 
 def options(cause: str) -> list:
@@ -197,14 +204,14 @@ def options(cause: str) -> list:
 
 
 def _words(lang: str, limit, cause: str, t: dict, profile: str, prices: Path) -> dict:
-    spent = _usd(t.get("today"))
+    spent, cap_usd = _usd(t.get("today"), lang), _usd(limit, lang)
     models = ", ".join(t.get("unknown_models") or [])
     launches = t.get("unknown_launches") or 0
     if lang.split("-")[0] == "zh":
         if cause == "spent":
-            what = f"今天的网关花费已到每日上限：{spent} / {_usd(limit)}（访问配置 {profile}）。"
+            what = f"今天的网关花费已到每日上限：{spent} / {cap_usd}（访问配置 {profile}）。"
         else:
-            what = f"今天有一部分网关花费无法计价，所以每日上限生效：已计价 {spent} / {_usd(limit)}（访问配置 {profile}）。"
+            what = f"今天有一部分网关花费无法计价，所以每日上限生效：已计价 {spent} / {cap_usd}（访问配置 {profile}）。"
         where = "在你回答之前，不会有新的 worker 启动或恢复；正在运行的 worker 会继续。"
         if cause == "unknown":
             where += (f"今天未计价的模型：{models or '无'}。今天没有对上会话的启动：{launches} 次。要给模型定价，"
@@ -215,10 +222,10 @@ def _words(lang: str, limit, cause: str, t: dict, profile: str, prices: Path) ->
         do += "或 `ap2 cap answer pause`，停下并暂停所有正在运行的 worker（之后用 `ap2 cap resume` 解除暂停）。"
         return {"what": what, "where": where, "do": do}
     if cause == "spent":
-        what = f"Today's gateway spend reached the daily cap: {spent} of {_usd(limit)} (access profile {profile})."
+        what = f"Today's gateway spend reached the daily cap: {spent} of {cap_usd} (access profile {profile})."
     else:
         what = (f"Some of today's gateway spend cannot be priced, so the daily cap holds: {spent} priced of "
-                f"{_usd(limit)} (access profile {profile}).")
+                f"{cap_usd} (access profile {profile}).")
     where = "No new worker starts or resumes until you answer; running workers keep going."
     if cause == "unknown":
         where += (f" Unpriced models today: {models or 'none'}. Launches not matched to a session today: {launches}."
