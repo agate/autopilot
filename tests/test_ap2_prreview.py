@@ -40,6 +40,13 @@ KEY = "example/widgets#42"
 LANGS = ("en", "zh")
 DIAGRAM = '<svg viewBox="0 0 10 10"><rect width="10" height="10"/></svg>'
 TITLE = "Retry failed card payments once, 2 seconds later"
+# The gh calls as recorded, copied by hand (not read from prreview), so a change to what prreview asks GitHub
+# no longer matches the recorded replies and fails a test instead of being served the old answer.
+GH_PR_FILES = """query($owner:String!, $name:String!, $n:Int!, $after:String){ repository(owner:$owner, name:$name){
+ pullRequest(number:$n){ headRefOid baseRefOid additions deletions
+  files(first:100, after:$after){ pageInfo{ hasNextPage endCursor } nodes{ path } } } } }"""
+GH_SINCE_JQ = "{status: .status, merges: [.commits[] | select(.parents | length > 1) | .sha]}"
+GH_SYNC_FIELDS = "state,headRefOid,reviewRequests,latestReviews"
 
 
 def fixture(name):
@@ -51,7 +58,7 @@ def compare(a, b):
 
 
 def graphql_argv(after=None, owner="example", name="widgets", n=42):
-    argv = ["api", "graphql", "-f", "query=" + prreview.PR_FILES, "-f", f"owner={owner}", "-f", f"name={name}",
+    argv = ["api", "graphql", "-f", "query=" + GH_PR_FILES, "-f", f"owner={owner}", "-f", f"name={name}",
             "-F", f"n={n}"]
     return argv + (["-f", f"after={after}"] if after else [])
 
@@ -66,12 +73,12 @@ def table(pages, head=A, since=None, reviewed=A, view=None):
     out.append({"argv": ["api", compare(BASE, head), "--jq", ".merge_base_commit.sha"], "stdout": cmp["merge_base"]})
     if since:
         reply = cmp[since]
-        entry = {"argv": ["api", compare(reviewed, head), "--jq", prreview.SINCE_JQ]}
+        entry = {"argv": ["api", compare(reviewed, head), "--jq", GH_SINCE_JQ]}
         entry.update(reply if isinstance(reply, dict) else {"stdout": reply})
         out.append(entry)
     if view:
         views = fixture("pr-view.json")
-        out.append({"argv": ["pr", "view", "42", "--repo", REPO, "--json", prreview.SYNC_FIELDS],
+        out.append({"argv": ["pr", "view", "42", "--repo", REPO, "--json", GH_SYNC_FIELDS],
                     "stdout": views[view]})
         out.append({"argv": ["api", "user", "--jq", ".login"], "stdout": views["user"]})
     return out
@@ -484,7 +491,7 @@ class PlanTest(Case):
         with self.subTest("sync: a pr view head that is a path"):
             self.store().update(cid, {"pr": {"repo": REPO, "number": 42}}, by="test")
             view = dict(fixture("pr-view.json")["open_head_a"], headRefOid="../../etc")
-            entries = [{"argv": ["pr", "view", "42", "--repo", REPO, "--json", prreview.SYNC_FIELDS], "stdout": view},
+            entries = [{"argv": ["pr", "view", "42", "--repo", REPO, "--json", GH_SYNC_FIELDS], "stdout": view},
                        {"argv": ["api", "user", "--jq", ".login"], "stdout": "octo-me\n"}]
             before = self.store().get(cid)
             with self.assertRaisesRegex(prreview.ReviewError,
@@ -741,6 +748,8 @@ class CheckTest(Case):
                 ("a text missing zh", bad(background={"en": "x"}), "background.zh: missing"),
                 ("a bad time", bad(reviewed_at="2026-11-11 09:30"), "reviewed_at: must be a UTC time"),
                 ("a bad ci", bad(checks={"ci": "yellow", "notes": good["checks"]["notes"]}), "checks.ci: must be"),
+                ("no checks", bad(checks=None), "checks: must be an object with ci and notes"),
+                ("no angles", bad(angles=None), "angles: must list {name, origin, why} for each angle that ran"),
                 ("an unknown field", bad(score=3), "score: not a field of the report"),
                 ("another card", bad(card="c-20200101-000000-000000"), f"card: must be {self.cid}"),
                 ("earlier on a full review", bad(earlier=[]), "earlier: only in a delta review"),
@@ -1252,6 +1261,25 @@ class SyncTest(Case):
             self.assertEqual(self.store().get(cid), before)
 
 
+class RecordedCallsTest(unittest.TestCase):
+    """What prreview asks GitHub is pinned as text, so a dropped field or a changed filter fails here."""
+
+    def test_the_gh_calls_are_the_recorded_text(self):
+        self.assertEqual(prreview.PR_FILES, GH_PR_FILES)
+        self.assertEqual(prreview.SINCE_JQ, GH_SINCE_JQ)
+        self.assertEqual(prreview.SYNC_FIELDS, GH_SYNC_FIELDS)
+
+    @unittest.skipUnless(shutil.which("jq"), "jq is not on PATH")
+    def test_the_since_filter_lists_only_merge_commits(self):
+        merge, plain = "e5f6a7b8" * 5, "f6a7b8c9" * 5
+        reply = {"status": "ahead", "ahead_by": 2, "commits": [
+            {"sha": plain, "parents": [{"sha": A}]},
+            {"sha": merge, "parents": [{"sha": plain}, {"sha": BASE}]}]}
+        out = subprocess.run([shutil.which("jq"), "-c", GH_SINCE_JQ], input=json.dumps(reply), text=True,
+                             capture_output=True, timeout=30, check=True).stdout
+        self.assertEqual(json.loads(out), {"status": "ahead", "merges": [merge]})
+
+
 # --- criterion 8: nothing is posted ------------------------------------------------------------------------------
 
 class NothingPostedTest(unittest.TestCase):
@@ -1308,7 +1336,7 @@ class NothingPostedTest(unittest.TestCase):
         ["pr", "view", "42", "--repo", "o/r", "--json", "state"],
         ["pr", "diff", "42", "--repo", "o/r"],
         ["pr", "checks", "42", "--repo", "o/r"],
-        ["api", "graphql", "-f", "query=" + prreview.PR_FILES, "-f", "owner=o", "-F", "n=1"],
+        ["api", "graphql", "-f", "query=" + GH_PR_FILES, "-f", "owner=o", "-F", "n=1"],
         ["api", "repos/o/r/compare/a...b", "--jq", ".merge_base_commit.sha"],
         ["api", "-H", "Accept: application/vnd.github.diff", "repos/o/r/compare/a...b"],
         ["api", "user", "--jq", ".login"],
