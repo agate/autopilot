@@ -600,6 +600,150 @@ class DecideTest(unittest.TestCase):
         self.assertEqual(guard._words("cp a $X/.@(. |x)/../c b"), ["cp", "a", "$X/.@(. |x)/../c", "b"])
         self.assertEqual(guard._words("a@(b(c)d)e f"), ["a@(b(c)d)e", "f"])
 
+    def test_an_extglob_opener_with_a_guarded_path_is_denied_whatever_turns_it_on(self):
+        """An unquoted `@(`, `+(`, `!(`, `?(` or `*(` outside arithmetic, in a command that names a guarded path, is
+        denied: extglob may be on (`shopt -s ${o}glob`), and then `#` and `|` in there are no comment or pipe."""
+        on, rm = "o=ext; shopt -s ${o}glob\n", "r" + "m"
+        self.check([on + "echo @(#) > $AP2_DATA/config.yaml", on + "cp @(a|zz) $AP2_DATA/config.yaml",
+                    on + "touch @(#) $AP2_DATA/x2",
+                    on + rm + " $AP2_RUN_DIR/!(handback.json)", on + "cp a $AP2_RUN_DIR/+(settings-implement.json)",
+                    on + "cp a $AP2_RUN_DIR/@(settings-implement.json)",
+                    on + "cp a $AP2_RUN_DIR/?(settings-implement.json)",
+                    # The literal option name, spelled so only the quote and continuation stripping finds it.
+                    "shopt -s ext$'g'lob\ncp @(a|zz) $AP2_DATA/config.yaml",
+                    "shopt -s ext\\\nglob\necho @(#) > $AP2_DATA/config.yaml",
+                    "shopt -s extglob\ncp @(a|zz) $AP2_\\\nDATA/config.yaml"], deny=True)
+        self.check([on + "ls /tmp/@(a|b) > /tmp/x", "echo $((2*(3))) > $AP2_RUN_DIR/n.txt",
+                    "echo $((2*(3+1)*(2))) > $AP2_RUN_DIR/n.txt", "echo '@(x)' > $AP2_RUN_DIR/n.txt",
+                    'echo "a @(x)" > $AP2_RUN_DIR/n.txt', "echo a\\@\\(x\\) > $AP2_RUN_DIR/n.txt"], deny=False)
+        # `_extglob` reads the option name through quotes and line continuations.
+        for cmd in ("shopt -s ext$'g'lob", "shopt -s ext\\\nglob", "shopt -s ext'gl'ob", "shopt -s ext\\glob"):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(guard._extglob(cmd))
+        # `_segments` marks each opener read outside quotes and arithmetic.
+        for opener in "@+!?*":
+            with self.subTest(opener=opener):
+                seen = set()
+                guard._segments(f"ls x{opener}(a|b)", seen=seen)
+                self.assertIn("@", seen)
+        for cmd in ("echo $((2*(3)))", "((x=2*(3)))", "echo '@(a)' \"*(b)\"", "echo \\@(", 'echo "${x:-@(a)}"'):
+            with self.subTest(cmd=cmd):
+                seen = set()
+                guard._segments(cmd, seen=seen)
+                self.assertNotIn("@", seen)
+        # The run-directory rule refuses a `(` after the run directory when the segment has an unquoted one.
+        marks = guard._Marks(WORKER)
+        for opener in "@+!?*":
+            word = f"$ap2_run_dir/{opener}(settings-implement.json)"
+            flags = set()
+            self.assertEqual(guard._words(f"cp a {word}", flags=flags), ["cp", "a", word])
+            self.assertIn("(", flags)
+            self.assertFalse(marks._own_run(word, True, True))
+        self.assertTrue(marks._own_run("$ap2_run_dir/@(x)", True, False))  # with no unquoted `(`, it is text
+
+    def test_zsh_forms_that_write_are_read_too(self):
+        """Claude Code runs a worker's Bash call in zsh on this Mac: `=(...)` runs a command, `>!` is a noclobber
+        redirect, `{ ... } always { ... }` runs its second block, and `(...)` in a word is a glob group."""
+        self.check(["ap2 card list =(cp src $AP2_DATA/config.yaml)",
+                    f"{PKG}/bin/ap2 card list =(cp src $AP2_DATA/config.yaml)",
+                    "ap2 card list >! $AP2_DATA/config.yaml", "ap2 card list 2>! $AP2_DATA/config.yaml",
+                    "ap2 card list >>! $AP2_DATA/config.yaml", "ap2 card list &>! $AP2_DATA/config.yaml",
+                    "ap2 card list >!$AP2_DATA/config.yaml", "echo x >! $AP2_DATA/config.yaml",
+                    "{ ap2 card list } always { cp src $AP2_DATA/config.yaml }",
+                    "cp src $AP2_RUN_DIR/(settings-implement.json)", "cp src $AP2_RUN_DIR/settings-implement(.json)",
+                    'cp src "$AP2_RUN_DIR"/(settings-implement.json)',
+                    # zsh reads a `}` that ends a word as a closing brace (even with no `{` open).
+                    "{# c\necho x >! $AP2_RUN_DIR/settings-implement.json}",
+                    "echo y > $AP2_RUN_DIR/settings-implement.json}\\\n", "{ cp src $AP2_RUN_DIR/x/..}"], deny=True)
+        self.check(["ap2 card note C1 --text 'a =(b)' --data $AP2_DATA", "ap2 card note C1 --text always > /tmp/x",
+                    "ap2 card list >! /tmp/x", 'echo "always (x)" > $AP2_RUN_DIR/n.txt',
+                    "echo x > ${AP2_RUN_DIR}", "echo x > ${AP2_RUN_DIR}/a.txt}"], deny=False)
+        targets = []
+        guard._words("a >! x >>! y 2>! z", targets)
+        self.assertEqual(targets, ["x", "y", "z"])
+
+    def test_a_brace_inside_a_quoted_parameter_expansion_is_a_brace(self):
+        """bash 3.2 ends the quote at the `"` inside `"${x:-"..."}"`, so a `{` in there brace-expands
+        (`x=; echo "${x:-"{a,b}"}"` prints `a b`)."""
+        self.check(['echo x | tee "${x:-"$AP2_RUN_DIR/{../..,o}/config.yaml"}"',
+                    'touch "${x:-"$AP2_RUN_DIR/{../..,o}/config.yaml"}"',
+                    'cp src "${x:-"$AP2_RUN_DIR/"{settings-implement.json,o}}"',
+                    "bash -c 'echo x | tee \"${x:-\"$AP2_RUN_DIR/{../..,o}/config.yaml\"}\"'",
+                    # A shell run on a quoted script reads its braces and groups unquoted.
+                    "bash -c 'touch {$AP2_RUN_DIR/..,x}/c'", "sh -c 'touch $AP2_RUN_DIR/{..,x}/c'",
+                    "zsh -c 'cp src $AP2_RUN_DIR/(settings-implement.json)'",
+                    "eval 'touch $AP2_RUN_DIR/{..,x}/c'",
+                    # The script a shell or `eval` runs is read as a command of its own: its words, line
+                    # continuations and final backslash as that shell reads them.
+                    "bash -c 'tee $AP2_RUN_DIR/settings-implement.json < src'",
+                    "sh -c 'mv src2 $AP2_RUN_DIR/\\.\\./\\.\\./config.yaml'",
+                    "bash -c 'touch $AP2_\\\nDATA/config.yaml'",
+                    "eval 'touch $AP2_RUN_DIR/settings-implement.json\\'",
+                    "zsh -c 'echo x >! $AP2_\\\nDATA/config.yaml'",
+                    "eval touch '$AP2_RUN_DIR/settings-implement.json'", "eval touch $AP2_RUN_DIR/\\'..\\'/c",
+                    "bash -c \"sh -c 'tee $AP2_RUN_DIR/settings-implement.json < src'\"",
+                    # zsh's `=sh` is the path of `sh`; `$@` is empty: still a shell's name.
+                    "=sh -c 'echo x > $AP2_RUN_DIR/\\.\\./\\.\\./config.yaml'",
+                    "$@eval 'echo x >! $AP2_RUN_DIR/settings-implement.json\\'",
+                    "${x}bash -c 'tee $AP2_RUN_DIR/settings-implement.json < src'",
+                    "bash -c \"sh -c \\\"zsh -c 'tee $AP2_RUN_DIR/settings-implement.json < src'\\\"\""], deny=True)
+        self.check(['echo "${x:-a,b}" > $AP2_RUN_DIR/x', "cp ${f} $AP2_RUN_DIR/a,b.txt",
+                    "bash -c 'echo hi > $AP2_RUN_DIR/x'", "bash -c 'ap2 card list --data $AP2_DATA'",
+                    "ssh host 'cat x' > $AP2_RUN_DIR/c.txt; ls $AP2_DATA"], deny=False)
+
+    def test_a_floor_glob_with_brackets_at_the_top_level_is_denied(self):
+        """Python's fnmatch reads `[^x]` and `[[:lower:]]` otherwise than bash: at the run directory's top level a
+        part with a `[` is refused (no floor-file write needs one)."""
+        self.check(["cp src $AP2_RUN_DIR/[^x]ettings-implement.json",
+                    "cp src $AP2_RUN_DIR/[[:lower:]]ettings-implement.json", "cp src $AP2_RUN_DIR/[[:alpha:]]*",
+                    "cp src $AP2_RUN_DIR/[s]ettings-implement.json", "cp src $AP2_RUN_DIR/x[ab].png"], deny=True)
+        self.check(["cp a $AP2_RUN_DIR/media/[ab].png", "rm -f $AP2_RUN_DIR/media/[!x]*.png"], deny=False)
+
+    def test_a_name_rebound_in_the_same_command_is_no_ap2_call(self):
+        """A function, an alias, a `hash` entry or a not-found handler can make `ap2` (or any name) run anything: a
+        command that defines one is denied when a segment names a guarded path."""
+        self.check(['ap2() { cp "$@"; }; ap2 src $AP2_DATA/config.yaml',
+                    'function ap2 { cp "$@"; }; ap2 src $AP2_DATA/config.yaml',
+                    "hash -p /bin/cp ap2; ap2 src $AP2_DATA/config.yaml",
+                    "shopt -s expand_aliases\nalias ap2=cp\nap2 src $AP2_DATA/config.yaml",
+                    "hash ap2=/bin/cp; ap2 src $AP2_DATA/config.yaml",
+                    'command_not_found_handler() { shift; cp "$@"; }; ap2 src $AP2_DATA/config.yaml',
+                    'command_not_found_handle () { shift; cp "$@"; }; ap2 src $AP2_DATA/config.yaml',
+                    'function command_not_found_handle { shift; cp "$@"; }; ap2 src $AP2_DATA/config.yaml',
+                    "'ap2'() { cp \"$@\"; }; ap2 src $AP2_DATA/config.yaml",
+                    "functions[ap2]='cp \"$@\"'; ap2 src $AP2_DATA/config.yaml",
+                    "commands[ap2]=/bin/cp; ap2 src $AP2_DATA/config.yaml",
+                    "ln -s /bin/cp /tmp/b/ap2; PATH=/tmp/b:$PATH ap2 src $AP2_DATA/config.yaml",
+                    "export PATH=/tmp/b:$PATH; ap2 src $AP2_DATA/config.yaml",
+                    "enable -n echo; ap2 src $AP2_DATA/config.yaml", "unalias ap2; ap2 src $AP2_DATA/config.yaml",
+                    "builtin alias ap2=cp\nap2 src $AP2_DATA/config.yaml",
+                    "eval 'ap2() { cp \"$@\"; }'; ap2 src $AP2_DATA/config.yaml",
+                    f'function {PKG}/bin/ap2 {{ cp "$@"; }}; {PKG}/bin/ap2 src $AP2_DATA/config.yaml',
+                    'f() { cp "$@"; }; f src $AP2_DATA/config.yaml', 'x ap2 () { cp "$@"; }; ap2 src $AP2_DATA/c'],
+                   deny=True)
+        self.check(["ap2 card list > /tmp/x", 'f() { echo hi; }; f > "$AP2_RUN_DIR/x"',
+                    'echo "f() and alias" > /tmp/x; ap2 card list --data $AP2_DATA',
+                    "ap2 card note C1 --text 'see hash()' --data $AP2_DATA",
+                    'x=$(date); ap2 card list --data $AP2_DATA',
+                    "cp \"$()\" /tmp/x; ap2 card list --data $AP2_DATA"], deny=False)
+
+    def test_a_final_lone_backslash_adds_nothing(self):
+        self.check(["cp ./src $AP2_RUN_DIR/settings-implement.json\\"], deny=True)
+        self.assertEqual(guard._words("a b\\"), ["a", "b"])
+        self.assertEqual(guard._words("a b\\\\"), ["a", "b\\"])
+
+    def test_each_run_directory_mention_in_a_word_is_judged_on_its_own(self):
+        """A quoted journal line can name the run directory twice: each mention that stays inside it is fine, and a
+        later one that leaves it is still denied."""
+        self.check(['echo "- screenshot: $AP2_RUN_DIR/media/a.png (before), $AP2_RUN_DIR/media/b.png (after)" '
+                    '>> "$AP2_RUN_DIR/journal.md"',
+                    'echo "see $AP2_RUN_DIR/a.png and $AP2_RUN_DIR/b.png" >> "$AP2_RUN_DIR/journal.md"',
+                    f'echo "see {RUN}/a.png and $AP2_RUN_DIR/b.png, {RUN}/c.png" >> "{RUN}/journal.md"'], deny=False)
+        self.check(['cp x "$AP2_RUN_DIR/$f"', 'echo x > "$AP2_RUN_DIR/a $AP2_RUN_DIR/../../config.yaml"',
+                    'echo x > "$AP2_RUN_DIR/a $AP2_DATA/config.yaml"', "echo x > $AP2_RUN_DIR/..$AP2_RUN_DIR",
+                    'echo x > "$AP2_RUN_DIR/a $AP2_RUN_DIR/settings-implement.json"',
+                    'echo x > "$AP2_RUN_DIR/a $AP2_RUN_DIR/*"', "echo x > $AP2_RUN_DIR/a$AP2_RUN_DIR$f"], deny=True)
+
     def test_a_variable_after_the_run_directory_is_not_trusted(self):
         self.check(["cp a.png $AP2_RUN_DIR/$f", "cp a.png ${AP2_RUN_DIR}/media/${f}",
                     # A command substitution after the run directory, either spelling, can print `/../..`.
@@ -713,6 +857,9 @@ class DecideTest(unittest.TestCase):
         def fill(unit, head=""):
             return head + (unit * (size // len(unit)))[:size - len(head)] + tail
 
+        def pad(head):  # `head`, then `a` up to MAX_COMMAND
+            return head + "a" * (guard.MAX_COMMAND - len(head))
+
         shapes = {"digits": fill("1", "echo "), "sed": fill("-sed ", "sed "),
                   "run dir": "cp x " + (RUN + "/a/") * ((size - 5) // (len(RUN) + 3)) + tail,
                   "$(": fill("$(echo "), '"$(': fill('"$(a '), "$'": fill("$'a\\'b' "), "${": fill("${x:-"),
@@ -740,7 +887,16 @@ class DecideTest(unittest.TestCase):
                   "heredoc $'": fill("cat <<$'\\x4f\\105\\cA' x\n"), 'heredoc $"': fill('cat <<$"E" x\n'),
                   "heredoc $' open": fill("\\'", "cat <<$'"), "func $'": fill("$'a'$$'b'", "ap2 "),
                   "extglob nested": fill("@("), "extglob $(": fill("@($(a) "),
-                  "(( deep": ("(( " * (size // 9) + "x" + " )" * (2 * (size // 9)))[:size] + tail}
+                  "(( deep": ("(( " * (size // 9) + "x" + " )" * (2 * (size // 9)))[:size] + tail,
+                  "(( $$' delim": pad('"$$(x)" ' + "((" * 180 + "$(<<$$'x\\' )" + " )" * 360 + " "),
+                  "${ quoted {": fill('"${x:-"{'), "${ {": fill('"${x:-{'),
+                  "rebind": fill("f() { x; }; ap2 $AP2_DATA "),
+                  "alias": fill("alias "), "=(": fill("=(a ", "ap2 "), ">!": fill(">! a ", "ap2 "),
+                  "always": fill("always ", "ap2 "), "zsh group": fill("$AP2_RUN_DIR/(a) "),
+                  "run dir twice": fill('"$AP2_RUN_DIR/a $AP2_RUN_DIR/b '), "( mid": fill("a("),
+                  "()": fill("() "), "bash -c {": fill("{a,b} ", "bash -c '"), "[ top": fill("$AP2_RUN_DIR/[a "),
+                  "extglob @ seen": fill("a@(b) "), "shells": fill("bash -c "), "eval": fill("eval $AP2_DATA "),
+                  "shells quoted": fill("'", "bash -c " + "'bash -c " * 50)}
         for name, cmd in shapes.items():
             with self.subTest(name):
                 self.assertLessEqual(len(cmd), guard.MAX_COMMAND)
@@ -764,6 +920,14 @@ class DecideTest(unittest.TestCase):
             self.assertIsNone(guard._judge(json.dumps(bash("echo x > /tmp/x")).encode(), WORKER))
             self.assertLess(time.monotonic() - t, 1.9)
         self.assertEqual(guard.signal.getitimer(guard.signal.ITIMER_REAL), (0.0, 0.0))  # the timer is off again
+        # A judgement that ends in time (the real `decide`) also turns the timer off and puts the old handler back.
+        def mine(signum, frame):
+            pass
+
+        self.addCleanup(guard.signal.signal, guard.signal.SIGALRM, guard.signal.signal(guard.signal.SIGALRM, mine))
+        self.assertIsNone(guard._judge(json.dumps(bash("echo x > /tmp/x")).encode(), WORKER))
+        self.assertEqual(guard.signal.getitimer(guard.signal.ITIMER_REAL), (0.0, 0.0))
+        self.assertIs(guard.signal.getsignal(guard.signal.SIGALRM), mine)
 
     def test_the_harmless_redirects_match_v1(self):
         v1 = re.compile(r"\d*>&\d+|&>>?\s*/dev/null|\d*>>?\s*/dev/null")
