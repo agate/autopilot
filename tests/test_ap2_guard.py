@@ -112,13 +112,75 @@ class DecideTest(unittest.TestCase):
         self.assertEqual(guard._segments("echo $# ${#x}; b"), ["echo $# ${#x}", " b"])  # not comments
         self.assertEqual(guard._segments("cat <<E; x\nl1; 'q\nE\nz"), ["cat <<E", " x", "l1; 'q", "E", "z"])
         self.assertEqual(guard._segments("cat <<E\nno end; 'q"), ["cat <<E", "no end; 'q"])
+        self.check([f"cat > /tmp/msg <<'EOF'\nx\nEOF\nsed -i 's/a/b/\n' {DATA}/config.yaml"], deny=True)
+        self.assertEqual(guard._segments("cat <<'E'\nx\nE\ny"), ["cat <<'E'", "x", "E", "y"])
+        self.assertIs(type(guard._segments("cat <<'E'\nx\nE\ny")[-1]), str)
         # `<<-` strips the body's leading tabs, so a tab-indented delimiter line ends it.
         self.check(["cat <<-EOF > /tmp/x\n\tbody\n\tEOF\n" + f"{PKG}/bin/ap2 card note C1 'rm it'"], deny=False)
+
+    def test_a_heredoc_opens_and_ends_where_bash_opens_and_ends_it(self):
+        """No heredoc inside `${...}` or `$[...]`; the delimiter keeps its backticks; a body line that ends in an odd
+        number of backslashes joins the next one, as bash joins them; inside `$(...)` a `EOF)` line ends the body."""
+        self.check(['echo ${x/<</y}\nrm -rf \\\n"$AP2_DATA/victim"',
+                    'echo $[1<<2]\nrm -rf \\\n"$AP2_DATA/victim"',
+                    'cat <<a`b`\nhi\na`b`\nrm -rf \\\n"$AP2_DATA/victim"',
+                    'cat <<EOF\nrm -rf \\\n"$AP2_DATA/victim"\nEOF',
+                    'bash <<EOF\nrm -rf \\\n\\\n$AP2_DATA/victim\nEOF',
+                    'x=$(cat <<EOF\nhi\nEOF)\ncp a $AP2_DATA/config.yaml'], deny=True)
+        self.check(['cat <<EOF\nls \\\\\n$AP2_DATA/x\nEOF',
+                    'x=$(cat <<EOF\nhi\nEOF)\nls $AP2_DATA; echo "$x" > /tmp/y',
+                    'x=$(cat <<-EOF\nhi\n\tEOF)\nls $AP2_DATA; echo "$x" > /tmp/y'], deny=False)
+        self.assertEqual(guard._segments("cat <<a`b`\nhi\na`b`\nz"), ["cat <<a`b`", "hi", "a`b`", "z"])
+        self.assertEqual(guard._segments('cat <<"a\\$b"\nhi\na$b\nz'), ['cat <<"a\\$b"', "hi", "a$b", "z"])
+        self.assertEqual(guard._segments("x=$(cat <<E\nhi\nE)\nz"), ["x=$(cat <<E", "hi", "E", ")", "z"])
+        self.assertIs(type(guard._segments("x=$(cat <<E\nhi\nE)\nz")[-1]), str)
+        self.assertEqual(guard._segments("echo ${x/<</y}\nz"), ["echo ${x/<</y}", "z"])
+
+    def test_a_line_continuation_joins_the_word(self):
+        """A backslash-newline outside single quotes is no character at all: bash joins the two lines' words."""
+        self.check(["rm -rf $AP2_\\\nDATA/victim", 'rm -rf "$AP2_\\\nDATA/victim"',
+                    f"rm -rf {DATA[:10]}\\\n{DATA[10:]}/victim", f"cp a {DATA}/con\\\nfig.yaml"], deny=True)
+        self.check(["echo 'a\\\nb' > /tmp/x"], deny=False)
+        self.assertEqual(guard._words("a$AP2_\\\nDATA \"x\\\ny\" 'p\\\nq'"), ["a$AP2_DATA", "xy", "p\\\nq"])
+        pad = "dd " * (guard.MAX_COMMAND // 3 + 1)
+        self.assertTrue(denied(guard.decide(bash(pad + "rm -rf $AP2_\\\nDATA/victim"), WORKER)))
+        raw = json.dumps(bash("rm -rf $AP2_\\\nDATA/victim")).encode()
+        self.assertTrue(denied(guard._fallback(raw, WORKER)))
+        self.assertIsNone(guard._fallback(raw.replace(b"AP2_", b"NOPE_"), WORKER))
+
+    def test_a_separator_inside_a_parameter_expansion_does_not_split(self):
+        self.check(['rm -rf ${x:-;} "$AP2_DATA/victim"', 'rm -rf ${x:-|} "$AP2_DATA/victim"',
+                    'rm -rf ${x:-&} "$AP2_DATA/victim"',
+                    # `$$` is the PID, so `$${` opens no expansion: bash splits at the `;`.
+                    f"ap2 status $${{x:-; cp a {DATA}/config.yaml"], deny=True)
+        self.assertEqual(guard._segments("a ${x:-;|&} b; c"), ["a ${x:-;|&} b", " c"])
+
+    def test_a_backtick_inside_double_quotes_reads_its_own_quotes(self):
+        self.check(['echo "`echo " #"`"; rm -rf $AP2_DATA/items',
+                    'git commit -m "`printf "%s #%s" fix 12`"; rm -rf $AP2_DATA/items',
+                    'cp "`echo "x;y"`" $AP2_DATA/config.yaml',
+                    'echo "`cp a $AP2_DATA/config.yaml`"',
+                    'ap2 card note C1 --text "`echo ok`"; cp a $AP2_DATA/config.yaml'], deny=True)
+        self.check(['echo "`date +"%F #"`" > /tmp/x; ls $AP2_DATA'], deny=False)
+        self.assertEqual(guard._segments('a "`b; c`" d; e'), ["b", " c", 'a "`b; c`" d', " e"])
+        self.assertEqual(guard._words('a "x`b "c d"`y" e'), ["a", "x`", "b", "c d", "y", "e"])
 
     def test_a_double_paren_that_bash_runs_as_two_subshells_is_no_arithmetic(self):
         """`((cd x; ls) )` closes with `) )`, not `))`: two subshells, so a later `<<` opens a heredoc."""
         self.check([f"((cd /tmp; ls) ); cat <<EOF\nit's\nEOF\nsed -i 's/a/b/\n' {DATA}/config.yaml",
-                    f"((cd /tmp && make) 2>&1)\ncat <<EOF > /tmp/x\ndon't\nEOF\necho x > {DATA}/config.yaml"],
+                    f"((cd /tmp && make) 2>&1)\ncat <<EOF > /tmp/x\ndon't\nEOF\necho x > {DATA}/config.yaml",
+                    f"echo $(( (n+1) << 2 ))\nsed -i 's/a/b/\n' {DATA}/config.yaml",
+                    # An arithmetic `|`, `&` or `#` neither splits nor starts a comment (bash: `((#))` is one
+                    # arithmetic error, then the next command runs); `((ap2 ...` is no ap2 call.
+                    'rm -rf $((1|0)) "$AP2_DATA/victim"', 'rm -rf $((1&1)) "$AP2_DATA/victim"',
+                    '((x=1|2)); rm -rf "$AP2_DATA/victim"', '((x=1|2)) && rm -rf "$AP2_DATA/victim"',
+                    '((ap2 status; rm -rf "$AP2_DATA/victim") )', '((ap2 status | rm -rf "$AP2_DATA/victim") )',
+                    '((ap2 status && rm -rf "$AP2_DATA/victim") )',
+                    '((#)); rm -rf "$AP2_DATA/victim"', '(( #)); rm -rf "$AP2_DATA/victim"',
+                    # Old-style `$[...]` arithmetic: its `<<` is a shift, its `|` no pipe.
+                    'echo $[1<<2]\nrm -rf \\\n"$AP2_DATA/victim"', 'rm -rf $[1|0] "$AP2_DATA/victim"',
+                    # `$$` is the PID, so `$$[` opens nothing: bash runs the `|` as a pipe.
+                    f"ap2 status $$[1| cp a {DATA}/config.yaml"],
                    deny=True)
         self.check([f"x=$((a<<b)); cat <<EOF\nit's\nEOF\nls {DATA}/items",
                     f"echo $(( (1+2) << 1 )) $(((1+2)))\ncat <<EOF\nit's\nEOF\nls {DATA}"], deny=False)
@@ -147,7 +209,13 @@ class DecideTest(unittest.TestCase):
 
     def test_an_ansi_c_quote_keeps_an_escaped_apostrophe(self):
         self.check([f"printf $'a\\'b\\n' > /tmp/x\nls {DATA}/items"], deny=False)
-        self.check([f"ap2 card add --title $'it\\'s' ; cp a {DATA}/config.yaml"], deny=True)
+        self.check([f"ap2 card add --title $'it\\'s' ; cp a {DATA}/config.yaml",
+                    f"ap2 card add --title \\$'it\\' ; cp a {DATA}/config.yaml # ''",
+                    # `$$` is the PID: the quote after it is a plain one, where a backslash is just a character.
+                    "ap2 status $$'\\'; rm -rf \"$AP2_DATA/victim\"; echo $$'\\'",
+                    "echo $$'\\'' #'; rm -rf $AP2_DATA/items",
+                    f"ap2 status \\$$$'\\'; cp a {DATA}/config.yaml #'"], deny=True)
+        self.check([f"printf $$$'a\\'b' > /tmp/x\nls {DATA}/items"], deny=False)
         self.assertEqual(guard._words("printf $'a\\'b' \"$'x'\""), ["printf", "a'b", "$'x'"])
 
     def test_a_hash_that_does_not_start_a_word_is_no_comment(self):
@@ -156,7 +224,9 @@ class DecideTest(unittest.TestCase):
                     f"echo ${{x// #/}}; cp a {DATA}/config.yaml",
                     f"v=`echo a #`; cp a {DATA}/config.yaml",
                     f"touch /tmp/a\\ #1 && cp a {DATA}/config.yaml"], deny=True)
-        self.check([f"(true) # cp a {DATA}/config.yaml", f"echo a \\\\ # cp a {DATA}/config.yaml"], deny=False)
+        self.check([f"ap2 card show ${{C}} # don't\ncp a {DATA}/config.yaml # it's ok"], deny=True)
+        self.check([f"(true) # cp a {DATA}/config.yaml", f"echo a \\\\ # cp a {DATA}/config.yaml",
+                    f"ls ${{HOME}} # cp x > {DATA}/config.yaml"], deny=False)
 
     def test_an_ap2_segment_that_runs_other_code_loses_its_exemption(self):
         self.check([f"ap2 card add --title \"$(cp a {DATA}/config.yaml)\"",
@@ -168,13 +238,28 @@ class DecideTest(unittest.TestCase):
         self.check(["ap2 card add --body \"$(cat $AP2_RUN_DIR/b.md)\"",
                     f"{PKG}/bin/ap2 card add --title x --body {DATA}/sessions/C1/b.md",
                     f"ap2 card add --title '$(cp a {DATA}/config.yaml)'",
-                    f"ap2 card add --title \"$((1+2))\" --data {DATA}"], deny=False)
+                    f"ap2 card add --title \"$((1+2))\" --data {DATA}",
+                    f"{PKG}/bin/ap2 worker park C1 implement --note \"can't rm the lock; needs a human\"",
+                    f"{PKG}/bin/ap2 worker park C1 implement --note $'can\\'t rm the lock'",
+                    f"{PKG}/bin/ap2 worker park C1 implement --note can\\'t-rm",
+                    f"{PKG}/bin/ap2 worker park C1 implement --note \"rm step $((n+1)) failed\"",
+                    # The same notes with a data-folder mention, so the exemption is what decides.
+                    "ap2 card note C1 --data $AP2_DATA --text \"can't rm the lock; needs a human\"",
+                    "ap2 card note C1 --data $AP2_DATA --text $'can\\'t rm the lock'",
+                    "ap2 card note C1 --data $AP2_DATA --text can\\'t-rm",
+                    "ap2 card note C1 --data $AP2_DATA --text \"rm step $((n+1)) failed\""], deny=False)
+        self.check(["ap2 card note C1 --data $AP2_DATA --text \"$(cp a b)\""], deny=True)
 
     def test_a_parameter_expansion_of_the_data_folder_is_a_mention(self):
         self.check(["rm -rf \"${AP2_DATA:?}/items\"", "rm -rf \"${AP2_DATA:?}\"/items",
                     "cp a \"${AP2_DATA%/}/config.yaml\"", "echo x > \"${AP2_RUN_DIR%/*}/C2/x\"",
                     # Accepted false deny: a brace after the run directory is never trusted.
-                    "echo x > ${AP2_RUN_DIR:?}/x"], deny=True)
+                    "echo x > ${AP2_RUN_DIR:?}/x", "echo x > ${AP2_RUN_DIR[0]}/x",
+                    'rm -rf "${AP2_DATA?}/items"', 'rm -rf "${AP2_DATA-}/items"', 'cp a "${AP2_DATA#}/config.yaml"',
+                    'rm -rf "${AP2_DATA//x/x}/items"',
+                    # An array subscript of the variable is the variable too.
+                    'rm -rf "${AP2_DATA[0]}/victim"', "rm -rf ${AP2_DATA[@]}", 'rm -rf "${AP2_DATA[*]}/x"',
+                    'echo pwned > "${AP2_RUN_DIR[0]}/../../victim/f"'], deny=True)
         self.check(["echo ${AP2_DATA_OLD:-x} > /tmp/x"], deny=False)
 
     def test_reads_and_writes_elsewhere_are_allowed(self):
@@ -230,7 +315,11 @@ class DecideTest(unittest.TestCase):
                     f"cp {DATA}/config.yaml /tmp/backup.yaml"], deny=True)
 
     def test_a_variable_after_the_run_directory_is_not_trusted(self):
-        self.check(["cp a.png $AP2_RUN_DIR/$f", "cp a.png ${AP2_RUN_DIR}/media/${f}"], deny=True)
+        self.check(["cp a.png $AP2_RUN_DIR/$f", "cp a.png ${AP2_RUN_DIR}/media/${f}",
+                    # A command substitution after the run directory, either spelling, can print `/../..`.
+                    "cp x $AP2_RUN_DIR`echo /../..`/config.yaml", "cp x $AP2_RUN_DIR$(echo /../..)/config.yaml",
+                    "cp x $AP2_RUN_DIR/`echo ../..`/config.yaml", 'cp x "$AP2_RUN_DIR/`echo ../..`/config.yaml"'],
+                   deny=True)
 
     def test_the_floor_in_the_run_directory_is_not_writable(self):
         self.check(["echo {} > $AP2_RUN_DIR/settings-implement.json", f"rm {RUN}/settings-review.json",
@@ -250,9 +339,20 @@ class DecideTest(unittest.TestCase):
 
     def test_an_ap2_segment_may_name_the_data_folder_but_not_redirect_into_it(self):
         self.check([f"ap2 evidence add C1 {DATA}/sessions/C1/a.png", f"ap2 card show C1 --data {DATA}",
-                    "ap2 card list > $AP2_RUN_DIR/cards.txt"], deny=False)
-        self.check([f"ap2 card list > {DATA}/config.yaml", f"{PKG}/bin/ap2 card list >> $AP2_DATA/items/x"],
-                   deny=True)
+                    "ap2 card list > $AP2_RUN_DIR/cards.txt",
+                    # ap2 by its full path (the worker prompt's park command): that path is no write target.
+                    f"{PKG}/bin/ap2 card show C1 > $AP2_RUN_DIR/card.json",
+                    f"{PKG}/bin/ap2 card list 2> $AP2_RUN_DIR/err.txt",
+                    f"{PKG}/bin/ap2 card add --title 'a -> b'",
+                    f"{PKG}/bin/ap2 worker park v2 C1 pr --note \"limit hit at $(date +%H:%M); will rm tmp after\"",
+                    # Only a redirect's target counts, not any `>` in the segment.
+                    "ap2 card list --data \"$AP2_DATA\" > /tmp/cards.json", "ap2 card list --data $AP2_DATA 2>&1",
+                    "ap2 card add --data $AP2_DATA --title 'a -> b' >/dev/null"], deny=False)
+        self.check([f"ap2 card list > {DATA}/config.yaml", f"{PKG}/bin/ap2 card list >> $AP2_DATA/items/x",
+                    f"{PKG}/bin/ap2 card list >> $AP2_DATA/x", f"cp x {PKG}/bin/ap2",
+                    "ap2 card list >& $AP2_DATA/x", "ap2 card list &> $AP2_DATA/x", "ap2 card list <> $AP2_DATA/x",
+                    "ap2 card list 2>$AP2_DATA/x", 'ap2 card list >"$AP2_"DATA/x', "ap2 card list >| $AP2_DATA/x",
+                    "ap2 card list &>> $AP2_DATA/x"], deny=True)
 
     def test_no_run_directory_means_no_exemption(self):
         env = {k: v for k, v in WORKER.items() if k != "AP2_RUN_DIR"}
@@ -280,17 +380,24 @@ class DecideTest(unittest.TestCase):
             with self.subTest(payload=payload):
                 self.assertIsNone(guard.decide(payload, WORKER))
 
+    def fast(self, call, *args):
+        """`call(*args)`, asserted to take well under the hook's 5 s timeout. CPU time, not wall time: the point is
+        that each step is linear (the quadratic shapes took 4-14 s), and a loaded machine does not change CPU time."""
+        t = time.process_time()
+        out = call(*args)
+        self.assertLess(time.process_time() - t, 2.0)
+        return out
+
     def test_a_command_too_long_to_check_is_denied_when_it_names_the_data_folder(self):
         pad = "dd " * (guard.MAX_COMMAND // 3 + 1)
-        t = time.monotonic()
-        self.assertTrue(denied(guard.decide(bash(f"{pad} > {DATA}/config.yaml"), WORKER)))
-        self.assertIsNone(guard.decide(bash(f"{pad} > /tmp/x"), WORKER))
-        self.assertTrue(denied(guard.decide(bash(f'{pad} > "$AP2_"DATA/config.yaml'), WORKER)))
+        self.assertTrue(denied(self.fast(guard.decide, bash(f"{pad} > {DATA}/config.yaml"), WORKER)))
+        self.assertIsNone(self.fast(guard.decide, bash(f"{pad} > /tmp/x"), WORKER))
+        self.assertTrue(denied(self.fast(guard.decide, bash(f'{pad} > "$AP2_"DATA/config.yaml'), WORKER)))
         # Just under the cap, the slowest shape the write pattern has still answers well inside the 5 s timeout.
         for shape in ("dd ", "open(", "sed -a "):
             body = (shape * (guard.MAX_COMMAND // len(shape)))[:guard.MAX_COMMAND - 40]
-            guard.decide(bash(f"{body} {DATA}/x"), WORKER)
-        self.assertLess(time.monotonic() - t, 2.5)
+            with self.subTest(shape):
+                self.fast(guard.decide, bash(f"{body} {DATA}/x"), WORKER)
 
     def test_a_payload_past_the_read_cap_is_denied_when_it_is_a_bash_call(self):
         """`main` reads MAX_STDIN + 1 bytes, so a write past them is never seen: a v2 worker's Bash call that long is
@@ -303,13 +410,12 @@ class DecideTest(unittest.TestCase):
         self.assertTrue(denied(guard._judge(read, WORKER)))
         self.assertIsNone(guard._judge(read.replace(b'"Bash"', b'"Grep"'), WORKER))
         self.assertIsNone(guard._judge(read, dict(WORKER, AP2_ROLE="")))
-        t = time.monotonic()
         # The slowest fallback (a payload too deep to parse is judged by it): a quote-split spelling at its end.
-        self.assertTrue(denied(guard._fallback(raw, WORKER)))
-        self.assertIsNone(guard._fallback(raw.replace(b"$AP2_", b"$NOPE_"), WORKER))
+        self.assertTrue(denied(self.fast(guard._fallback, raw, WORKER)))
+        self.assertIsNone(self.fast(guard._fallback, raw.replace(b"$AP2_", b"$NOPE_"), WORKER))
         # And the largest command `decide` sees after a parse, with the same spelling.
-        self.assertTrue(denied(guard.decide(bash("a " * (guard.MAX_STDIN // 2 - 40) + '> "$AP2_"DATA/c'), WORKER)))
-        self.assertLess(time.monotonic() - t, 2.5)
+        self.assertTrue(denied(self.fast(guard.decide, bash("a " * (guard.MAX_STDIN // 2 - 40) + '> "$AP2_"DATA/c'),
+                                         WORKER)))
 
     def test_each_parser_shape_at_the_cap_answers_fast(self):
         """The shapes that were slow (a digit run before a redirect, a long `sed -x -x ...`, a word with the run
@@ -323,13 +429,15 @@ class DecideTest(unittest.TestCase):
                   "run dir": "cp x " + (RUN + "/a/") * ((size - 5) // (len(RUN) + 3)) + tail,
                   "$(": fill("$(echo "), '"$(': fill('"$(a '), "$'": fill("$'a\\'b' "), "${": fill("${x:-"),
                   "backticks": fill("`a #` "), "&": fill("a & "), "((": fill("((a) ) "), "$((": fill("$((a<<b)) "),
-                  "#": fill("a\\ #"), ">|": fill(">|a ")}
+                  "#": fill("a\\ #"), ">|": fill(">|a "), "$[": fill("$[a<<b] "), "$[[": fill("[", "echo $["),
+                  '"`': fill('"`a #`" '), "\\newline": fill("a\\\n"), "$$'": fill("$$'a' "),
+                  "${;": fill("${x:-;"), "((|": fill("((a|b)) "), "heredoc \\": fill("a\\\n", "cat <<E\n"),
+                  "ap2 >": fill("> $AP2_DATA ", "ap2 "), "[": "cat $AP2_RUN_DIR/" + "[" * (size - 20) + "/x",
+                  "*": "cat $AP2_RUN_DIR/" + "*[" * ((size - 20) // 2)}
         for name, cmd in shapes.items():
             with self.subTest(name):
                 self.assertLessEqual(len(cmd), guard.MAX_COMMAND)
-                t = time.monotonic()
-                guard.decide(bash(cmd), WORKER)
-                self.assertLess(time.monotonic() - t, 2.5)
+                self.fast(guard.decide, bash(cmd), WORKER)
 
     def test_a_judgement_past_the_deadline_is_a_deny_when_it_names_a_guarded_path(self):
         if not hasattr(guard.signal, "setitimer"):
@@ -340,11 +448,14 @@ class DecideTest(unittest.TestCase):
                 pass
 
         with mock.patch.object(guard, "decide", forever), mock.patch.object(guard, "DEADLINE", 0.2):
+            # Each call on its own, under the 2 s default: it fails if the patched deadline were not the one used.
             t = time.monotonic()
             self.assertTrue(denied(guard._judge(json.dumps(bash(f"echo x > {DATA}/config.yaml")).encode(),
                                                 WORKER)))
+            self.assertLess(time.monotonic() - t, 1.9)
+            t = time.monotonic()
             self.assertIsNone(guard._judge(json.dumps(bash("echo x > /tmp/x")).encode(), WORKER))
-            self.assertLess(time.monotonic() - t, 2.5)
+            self.assertLess(time.monotonic() - t, 1.9)
         self.assertEqual(guard.signal.getitimer(guard.signal.ITIMER_REAL), (0.0, 0.0))  # the timer is off again
 
     def test_the_harmless_redirects_match_v1(self):

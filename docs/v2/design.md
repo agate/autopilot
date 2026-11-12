@@ -1883,8 +1883,9 @@ Calls the author made without asking (check them):
     Choices the task left open:
     - The own run directory: a segment whose every data-folder mention is a path under `AP2_RUN_DIR` (in any of
       the spellings above, or `$AP2_RUN_DIR` / `${AP2_RUN_DIR}`) with no `..` component and no `$` after the run
-      directory is allowed; `$AP2_RUN_DIR/$f` is denied, since `$f` could hold `..`, and so is a `{` (brace
-      expansion can make `..`), a part that is `..` or a dot glob such as `.*` (bash 3.2 matches it to `..`), and a
+      directory is allowed; `$AP2_RUN_DIR/$f` is denied, since `$f` could hold `..`, and so is a backtick
+      (``$AP2_RUN_DIR`echo /../..`/x`` can print `..`, as `$(...)` can), a `{` (brace expansion can make `..`), a
+      part that is `..` or a dot glob such as `.*` (bash 3.2 matches it to `..`), and a
       part named `settings-*.json` at any depth, and at the run directory's top level only (where the floor's own
       `settings-<role>.json` files live, which `Edit` cannot change either) a glob that matches one (`settings*`,
       `*`); `$AP2_RUN_DIR/media/*` is fine. Still possible, and left as best effort: removing or copying into the run
@@ -1893,19 +1894,29 @@ Calls the author made without asking (check them):
       (`ln -s ../../config.yaml $AP2_RUN_DIR/l`, then a write to `$AP2_RUN_DIR/l`) can get past the guard: it
       reads text, not link targets.
     - An expansion of the variables with an operator after the name (`${AP2_DATA` or `${AP2_RUN_DIR` followed by
-      one of `: % # / ^ , - + = ?`, as in ShellCheck's `"${AP2_DATA:?}"/items`) is a data-folder mention that is
-      never the own run directory, so `rm -rf "${AP2_DATA:?}/items"` and `echo x > "${AP2_RUN_DIR%/*}/C2/x"` are
-      denied. `${AP2_RUN_DIR:?}/x` is denied too, an accepted false deny (a brace is never trusted in the run
-      directory exemption); write `$AP2_RUN_DIR/x`.
+      one of `: % # / ^ , - + = ? [`, as in ShellCheck's `"${AP2_DATA:?}"/items`, or an array subscript such as
+      `${AP2_DATA[0]}` or `${AP2_DATA[@]}`) is a data-folder mention that is never the own run directory, so
+      `rm -rf "${AP2_DATA:?}/items"` and `echo x > "${AP2_RUN_DIR%/*}/C2/x"` are denied. `${AP2_RUN_DIR:?}/x` and
+      `${AP2_RUN_DIR[0]}/x` are denied too, accepted false denies (a brace is never trusted in the run directory
+      exemption); write `$AP2_RUN_DIR/x`.
     - A mention ends where the path part ends (`<data>2/` and `$AP2_DATA_OLD` are not the data folder);
       mentions match case-insensitively (macOS folders are), and `a//b` and `a/./b` read as `a/b`. A segment is
       read as shell words, with quotes and backslashes removed the way bash reads them, so `"$AP2_RUN_DIR"/../x`
-      and `"$AP2_"DATA/x` are seen whole. Separators inside quotes or after a backslash do not split a segment,
-      so `sed -i 's|a|b|' <data>/config.yaml` and `cp 'a;b' <data>/x` stay one segment with their write. A comment
+      and `"$AP2_"DATA/x` are seen whole; a backslash-newline outside single quotes (a line continuation) is no
+      character at all, so `$AP2_\<newline>DATA/x` is `$AP2_DATA/x`, also in a command past 64 KiB and in a
+      payload too deep to parse (read with all its JSON escapes undone, `\n` too). Separators inside quotes or
+      after a backslash do not split a segment, so `sed -i 's|a|b|' <data>/config.yaml` and `cp 'a;b' <data>/x`
+      stay one segment with their write. A comment
       (an unquoted `#` at the start of a word, to the end of its line) and a heredoc body (the lines after an
       unquoted `<<` or `<<-`, up to its delimiter line) are read line by line without quotes, as bash reads them, so
       an apostrophe in `# don't` or in a body line cannot hide the next command; a body line is data, so the `ap2`
-      exemption below never applies to it. A here-string (`<<<`) and a shift inside `((...))` or `$((...))` open no
+      exemption below never applies to it. Body lines that end in an odd number of backslashes are joined to the
+      next one (the backslash-newline dropped) before they are judged, as bash joins them in an unquoted heredoc
+      and as a shell fed the body does, so a body's `rm -rf \<newline><data>/x` is one write. The delimiter is the
+      word after `<<` with quote removal only (bash keeps the rest literal: ``<<a`b` `` ends at a line ``a`b` ``).
+      Inside `$(...)` a body also ends at a line that is the delimiter followed by `)` (bash 3.2 reads
+      `x=$(cat <<EOF`, body, `EOF)` so), and the scan goes on at that `)`. A here-string (`<<<`), a shift inside
+      arithmetic (`((...))`, `$((...))`, or the old `$[...]`) and a `<<` inside `${...}` (`${x/<</y}`) open no
       heredoc, and a `#` right after `)` stays in the word (`echo $(date)#x` is no comment), as in bash. A `((`
       that bash runs as two subshells (it closes with a single `)` first, `((cd x; ls) )`, not `))`) is no
       arithmetic, so a later `<<` opens a heredoc; a newline ends any arithmetic span.
@@ -1914,22 +1925,36 @@ Calls the author made without asking (check them):
       (`${x:- #}`) or inside backticks. Inside `$(...)`, even within `"..."`, quoting starts afresh until the `)`
       that closes it (`"$(git log --format="%an's")"` is one word; `"$(date +"%F #")" > <data>/f` holds no
       comment); separators inside `$(...)` split it too, since bash runs those commands, and a heredoc opened in
-      it has its body read as above. `$'...'` is an ANSI-C quote where `\'` stays inside. A background `&` ends a
+      it has its body read as above. A backtick inside `"..."` runs the text up to the next unescaped backtick
+      (bash ends it there, whatever quotes lie between); that text is read with its own quotes, as segments of its
+      own, and the outer `"..."` goes on after it, so ``echo "`echo " #"`"; <next command>`` holds no comment and
+      ``cp "`echo "x;y"`" <data>/f`` is one segment with its write. `$'...'` is an ANSI-C quote where `\'` stays
+      inside, but only after an odd run of unescaped `$`: `$$` is the shell's PID, so in `$$'\'` the quote is a
+      plain one (and `$${` and `$$[` open nothing). No separator splits inside an unquoted `${...}` (`${x:-;}` is
+      one word), no `|` or `&` splits inside arithmetic (`$((1|0))`, `$[1|0]`, `((x=1|2))`), and a `#` there
+      starts no comment (bash runs the command after `((#));`). A background `&` ends a
       segment (`ap2 card list & cp y <data>/config.yaml` is two), but the `&` of `2>&1`, `>&2`, `<&3`, `&>` and
       `&>>` does not, and `|&` is a pipe. The `|` of `>|` (the noclobber override) is a redirect, not a pipe.
     - A segment that runs `ap2` (its first word is `ap2` or ends in `/bin/ap2`) may name the data folder, since
-      `ap2` writes it itself, but a redirect (`>`, `>>`) in that segment into the data folder is still denied:
-      `ap2 card list > <data>/config.yaml` is the shell writing, not `ap2`. The segment loses the exemption, and is
-      judged like any other, when bash runs more than `ap2` in it: outside single quotes a `$(` (not `$((`), a
-      backtick, `<(` or `>(`; its first word followed by `(` (`ap2(){ cp a <data>/f; }; ap2` defines a function);
-      or a quote still open at its end. `ap2 card add --body "$(cat $AP2_RUN_DIR/b.md)"` stays allowed: it names
-      only the own run directory and writes nothing.
+      `ap2` writes it itself, and its first word is no package mention (workers run `<pkg>/bin/ap2 worker park
+      ...` by its full path). Only a redirect into a guarded path in that segment is denied: an unquoted `>`, `>>`,
+      `>|`, `>&`, `&>` or `<>` whose target word names one, so `ap2 card list > <data>/config.yaml` is the shell
+      writing, not `ap2`, while `ap2 card list --data <data> > /tmp/cards.json` and
+      `<pkg>/bin/ap2 card add --title 'a -> b'` are allowed. The segment loses the exemption, and is judged like
+      any other (with `_WRITE`, when it still names a guarded path past its first word), when bash runs more than
+      `ap2` in it: outside single quotes a `$(` (not `$((`), a backtick, `<(` or `>(`; outside any quotes a `((`
+      (`((ap2 status | <write>) )` is two subshells); its first word followed by `(`
+      (`ap2(){ cp a <data>/f; }; ap2` defines a function); or a quote still open at its end.
+      `ap2 card add --body "$(cat $AP2_RUN_DIR/b.md)"` stays allowed: it names only the own run directory and
+      writes nothing.
     - Time: every step is linear in the command's length, since a hook past its 5 s timeout lets the call
       through. v1's `sed -x ... -i`, `dd ... of=` and `open(..., 'w')` forms are quadratic as one regex (11 s on
       64 KiB of `dd `, 7.9 s on 32 KiB of `-sed `), so they are matched token by token or piece by piece with the
       same result; v1's `_HARMLESS` (`\d*>&\d+...`, 14 s on a 32 KiB digit run) reads each digit run once, with
       the same result; and in a word with many mentions only the first is checked to the word's end (a later one
-      lies in the part already checked). A command longer than 64 KiB is not split: it is denied when it names a
+      lies in the part already checked). A glob longer than 64 characters at the run directory's top level is
+      denied outright (fnmatch reads a pattern in quadratic time, 4 s on 8,000 `[`; no floor file name is that
+      long). A command longer than 64 KiB is not split: it is denied when it names a
       guarded path anywhere. As a safety net the hook gives one judgement 2 s (a timer signal, which also stops a
       slow regex match); past it, the call is denied when it is a worker's Bash call naming a guarded path. The
       hook reads at most 1 MiB of payload, so a write past that would never be seen: a v2 worker's payload past

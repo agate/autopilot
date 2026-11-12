@@ -4,13 +4,14 @@ package (design 8.1, section 12 workers).
 `workers.floor()` wires it into every worker's settings after the park hook. For a Bash call from a v2 worker
 (`AP2_ROLE` set) it splits the command into segments (newlines, `;`, `&&`, `||`, `|`, `|&`, and a background `&`;
 not the `&` of `2>&1`, `&>` or `<&`, nor the `|` of `>|`) and denies the call when a segment names the data folder
-(`AP2_DATA`, its `~` or `$HOME` form, `$AP2_DATA`, `${AP2_DATA}`, `${AP2_DATA:?}`-style expansions,
-`$AP2_RUN_DIR`) or the package and looks like a write (v1's `_WRITE`, with the redirects that write nowhere removed
-first). A segment that runs `ap2` may name them (`ap2` writes the data folder itself); only a redirect in it counts
-as a write, unless it also runs other shell code (`$(...)`, a backtick, `<(...)`, a function named `ap2`). A
-segment whose every data-folder mention is a path under the worker's own run directory (`AP2_RUN_DIR`) with no
-`..`, no `$` and no `settings-*.json` (the floor itself, Edit-denied too) after it is allowed: the worker writes
-its results there.
+(`AP2_DATA`, its `~` or `$HOME` form, `$AP2_DATA`, `${AP2_DATA}`, `${AP2_DATA:?}`- and `${AP2_DATA[0]}`-style
+expansions, `$AP2_RUN_DIR`) or the package and looks like a write (v1's `_WRITE`, with the redirects that write
+nowhere removed first). A segment that runs `ap2` (by name, or by its full path, which is then no mention) may name
+them (`ap2` writes the data folder itself); only a redirect into one of them counts as a write, unless it also
+runs other shell code (`$(...)`, a backtick, `<(...)`, `((`, a function named `ap2`). A segment whose every
+data-folder mention is a path under the worker's own run directory (`AP2_RUN_DIR`) with no `..`, no `$`, no
+backtick and no `settings-*.json` (the floor itself, Edit-denied too) after it is allowed: the worker writes its
+results there. Heredoc body lines that end in a backslash are joined, as bash joins them.
 
 Best effort: it reads the command text, so a path built at run time (a variable, `$(...)`, a `cd` first and a
 relative path after, a symlink) can get past it. The `Edit` deny rules of the floor stay the main guard.
@@ -43,7 +44,7 @@ _OPEN, _MODE = re.compile(r"\bopen\("), re.compile(r",\s*['\"][wax+]")
 # follows it (`_harmless`).
 _HARMLESS = re.compile(r"\d+(?:>&\d+|>>?\s*/dev/null)?|>&\d+|&>>?\s*/dev/null|>>?\s*/dev/null")
 # `${AP2_DATA:?}`, `${AP2_RUN_DIR%/*}`, ...: an expansion of the variable, never the worker's own run directory.
-_EXPANSION = r"\$\{AP2_(?:DATA|RUN_DIR)[:%#/^,+=?-]"
+_EXPANSION = r"\$\{AP2_(?:DATA|RUN_DIR)[:%#/^,+=?\[-]"
 _BREAK = set(" \t\r\n;|&<>()`")  # outside quotes, these end a shell word
 # A mention ends where the path part ends: `$AP2_DATA_OLD` or `<data>2/` is not the data folder.
 _END = r"(?![A-Za-z0-9_.-])"
@@ -86,6 +87,8 @@ def _bad_part(part: str, top: bool) -> bool:
         return True
     if fnmatch.fnmatchcase(part, "settings-*.json"):
         return True
+    if top and len(part) > 64 and any(c in part for c in "*?["):
+        return True  # fnmatch reads a pattern in quadratic time (many `[`); no floor file name is that long
     return top and any(fnmatch.fnmatchcase(f"settings-{role}.json", part) for role in ROLES)
 
 
@@ -118,7 +121,7 @@ class _Marks:
             if w == form or w.startswith(form + "/"):
                 rest = w[len(form):]
                 parts = rest.split("/")[1:]  # rest is empty or starts with `/`
-                return "$" not in rest and "{" not in rest and not any(
+                return "$" not in rest and "{" not in rest and "`" not in rest and not any(
                     _bad_part(p, k == 0) for k, p in enumerate(parts))
         return False
 
@@ -138,9 +141,10 @@ class _Marks:
         """Whether `text` names a guarded path anywhere, as written or with its quotes removed."""
         return bool(self.any.search(text)) or any(self.any.search(w) for w in _words(text))
 
-    def unsafe(self, seg: str) -> bool:
-        """Whether `seg` names the data folder or the package anywhere but under the worker's own run directory."""
-        for word in _words(seg):
+    def unsafe(self, words) -> bool:
+        """Whether one of the shell words `words` names the data folder or the package anywhere but under the
+        worker's own run directory."""
+        for word in words:
             # `a//b` and `a/./b` are `a/b`; case-folded once (macOS folders are case-insensitive).
             w = re.sub(r"/(?:\./)+", "/", re.sub(r"/{2,}", "/", word)).casefold()
             checked = False  # whether a mention in `w` passed `_own_run` (each later one is then checked cheaply)
@@ -162,7 +166,65 @@ _DELIM = re.compile(r"""(?:[^\s;|&<>()'"\\]|\\.|'[^']*'|"(?:[^"\\]|\\.)*")+""", 
 
 
 # Outside quotes, the characters `_segments` acts on; any other one it steps over.
-_SPECIAL = frozenset("\\$'\"`(){}#<>\n;|&")
+_SPECIAL = frozenset("\\$'\"`(){}[]#<>\n;|&")
+# A backtick command substitution's text: bash ends it at the first unescaped backtick, whatever quotes lie between.
+_TICK_BODY = re.compile(r"[^\\`]*(?:\\.[^\\`]*)*", re.S)
+
+
+def _tick_end(s: str, j: int) -> int:
+    """The index of the first unescaped backtick in `s` from `j` on, or len(s) when there is none."""
+    k = _TICK_BODY.match(s, j).end()
+    return k if k < len(s) and s[k] == "`" else len(s)
+
+
+def _expands(s: str, i: int, esc: int) -> bool:
+    """Whether the `$` at `i` starts an expansion (`$'`, `${`, `$[`, `$(`): the run of unescaped `$` that ends at it
+    is odd. `$$` is the shell's PID, so in `$$'`, `$${` or `$$[` the quote or bracket is a plain one. `esc` is the
+    index of the last escaped character. Linear overall: only the last `$` of a run has another character next."""
+    k = i
+    while k >= 0 and s[k] == "$" and k != esc:
+        k -= 1
+    return (i - k) % 2 == 1
+
+
+def _unquote(word: str) -> str:
+    """`word` after quote removal only, as bash reads a heredoc delimiter: quotes and the backslashes that escape go,
+    every other character stays (``a\\`b`` is ``a`b``, `"a\\$b"` is `a$b`, `"a\\b"` is `a\\b`). `$'...'` reads as in
+    `_words`."""
+    out, i, n, esc = [], 0, len(word), -1
+    while i < n:
+        c = word[i]
+        if c == "\\" and i + 1 < n:
+            i += 1
+            esc = i
+            if word[i] != "\n":  # a line continuation: both characters go
+                out.append(word[i])
+        elif c == "'":
+            ansi = word[i - 1:i] == "$" and _expands(word, i - 1, esc)
+            if ansi:
+                out.pop()
+            i += 1
+            while i < n and word[i] != "'":
+                if ansi and word[i] == "\\" and i + 1 < n:
+                    i += 1
+                out.append(word[i])
+                i += 1
+        elif c == '"':
+            i += 1
+            while i < n and word[i] != '"':
+                if word[i] == "\\" and word[i + 1:i + 2] in ("$", "`", '"', "\\", "\n"):
+                    i += 1
+                    if word[i] == "\n":
+                        i += 1
+                        continue
+                out.append(word[i])
+                i += 1
+        else:
+            out.append(c)
+        i += 1
+    return "".join(out)
+
+
 # The first word of a segment, then `(`: `ap2(){ ...; }` or `ap2 () ...` defines a function, it does not run ap2.
 _FUNC = re.compile(r"\s*(?:" + _DELIM.pattern + r")[ \t]*\(", re.S)
 
@@ -174,20 +236,25 @@ def _segments(cmd: str) -> list:
     separators. An unterminated quote keeps the rest as one segment. The segments keep their text as written (quotes
     and backslashes too).
     Quotes nest as in bash: inside `$(...)`, even within `"..."`, quoting starts afresh (`"$(cmd "a b")"`), up to
-    the `)` that closes it; separators in there split too, since bash runs them. `$'...'` is an ANSI-C quote, where
-    `\\'` stays inside.
+    the `)` that closes it; separators in there split too, since bash runs them. A backtick inside `"..."` runs the
+    text up to the next unescaped backtick (whatever quotes lie between), read with its own quotes: its segments
+    come first, and the outer `"..."` goes on after it. `$'...'` is an ANSI-C quote, where `\\'` stays inside, but
+    in `$$'` the `$$` is the PID and the quote a plain one (likewise `$${` and `$$[`). Inside `${...}` no separator
+    splits (`${x:-;}`), and inside arithmetic (`((...))`, `$((...))`, `$[...]`) no `|` or `&` does.
     Bash reads no quotes in a comment or a heredoc body, and neither does this: an unquoted `#` at the start of a
-    word (not after an escaped blank, not inside `${...}` or backticks) drops the rest of its line, and after an
-    unquoted `<<` or `<<-` the lines from the next newline on, up to and including the delimiter line (leading tabs
-    stripped for `<<-`), are each one segment (`_Body`), with no scan. A here-string `<<<` and a shift inside
-    `((...))` or `$((...))` open no heredoc. A `((` closed by a single `)` first (`((cd x; ls) )`) was two
-    subshells, not arithmetic; a newline ends any arithmetic span."""
+    word (not after an escaped blank, not inside `${...}`, backticks or arithmetic) drops the rest of its line, and
+    after an unquoted `<<` or `<<-` (not inside `${...}` or arithmetic) the lines from the next newline on, up to and
+    including the delimiter line (its word after quote removal only; leading tabs stripped for `<<-`), are each one
+    segment (`_Body`), with no scan. Inside `$(...)` a line of the delimiter and then `)` ends the body too (bash
+    3.2), and the scan goes on at that `)`. A here-string `<<<` opens no heredoc. A `((` closed by a single `)`
+    first (`((cd x; ls) )`) was two subshells, not arithmetic; a newline ends any arithmetic span."""
     segs, start, quote, i, n = [], 0, None, 0, len(cmd)
     cut = None  # where a comment ended the current segment
     pending = []  # the heredocs opened on this line: (delimiter, strip leading tabs)
     esc = -1  # the index of the last character a backslash escaped
     # The quote state, one context per open `$(`: the quote (None, `'`, `"`, or `$'`), open `(` (`paren`), open
-    # `${` (`brace`), inside backticks (`tick`), and per open `((` / `$((` its own open single `(` (`arith`).
+    # `${` (`brace`), inside backticks (`tick`), and per open arithmetic span (`arith`) its kind and depth:
+    # `["(", open single (]` for `((` and `$((`, `["[", open [ ]` for `$[`.
     paren, brace, tick, arith, stack = 0, 0, False, [], []
     while i < n:
         c = cmd[i]
@@ -205,7 +272,7 @@ def _segments(cmd: str) -> list:
         elif c == "\\":
             i += 1
             esc = i
-        elif c == "$" and cmd.startswith("$(", i) and not cmd.startswith("$((", i):
+        elif c == "$" and cmd.startswith("$(", i) and not cmd.startswith("$((", i) and _expands(cmd, i, esc):
             stack.append((quote, paren, brace, tick, arith))
             quote, paren, brace, tick, arith = None, 0, 0, False, []
             i += 2
@@ -213,42 +280,63 @@ def _segments(cmd: str) -> list:
         elif quote == '"':
             if c == '"':
                 quote = None
+            elif c == "`":
+                end = _tick_end(cmd, i + 1)
+                segs.extend(_segments(cmd[i + 1:end]))
+                i = end + 1
+                continue
         elif c == "'":
-            quote = "$'" if cmd[i - 1:i] == "$" and esc != i - 1 else "'"
+            quote = "$'" if cmd[i - 1:i] == "$" and _expands(cmd, i - 1, esc) else "'"
         elif c == '"':
             quote = c
-        elif c == "$" and cmd.startswith("${", i):
+        elif c == "$" and cmd.startswith("${", i) and _expands(cmd, i, esc):
             brace += 1
+            i += 2
+            continue
+        elif c == "$" and cmd.startswith("$[", i) and _expands(cmd, i, esc):
+            arith.append(["[", 0])
             i += 2
             continue
         elif c == "}" and brace:
             brace -= 1
         elif c == "`":
             tick = not tick
+        elif c in "[]":
+            if arith and arith[-1][0] == "[":
+                if c == "[":
+                    arith[-1][1] += 1
+                elif arith[-1][1]:
+                    arith[-1][1] -= 1
+                else:
+                    arith.pop()
         elif cmd.startswith("((", i):
-            arith.append(0)
+            arith.append(["(", 0])
             i += 2
             continue
         elif c == "(":
-            if arith:
-                arith[-1] += 1
-            else:
+            if not arith:
                 paren += 1
+            elif arith[-1][0] == "(":
+                arith[-1][1] += 1
         elif c == ")":
-            if arith and arith[-1]:
-                arith[-1] -= 1
-            elif arith and cmd.startswith("))", i):
+            top = arith[-1] if arith else None
+            if top and top[0] == "[":
+                pass  # `$[...]` counts brackets only
+            elif top and top[1]:
+                top[1] -= 1
+            elif top and cmd.startswith("))", i):
                 arith.pop()
                 i += 2
                 continue
-            elif arith:  # the `((` was two subshells: this `)` closes the inner one, the outer one is still open
+            elif top:  # the `((` was two subshells: this `)` closes the inner one, the outer one is still open
                 arith.pop()
                 paren += 1
             elif paren:
                 paren -= 1
             elif stack:
                 quote, paren, brace, tick, arith = stack.pop()
-        elif c == "#" and not brace and not tick and (i == 0 or (cmd[i - 1] in " \t\n;|&(" and esc != i - 1)):
+        elif c == "#" and not brace and not tick and not arith and (
+                i == 0 or (cmd[i - 1] in " \t\n;|&(" and esc != i - 1)):
             cut = i  # after `)` bash keeps `#` in the word
             j = cmd.find("\n", i)
             i = n if j < 0 else j  # the newline still ends the segment, below
@@ -256,7 +344,7 @@ def _segments(cmd: str) -> list:
         elif cmd.startswith("<<<", i):  # a here-string: one word of input, no body lines
             i += 3
             continue
-        elif cmd.startswith("<<", i) and not arith:
+        elif cmd.startswith("<<", i) and not arith and not brace:
             j = i + 2
             strip = cmd[j:j + 1] == "-"
             j += strip
@@ -264,26 +352,32 @@ def _segments(cmd: str) -> list:
                 j += 1
             m = _DELIM.match(cmd, j)
             if m:
-                pending.append(("".join(_words(m.group(0))), strip))
+                pending.append((_unquote(m.group(0)), strip))
                 i = m.end()
             else:
                 i = j
             continue
-        elif c in "\n;|&" and not _in_redirect(cmd, i, esc):
+        elif c in "\n;|&" and not brace and not (arith and c in "|&") and not _in_redirect(cmd, i, esc):
             segs.append(cmd[start:cut if cut is not None else i])
             cut = None
             nxt = cmd[i + 1:i + 2]
             i += 2 if (c in "&|" and nxt == c) or (c == "|" and nxt == "&") else 1
             if c == "\n":
-                arith = []
+                arith, closed = [], False
                 for delim, strip in pending:
-                    while i < n:
+                    while i < n and not closed:
                         j = cmd.find("\n", i)
                         end = n if j < 0 else j
                         line = cmd[i:end]
+                        body = line.lstrip("\t") if strip else line
+                        if stack and body.startswith(delim + ")"):  # bash 3.2 ends it in `$(...)` at `EOF)` too
+                            segs.append(_Body(delim))
+                            i = end - len(body) + len(delim)  # the scan goes on at that `)`
+                            closed = True  # it closes the `$(`: any other heredoc of that line has no body
+                            break
                         segs.append(_Body(line))
                         i = end + 1
-                        if (line.lstrip("\t") if strip else line) == delim:
+                        if body == delim:
                             break
                 pending = []
                 i = min(i, n)
@@ -303,12 +397,17 @@ def _in_redirect(cmd: str, i: int, esc: int) -> bool:
     return c in "|&" and (after or (c == "&" and cmd[i + 1:i + 2] == ">"))
 
 
-def _words(seg: str) -> list:
+def _words(seg: str, targets=None) -> list:
     """The shell words of `seg` as bash reads quotes and backslashes, with the quotes removed: `"$AP2_RUN_DIR"/../x`
-    is one word, `$AP2_RUN_DIR/../x`, and `"$AP2_"DATA` is `$AP2_DATA`. Inside `$(...)`, even within `"..."`,
-    quoting starts afresh, as in `_segments`; in `$'...'` a backslash keeps the next character as it is."""
+    is one word, `$AP2_RUN_DIR/../x`, and `"$AP2_"DATA` is `$AP2_DATA`; a backslash-newline outside single quotes is
+    no character at all. Inside `$(...)`, even within `"..."`, quoting starts afresh, as in `_segments`, and a
+    backtick inside `"..."` runs up to the next unescaped backtick, read as words of its own. A word that a `$(` or
+    a backtick ends keeps that `$` or backtick (`$AP2_RUN_DIR$`), so no command's output passes for a plain path.
+    In `$'...'` a backslash keeps the next character as it is. When `targets` is a list, the word after each
+    unquoted `>` (in `>`, `>>`, `>|`, `>&`, `&>`, `<>`) is added to it too: the file that redirect writes."""
     words, text, quote, i, n = [], [], None, 0, len(seg)
     esc, paren, stack = -1, 0, []  # the last escaped index, open `(`, and the state saved at each open `$(`
+    redir = False  # whether the next word is a redirect's target
     while i < n:
         c = seg[i]
         if quote == "'":
@@ -327,14 +426,23 @@ def _words(seg: str) -> list:
         elif c == "\\" and i + 1 < n:
             i += 1
             esc = i
-            text.append(seg[i])
-        elif c == "$" and seg.startswith("$(", i) and not seg.startswith("$((", i):
+            if seg[i] != "\n":  # a line continuation: both characters go
+                text.append(seg[i])
+        elif c == "$" and seg.startswith("$(", i) and not seg.startswith("$((", i) and _expands(seg, i, esc):
             stack.append((quote, paren))
             quote, paren = None, 0
             text.append(c)
-            words.append("".join(text))
+            redir = _flush(words, text, targets, redir)
             text = []
             i += 2
+            continue
+        elif c == "`" and quote == '"':
+            end = _tick_end(seg, i + 1)
+            text.append(c)
+            redir = _flush(words, text, targets, redir)
+            text = []
+            words += _words(seg[i + 1:end])
+            i = end + 1
             continue
         elif quote == '"':
             if c == '"':
@@ -342,7 +450,7 @@ def _words(seg: str) -> list:
             else:
                 text.append(c)
         elif c == "'":
-            if seg[i - 1:i] == "$" and esc != i - 1:  # `$'...'`: the `$` is not part of the word
+            if seg[i - 1:i] == "$" and _expands(seg, i - 1, esc):  # `$'...'`: the `$` is not part of the word
                 text.pop()
                 quote = "$'"
             else:
@@ -357,29 +465,43 @@ def _words(seg: str) -> list:
                     paren -= 1
                 elif stack:
                     quote, paren = stack.pop()
-            if text:
-                words.append("".join(text))
+            elif c == "`" and text:
+                text.append(c)
+            redir = _flush(words, text, targets, redir)
             text = []
+            if c == ">":
+                redir = True
         else:
             text.append(c)
         i += 1
-    if text:
-        words.append("".join(text))
+    _flush(words, text, targets, redir)
     return words
 
 
-def _runs_ap2(segment: str) -> bool:
-    words = _words(segment)
+def _flush(words: list, text: list, targets, redir: bool) -> bool:
+    """Ends the word in `text`, if any, adding it to `targets` too when it is a redirect's target; returns whether
+    the next word still is one."""
+    if not text:
+        return redir
+    word = "".join(text)
+    words.append(word)
+    if redir and targets is not None:
+        targets.append(word)
+    return False
+
+
+def _runs_ap2(words: list) -> bool:
     return bool(words) and (words[0] == "ap2" or words[0].endswith("/bin/ap2"))
 
 
 def _runs_more(segment: str) -> bool:
     """Whether an `ap2` segment also runs other shell code, so its exemption ends: outside single quotes a `$(`
-    (not `$((`), a backtick, `<(` or `>(`; a first word followed by `(` (a function named `ap2`); or a quote still
+    (not `$((`), a backtick, `<(` or `>(`; outside any quotes a `((` (`((ap2 x | cp ...) )` is two subshells, and
+    an unquoted `$((cmd) )` runs `cmd`); a first word followed by `(` (a function named `ap2`); or a quote still
     open at its end."""
     if _FUNC.match(segment):
         return True
-    quote, i, n = None, 0, len(segment)
+    quote, i, n, esc = None, 0, len(segment), -1
     while i < n:
         c = segment[i]
         if quote == "'":
@@ -392,13 +514,14 @@ def _runs_more(segment: str) -> bool:
                 quote = None
         elif c == "\\":
             i += 1
-        elif c == "`" or segment.startswith(("<(", ">("), i) or (
-                segment.startswith("$(", i) and not segment.startswith("$((", i)):
+            esc = i
+        elif c == "`" or segment.startswith(("<(", ">("), i) or (quote is None and segment.startswith("((", i)) or (
+                segment.startswith("$(", i) and not segment.startswith("$((", i) and _expands(segment, i, esc)):
             return True
         elif c == '"':
             quote = None if quote else c
         elif c == "'" and not quote:
-            quote = "$'" if segment[i - 1:i] == "$" and (i < 2 or segment[i - 2] != "\\") else "'"
+            quote = "$'" if segment[i - 1:i] == "$" and _expands(segment, i - 1, esc) else "'"
         i += 1
     return quote is not None
 
@@ -441,6 +564,29 @@ def _harmless(text: str) -> str:
     return _HARMLESS.sub(lambda m: m.group(0) if m.group(0).isdigit() else " ", text)
 
 
+def _joined(segs: list) -> list:
+    """`segs` with each heredoc body line that ends in an odd number of backslashes joined to the body line after it
+    (the backslash and the newline dropped), as bash joins them in an unquoted heredoc and as a shell fed the body
+    (`bash <<'EOF'`) does."""
+    out, parts = [], []
+    for seg in segs:
+        if isinstance(seg, _Body):
+            if (len(seg) - len(seg.rstrip("\\"))) % 2:
+                parts.append(seg[:-1])
+                continue
+            if parts:
+                parts.append(seg)
+                seg = _Body("".join(parts))
+                parts = []
+        elif parts:
+            out.append(_Body("".join(parts)))
+            parts = []
+        out.append(seg)
+    if parts:
+        out.append(_Body("".join(parts)))
+    return out
+
+
 def _deny() -> dict:
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                    "permissionDecisionReason": REASON}}
@@ -458,12 +604,19 @@ def decide(payload: dict, env):
     marks = _Marks(env)
     if len(cmd) > MAX_COMMAND:
         return _deny() if marks.names(cmd) else None
-    for seg in _segments(cmd):
-        if not seg.strip() or not marks.unsafe(seg):
+    for seg in _joined(_segments(cmd)):
+        if not seg.strip():
             continue
-        rest = _harmless(seg)
-        ap2 = not isinstance(seg, _Body) and _runs_ap2(seg) and not _runs_more(seg)
-        if (">" in rest) if ap2 else _writes(rest):
+        targets = []
+        words = _words(seg, targets)
+        ap2 = not isinstance(seg, _Body) and _runs_ap2(words)
+        # `<pkg>/bin/ap2` runs ap2: that first word is no write into the package.
+        if not marks.unsafe(words[1:] if ap2 else words):
+            continue
+        if ap2 and not _runs_more(seg):
+            if marks.unsafe(targets):  # a redirect's file is the shell writing, not ap2
+                return _deny()
+        elif _writes(_harmless(seg)):
             return _deny()
     return None
 
@@ -473,9 +626,17 @@ def _fallback(raw: bytes, env):
     naming a guarded path."""
     if not env.get("AP2_ROLE") or b'"Bash"' not in raw:
         return None
-    # The text is JSON: undo its `\\` and `\"` escapes, so a quote-split `"$AP2_"DATA` reads as the shell's.
-    text = raw.decode("utf-8", "replace").replace("\\\\", "\0").replace('\\"', '"').replace("\0", "\\")
+    # The text is JSON: undo its escapes, so a quote-split `"$AP2_"DATA` or a line continuation reads as the shell's.
+    text = _JSON_ESC.sub(_unescape, raw.decode("utf-8", "replace"))
     return _deny() if _Marks(env).names(text) else None
+
+
+_JSON_ESC = re.compile(r"\\(?:u([0-9a-fA-F]{4})|(.))", re.S)
+_JSON_CHARS = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f"}
+
+
+def _unescape(m) -> str:
+    return chr(int(m.group(1), 16)) if m.group(1) else _JSON_CHARS.get(m.group(2), m.group(2))
 
 
 class _Late(Exception):
