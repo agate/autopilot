@@ -585,6 +585,24 @@ class TitleBriefTest(TempFolder):
                 self.assertEqual(e.exception.missing, ["title"])
                 self.assertIn("the card has no {title}", str(e.exception))
 
+    def test_a_text_title_of_only_invisible_characters_is_missing(self):
+        # cards.blank: U+FEFF counts as white space, so it is not filled in as an invisible title.
+        for title in ("\ufeff", "\ufeff \x1c", " \ufeff"):
+            with self.subTest(title=title):
+                with self.assertRaises(BriefError) as e:
+                    templates.fill_brief("In {title}.", {"title": title})
+                self.assertEqual(e.exception.missing, ["title"])
+                self.assertIn("the card has no {title}", str(e.exception))
+
+    def test_a_title_with_words_next_to_an_invisible_character_still_fills(self):
+        self.assertEqual(templates.fill_brief("In {title}.", {"title": "\ufeffa"}), "In \ufeffa.")
+        # title_for skips an object title's invisible slot for one with words.
+        self.assertEqual(templates.fill_brief("In {title}.", {"title": {"en": "\ufeff", "zh": "Z"}}), "In Z.")
+
+    def test_a_field_other_than_title_of_only_an_invisible_character_fills_as_it_is(self):
+        # Only {title} is judged by cards.blank; other fields keep str.strip(), which keeps U+FEFF.
+        self.assertEqual(templates.fill_brief("In {id}.", {"id": "\ufeff"}), "In \ufeff.")
+
     def test_a_dotted_title_slot_still_reads_the_field(self):
         self.assertEqual(templates.fill_brief("{title.zh}", {"title": {"en": "E", "zh": "Z"}}), "Z")
 
