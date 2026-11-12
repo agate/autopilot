@@ -531,6 +531,77 @@ asked the user twice for the same reason (v1 PRs #21 and #25 on `v2`). v1 keeps 
 4. The card and the round report say the loop ended through a check of the fix, and link its findings.
 5. A loop that stops for any other reason (not converging, the same finding twice, a design call) asks as before.
 
+How it is built (`lib/assistant/prloop.py`):
+
+- **[decided by the builder]** Where. One pure module, standard library only, with no new `ap2` command and no
+  runner: it decides the loop's end from recorded round results, writes the check reviewers' briefs, and turns the
+  end into card fields. It runs no agent, no `git`, no `gh` and no other program. v1's `commands/pr-loop.md` and
+  the `pr-loop` role's brief in the `code` template stay as they are (6.3's rule in that brief would contradict
+  v1's own stop rule in the same prompt). The check reviewers are the shipped `reviewer-angle` role: no new role,
+  no new tools.
+- **[decided by the builder]** The round limit. `ROUND_LIMIT = 20` (the user's answer for this autopilot's v1
+  loops: "keep looping until a round is clean, at most 20 rounds"); it is also the most allowed. A record or a
+  caller may set a lower `limit`, a whole number from 1 to 20 (a bool is refused); `decide(record, limit)` takes
+  the record's `limit`, else the call's, else 20, and refuses a call limit that differs from the record's. The
+  check of the fix is not a round and does not count toward it.
+- **[decided by the builder]** The record, v2's `prloop.json`. v1's top-level keys (`result`, `reason`, `head`,
+  `ci`, `rounds`, `followups`, `questions`) keep their meaning; v2 adds `limit`, `fix_check` and `ended_by`
+  (`round`, `converged`, `fix_check`, `stop`). Each round is `{"n", "angles", "findings", "commit", "ci", "stop"}`:
+  `angles` the picked angles as `angles.pick` returns them (Correctness always among them), `commit` the fix commit
+  (7-40 lowercase hex characters, or null when nothing was fixed), `ci` `green` or `red` on the round's head, `stop`
+  null or the loop's one-line reason (the same finding twice, a fix that failed, the branch moved). A finding is
+  `{"id", "angle", "bucket"}` plus optional `behavior` (default true), `where`, `text`, `reason`; `bucket` is v1's
+  triage bucket (`fix`, `out_of_scope`, `invalid`, `owner`); `angle` names one of the round's angles, or is null
+  only for a CI finding (id `ci-<n>`). `fix_check` is null or `{"commit", "ci", "reviewers": [{"angle", "answers",
+  "findings"}]}`, `angle` there the angle's name. `read(path)` reads at most `sources.MAX_SOURCE` bytes and checks
+  every rule; a broken file is a `PrLoopError` (a `ValueError`) naming the file and the field
+  (`rounds[2].findings[0].bucket`). Also refused: unknown keys, rounds not numbered 1, 2, 3 ... in order, a round
+  past the limit, a round after one that ended the loop, a `fix` finding in a round with no commit (unless the
+  round's `stop` says the fix failed), a check whose reviewers or answers differ from the plan, and a stored
+  `result` or `ended_by` that the rounds do not give.
+- **[decided by the builder]** The decision. `decide(record)` returns `{"next", "result", "ended_by", "reason",
+  "plan"}`, `next` one of `round`, `check`, `end`, checked in this order on the last round: a `stop` or any `owner`
+  finding ends `stopped` (`ended_by: stop`, point 5: it asks as before); no `fix` finding and CI green ends `clean`
+  (`round`); this and the round before with no `fix` finding whose `behavior` is true ends `converged` (v1's rule);
+  a round below the limit gives `round`; at the limit with fixes, `check` with its plan. No rounds yet gives
+  `round`. v1's "not converging" stop is its round limit; here the limit always goes through the check, so there
+  is no separate one. A limit round with no fix and CI red has nothing to check and ends `stopped` (`round`).
+- **[decided by the builder]** Who checks. `plan(record)`: one entry per angle with at least one `fix` finding in
+  the last round, in that round's `angles` order, each `{"angle": <the picked angle>, "commit", "answers": [the fix
+  findings it answers, verbatim]}`. A CI finding goes to Correctness. An angle whose findings were all `invalid` or
+  `out_of_scope` gets no check reviewer: the fix commit answers none of them.
+- **[decided by the builder]** What a check reviewer reads. `check_brief(entry, pr, worktree)` is the prompt for one
+  fresh `reviewer-angle` session: the angle's name, question and brief; the PR number, the worktree and the fix
+  commit; "read only this commit: `git show <commit>`, the findings below, and the code the commit touches"; each
+  answered finding verbatim (as JSON, marked as data); v1's return contract and that NO FINDINGS is a good answer;
+  read-only, no edits, no comments. Nothing from an earlier round but the answered findings: no earlier
+  reviewer's words, no other angle's findings.
+- **[decided by the builder]** The check's outcome. `record_check(record, results, ci)` returns a new record with
+  `fix_check` set (and `result`, `ended_by`, `reason`, `head` and `ci` from the end it gives); `results` maps each
+  planned angle to its triaged findings, the same buckets as a round, verified in the loop's own session as v1's
+  triage says. It finds something when any finding is `fix` or `owner`, or CI on the fix commit is `red` (each
+  counts as one thing); `invalid` and `out_of_scope` findings are listed but do not block. Nothing found ends
+  `clean` (`ended_by: fix_check`, point 2; `ap merge-check` still decides). Something found ends `stopped`
+  (`fix_check`), the reason naming how many things: no more fixing (point 3).
+- **[decided by the builder]** At most once. `record_check` refuses a record that already has a `fix_check`, one
+  whose last round is below the limit, fixed nothing or stopped, and `results` that miss a planned angle or add
+  one. `read` and `decide` refuse a round after a `fix_check` and a round past the limit. With a check recorded,
+  `decide` only ever returns `end`.
+- **[decided by the builder]** The card and the report (point 4). `report(record)` is the last lines of the round
+  report: `Fix:` and `Next:`, and on a check `Check of the fix · commit <short sha> · reviewers: <angles> · <found
+  nothing: clean | found <n>: asking you>` then `Findings: prloop.json fix_check.reviewers`. `summary(record)` is
+  the card's `prloop` field: `result`, `ended_by`, `reason` (null while the loop runs), `next`, `limit`, the round
+  count, and `fix_check` with its findings. `ask(record)`: none for `clean` or `converged`; for a check that found
+  something an `approve` ask, `{"type": "approve", "from": "prloop", "role": "pr", "reason": "fix_check", "commit",
+  "findings", "text"}`, the text saying how many things the check found in which commit and that nothing more is
+  fixed until the user decides; for any other stop an `answer` ask with the reason. `from` is `prloop`, never
+  `worker`, so a worker start or finish never closes it. `apply(store, card_id, record, by)` writes the `prloop`
+  field with `store.update`, then the ask with `store.update_checked` only when the card has no open ask (or
+  already this one); another open ask is kept and `apply` returns False, the summary still landing. It writes only
+  the card, in the data folder, so shadow mode allows it.
+- Not built here: the v2 PR loop runner that calls `decide` and starts the check reviewers (v2's `pr` role keeps
+  running v1's `/autopilot:pr-loop` until then), writing `prloop.json` from the worker's done path, and any merge.
+
 ## 7. Scheduling
 
 ### 7.1 The gate **[decided, from v1]**
@@ -815,8 +886,10 @@ Calls the author made without asking (check them):
   `extends:`, checks), `form.py` (the form, the path language, `{field}` patterns and derived fields) and
   `engine.py` (read, fill, check, link and key, sort, card); scan sessions: `scan.py` (the plan, the brief, the
   save-raw hook and the take); review angles: `angles.py` (the three layers, kinds, globs and the picker,
-  design 6.1) with the built-in table in `review/angles.yaml` at the plugin root; for workers, `workers.py`,
-  `resources.py`, `transcripts.py` and `projects.py` (see the workers entry below); the local page:
+  design 6.1) with the built-in table in `review/angles.yaml` at the plugin root; how the PR loop ends:
+  `prloop.py` (the loop's record, the decision, the one check of the fix and the card's fields, design 6.3);
+  for workers, `workers.py`, `resources.py`, `transcripts.py` and `projects.py` (see the workers entry below);
+  the local page:
   `server.py` (the server, its JSON routes and the request guard, run by `ap2 serve`) and
   `builtin/page/local.html` (the one page, inline CSS and JS, found from `server.py`'s own path); and the
   phone page's data: `phone.py` (`build`, run by `ap2 phone build`). `ap2 config [--data PATH]` prints the
