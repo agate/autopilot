@@ -2194,13 +2194,20 @@ Calls the author made without asking (check them):
      park is still this one) only when one more listing, taken under that lock, shows its session still running
      (`_session_running`). So a worker whose stop failed stays unparked (it still shows as running); every
      live `check` while `paused.json` holds `reason: cap` runs `cap_stop` again first, and the line of a stop that
-     failed again says so. One whose session no longer runs (another `cap_stop` that ran meanwhile stopped it, or
-     its own stop landed before it timed out) keeps its park and is marked `parked` like a stopped one, so an
-     overlapping call never unparks a worker the other call stopped (a check would then take it for dead and close
-     one that died twice); a listing that failed counts as not running, and the next retry stops it again if it
-     does run. A stop loop cut short (Ctrl-C, any other exception) still runs that last step, and unparks, by the
-     same rule, every worker this call parked and did not stop (its stop failed or never ran), then the exception
-     goes on. A process killed outright runs nothing more, so `cap_stop` also takes a worker that is already
+     failed again says so. One whose session no longer runs (its own stop landed before it timed out, or something
+     else stopped it) keeps its park and is marked `parked` like a stopped one, and is in `stopped`, not in `failed`
+     (nothing would retry it); a listing that failed counts as not running, and the next retry stops it again if it
+     does run. A stop loop cut short (Ctrl-C, any other exception) still runs that last step (its card updates
+     included, so a worker it stopped before the cut says `parked` on its card), and unparks, by the same rule,
+     every worker this call parked and did not stop (its stop failed or never ran), then the exception goes on.
+     Only one `cap_stop` runs at a time: two overlapping calls (the pause and a check's retry) kept finding new
+     ways to unpark a worker the other one stopped, so the whole call (both locked steps, the stops, the card
+     updates) holds `<data>/.cap-stop.lock` (`flock` on its own file descriptor, as the worker list's lock; without
+     `fcntl` there is no such lock). It is taken before the worker list's lock and never while holding it, and
+     nothing that holds the worker list's lock calls `cap_stop` (`check` runs its retry before its own locked
+     step). The pause waits for it; a check's retry (`cap_stop(blocking=False)`) does not: when another call holds
+     it, the retry is skipped for that pass (`{"stopped": [], "failed": [], "busy": true}`, no retry notes), since
+     that call is already stopping those workers and the check sees them cap-parked. A process killed outright runs nothing more, so `cap_stop` also takes a worker that is already
      cap-parked (no close started) whose session the listing still shows running (`_session_running`): it is
      stopped again with its park kept, and unparked like the rest when that stop fails. Running means `classify`
      says `running` with the park left out, and the listing does not mark the session `state: stopped`: the CLI
@@ -2234,8 +2241,8 @@ Calls the author made without asking (check them):
       from the ledger's cache and, on first use, the data folder's layout. `ap2 cap answer OPTION` and `ap2 cap
       resume` print JSON. Exit 0; an error is one `ap2: ...` line and exit 1. All write only inside the data folder, so they work in shadow mode, except that
       `answer pause` stops workers only in live mode.
-  12. Workers cannot edit the cap: `cap-state.json` and `paused.json` are in `PROTECTED`, so every worker floor
-      Edit-denies them.
+  12. Workers cannot edit the cap: `cap-state.json`, `paused.json` and `.cap-stop.lock` are in `PROTECTED`, so
+      every worker floor Edit-denies them.
 - **[decided by the builder]** v1 import (10, 11 question 5), read-only, in `importv1.py`.
   - Command: `ap2 import-v1 [--data PATH] [--from DIR] [--project NAME ...] [--dry-run]`. `--from` defaults to
     v1's own data root (`AUTOPILOT_DATA`, else `~/.claude/autopilot-data`, v1's `paths.data_root()`). A project is

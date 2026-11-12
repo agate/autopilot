@@ -601,6 +601,7 @@ class WorkerCapTest(CapWorkerCase):
             self.assertIn(f"Edit(/{self.data}/paused.json)", deny, role)
         self.assertIn(cap.STATE, workers_mod.PROTECTED)
         self.assertIn(cap.PAUSED, workers_mod.PROTECTED)
+        self.assertIn(workers_mod.CAP_STOP_LOCK, workers_mod.PROTECTED)
 
 
 # -- 6. the pause stops and parks; a failed stop is retried ----------------------------------------------------------------
@@ -757,8 +758,9 @@ class PauseTest(CapWorkerCase):
         self.assertEqual(rows[c["short_id"]]["status"], "idle")
 
     def overlapping_pause(self, gone=False):
-        """Pause (call A) with two workers that were resumed once; A's first stop runs a whole `cap_stop` (call B,
-        a check's retry) and then times out. Returns the two workers and the list of stops."""
+        """Pause (call A) with two workers that were resumed once; A's first stop tries a second `cap_stop` (call B,
+        a check's retry, which never waits) and then times out, its stop never landing. B is skipped while A holds
+        the stop lock; the next check's retry stops that worker. Returns nothing; asserts throughout."""
         self.use_gateway()
         a, b = self.start(), self.start()
         with resources.Registry(self.data).locked() as records:
@@ -767,23 +769,27 @@ class PauseTest(CapWorkerCase):
         inner = []
 
         def on_stop(short):
-            if not inner:  # A's first stop (B's own stops come back here, with `inner` set)
-                inner.append(None)
-                inner[0] = self.workers().cap_stop()
+            if not inner:  # A's first stop
+                inner.append(self.workers().cap_stop(blocking=False))
                 raise subprocess.TimeoutExpired(["claude", "stop", short], 60)
         patch, seen = self.cli_stops(on_stop=on_stop, gone=gone)
         with patch:
             out = self.pause()
-            self.assertEqual(len(inner[0]["stopped"]), 2)  # B stopped both
+            self.assertEqual(inner, [{"stopped": [], "failed": [], "busy": True}])  # B never ran
+            self.assertEqual(seen, [a["short_id"], b["short_id"]])  # A's two stops only
             self.assertIn(a["card"], json.dumps(out["failed"]))  # A's own stop of it raised
-            recs = self.records()
-            self.assertEqual([(r["parked"] or {}).get("kind") for r in recs], ["cap", "cap"])  # what B stopped
-            self.assertEqual(len({r["parked"]["parked_at"] for r in recs}), 1)
-            stops = list(seen)
+            self.assertEqual([w["card"] for w in out["stopped"]], [b["card"]])
+            recs = {r["card"]: r for r in self.records()}
+            self.assertIsNone(recs[a["card"]]["parked"])  # its session still runs
+            self.assertEqual(recs[b["card"]]["parked"]["kind"], "cap")
             self.clock.advance(5)
-            entries = {e["card"]: e for e in self.workers().check()}
-            self.assertEqual(seen, stops)
-        self.assertEqual({k: e["state"] for k, e in entries.items()}, {a["card"]: "parked", b["card"]: "parked"})
+            entries = {e["card"]: e for e in self.workers().check()}  # paused: its retry stops `a`
+            self.assertEqual(seen, [a["short_id"], b["short_id"], a["short_id"]])
+            self.clock.advance(5)
+            again = {e["card"]: e for e in self.workers().check()}
+            self.assertEqual(len(seen), 3)  # stopped: never again
+        for e in (entries, again):
+            self.assertEqual({k: x["state"] for k, x in e.items()}, {a["card"]: "parked", b["card"]: "parked"})
         self.assertEqual(len(self.records()), 2)  # neither closed as died twice
         for x in (a, b):
             self.assertNotEqual((self.get(x["card"]).get("ask") or {}).get("reason"), workers_mod.DIED)
@@ -797,6 +803,60 @@ class PauseTest(CapWorkerCase):
 
     def test_an_overlapping_pause_never_unparks_a_worker_whose_row_is_gone(self):
         self.overlapping_pause(gone=True)
+
+    def test_a_check_during_a_pause_never_runs_a_second_cap_stop(self):
+        self.use_gateway()
+        a, b = self.start(), self.start()
+        inner = []
+
+        def on_stop(short):
+            if not inner:  # the pause's first stop: both workers are cap-parked, both sessions still run
+                inner.append(None)
+                inner[0] = {e["card"]: e for e in self.workers().check()}
+        patch, seen = self.cli_stops(on_stop=on_stop)
+        with patch:
+            out = self.pause()
+        self.assertEqual({k: seen.count(k) for k in seen}, {a["short_id"]: 1, b["short_id"]: 1})  # no stop of its own
+        self.assertEqual({k: e["did"] for k, e in inner[0].items()}, {a["card"]: "nothing", b["card"]: "nothing"})
+        self.assertEqual([r["parked"]["kind"] for r in self.records()], ["cap", "cap"])
+        for x in (a, b):
+            self.assertEqual(self.get(x["card"])["sessions"]["implement"]["state"], "parked")
+        self.assertEqual(sorted(w["card"] for w in out["stopped"]), sorted([a["card"], b["card"]]))
+        self.assertEqual(out["failed"], [])
+
+    def test_a_stop_that_timed_out_but_landed_is_stopped_not_failed(self):
+        self.use_gateway()
+        a = self.start()
+        patch, _ = self.cli_stops()
+        real = subprocess.run
+
+        def run(argv, *args, **kw):
+            if argv[1:2] == ["stop"]:
+                patched(argv, *args, **kw)  # the stop lands (its row says `state: stopped`)
+                raise subprocess.TimeoutExpired(argv, 60)
+            return real(argv, *args, **kw)
+        with patch as patched, mock.patch("assistant.workers.subprocess.run", side_effect=run):
+            out = self.pause()
+        self.assertEqual(out["stopped"], [{"card": a["card"], "role": "implement"}])
+        self.assertNotIn(a["card"], json.dumps(out["failed"]))
+        self.assertEqual(self.records()[0]["parked"]["kind"], "cap")
+
+    def test_an_interrupted_pause_still_marks_a_stopped_worker_parked_on_its_card(self):
+        self.use_gateway()
+        a, b = self.start(), self.start()
+
+        def on_stop(short):
+            if short == b["short_id"]:
+                raise KeyboardInterrupt  # Ctrl-C during the second `claude stop`
+        patch, seen = self.cli_stops(on_stop=on_stop)
+        with patch:
+            with self.assertRaises(KeyboardInterrupt):
+                self.pause()
+        self.assertEqual(seen, [a["short_id"], b["short_id"]])
+        self.assertEqual(self.get(a["card"])["sessions"]["implement"]["state"], "parked")
+        recs = {r["card"]: r for r in self.records()}
+        self.assertEqual(recs[a["card"]]["parked"]["kind"], "cap")
+        self.assertIsNone(recs[b["card"]]["parked"])  # not stopped: unparked
 
     def test_a_check_during_the_pause_never_closes_a_stopped_worker(self):
         self.use_gateway()

@@ -61,6 +61,11 @@ from assistant.cards import CardError
 from assistant.resources import MAX_WORKERS, PORT_BASE, Registry, WorkerError, check_start, next_ports
 from assistant.store import Store, write_json
 
+try:
+    import fcntl
+except ImportError:  # not POSIX: one cap pause at a time is then the caller's job, as for the registry's lock
+    fcntl = None
+
 RESULT_FILES = dict(v1_sessions.RESULT_FILES)  # implement: handback.json, review: review.json, pr: prloop.json
 ROLES = tuple(RESULT_FILES)
 AGENTS = dict(v1_workers.AGENTS)  # the pr role runs the PR loop command instead of an agent
@@ -70,6 +75,7 @@ PERMISSION_MODE = "auto"  # v1's default `permission_mode`
 EFFORT = "xhigh"  # v1's default `worker_effort`: the built-in subscription profile's effort (`profiles.builtin`)
 IDLE_MIN = 60  # a worker idle this long with no result file is stopped and marked paused, can resume
 BLOCKED_MIN = 30  # a worker waiting at a permission prompt this long is stopped, kept resumable
+CAP_STOP_LOCK = ".cap-stop.lock"  # held for a whole `cap_stop`: one cap pause stop runs at a time
 PARK_RULES = dict(v1_config.DEFAULT_GLOBAL["budget"])  # park at 90%, resume 5 minutes after the reset
 PARKED_RESUME = "Usage is under the line again. Continue the task from where you parked."
 # A record parked for an API limit (`reason: limit`) resumes like a quota park once its `resume_at` has passed.
@@ -103,8 +109,8 @@ CLOSES = {"end": ("ended", "ended", True), "done": ("ended", "ended", False),
 # Files a worker may not edit in the data folder. Every card's run directory stays writable except its settings
 # files: a deny rule cannot keep one worker out of another card's result files. The user's templates and sources
 # are here as well (the worker floor in roles.py), the access profiles with the active one's name, and the spend
-# ledger with the data folder's price override, and the daily cap's state and pause.
-PROTECTED = ("config.yaml", "workers.json", ".workers.lock", ".store.lock", "index.sqlite", "items/**",
+# ledger with the data folder's price override, and the daily cap's state, pause and stop lock.
+PROTECTED = ("config.yaml", "workers.json", ".workers.lock", ".store.lock", CAP_STOP_LOCK, "index.sqlite", "items/**",
              "restore/**", "projects/**", "templates/**", "sources/**", "sessions/**/settings-*.json",
              f"{profiles.FOLDER}/**", profiles.ACTIVE, f"{spend.FOLDER}/**", spend.PRICES, cap.STATE, cap.PAUSED)
 SPEND_LINE = 300  # the longest stderr line a failed ledger step prints
@@ -331,7 +337,7 @@ class Workers:
             return False
         return self._session_running(rec, listing)
 
-    def cap_stop(self, by: str = BY) -> dict:
+    def cap_stop(self, by: str = BY, blocking: bool = True) -> dict:
         """The cap pause: park every worker on the list that is not parked (`kind: cap`, no `resume_at`) under the
         lock first, then stop each one outside the lock (`_kill`: `claude stop`, then its spend settled), then mark
         the card's session `parked` for the ones that stopped. Parked first, a `check` that runs while the stops do
@@ -340,8 +346,8 @@ class Workers:
         `check`) is on the list, and its session in the listing. Never call it while holding the lock. A worker
         whose stop failed is unparked again (when its park is still this one) only when one more listing, taken
         under the lock, shows its session still running (`_session_running`), so it still shows as running, and
-        the next `check` while paused tries again. One whose session no longer runs (another call's stop landed, or
-        its own stop landed and timed out; a stopped session that still lists counts as stopped; a listing that
+        the next `check` while paused tries again. One whose session no longer runs (its own stop landed and timed
+        out, or something else stopped it; a stopped session that still lists counts as stopped; a listing that
         failed says not running) keeps its park and is marked parked like a stopped one: the next retry stops it
         again if it does run. One stop that fails never blocks the rest. A stop loop cut short (Ctrl-C, any other
         exception) still unparks, by the same rule, every worker it parked and did not stop, then the exception goes
@@ -349,7 +355,28 @@ class Workers:
         stops ran) is stopped again, keeping its park; unparked like the rest when that stop fails. A dead worker
         (by one listing; a listing that failed says unknown, so it is stopped) is left to `check`: it closes one
         that died twice and refuses the resume while paused, so the pause never hands it an uncounted run.
+        Only one `cap_stop` runs at a time: the whole call (both locked steps, the stops, the card updates) holds
+        `<data>/.cap-stop.lock` (`flock`), taken before the worker list's lock and never while holding it. The pause
+        (`blocking`, the default) waits for it; a check's retry (`blocking=False`) is skipped when another call holds
+        it, returning `{"stopped": [], "failed": [], "busy": True}`: that call is already stopping those workers, and
+        a check meanwhile sees them cap-parked. Without `fcntl` there is no such lock. A pick whose stop failed and
+        whose session no longer runs is in `stopped`, never in `failed` as well. The card updates run in the same
+        `finally` as the last locked step, so a loop cut short still marks the workers it stopped `parked`.
         Returns `{"stopped": [...], "failed": [...]}`."""
+        self.data.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(self.data / CAP_STOP_LOCK), os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            if fcntl is not None:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:  # another cap_stop runs: it stops these workers
+                    return {"stopped": [], "failed": [], "busy": True}
+            return self._cap_stop(by)
+        finally:
+            os.close(fd)  # closing the file lets the lock go
+
+    def _cap_stop(self, by: str) -> dict:
+        """`cap_stop`'s work, with its lock held."""
         now = self.clock()
         rec = {"kind": "cap", "reason": "cap", "model": None, "percent": None, "resets_at": None, "resume_at": None,
                "note": cap.PAUSE_NOTE, "parked_at": cards.stamp(now)}
@@ -374,16 +401,16 @@ class Workers:
                     running.append(dict(w))
                 elif self._cap_parked_running(w, listing):
                     running.append(dict(w))  # a killed pause parked it and never stopped it: stop it now
-        done, failed, parked = set(), [], []
+        done, failed, parked = set(), {}, []
         try:
             for r in running:  # outside the lock: a stop can take up to a minute
                 try:
                     self._kill(r.get("short_id"), r.get("session_id") or "")
                     done.add(key(r))
                 except (OSError, subprocess.SubprocessError) as e:
-                    failed.append({"card": r["card"], "role": r["role"],
-                                   "note": f"the cap pause could not stop it ({str(e) or type(e).__name__}); the "
-                                           "next `ap2 worker check` tries again"})
+                    failed[key(r)] = {"card": r["card"], "role": r["role"],
+                                      "note": f"the cap pause could not stop it ({str(e) or type(e).__name__}); "
+                                              "the next `ap2 worker check` tries again"}
         finally:
             # Also when the loop was cut short: a worker parked here and not stopped (its stop failed, or never ran)
             # is unparked when its session still runs, so it still shows as running and the next `check` while
@@ -397,15 +424,18 @@ class Workers:
                         continue
                     if k not in done and self._session_running(w, listing):
                         w["parked"] = None  # not stopped: still running, as far as anyone can tell
-                    elif not w.get("closing"):
+                        continue
+                    failed.pop(k, None)  # its session no longer runs: stopped (it landed), not failed
+                    if not w.get("closing"):
                         parked.append({"card": w["card"], "role": w["role"]})
-        for w in parked:
-            try:
-                self._close_worker_asks(w["card"], w["role"], by, kinds=("attach",))
-                self._save_session(w["card"], w["role"], by, state="parked", why=cap.PAUSE_NOTE)
-            except Exception as e:  # noqa: BLE001 - the worker is parked; its card line is bookkeeping
-                w["note"] = f"parked, but its card could not be updated: {str(e) or type(e).__name__}"
-        return {"stopped": parked, "failed": failed}
+            # In the finally too: a loop cut short still marks the workers it stopped `parked` on their cards.
+            for w in parked:
+                try:
+                    self._close_worker_asks(w["card"], w["role"], by, kinds=("attach",))
+                    self._save_session(w["card"], w["role"], by, state="parked", why=cap.PAUSE_NOTE)
+                except Exception as e:  # noqa: BLE001 - the worker is parked; its card line is bookkeeping
+                    w["note"] = f"parked, but its card could not be updated: {str(e) or type(e).__name__}"
+        return {"stopped": parked, "failed": list(failed.values())}
 
     def _env(self, card: dict, role: str, project: dict, port_range: list, branch: str, profile: dict) -> dict:
         """The worker's AP2_* variables, for its process env and its settings env alike (AP2_PROFILE included)."""
@@ -1019,8 +1049,9 @@ class Workers:
             b = v1_budget.read(Path(usage_file), now_ms=int(now.timestamp() * 1000), stale_min=PARK_RULES["stale_min"])
         retry = {}
         if self.cfg.mode == "live" and (cap.paused(self.data) or {}).get("reason") == "cap":
-            # Paused at the daily cap: a worker whose stop failed gets the stop again, until it works.
-            retry = {(f["card"], f["role"]): f["note"] for f in self.cap_stop(by)["failed"]}
+            # Paused at the daily cap: a worker whose stop failed gets the stop again, until it works. Skipped
+            # while another cap_stop runs (the pause): that one is stopping them, and they show as cap-parked.
+            retry = {(f["card"], f["role"]): f["note"] for f in self.cap_stop(by, blocking=False)["failed"]}
         allow = self._pass_allowance(now)  # one allowance (one `spend.totals`) per pass, only when a resume asks
         out, planned = [], []
         stopped = None
