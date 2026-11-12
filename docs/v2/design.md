@@ -2055,7 +2055,8 @@ Calls the author made without asking (check them):
 - **[decided by the builder]** Spend ledger (slice 2 of the port of v1's access profiles): a gateway shows no
   dollars, so v2 adds up what its own workers cost. Ported from v1's `lib/autopilot/spend.py` into
   `lib/assistant/spend.py`, never imported (v1's version keeps v1's ledger). v1 and v2 totals are separate: v2
-  replaces v1. This slice only counts money; nothing reads the totals to block anything yet (the daily cap is next).
+  replaces v1. This slice only counts money; nothing in it blocks on the totals: the daily cap (its own entry below)
+  does.
   1. Own module. `spend.py` keeps v1's request pricing: the last usage per requestId (or message id) wins, so
      streaming duplicates count once; synthetic all-zero lines are skipped; a model key drops a trailing `[...]`
      (`[1m]`) and `-YYYYMMDD`; the `over_100k` tier applies when the prompt is over 100,000 tokens; a line without a
@@ -2192,9 +2193,15 @@ Calls the author made without asking (check them):
      one has its card's session state set to `parked`; a record whose stop failed is unparked again (only when its
      park is still this one). So a worker whose stop failed stays unparked (it still shows as running); every
      live `check` while `paused.json` holds `reason: cap` runs `cap_stop` again first, and the line of a stop that
-     failed again says so. One failed stop never blocks the rest; `paused.json` is written before any stop. A worker that one listing
-     shows dead is not stopped or parked: it is left to `check`, which closes one that died twice (`died`, its fix
-     ask) and refuses a dead worker's one resume while paused, so the pause never gives it an uncounted run (a
+     failed again says so. A stop loop cut short (Ctrl-C, any other exception) still runs that last step, and
+     unparks every worker this call parked and did not stop (its stop failed or never ran), then the exception goes
+     on. A process killed outright runs nothing more, so `cap_stop` also takes a worker that is already cap-parked
+     (no close started) whose session the listing still shows `running` (classified with its park left out): it is
+     stopped again with its park kept, and unparked like the rest when that stop fails. Only `running`: a stopped
+     session that still lists (idle, blocked) is not stopped again every check, and a listing that failed never
+     stops one again. One failed stop never blocks the rest; `paused.json` is written before any stop. A worker
+     that one listing shows dead is not stopped or parked: it is left to `check`, which closes one that died twice
+     (`died`, its fix ask) and refuses a dead worker's one resume while paused, so the pause never gives it an uncounted run (a
      listing that failed says unknown, and that worker is stopped and parked as before). In shadow
      mode nothing is stopped (`ap2 cap answer pause` writes `paused.json` and says so; `check` does not retry).
   8. Parked workers resume by the active profile's rules (`Workers._parked_due`): never while paused; not before

@@ -655,6 +655,45 @@ class PauseTest(CapWorkerCase):
         self.assertEqual(entries[a["card"]]["state"], "parked")
         self.assertNotIn(a["short_id"], [x["id"] for x in self.agents()])
 
+    def test_an_interrupted_pause_unparks_what_it_did_not_stop(self):
+        a, b = self.start(), self.start()
+        real, seen = subprocess.run, []
+
+        def run(argv, *args, **kw):
+            if argv[1:2] == ["stop"] and not seen:
+                seen.append(argv[2])
+                raise KeyboardInterrupt  # Ctrl-C during the first `claude stop`
+            return real(argv, *args, **kw)
+        with mock.patch("assistant.workers.subprocess.run", side_effect=run):
+            with self.assertRaises(KeyboardInterrupt):
+                self.pause()
+        self.assertEqual(len(seen), 1)
+        self.assertEqual([r["parked"] for r in self.records()], [None, None])  # neither stopped: both unparked
+        self.workers().check()  # paused: its retry stops both
+        stops = [c["argv"][1] for c in self.calls() if c["argv"][:1] == ["stop"]]
+        self.assertEqual(sorted(stops), sorted([a["short_id"], b["short_id"]]))
+        self.assertEqual([r["parked"]["kind"] for r in self.records()], ["cap", "cap"])
+        live = [x["id"] for x in self.agents()]
+        self.assertNotIn(a["short_id"], live)
+        self.assertNotIn(b["short_id"], live)
+
+    def test_a_cap_parked_worker_still_running_is_stopped_again(self):
+        a = self.start()
+        # What a pause killed outright leaves: the park is on, the stop never ran, the session still runs.
+        park = {"kind": "cap", "reason": "cap", "model": None, "percent": None, "resets_at": None,
+                "resume_at": None, "note": cap.PAUSE_NOTE, "parked_at": cards.stamp(self.clock())}
+        with resources.Registry(self.data).locked() as records:
+            records[0]["parked"] = dict(park)
+        cap.pause(self.data, self.clock())
+        self.clock.advance(5)  # a fresh park would carry another stamp
+        self.workers().check()
+        stops = [c["argv"][1] for c in self.calls() if c["argv"][:1] == ["stop"]]
+        self.assertEqual(stops, [a["short_id"]])
+        self.assertEqual(self.records()[0]["parked"], park)  # its park is kept, not put on again
+        self.assertNotIn(a["short_id"], [x["id"] for x in self.agents()])
+        self.workers().check()  # its session is gone: no more stops
+        self.assertEqual([c["argv"][1] for c in self.calls() if c["argv"][:1] == ["stop"]], [a["short_id"]])
+
     def test_a_check_during_the_pause_never_closes_a_stopped_worker(self):
         self.use_gateway()
         a, b = self.start(), self.start()
