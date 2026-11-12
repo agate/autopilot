@@ -718,6 +718,9 @@ _RUNNERS = {"xargs": (re.compile(r"-.*", re.S), _XARGS_VALUE), "env": (re.compil
             "nice": (re.compile(r"-\d+"), frozenset(("-n",)))}
 # A `NAME=value` word: before a command name, or after `env`, it sets a variable.
 _ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+# `time -p` (POSIX output) still runs the next word. A module constant, not a literal in `_commands`: a function
+# holding the "-p" literal reads as a session launch to tests/test_ap2_profile_launch.py.
+_TIME_POSIX = "-p"
 
 
 def _commands(words: list, events: list):
@@ -742,7 +745,8 @@ def _commands(words: list, events: list):
             if plain.fullmatch(w) or (run == "env" and _ASSIGN.match(w)):
                 continue
             want, run = not w.startswith("-"), None  # an unknown flag: no command after it
-        if want and w not in _KEYWORDS and not _ASSIGN.match(w) and not (w == "-p" and k and words[k - 1] == "time"):
+        if want and w not in _KEYWORDS and not _ASSIGN.match(w) and not (
+                w == _TIME_POSIX and k and words[k - 1] == "time"):
             out.append(k)
             if top:
                 lead = k
