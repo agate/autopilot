@@ -334,11 +334,18 @@ class _Maker:
                          self.texts(d.get("title"), d["id"]), where, self.say("do_question" if open_ else "do_closed"),
                          record, parent, ask={"type": ASK[d["kind"]], "from": "v1"} if open_ else None)
 
+    def kept(self, old, new: dict) -> dict:
+        """`new` with `old`'s non-blank texts in the languages that are not configured."""
+        extra = {k: v for k, v in old.items() if isinstance(k, str) and k not in self.langs
+                 and isinstance(v, str) and v.strip()} if isinstance(old, dict) else {}
+        return {**new, **extra}
+
     def closed(self, old: dict) -> dict:
         """The closed question card for `old`, a question card whose decision has left state.json: as `question`
         makes it with `open_=False`, keeping the old card's words, `where`, source and parent. Each language's
         `what` (and title slot) is the old `plain.what` text, else the old title in that language (a one-text title
-        the old import wrote, or an object title), else the decision id."""
+        the old import wrote, or an object title), else the decision id. The old words in a language no longer
+        configured are kept, as v1 cannot make them again."""
         plain = old.get("plain") if isinstance(old.get("plain"), dict) else {}
         what = plain.get("what") if isinstance(plain.get("what"), dict) else {}
         where = plain.get("where") if isinstance(plain.get("where"), dict) else {}
@@ -352,9 +359,9 @@ class _Maker:
                 continue
             text = cards.title_for(old, lang, self.langs[0])  # a one-text title is returned as it is, blank or not
             words[lang] = text if isinstance(text, str) and text.strip() else decision
-        entry = self.card("question", old["key"], "done", words,
-                          {lang: where.get(lang) or fresh[lang] for lang in self.langs}, self.say("do_closed"),
-                          source.get("record"), None, ask=None)
+        entry = self.card("question", old["key"], "done", self.kept(what, words),
+                          self.kept(where, {lang: where.get(lang) or fresh[lang] for lang in self.langs}),
+                          self.kept(plain.get("do"), self.say("do_closed")), source.get("record"), None, ask=None)
         if old.get("parent"):
             entry["card"]["parent"] = old["parent"]
         return entry

@@ -622,6 +622,30 @@ class ImportV1Test(unittest.TestCase):
         self.assertNotIn("v1:shop:D1", self.actions(report))
         self.assertEqual(self.by_key()["v1:shop:D1"], card)
 
+    def test_a_question_card_closed_again_keeps_its_words_in_a_language_no_longer_configured(self):
+        self.set_config("secondary_language: zh\n")
+        self.ok("--project", "shop")
+        self.edit_state("projects/shop", lambda s: s["decisions"].pop(0))
+        self.ok("--project", "shop")  # D1 is closed
+        d1 = self.by_key()["v1:shop:D1"]
+        Store(self.data).update(d1["id"], {"title": d1["plain"]["what"]["en"]}, by="test")  # as the old import left it
+        before = self.by_key()["v1:shop:D1"]
+        self.set_config("")
+        report = self.ok("--project", "shop")
+        self.assertEqual(self.actions(report)["v1:shop:D1"], "update")
+        card = self.by_key()["v1:shop:D1"]
+        want = {"en": before["plain"]["what"]["en"], "zh": before["plain"]["what"]["zh"]}
+        self.assertEqual(card["title"], want)
+        self.assertEqual(card["plain"]["what"], want)
+        for field in ("where", "do"):
+            self.assertEqual(card["plain"][field]["zh"], before["plain"][field]["zh"])
+        # With the language added back, the card has its words in it and is left alone.
+        self.set_config("secondary_language: zh\n")
+        report = self.ok("--project", "shop")
+        self.assertNotIn("v1:shop:D1", self.actions(report))
+        card = self.by_key()["v1:shop:D1"]
+        cards.validate(card, ("en", "zh"))
+
     def test_a_task_card_gone_from_v1_keeps_its_one_text_title(self):
         self.set_config("secondary_language: zh\n")
         self.ok("--project", "shop")

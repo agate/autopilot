@@ -1759,17 +1759,18 @@ Calls the author made without asking (check them):
     written) from the package's `templates/labels.<lang>.json` with the v1 folder's `labels.<lang>.json` on top
     (where v1 keeps its page translations), falling back to `en`, then to the key. `title` is one text per
     configured language, each slot the same text as that language's `plain.what` (a v1 title empty or blank in one
-    language falls back as above, so no slot is empty). Plain words come from fixed phrases (`importv1.PHRASES`,
-    `en` and `zh`): `what` is the title, `where` names the project (and task, with its v1 status), `do` says it is
-    a read-only copy and to act on v1's page. A configured language with no phrases is refused before anything is
-    written.
+    language falls back as above, then to the task's or decision's id, so no slot is empty). Plain words come from
+    fixed phrases (`importv1.PHRASES`, `en` and `zh`): `what` is the title, `where` names the project (and task,
+    with its v1 status), `do` says it is a read-only copy and to act on v1's page. A configured language with no
+    phrases is refused before anything is written.
   - **[decided by the builder]** The project card's title is the project name in every configured language's
     slot (`{en: shop, zh: shop}`), the same words in each slot as code-made titles (not one text), so every card
     the import writes has the same title shape.
   - **[decided by the builder]** A closed question card's title is its old words, one slot per language: each slot
     is the old card's `plain.what` text in that language, else its old title in that language (`cards.title_for`,
     so an old one-text title and an old object title both work), else the decision id. It equals the closed
-    card's `plain.what`.
+    card's `plain.what`. A closed question card also keeps the old card's words in a language no longer configured
+    (they cannot be made again from v1), so adding that language back finds them.
   - **[decided by the builder]** A card an older import wrote with a one-text title is moved to the per-language
     title by the next run, when that run still makes or closes it (`title` is one of the fields a re-run updates:
     `action: update`, its `id`, `parent` and audit history kept), and is `unchanged` on the run after that. A
