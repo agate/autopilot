@@ -241,6 +241,7 @@ class ModelChoicesTest(Case):
             self.assertEqual(msg, f"gateway.models_command: failed ({kind})")
             self.assertNotIn("printf", msg)
             self.assertIsNone(cm.exception.__cause__)
+            self.assertTrue(cm.exception.__suppress_context__)
             # `save` checks the models with the same command: a ProfileError naming the failure, not a ValueError.
             with self.assertRaises(ProfileError, msg=repr(cmd)) as cm:
                 profiles.save(self.data, dict(p, name="h"))
