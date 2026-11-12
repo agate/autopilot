@@ -1,0 +1,76 @@
+{
+  "card": "CARD",
+  "stage": "delta",
+  "head_sha": "b2c3d4e5b2c3d4e5b2c3d4e5b2c3d4e5b2c3d4e5",
+  "reviewed_at": "2026-11-11T11:00:00Z",
+  "verdict": "approve",
+  "tldr": {
+    "en": "Approve: the double charge is fixed; nothing new found.",
+    "zh": "Approve：重复扣款已修好；没有新问题。"
+  },
+  "background": {
+    "en": "The PR retries a failed card payment once, 2 seconds later.",
+    "zh": "这个 PR 让失败的扣款在 2 秒后重试一次。"
+  },
+  "problem": {
+    "en": "A failed payment was never retried, so a brief gateway error lost the order.",
+    "zh": "以前失败的扣款不会重试，网关短暂出错就会丢单。"
+  },
+  "solution": {
+    "en": "billing/retry.py adds `retry_charge`; tests/test_retry.py covers the retry.",
+    "zh": "billing/retry.py 加了 `retry_charge`；tests/test_retry.py 测了重试。"
+  },
+  "reply_draft": {
+    "en": "Thanks for the fix, this looks good to me.",
+    "zh": "谢谢修复，我觉得没问题了。"
+  },
+  "findings": {
+    "confirmed": [],
+    "out_of_scope": [],
+    "rejected": [],
+    "questions": []
+  },
+  "angles": [
+    {
+      "name": "Correctness",
+      "origin": "built-in",
+      "why": {
+        "en": "Always.",
+        "zh": "总是要看。"
+      }
+    },
+    {
+      "name": "Test value",
+      "origin": "built-in",
+      "why": {
+        "en": "The PR changes tests/test_retry.py.",
+        "zh": "这个 PR 改了 tests/test_retry.py。"
+      }
+    },
+    {
+      "name": "Flakiness & isolation",
+      "origin": "built-in",
+      "why": {
+        "en": "The new test sleeps 2 seconds.",
+        "zh": "新测试会 sleep 2 秒。"
+      }
+    }
+  ],
+  "checks": {
+    "ci": "green",
+    "notes": {
+      "en": "Read the diff and both versions of billing/retry.py.",
+      "zh": "读了 diff 和 billing/retry.py 的两个版本。"
+    }
+  },
+  "since_last": {
+    "en": "Since a1b2c3d: correctness-1 is fixed (retry_charge now reuses the first key).",
+    "zh": "自 a1b2c3d 以来：correctness-1 已修复（retry_charge 现在复用第一次的键）。"
+  },
+  "earlier": [
+    {
+      "id": "correctness-1",
+      "state": "fixed"
+    }
+  ]
+}

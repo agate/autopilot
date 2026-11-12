@@ -15,5 +15,5 @@ buttons:
     label: Undo
     restore: last
 roles:
-  - role: reviewer-angle
-    brief: "Review the pull request on card {id}, read-only: the requirement, the code around the change, and CI at the head. Check each finding against the code. Lead with a verdict: approve, changes or question. Post nothing."
+  - role: pr-review
+    brief: "Review the pull request on card {id} with commands/pr-review.md, read-only. Lead with a verdict: approve, changes or question. Post nothing."

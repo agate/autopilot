@@ -8,17 +8,20 @@ it). A missing or broken active profile is refused (ProfileError), never replace
 
 `overlay(p)` is the settings a profile owns (never `permissions` or `hooks`); `merge(floor, overlay)` lays it under
 a worker's permission floor, which keeps its deny and allow lists, hooks and `AP2_*` variables. Nothing here reads
-or writes v1's data folder, and a symlink at `profiles/`, a profile file or `active-profile.json` is refused.
+or writes v1's data folder, and a symlink at `profiles/`, a profile file or `active-profile.json` is refused. A
+folder on the way that cannot be read (mode 000) is a one-line ProfileError naming the path, never read as empty.
 """
 from __future__ import annotations
 
 import json
 import math
+import os
+import re
+import stat
 import subprocess
 from pathlib import Path
 
 from assistant.config import ConfigError
-from assistant.projects import NAME
 from assistant.store import write_json
 
 SUBSCRIPTION = "subscription"
@@ -40,6 +43,11 @@ _BLANKED_ENV = ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL",
 # A cloud-provider switch in the daemon's env would send any session to that provider instead: blanked in both modes.
 _PROVIDER_ENV = ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY")
 _OWN_PREFIXES = ("AP2_", "AUTOPILOT_")  # variables v2 (and v1) set themselves
+# A profile is often named after a gateway project (`team_project`), so `_` is allowed: unlike a project name
+# (`projects.NAME`, which stays as it is). v1's rule, with \Z so a trailing newline never matches.
+PROFILE_NAME = re.compile(r"[a-z][a-z0-9_-]{0,39}\Z")
+NAME_RULE = "lowercase letters, digits, - and _, starting with a letter (40 at most)"
+LONG_CONTEXT = "[1m]"  # Claude Code's marker for the 1M context window; the gateway lists the name without it
 
 
 class ProfileError(ConfigError):
@@ -58,11 +66,30 @@ def builtin() -> dict:
 
 # -- where things are kept -----------------------------------------------------------------------------------------
 
-def _no_link(path: Path) -> Path:
-    if path.is_symlink():  # lstat: a dangling link counts too
+def _lstat(path: Path, fix: str = ""):
+    """`os.lstat(path)`, or None when nothing is there (a missing file, or a folder on the way that is a file). Any
+    other OSError, e.g. a folder on the way with mode 000, is a one-line ProfileError naming the path (and `fix`):
+    never "nothing there", so an unreadable folder never reads as empty and nothing falls back."""
+    try:
+        return os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError as e:
+        raise ProfileError(f"cannot read {path}: {e.strerror or type(e).__name__}"
+                           + (f"; {fix}" if fix else "")) from e
+
+
+def _no_link(path: Path, fix: str = "") -> Path:
+    st = _lstat(path, fix)  # lstat: a dangling link counts too
+    if st is not None and stat.S_ISLNK(st.st_mode):
         raise ProfileError(f"{path} is a symlink; ap2 never follows a link where it keeps its profiles. Remove the "
                            "link and save the profile again")
     return path
+
+
+def _exists(path: Path) -> bool:
+    """A path `_no_link` passed is there. Raises ProfileError when it cannot be looked at (`_lstat`)."""
+    return _lstat(path) is not None
 
 
 def folder(data) -> Path:
@@ -70,13 +97,13 @@ def folder(data) -> Path:
 
 
 def path(data, name) -> Path:
-    if not (isinstance(name, str) and NAME.match(name)):
-        raise ProfileError(f"not a profile name: {name!r} (lowercase letters, digits and -, starting with a letter)")
+    if not (isinstance(name, str) and PROFILE_NAME.match(name)):
+        raise ProfileError(f"not a profile name: {name!r} ({NAME_RULE})")
     return _no_link(folder(data) / f"{name}.json")
 
 
-def active_file(data) -> Path:
-    return _no_link(Path(data) / ACTIVE)
+def active_file(data, fix: str = "") -> Path:
+    return _no_link(Path(data) / ACTIVE, fix)
 
 
 # -- validation ------------------------------------------------------------------------------------------------------
@@ -109,8 +136,8 @@ def validate(p) -> list:
         return ["a profile must be a JSON object"]
     errs = []
     name = p.get("name")
-    if not (isinstance(name, str) and NAME.match(name)):
-        errs.append("name: lowercase letters, digits and -, starting with a letter")
+    if not (isinstance(name, str) and PROFILE_NAME.match(name)):
+        errs.append(f"name: {NAME_RULE}")
     mode = p.get("mode")
     if mode not in MODES:
         errs.append("mode: must be subscription or gateway")
@@ -161,9 +188,15 @@ def validate(p) -> list:
     return errs
 
 
+def base_model(name: str) -> str:
+    """`name` without one trailing `[1m]` (LONG_CONTEXT); any other name as it is."""
+    return name[:-len(LONG_CONTEXT)] if name.endswith(LONG_CONTEXT) else name
+
+
 def _model_errors(p: dict) -> list:
-    """The models the profile names that `gateway.models_command` does not list. The command's output is only
-    parsed, never shown: it may hold more than model names."""
+    """The models the profile names that `gateway.models_command` does not list. A name ending in `[1m]` counts as
+    listed when its base name is; it is stored and passed with the marker. The command's output is only parsed,
+    never shown: it may hold more than model names."""
     cmd = (p.get("gateway") or {}).get("models_command")
     if not cmd:
         return []
@@ -178,12 +211,12 @@ def _model_errors(p: dict) -> list:
         return [f"gateway.models_command: failed (exit {r.returncode})"]
     try:
         known = json.loads(r.stdout)
-    except ValueError:
+    except (ValueError, RecursionError):
         known = None
-    if not isinstance(known, list):
+    if not (isinstance(known, list) and all(isinstance(m, str) for m in known)):
         return ["gateway.models_command: must print a JSON list of model names"]
     return [f"{f}: {p[f]} is not offered by the gateway" for f in ("model", "dispatcher_model", "small_model")
-            if p.get(f) and p[f] not in known]
+            if p.get(f) and p[f] not in known and base_model(p[f]) not in known]
 
 
 # -- the store -------------------------------------------------------------------------------------------------------
@@ -206,7 +239,7 @@ def save(data, p: dict) -> dict:
 def load(data, name) -> dict:
     """The profile `name`, checked. Raises ProfileError when it is unknown, unreadable or not valid."""
     f = path(data, name)
-    if not f.exists():
+    if not _exists(f):  # an unreadable folder raises here: never the built-in subscription
         if name == SUBSCRIPTION:
             return builtin()
         raise ProfileError(f"no profile named {name!r} ({f} does not exist)")
@@ -228,22 +261,28 @@ def load(data, name) -> dict:
 def names(data) -> list:
     """Every profile name, the built-in subscription included, sorted."""
     d = folder(data)
-    stored = [f.stem for f in d.glob("*.json") if NAME.match(f.stem)] if d.is_dir() else []
+    try:
+        entries = os.listdir(d)  # not glob(): it reads an unreadable folder as empty
+    except (FileNotFoundError, NotADirectoryError):
+        entries = []
+    except OSError as e:
+        raise ProfileError(f"cannot read {d}: {e.strerror or type(e).__name__}") from e
+    stored = [n[:-len(".json")] for n in entries if n.endswith(".json") and PROFILE_NAME.match(n[:-len(".json")])]
     return sorted(set(stored) | {SUBSCRIPTION})
 
 
 def active_name(data) -> str:
     """The active profile's name (`subscription` with no active-profile.json). Raises ProfileError when the file
     cannot be read or names no valid name."""
-    f = active_file(data)
-    if not f.exists():
+    f = active_file(data, FIX)
+    if _lstat(f, FIX) is None:  # an unreadable data folder raises here: never `subscription`
         return SUBSCRIPTION
     try:
         raw = json.loads(f.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, ValueError) as e:
         raise ProfileError(f"{f}: cannot read: {e}; {FIX}") from e
     name = raw.get("name") if isinstance(raw, dict) else None
-    if not (isinstance(name, str) and NAME.match(name)):
+    if not (isinstance(name, str) and PROFILE_NAME.match(name)):
         raise ProfileError(f"{f}: must be {{\"name\": <profile name>}}; {FIX}")
     return name
 
@@ -285,17 +324,22 @@ def _raw_active(f: Path):
 
 
 def remove(data, name: str) -> dict:
-    """Delete a stored profile. The subscription and the active profile cannot be removed."""
+    """Delete a stored profile. The subscription and the active profile cannot be removed, and nothing is removed
+    while active-profile.json is there but holds no name at all (unreadable, bad JSON, no string `name`): the active
+    one is then unknown."""
     f = path(data, name)
     if name == SUBSCRIPTION:
         raise ProfileError("the subscription profile cannot be removed")
     try:
         current = active_name(data)
-    except ProfileError:
-        current = _raw_active(active_file(data))
+    except ProfileError as e:
+        af = active_file(data)
+        current = _raw_active(af)
+        if current is None and _exists(af):  # unreadable, bad JSON, no name: it may be `name`, so fail closed
+            raise ProfileError(f"cannot remove {name!r}: the active profile is unknown, since {e}") from None
     if name == current:
         raise ProfileError(f"{name} is the active profile; `ap2 profile use` another one first")
-    if not f.exists():
+    if not _exists(f):
         raise ProfileError(f"no profile named {name!r}")
     try:
         f.unlink()

@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import ast
 import json
+import os
+import re
 from pathlib import Path
 from unittest import mock
 
@@ -256,6 +258,61 @@ class WorkerProfileLaunchTest(WorkerCase):
         self.assertEqual(a["profile"], "g1")
         self.assertEqual(resources.Registry(self.data).read()[0]["profile"], "g1")
         self.assertEqual(self.get(a["card"])["sessions"]["implement"]["profile"], "g1")
+
+    def test_the_profile_is_read_once_per_resume(self):
+        """A `use` that lands at the start of an in-place resume's lock-free step (after `_plan_resume`, before
+        `_resume_tools` picks its profile) changes nothing in this resume: the probe, the floor, the process env,
+        the record and the card all take the profile `_plan_resume` read."""
+        a = self.start()  # on the subscription, so every field below must change to g1
+        self.use_gateway("g2", url=OTHER_URL, model="m2", effort="low")
+        self.use_gateway("g1", model="m1", effort="high")
+        self.drop_agent(a["short_id"])  # dead: an in-place resume
+        probe = transcripts.run_dir(self.data, a["card"]) / "settings-discover-implement.json"
+        real_resume_tools, real_tools = Workers._resume_tools, Workers._tools
+        switched, probes = [], []
+
+        def resume_tools(self_, plan):
+            if not switched:
+                switched.append(profiles.use(self.data, "g2"))
+            return real_resume_tools(self_, plan)
+
+        def tools(self_, *args):
+            found = real_tools(self_, *args)
+            probes.append(json.loads(probe.read_text()))  # what this resume's own discovery ran on
+            return found
+
+        before = len(self.discovery_calls())
+        with mock.patch.object(Workers, "_resume_tools", resume_tools), mock.patch.object(Workers, "_tools", tools):
+            self.assertEqual(self.workers().check()[0]["did"], "resumed")
+        self.assertEqual(switched, [{"active": "g2", "was": "g1"}])
+        self.assertGreater(len(self.discovery_calls()), before)  # the resume ran its own discovery
+        self.assertEqual([(p["env"]["ANTHROPIC_BASE_URL"], p["env"]["AP2_PROFILE"]) for p in probes], [(URL, "g1")])
+        last = self.bg_calls()[-1]
+        self.assertEqual(last["argv"][1:3], ["--resume", a["session_id"]])
+        env = self.settings_of(last)["env"]
+        self.assertEqual((env["ANTHROPIC_BASE_URL"], env["AP2_PROFILE"], env["ANTHROPIC_MODEL"]), (URL, "g1", "m1"))
+        # A resume gets neither --model nor --effort (design 8.2): its model comes from ANTHROPIC_MODEL above.
+        self.assertNotIn("--model", last["argv"])
+        self.assertNotIn("--effort", last["argv"])
+        self.assertEqual(last["env"]["AP2_PROFILE"], "g1")  # the process env, as the settings env
+        self.assertEqual(resources.Registry(self.data).read()[0]["profile"], "g1")
+        self.assertEqual(self.get(a["card"])["sessions"]["implement"]["profile"], "g1")
+
+    def test_an_unreadable_profiles_folder_starts_nothing(self):
+        if os.geteuid() == 0:
+            self.skipTest("root reads a folder with mode 000")
+        self.use_gateway()
+        cid = self.add_card()
+        folder = self.data / "profiles"
+        folder.chmod(0)
+        self.addCleanup(folder.chmod, 0o755)
+        with self.assertRaisesRegex(profiles.ProfileError, f"cannot read {re.escape(str(folder))}"):
+            self.start(card_id=cid)
+        self.assertEqual(self.calls(), [])  # no discovery, no launch
+        run = transcripts.run_dir(self.data, cid)
+        for name in ("settings-implement.json", "settings-discover-implement.json"):
+            self.assertFalse((run / name).exists(), name)
+        self.assertEqual(resources.Registry(self.data).read(), [])
 
     def test_one_probe_on_the_subscription(self):
         a = self.start()

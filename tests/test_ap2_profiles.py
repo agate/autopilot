@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -195,6 +196,114 @@ class ProfileStoreTest(WorkerCase):
                 call()
         self.assertEqual((elsewhere / "active.json").read_text(), '{"name": "g"}')
 
+    def lock(self, folder: Path) -> None:
+        """Mode 000 on `folder`, put back by a cleanup so the temp folder can be removed."""
+        if os.geteuid() == 0:
+            self.skipTest("root reads a folder with mode 000")
+        folder.chmod(0)
+        self.addCleanup(folder.chmod, 0o755)
+
+    def assert_cannot_read(self, call, where: Path, *more) -> str:
+        """`call` raises a one-line ProfileError (never a bare OSError) that names `where` and says it cannot be
+        read."""
+        with self.assertRaises(ProfileError) as e:
+            call()
+        msg = str(e.exception)
+        self.assertIn(str(where), msg)
+        self.assertIn("cannot read", msg)
+        self.assertNotIn("\n", msg)
+        for text in more:
+            self.assertIn(text, msg)
+        return msg
+
+    def test_an_unreadable_profiles_folder_is_a_profile_error(self):
+        profiles.save(self.data, gateway())
+        folder = self.data / "profiles"
+        self.lock(folder)
+        g = folder / "g.json"
+        for label, call, where in (
+                ("path", lambda: profiles.path(self.data, "g"), g),
+                ("load", lambda: profiles.load(self.data, "g"), g),
+                # Fail closed: never the built-in subscription when the folder cannot be looked into.
+                ("load subscription", lambda: profiles.load(self.data, "subscription"), folder / "subscription.json"),
+                ("page_profile", lambda: profiles.page_profile(self.data), folder / "subscription.json"),
+                ("active", lambda: profiles.active(self.data), folder / "subscription.json"),
+                # Never ["subscription"] as if the folder were empty.
+                ("names", lambda: profiles.names(self.data), folder),
+                ("save", lambda: profiles.save(self.data, gateway("g2")), folder / "g2.json"),
+                ("use", lambda: profiles.use(self.data, "g"), g),
+                ("remove", lambda: profiles.remove(self.data, "g"), g)):
+            with self.subTest(label):
+                self.assert_cannot_read(call, where)
+        self.assertFalse((self.data / "active-profile.json").exists())  # `use` wrote nothing
+
+    def test_remove_refuses_while_the_active_profile_cannot_be_read(self):
+        """active-profile.json is there but names no profile it can read: `remove` cannot tell which one is in use,
+        so it removes nothing (it would otherwise delete the active profile)."""
+        profiles.save(self.data, gateway())
+        active = self.data / "active-profile.json"
+        g = self.data / "profiles" / "g.json"
+        for label, body in (("mode 000", None), ("bad JSON", "{nope"), ("a list", '["g"]'), ("no name", "{}")):
+            with self.subTest(label):
+                if active.exists():
+                    active.chmod(0o644)  # a failed earlier case must not leave the file unwritable for this one
+                profiles.save(self.data, gateway())  # each case on its own, even when an earlier one removed g
+                active.write_text('{"name": "g"}' if body is None else body)
+                if body is None:
+                    if os.geteuid() == 0:
+                        continue  # root reads a file with mode 000
+                    active.chmod(0)
+                    self.addCleanup(active.chmod, 0o644)
+                with self.assertRaises(ProfileError) as cm:
+                    profiles.remove(self.data, "g")
+                msg = str(cm.exception)
+                self.assertIn(str(active), msg)
+                self.assertIn(profiles.FIX, msg)
+                self.assertNotIn("\n", msg)
+                self.assertTrue(g.exists())
+        # `ap2 profile use` rewrites the file, and the same remove then works.
+        profiles.use(self.data, "subscription")
+        self.assertEqual(profiles.remove(self.data, "g"), {"removed": "g"})
+        self.assertFalse(g.exists())
+
+    def test_remove_still_refuses_the_name_a_broken_active_file_holds(self):
+        profiles.save(self.data, gateway())
+        profiles.save(self.data, gateway("h"))
+        active = self.data / "active-profile.json"
+        # A name that is not a profile name: that name is refused, another stored profile can go.
+        active.write_text('{"name": "Bad/Name"}')
+        with self.assertRaisesRegex(ProfileError, "not a profile name"):
+            profiles.remove(self.data, "Bad/Name")
+        self.assertEqual(profiles.remove(self.data, "h"), {"removed": "h"})
+        # The active profile's own file is broken: it is still the active one, so it is refused.
+        profiles.save(self.data, gateway("h"))
+        (self.data / "profiles" / "g.json").write_text("{nope")
+        active.write_text('{"name": "g"}')
+        with self.assertRaisesRegex(ProfileError, "g is the active profile"):
+            profiles.remove(self.data, "g")
+        self.assertTrue((self.data / "profiles" / "g.json").exists())
+        self.assertEqual(profiles.remove(self.data, "h"), {"removed": "h"})
+
+    def test_an_unreadable_data_folder_is_a_profile_error(self):
+        profiles.save(self.data, gateway())
+        profiles.use(self.data, "g")
+        self.lock(self.data)
+        active = self.data / "active-profile.json"
+        self.assert_cannot_read(lambda: profiles.folder(self.data), self.data / "profiles")
+        self.assert_cannot_read(lambda: profiles.active_file(self.data), active)
+        # The active profile's name: the file and the fix, never `subscription`.
+        for call in (profiles.active_name, profiles.active):
+            with self.subTest(call.__name__):
+                self.assert_cannot_read(lambda: call(self.data), active, profiles.FIX)
+
+    def test_a_profiles_folder_that_is_a_file_holds_no_profiles(self):
+        # Not an unreadable folder: nothing is stored there, as before (`ap2 profile add` then fails to write).
+        (self.data / "profiles").write_text("")
+        self.assertEqual(profiles.names(self.data), ["subscription"])
+        self.assertEqual(profiles.load(self.data, "subscription"), profiles.builtin())
+        with self.assertRaisesRegex(ProfileError, "no profile named 'g'"):
+            profiles.load(self.data, "g")
+
     def test_nothing_is_written_in_v1s_folder(self):
         v1 = self.tmp / "v1-data"
         v1.mkdir()
@@ -206,6 +315,131 @@ class ProfileStoreTest(WorkerCase):
             profiles.remove(self.data, "g")
         self.assertEqual(list(v1.iterdir()), [])
         self.assertTrue((self.data / "active-profile.json").is_file())
+
+
+class ProfileNameAndLongContextTest(WorkerCase):
+    """Profile names may hold `_` (often a gateway project's name), and a model may end in `[1m]` (Claude Code's
+    marker for the 1M context window): checked against the gateway's list without it, kept and passed with it."""
+
+    MODELS = "printf '[\"claude-opus-5-5\", \"claude-haiku-4-5\"]'"
+
+    def long_context(self, **over) -> dict:
+        p = gateway(**{"small_model": "claude-haiku-4-5", **over})
+        p["gateway"]["models_command"] = self.MODELS
+        return p
+
+    def test_the_profile_name_rule(self):
+        for name in ("team_project", "a", "a-b_c", "x" + "y" * 39):
+            self.assertEqual(profiles.validate({"name": name, "mode": "subscription"}), [], name)
+        for name in ("", "Team", "_x", "1x", "a/b", "a.b", "a b", "x" * 41, "a\n", "../x"):
+            errs = profiles.validate({"name": name, "mode": "subscription"})
+            self.assertEqual(len(errs), 1, (name, errs))
+            self.assertTrue(errs[0].startswith("name:"), (name, errs))
+            self.assertIn("lowercase letters, digits, - and _, starting with a letter (40 at most)", errs[0])
+        with self.assertRaisesRegex(ProfileError, r"\(lowercase letters, digits, - and _, starting with a letter "
+                                                  r"\(40 at most\)\)"):
+            profiles.path(self.data, "a\n")
+        self.assertFalse(hasattr(profiles, "NAME"))  # the project rule is no longer imported
+
+    def test_an_underscore_name_round_trips(self):
+        """A bug v1 had: a name `save` accepted but `load` refused was saved, then broke `profile list`."""
+        p = profiles.save(self.data, dict(profiles.builtin(), name="team_project", label="Team"))
+        self.assertEqual(p["name"], "team_project")
+        self.assertTrue((self.data / "profiles" / "team_project.json").exists())
+        self.assertEqual(profiles.load(self.data, "team_project")["label"], "Team")
+        self.assertEqual(profiles.names(self.data), ["subscription", "team_project"])
+        self.assertEqual(profiles.use(self.data, "team_project"), {"active": "team_project", "was": "subscription"})
+        self.assertEqual(profiles.active_name(self.data), "team_project")
+        self.assertEqual(profiles.active(self.data)["name"], "team_project")
+        long = "team_" + "x" * 35  # the longest name the rule allows, past the 31 project names may hold
+        self.assertEqual(len(long), 40)
+        profiles.save(self.data, dict(profiles.builtin(), name=long, label="Long"))
+        self.assertEqual(profiles.load(self.data, long)["label"], "Long")
+        self.assertIn(long, profiles.names(self.data))
+        self.assertEqual(profiles.use(self.data, long)["active"], long)
+        self.assertEqual(profiles.active_name(self.data), long)
+        profiles.use(self.data, "team_project")
+        if temp_inside_the_accounts_claude():
+            self.skipTest("the temp folder is inside the account's ~/.claude, so ap2 refuses every temp data folder")
+        home = self.tmp / "cli-home"
+        home.mkdir()
+        env = {k: v for k, v in os.environ.items() if k != "AP2_DATA" and not k.startswith("AUTOPILOT_")}
+        env.update(HOME=str(home), AUTOPILOT_DATA=str(self.tmp / "v1-cli"), PYTHONIOENCODING="utf-8")
+        for args in (("use", "subscription"), ("list",), ("use", "team_project"), ("list",)):
+            r = subprocess.run([sys.executable, str(AP2), "profile", *args, "--data", str(self.data)],
+                               capture_output=True, text=True, env=env, timeout=60)
+            self.assertEqual(r.returncode, 0, (args, r.stderr))
+        listed = json.loads(r.stdout)
+        self.assertEqual(listed["active"], "team_project")
+        self.assertIsNone(listed["active_error"])
+        self.assertIn("team_project", [x["name"] for x in listed["profiles"]])
+
+    def test_project_names_keep_their_rule(self):
+        from assistant.projects import NAME
+        self.assertIsNone(NAME.match("team_project"))
+        self.assertIsNotNone(profiles.PROFILE_NAME.match("team_project"))
+
+    def test_base_model_strips_one_long_context_marker(self):
+        self.assertEqual(profiles.LONG_CONTEXT, "[1m]")
+        for name, base in (("claude-opus-5-5[1m]", "claude-opus-5-5"), ("claude-opus-5-5", "claude-opus-5-5"),
+                           ("m[1m][1m]", "m[1m]"), ("m[2m]", "m[2m]"), ("[1m]m", "[1m]m"), ("m[1M]", "m[1M]")):
+            self.assertEqual(profiles.base_model(name), base, name)
+
+    def test_a_long_context_model_is_checked_without_its_marker(self):
+        saved = profiles.save(self.data, self.long_context(model="claude-opus-5-5[1m]",
+                                                           dispatcher_model="claude-opus-5-5[1m]"))
+        self.assertEqual((saved["model"], saved["dispatcher_model"]), ("claude-opus-5-5[1m]", "claude-opus-5-5[1m]"))
+        for bad in ("claude-opus-9[1m]", "claude-opus-5-5[2m]"):
+            with self.assertRaises(ProfileError) as cm:
+                profiles.save(self.data, self.long_context(name="h", model=bad))
+            self.assertIn(f"model: {bad} is not offered by the gateway", str(cm.exception))
+        with self.assertRaises(ProfileError) as cm:
+            profiles.save(self.data, self.long_context(name="h", model="claude-opus-5-5",
+                                                       small_model="claude-haiku-9[1m]"))
+        self.assertIn("small_model: claude-haiku-9[1m] is not offered", str(cm.exception))
+        # A name the gateway lists with its marker is offered as written.
+        p = self.long_context(name="lc", model="m[1m]")
+        p["gateway"]["models_command"] = "printf '[\"m[1m]\", \"claude-haiku-4-5\"]'"
+        self.assertEqual(profiles.save(self.data, p)["model"], "m[1m]")
+        # small_model is checked without its marker too.
+        saved = profiles.save(self.data, self.long_context(name="sm", model="claude-opus-5-5",
+                                                           small_model="claude-haiku-4-5[1m]"))
+        self.assertEqual(saved["small_model"], "claude-haiku-4-5[1m]")
+        self.assertEqual(profiles.names(self.data), ["g", "lc", "sm", "subscription"])
+
+    def test_a_long_context_model_is_stored_and_passed_as_written(self):
+        profiles.save(self.data, self.long_context(model="claude-opus-5-5[1m]", effort="high"))
+        self.assertEqual(json.loads((self.data / "profiles" / "g.json").read_text())["model"], "claude-opus-5-5[1m]")
+        p = profiles.load(self.data, "g")
+        self.assertEqual(p["model"], "claude-opus-5-5[1m]")
+        self.assertEqual(profiles.overlay(p)["env"]["ANTHROPIC_MODEL"], "claude-opus-5-5[1m]")
+        from tests.test_ap2_profile_launch import opt  # imported here: that module imports this one
+        profiles.use(self.data, "g")
+        self.start()
+        call = self.bg_calls()[-1]
+        self.assertEqual(opt(call["argv"], "--model"), "claude-opus-5-5[1m]")
+        settings = json.loads(Path(opt(call["argv"], "--settings")).read_text())
+        self.assertEqual(settings["env"]["ANTHROPIC_MODEL"], "claude-opus-5-5[1m]")
+
+    def test_a_models_list_with_a_non_text_item_is_refused(self):
+        p = self.long_context(model="claude-x")
+        p["gateway"]["models_command"] = "printf '[1, \"claude-x\"]'"
+        with self.assertRaises(ProfileError) as cm:
+            profiles.save(self.data, p)
+        msg = str(cm.exception)
+        self.assertEqual(msg, "gateway.models_command: must print a JSON list of model names")
+        self.assertNotIn("claude-x", msg)  # the command's output is never shown
+        # An unhashable item (a list in the list) is refused the same way, never a traceback.
+        p["gateway"]["models_command"] = "printf '[[\"claude-x\"], \"claude-x\"]'"
+        with self.assertRaisesRegex(ProfileError, "must print a JSON list of model names"):
+            profiles.save(self.data, p)
+        # A list nested too deep to parse is refused the same way, never a traceback.
+        deep = self.tmp / "deep.json"
+        deep.write_text("[" * 100000 + "]" * 100000)
+        p["gateway"]["models_command"] = "cat " + shlex.quote(str(deep))
+        with self.assertRaisesRegex(ProfileError, r"^gateway\.models_command: must print a JSON list of model names$"):
+            profiles.save(self.data, p)
+        self.assertEqual(profiles.names(self.data), ["subscription"])
 
 
 class ProfileOverlayTest(unittest.TestCase):
@@ -361,6 +595,7 @@ class ProfileCliTest(unittest.TestCase):
                          {"pluginConfigs": {"p": {}}})
         self.assertEqual(json.loads((self.data / "profiles" / "s.json").read_text())["settings"],
                          {"pluginConfigs": {"p": {}}})
+        self.assertFalse((self.data / "active-profile.json").exists())  # no file: the active one is subscription
         self.assertEqual(self.ok("remove", "s"), {"removed": "s"})
         self.assertEqual(self.ok("use", "g"), {"active": "g", "was": "subscription"})
         listed = self.ok("list")
@@ -432,6 +667,48 @@ class ProfileCliTest(unittest.TestCase):
         self.assertTrue(r.stderr.startswith("ap2: "), r.stderr)
         self.assertNotIn("Traceback", r.stderr)
         self.assertIn("active-profile.json", r.stderr)
+        self.assertFalse((self.data / "active-profile.json").exists())
+
+    def test_remove_with_an_unreadable_active_file_prints_one_line(self):
+        if os.geteuid() == 0:
+            self.skipTest("root reads a file with mode 000")
+        self.add_gateway()
+        self.ok("use", "g")
+        active = self.data / "active-profile.json"
+        active.chmod(0)
+        self.addCleanup(active.chmod, 0o644)
+        r = self.run_ap2("remove", "g")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertEqual(len(r.stderr.splitlines()), 1, r.stderr)
+        self.assertTrue(r.stderr.startswith("ap2: "), r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertIn("active-profile.json", r.stderr)
+        self.assertIn("ap2 profile use <name>", r.stderr)
+        self.assertTrue((self.data / "profiles" / "g.json").exists())
+        # The fix the message names: `use` replaces the unreadable file, and the same remove then works.
+        self.assertEqual(self.ok("use", "subscription"), {"active": "subscription", "was": None})
+        self.assertEqual(self.ok("remove", "g"), {"removed": "g"})
+        self.assertFalse((self.data / "profiles" / "g.json").exists())
+
+    def test_an_unreadable_profiles_folder_prints_one_line(self):
+        if os.geteuid() == 0:
+            self.skipTest("root reads a folder with mode 000")
+        self.ok("add", "s2", "--subscription")
+        folder = self.data / "profiles"
+        folder.chmod(0)
+        self.addCleanup(folder.chmod, 0o755)
+        for args in (("list",), ("show", "subscription"), ("show", "s2"), ("add", "s3", "--subscription"),
+                     ("use", "s2"), ("remove", "s2")):
+            with self.subTest(args):
+                r = self.run_ap2(*args)
+                self.assertEqual(r.returncode, 1, r.stdout)
+                self.assertEqual(r.stdout, "")
+                self.assertEqual(len(r.stderr.splitlines()), 1, r.stderr)
+                self.assertTrue(r.stderr.startswith("ap2: "), r.stderr)
+                self.assertNotIn("Traceback", r.stderr)
+                self.assertIn(str(folder), r.stderr)
+        folder.chmod(0o755)
+        self.assertEqual(sorted(f.name for f in folder.iterdir()), ["s2.json"])
         self.assertFalse((self.data / "active-profile.json").exists())
 
     def test_list_and_show_create_nothing(self):

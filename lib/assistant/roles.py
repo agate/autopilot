@@ -4,7 +4,7 @@ A template names roles and gives each a brief; it never changes a role's tools o
 key that would). The table is fixed here, in code, not in a file: nothing in the data folder can change it, and
 `ROLES` is read-only. Which folder a role runs in comes from the card (its repo worktree, or the data folder).
 
-To add a role (the PR review cards slice adds `pr-review`), add one `Role(...)` to `_SHIPPED`.
+To add a role (as the PR review cards slice added `pr-review`), add one `Role(...)` to `_SHIPPED`.
 """
 from __future__ import annotations
 
@@ -60,6 +60,10 @@ _SHIPPED = (
          _READ + _WEB + ("Write",), "read-only", "secretary's analyst agent"),
     Role("reviewer-angle", "Reviews a PR from one review angle, adversarially, and returns findings.",
          _READ, "read-only", "secretary's reviewer agent; the PR loop's role reviewers"),
+    Role("pr-review", "Reviews someone else's PR for the user: its angles in parallel, every finding checked, a "
+                      "report that leads with a verdict. Posts nothing.",
+         ("Agent", "Bash", "Glob", "Grep", "Read", "Write"), "read-only",
+         "secretary's review command, copied into commands/pr-review.md"),
     Role("general", "Does one errand from its brief: reads, checks, drafts, and edits files only in the card's "
                     "folder.",
          ("Bash", "Edit", "Glob", "Grep", "Read", "WebFetch", "WebSearch", "Write"), "worker", "v1's worker floor"),
