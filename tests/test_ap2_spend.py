@@ -923,6 +923,12 @@ class HardeningTest(SpendCase):
         self.assertAlmostEqual(self.totals()["month"], STREAMING_USD)
         self.assertEqual(sorted(self.settle(session_id=SID)["reqs"]), ["req_1"])
 
+    def test_a_subagents_folder_that_cannot_be_listed_leaves_only_the_main_transcript(self):
+        # Some Python versions let `glob` raise on an unreadable folder instead of skipping it.
+        self.put(sub="subagent.jsonl")
+        with mock.patch.object(Path, "glob", side_effect=PermissionError("denied")):
+            self.assertEqual(spend._files(self.transcript), [self.transcript])
+
     def test_a_sum_too_big_for_a_number_is_clamped_and_unknown(self):
         self.write(self.line("req_a"), self.line("req_b"))
         self.launch(at=TODAY_8)
