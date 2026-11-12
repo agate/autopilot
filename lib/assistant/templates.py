@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Optional
 
 from assistant import roles, yamlish
-from assistant.cards import LANES, title_for
+from assistant.cards import LANES, blank, title_for
 from assistant.config import Config, ConfigError
 
 BUILTIN_DIR = Path(__file__).resolve().parent / "builtin" / "templates"
@@ -107,9 +107,10 @@ class Template:
     replaces_builtin: bool = False
 
     def runs(self, card: dict, *, primary: str = Config.primary_language) -> list:
-        """The template's roles for `card`, in order: each with its brief filled from the card (`{title}` in the
-        `primary` language), and the tools and floor the role ships with. Raises BriefError naming the template,
-        the role and every missing field."""
+        """The template's roles for `card`, in order: each with its brief filled from the card (`{title}` as
+        `cards.title_for` picks it for the `primary` language: a text title as it is; an object title's primary slot
+        when it is non-blank text, else its first non-blank text slot in sorted key order), and the tools and floor
+        the role ships with. Raises BriefError naming the template, the role and every missing field."""
         out = []
         for i, entry in enumerate(self.data["roles"]):
             role = roles.ROLES[entry["role"]]
@@ -153,16 +154,24 @@ def _lookup(card, name: str):
 
 def fill_brief(brief: str, card: dict, *, primary: str = Config.primary_language) -> str:
     """Fill each `{field}` (or `{a.b}`, a field inside a field) from `card`; `{{` and `}}` are literal braces.
-    `{title}` is the title in the `primary` language (`cards.title_for`). A field the card lacks, or holds as
-    null or blank text, is an error naming it: never an empty fill. A value must be text or a number."""
+    `{title}` is the title as `cards.title_for` picks it for the `primary` language (a text title as it is; an object
+    title's primary slot when it is non-blank text, else its first non-blank text slot in sorted key order). A field
+    the card lacks, or holds as null or blank text, is an error naming it: never an empty fill. `{title}` is blank by
+    `cards.blank` (so a title of only U+FEFF is missing too); every other field by `str.strip()`. A value must be text
+    or a number."""
     try:
         names = placeholders(brief)
     except ValueError as e:
         raise BriefError(f"bad brief: {e}", []) from None
     missing, wrong, values = [], [], {}
     for name in names:
-        v = title_for(card, primary, primary) if name == "title" else _lookup(card, name)
-        if v is None or (isinstance(v, str) and not v.strip()):
+        if name == "title":
+            v = title_for(card, primary, primary)
+            empty = v is None or (isinstance(v, str) and blank(v))
+        else:
+            v = _lookup(card, name)
+            empty = v is None or (isinstance(v, str) and not v.strip())
+        if empty:
             missing.append(name)
         elif isinstance(v, bool) or not isinstance(v, (str, int, float)):
             wrong.append(name)

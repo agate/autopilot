@@ -64,8 +64,12 @@ _SVG_UNSAFE = re.compile(r"<\s*script|<\s*foreignObject|\son[a-z]+\s*=|javascrip
 PR_FILES = """query($owner:String!, $name:String!, $n:Int!, $after:String){ repository(owner:$owner, name:$name){
  pullRequest(number:$n){ headRefOid baseRefOid additions deletions
   files(first:100, after:$after){ pageInfo{ hasNextPage endCursor } nodes{ path } } } } }"""
-# A delta's commits since the last review: how they relate to it, and which of them are merges.
-SINCE_JQ = "{status: .status, merges: [.commits[] | select(.parents | length > 1) | .sha]}"
+# A delta's commits since the last review: how they relate to it, which of them are merges, and whether there are
+# more than the reply lists (GitHub's compare lists at most 250 commits but counts them all in total_commits). With
+# no number in total_commits, more is null (jq orders null below every number, so a bare `>` would say false).
+SINCE_JQ = ("{status: .status, merges: [.commits[] | select(.parents | length > 1) | .sha], "
+            "more: (if (.total_commits | type) == \"number\" then .total_commits > (.commits | length) else null end)}")
+COMPARE_LISTS = 250
 SYNC_FIELDS = "state,headRefOid,reviewRequests,latestReviews,author"
 
 _GIT_ENV = {"GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": "", "GIT_TERMINAL_PROMPT": "0"}
@@ -276,17 +280,22 @@ def merge_base(repo: str, base: str, head: str, run=None) -> str:
 def whole_pr_reason(repo: str, reviewed: str, head: str, run=None) -> Optional[str]:
     """Why the commits since the last review cannot be reviewed alone, or None. After a merge commit (an "update
     branch" merge) that diff holds the base branch's changes; after a rewrite it no longer starts at the review,
-    and once the reviewed commit is gone from GitHub (collected after a force-push) the compare is a 404."""
+    and once the reviewed commit is gone from GitHub (collected after a force-push) the compare is a 404. When more
+    commits came in than the compare reply lists, a merge commit past them cannot be ruled out, so that too is a
+    whole-PR review."""
     try:
         since = _json(gh_read(["api", compare_path(repo, reviewed, head), "--jq", SINCE_JQ], run), "compare")
     except NotFound:
         return f"the last reviewed commit ({reviewed[:7]}) is no longer on GitHub (history rewritten)"
-    if not isinstance(since, dict):
+    if not isinstance(since, dict) or not isinstance(since.get("more"), bool):
         raise ReviewError(f"compare {reviewed[:7]}...{head[:7]}: unexpected reply")
     merges = [m for m in since.get("merges") or [] if isinstance(m, str)]
     if merges:
         return (f"the new commits include a merge commit ({', '.join(m[:7] for m in merges)}), so the diff since "
                 f"the last review holds the base branch's changes")
+    if since["more"]:
+        return (f"more commits since the last review than GitHub's compare lists ({COMPARE_LISTS}), so a merge "
+                f"commit among them cannot be ruled out")
     if since.get("status") in ("diverged", "behind"):
         return f"the branch was rewritten since the last review (compare status {since['status']})"
     return None
@@ -295,7 +304,9 @@ def whole_pr_reason(repo: str, reviewed: str, head: str, run=None) -> Optional[s
 # --- the card ---------------------------------------------------------------------------------------------------
 
 def pr_of(card: dict) -> dict:
-    """{repo, number, url} of a PR review card. Anything else is a ReviewError."""
+    """{repo, number, url} of a PR review card. Anything else is a ReviewError. The url is the card's
+    `source.link` when that is `https://<host>/<repo>/pull/<number>` for the key's repo and number (then `/`, `?...`
+    or `#...` allowed), else `https://github.com/<repo>/pull/<number>`."""
     cid = card.get("id", "?")
     if card.get("kind") != KIND:
         raise ReviewError(f"card {cid} is a {card.get('kind')!r} card, not a {KIND} card")
@@ -304,10 +315,29 @@ def pr_of(card: dict) -> dict:
     if not m:
         raise ReviewError(f"card {cid}: key {str(key)[:80]!r} is not <owner>/<repo>#<number>")
     repo, number = m.group(1), int(m.group(2))
-    link = (card.get("source") or {}).get("link") if isinstance(card.get("source"), dict) else None
-    url = link if isinstance(link, str) and re.match(r"https://\S+\Z", link) else \
-        f"https://github.com/{repo}/pull/{number}"
+    link = _source_link(card)
+    # The source's link is the PR only when it is this PR's page (GitHub or another host); a Slack ask's link is the
+    # message, so the URL is then made from the key.
+    url = link if _is_pr_page(link, repo, number) else f"https://github.com/{repo}/pull/{number}"
     return {"repo": repo, "number": number, "url": url}
+
+
+def _source_link(card: dict):
+    return (card.get("source") or {}).get("link") if isinstance(card.get("source"), dict) else None
+
+
+def _is_pr_page(link, repo: str, number: int) -> bool:
+    """True when `link` is this PR's own page, `https://<host>/<repo>/pull/<number>` (then `/`, `?...` or `#...`
+    allowed). A card whose source link is not (a Slack ask's message link) was not asked for on GitHub."""
+    own = re.compile(r"https://[^\s/]+/" + re.escape(repo) + f"/pull/{number}" + r"(?:[/?#]\S*)?\Z")
+    return isinstance(link, str) and bool(own.match(link))
+
+
+def _asked_elsewhere(card: dict, repo: str, number: int) -> bool:
+    """True when the card's source link is text that names no `/<repo>/pull/<number>` (a Slack ask's message)."""
+    link = _source_link(card)
+    names = re.compile("/" + re.escape(repo) + f"/pull/{number}" + r"(?!\d)")
+    return isinstance(link, str) and not names.search(link)
 
 
 def run_dir(data, card_id: str) -> Path:
@@ -697,10 +727,10 @@ def plain_for(record, card, langs) -> dict:
     tldr = block.get("tldr") if block and isinstance(block.get("tldr"), dict) else None
     found = card.get("findings") if isinstance(card.get("findings"), dict) else {}
     n = sum(len(found.get(b) or []) for b in ("confirmed", "questions") if isinstance(found.get(b), list))
-    number = record.get("id")
+    m = KEY.match(card.get("key")) if isinstance(card.get("key"), str) else None
+    number = m.group(2) if m else record.get("id")  # a Slack ask's id is its message ts, not the PR number
     if not (isinstance(number, (str, int)) and str(number).strip()):
-        m = KEY.match(card.get("key") or "") if isinstance(card.get("key"), str) else None
-        number = m.group(2) if m else "?"
+        number = "?"
     author = record.get("author") if isinstance(record.get("author"), str) and record["author"].strip() else None
     own = card.get("feed") == OWN_FEED
     out = {line: {} for line in cards.PLAIN_LINES}
@@ -791,7 +821,9 @@ def sync(data, card_id: str, by: str = "ap2 review", cfg=None, run=None) -> dict
     """Where the PR stands on GitHub (design 6.2 points 5-6): merged, closed, reviewed (the user has a review),
     request_removed (neither the user nor a team is asked any more), not_reviewed, new_commits (a delta is due) or
     current. The first four move the card to done; every state records the head. Only the card changes. The user's
-    own PR (its author's login is the user's) is never reviewed or request_removed: only merged and closed end it."""
+    own PR (its author's login is the user's) is never reviewed or request_removed: only merged and closed end it. A
+    card whose source link is text naming no `/<repo>/pull/<number>` (a Slack ask's message) was never asked on
+    GitHub, so it is never request_removed; a card with no text link, or one naming this PR anywhere, still is."""
     data = Path(data)
     cfg = cfg if cfg is not None else config.load(data)
     store = Store(data, cfg=cfg)
@@ -822,7 +854,8 @@ def sync(data, card_id: str, by: str = "ap2 review", cfg=None, run=None) -> dict
         out = "not_reviewed" if reviewed is None else "new_commits" if head != reviewed else "current"
     elif mine:
         out = "reviewed"
-    elif not asked and not team:
+    elif not asked and not team and not _asked_elsewhere(card, pr["repo"], pr["number"]):
+        # A Slack ask's card (its link is the message, naming no PR page) never had a request on GitHub to lose.
         out = "request_removed"
     elif reviewed is None:
         out = "not_reviewed"

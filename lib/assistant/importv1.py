@@ -343,10 +343,12 @@ class _Maker:
     def closed(self, old: dict) -> dict:
         """The closed question card for `old`, a question card whose decision has left state.json: as `question`
         makes it with `open_=False`, keeping the old card's words, `where`, source and parent. Each language's
-        `what` (and title slot) is the old `plain.what` text, else the old title in that language (a one-text title
-        the old import wrote, or an object title), else the decision id. In a language no longer configured, the old
-        `what` and `where` words are kept, as v1 cannot make them again, and `do` is the closed phrase (none in a
-        language without phrases)."""
+        `what` (and title slot) is the old `plain.what` text, else the old title as `cards.title_for` picks it when
+        that is non-blank text (a one-text title the old import wrote as it is; an object title's non-blank text slot
+        in that language, then the primary's, then the first other one in sorted key order), else the decision id.
+        Blank is `cards.blank`, so a one-text title of only U+FEFF gives the decision id too. In a language no longer
+        configured, the old `what` and `where` words are kept, as v1 cannot make them again, and `do` is the closed
+        phrase (none in a language without phrases)."""
         plain = old.get("plain") if isinstance(old.get("plain"), dict) else {}
         what = plain.get("what") if isinstance(plain.get("what"), dict) else {}
         where = plain.get("where") if isinstance(plain.get("where"), dict) else {}
@@ -359,7 +361,7 @@ class _Maker:
                 words[lang] = what[lang]
                 continue
             text = cards.title_for(old, lang, self.langs[0])  # a one-text title is returned as it is, blank or not
-            words[lang] = text if isinstance(text, str) and text.strip() else decision
+            words[lang] = decision if cards.blank(text) else text
         what = self.kept(what, words)
         where = self.kept(where, {lang: where.get(lang) or fresh[lang] for lang in self.langs})
         do = self.say("do_closed")

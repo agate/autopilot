@@ -324,7 +324,7 @@ class SourceCommandTest(unittest.TestCase):
         bad.write_text("source: t-bad\nbrings: messages\nraed: x\n")
         self.assertEqual(self.fails("source", "show", "t-bad"),
                          f"ap2: {bad}: line 3: unknown key 'raed' (known keys: source, brings, read, fill, form, link, "
-                         "key, sort, instructions, status_map, writes, never, plan)")
+                         "key, sort, key_for, instructions, status_map, writes, never, plan)")
         self.assertTrue(self.fails("source", "list").startswith(f"ap2: {bad}: "))
         self.assertIn("--records needs --raw FILE", self.fails("source", "read", "t-vendor-status", "--records",
                                                                str(self.reply)))

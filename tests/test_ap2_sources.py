@@ -250,8 +250,8 @@ class ValidationTest(SourceCase):
     CASES = [
         # (what, the change to GOOD as (old, new) or extra text, the expected reason)
         ("unknown top-level key", ("sort:", "raed: x\nsort:"),
-         "line 13: unknown key 'raed' (known keys: source, brings, read, fill, form, link, key, sort, instructions, "
-         "status_map, writes, never, plan)"),
+         "line 13: unknown key 'raed' (known keys: source, brings, read, fill, form, link, key, sort, key_for, "
+         "instructions, status_map, writes, never, plan)"),
         ("brings", ("brings: messages", "brings: tasks"), "line 2: brings must be one of messages, work, not 'tasks'"),
         ("read missing", ("read:\n  via: command\n  run: echo []\n", ""), "read missing"),
         ("read not a map", ("read:\n  via: command\n  run: echo []\n", "read: command\n"),
@@ -272,7 +272,7 @@ class ValidationTest(SourceCase):
          "line 7: form must name id, at, text; missing: id, text"),
         ("unknown form field", ("  text: .text\n", "  text: .text\n  title: .title\n"),
          "line 11: form: unknown field 'title' (fields: id, thread_id, author, at, text, place, place_id, status, "
-         "depends_on)"),
+         "depends_on, pr)"),
         ("bad path", ("  at: .at\n", "  at: at\n"), "line 9: form.at: a path starts with '.', not 'at'"),
         ("path with an index", ("  at: .at\n", "  at: .times[0]\n"),
          "line 9: form.at: '.times[0]': [0] looks like an index; indexes are not supported"),
@@ -395,6 +395,163 @@ class ValidationTest(SourceCase):
         self.user("s", GOOD.replace("link: .url", 'link: "https://x.example.com/{id}"'))
         self.assertEqual(self.loader().load("s").link,
                          ("pattern", (("text", "https://x.example.com/"), ("field", "id"))))
+
+
+class KeyForTest(SourceCase):
+    """`key_for: {<category>: <pattern>}`: the records of one category key on their own pattern (design 6.2)."""
+
+    KEYED = GOOD.replace("sort: { all: alert }\n",
+                         'sort: { all: alert, review_request: pr-review }\nkey_for: { review_request: "{pr}" }\n')
+
+    def test_key_for_loads_into_parsed_patterns(self):
+        self.user("s", self.KEYED)
+        src = self.loader().load("s")
+        self.assertEqual(src.key_for, {"review_request": form.parse_pattern("{pr}")})
+        self.assertEqual(src.key, form.parse_pattern("{id}"))  # every other category keys as before
+
+    def test_a_source_without_key_for_gets_an_empty_map(self):
+        self.user("s", GOOD)
+        self.assertEqual(self.loader().load("s").key_for, {})
+
+    def test_bad_key_for_is_refused_naming_its_path(self):
+        cases = [
+            ('key_for: { review_request: "{pr}" }', 'key_for: { other: "{pr}" }',
+             "line 14: key_for.other: 'other' is not one of sort's categories (all, review_request)"),
+            ('key_for: { review_request: "{pr}" }', "key_for: { review_request: pr }",
+             "line 14: key_for.review_request must name at least one {field}, or every such item would be one "
+             "card: 'pr'"),
+            ('key_for: { review_request: "{pr}" }', "key_for: { review_request: .pr }",
+             "line 14: key_for.review_request must be a {field} pattern such as \"{pr}\", not '.pr'"),
+            ('key_for: { review_request: "{pr}" }', "key_for: { review_request: \"\" }",
+             "line 14: key_for.review_request must be a {field} pattern such as \"{pr}\", not ''"),
+            ('key_for: { review_request: "{pr}" }', 'key_for: { review_request: "{pr" }',
+             "line 14: key_for.review_request: '{pr': a brace that is not a {field}"),
+            ('key_for: { review_request: "{pr}" }', "key_for: [review_request]",
+             "line 14: key_for must map a category of sort to a {field} pattern, not ['review_request']"),
+            # Block style: the entry's own line, not the key_for line above it.
+            ('key_for: { review_request: "{pr}" }', 'key_for:\n  other: "{pr}"',
+             "line 15: key_for.other: 'other' is not one of sort's categories (all, review_request)"),
+        ]
+        for old, new, reason in cases:
+            with self.subTest(new):
+                self.assertIn(old, self.KEYED)
+                p = self.user("s", self.KEYED.replace(old, new))
+                with self.assertRaises(SourceError) as cm:
+                    self.loader().load("s")
+                self.assertEqual(str(cm.exception), f"{p}: {reason}")
+
+    def test_the_builtin_slack_mentions_keys_a_review_request_on_its_pr(self):
+        # The real built-in file (sources.PLUGIN_DIR), not the test copy.
+        src = Loader(self.data, plugin_dir=sources.PLUGIN_DIR).load("slack-mentions")
+        self.assertEqual(src.origin, "built-in")
+        self.assertIn("pr", src.data["form"])
+        self.assertIn("github.com/<owner>/<repo>/pull/<number>", src.data["form"]["pr"])
+        self.assertEqual(src.sort, {"question": "question", "ask_to_do": "errand", "alert": "alert", "fyi": "none",
+                                    "review_request": "pr-review"})
+        self.assertEqual(src.key_for, {"review_request": form.parse_pattern("{pr}")})
+        self.assertEqual(src.data["key"], "{place_id}:{thread_or_id}")  # the thread key is unchanged
+        self.assertIn("review_request", src.data["instructions"])
+
+    def test_a_user_null_turns_a_key_for_category_off(self):
+        self.user("slack-mentions", "extends: slack-mentions\nsettings: { me: U1 }\n"
+                                    "key_for: { review_request: null }\n")
+        src = Loader(self.data, plugin_dir=sources.PLUGIN_DIR).load("slack-mentions")
+        self.assertEqual(src.key_for, {})  # a review ask keys on `key`, its thread, again
+
+    def test_a_null_for_a_category_sort_lacks_is_refused(self):
+        # A misspelled opt-out must not load silently and leave the PR keying on.
+        p = self.user("slack-mentions", "extends: slack-mentions\nsettings: { me: U1 }\n"
+                                        "key_for: { review_requests: null }\n")
+        with self.assertRaises(SourceError) as cm:
+            Loader(self.data, plugin_dir=sources.PLUGIN_DIR).load("slack-mentions")
+        self.assertEqual(str(cm.exception),
+                         f"{p} (merged over {sources.PLUGIN_DIR / 'slack-mentions.yaml'}): line 3: "
+                         "key_for.review_requests: 'review_requests' is not one of sort's categories "
+                         "(question, ask_to_do, alert, fyi, review_request)")
+
+    def test_re_sorting_a_key_for_category_without_its_key_for_is_refused(self):
+        # Else a Slack ask would make a `question` card keyed on the PR, and the GitHub review request would land
+        # on it, so no pr-review card is ever made for that PR.
+        p = self.user("slack-mentions", "extends: slack-mentions\nsettings: { me: U0EXAMPLE1 }\n"
+                                        "sort: { review_request: question }\n")
+        with self.assertRaises(SourceError) as cm:
+            Loader(self.data, plugin_dir=sources.PLUGIN_DIR).load("slack-mentions")
+        self.assertEqual(str(cm.exception), self.re_sorted(p, 3))
+
+    def test_re_sorting_with_another_categorys_key_for_is_refused(self):
+        # A key_for for some other category does not stand in for the re-sorted one's.
+        p = self.user("slack-mentions", "extends: slack-mentions\nsettings: { me: U0EXAMPLE1 }\n"
+                                        "sort: { review_request: question }\nkey_for: { fyi: \"{pr}\" }\n")
+        with self.assertRaises(SourceError) as cm:
+            Loader(self.data, plugin_dir=sources.PLUGIN_DIR).load("slack-mentions")
+        self.assertEqual(str(cm.exception), self.re_sorted(p, 3))
+
+    @staticmethod
+    def re_sorted(path, line):
+        return (f"{path}: line {line}: sort.review_request: re-sorted here while key_for.review_request still "
+                "keys it on {pr} (from the file this extends); set key_for.review_request too (null keys it on key "
+                "again)")
+
+    def test_re_sorting_a_key_for_category_is_refused_anywhere_in_the_chain(self):
+        # The bad file is in the middle: a source extending it fails too, naming that file and its line.
+        p = self.user("slack-mentions", "extends: slack-mentions\nsettings: { me: U0EXAMPLE1 }\n"
+                                        "sort: { review_request: question }\n")
+        self.user("slack-team", "extends: slack-mentions\n")
+        with self.assertRaises(SourceError) as cm:
+            Loader(self.data, plugin_dir=sources.PLUGIN_DIR).load("slack-team")
+        self.assertEqual(str(cm.exception), self.re_sorted(p, 3))
+
+    def test_a_block_style_re_sort_names_the_category_line(self):
+        p = self.user("slack-mentions", "extends: slack-mentions\nsettings: { me: U0EXAMPLE1 }\n"
+                                        "sort:\n  review_request: question\n")
+        with self.assertRaises(SourceError) as cm:
+            Loader(self.data, plugin_dir=sources.PLUGIN_DIR).load("slack-mentions")
+        self.assertEqual(str(cm.exception), self.re_sorted(p, 4))
+
+    def test_writing_the_same_sort_as_the_base_loads(self):
+        self.user("slack-mentions", "extends: slack-mentions\nsettings: { me: U0EXAMPLE1 }\n"
+                                    "sort: { review_request: pr-review }\n")
+        src = Loader(self.data, plugin_dir=sources.PLUGIN_DIR).load("slack-mentions")
+        self.assertEqual(src.sort["review_request"], "pr-review")
+        self.assertEqual(src.key_for, {"review_request": form.parse_pattern("{pr}")})
+
+    def test_re_sorting_over_an_inherited_null_loads(self):
+        # `a` turned the PR keying off, so `b` may sort review asks anywhere without saying so again.
+        self.user("a", "extends: slack-mentions\nsettings: { me: U0EXAMPLE1 }\n"
+                       "sort: { review_request: question }\nkey_for: { review_request: null }\n")
+        self.user("b", "extends: a\nsort: { review_request: fyi }\n")
+        src = Loader(self.data, plugin_dir=sources.PLUGIN_DIR).load("b")
+        self.assertEqual(src.key_for, {})
+        self.assertEqual(src.sort["review_request"], "fyi")
+
+    def test_re_sorting_a_key_for_category_with_its_key_for_loads(self):
+        self.user("slack-mentions", "extends: slack-mentions\nsettings: { me: U0EXAMPLE1 }\n"
+                                    "sort: { review_request: question }\nkey_for: { review_request: null }\n")
+        src = Loader(self.data, plugin_dir=sources.PLUGIN_DIR).load("slack-mentions")
+        self.assertEqual(src.key_for, {})
+        self.assertEqual(src.sort["review_request"], "question")
+
+    def test_re_sorting_with_its_own_key_for_loads(self):
+        self.user("slack-mentions", "extends: slack-mentions\nsettings: { me: U0EXAMPLE1 }\n"
+                                    "sort: { review_request: question }\nkey_for: { review_request: \"{pr}\" }\n")
+        src = Loader(self.data, plugin_dir=sources.PLUGIN_DIR).load("slack-mentions")
+        self.assertEqual(src.sort["review_request"], "question")
+        self.assertEqual(src.key_for, {"review_request": form.parse_pattern("{pr}")})
+
+    def test_re_sorting_a_category_not_in_key_for_loads(self):
+        self.user("slack-mentions", "extends: slack-mentions\nsettings: { me: U0EXAMPLE1 }\n"
+                                    "sort: { fyi: question }\n")
+        src = Loader(self.data, plugin_dir=sources.PLUGIN_DIR).load("slack-mentions")
+        self.assertEqual(src.sort["fyi"], "question")
+        self.assertEqual(src.key_for, {"review_request": form.parse_pattern("{pr}")})
+
+    def test_an_empty_setting_named_in_key_for_refuses_the_source(self):
+        p = self.user("slack-mentions", "extends: slack-mentions\nsettings: { me: U1, org: '' }\n"
+                                        "key_for: { review_request: \"{org}/{pr}\" }\n")
+        src = Loader(self.data, plugin_dir=sources.PLUGIN_DIR).load("slack-mentions")
+        with self.assertRaises(SourceError) as cm:
+            sources.unset_settings(src)
+        self.assertEqual(str(cm.exception), f"slack-mentions: settings.org is not set; add it in {p}")
 
 
 if __name__ == "__main__":

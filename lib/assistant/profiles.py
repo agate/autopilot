@@ -19,6 +19,7 @@ import os
 import re
 import stat
 import subprocess
+from datetime import datetime
 from pathlib import Path
 
 from assistant.config import ConfigError
@@ -30,7 +31,7 @@ ACTIVE = "active-profile.json"
 MODES = ("subscription", "gateway")
 GATEWAY_FIELDS = ("base_url", "key_command", "refresh_command", "rotate_command", "models_command")
 FIELDS = ("name", "mode", "label", "model", "dispatcher_model", "small_model", "effort", "daily_cap_usd", "gateway",
-          "env", "settings")
+          "env", "settings", "chosen_at")
 FORBIDDEN_SETTINGS = ("permissions", "hooks", "apiKeyHelper", "disableAllHooks")
 MODELS_TIMEOUT = 30  # seconds `gateway.models_command` may take
 FIX = "run `ap2 profile list`, then `ap2 profile use <name>` with a profile that loads"
@@ -48,15 +49,34 @@ _OWN_PREFIXES = ("AP2_", "AUTOPILOT_")  # variables v2 (and v1) set themselves
 PROFILE_NAME = re.compile(r"[a-z][a-z0-9_-]{0,39}\Z")
 NAME_RULE = "lowercase letters, digits, - and _, starting with a letter (40 at most)"
 LONG_CONTEXT = "[1m]"  # Claude Code's marker for the 1M context window; the gateway lists the name without it
+# Choosing the model and effort: the first time a profile is set up or used, both are picked from a list fetched
+# just then (never cached), and `chosen_at` records when.
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+RECOMMENDED_MODEL = "claude-opus-5-5[1m]"
+RECOMMENDED_EFFORT = "high"
+DEFAULT_MODEL = "default"  # Claude Code's own default model, stored as null
+CHOICE_TIMEOUT = 20  # seconds `gateway.models_command` may take when it lists the choices
+# The shape of a model name the choices may show (`gpt-x`, `claude-opus-5-5[1m]`, `us.anthropic.claude-x-v1:0`,
+# `anthropic/claude-x`): the list is shown in a terminal and in logs, so an entry with a space, a control character or
+# any other character a model name never has (a gateway's error text, a terminal control sequence) is dropped from the
+# choices, never shown. A bare token shaped like a model name would still be shown: a gateway's model list holds no
+# keys. What a save accepts is checked against the full list (`fetch_models`).
+MODEL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@\[\]-]{0,127}")
+NEEDS_CHOICE = 3  # `ap2 profile`'s exit code when a choice is needed and no terminal can ask for it
 
 
 class ProfileError(ConfigError):
     """A profile cannot be saved, loaded or used. A ConfigError, so `ap2` prints one line and exits 1."""
 
 
+class ModelsUnavailable(ProfileError):
+    """The model list could not be fetched: the models command failed, timed out or printed no JSON list of texts.
+    The message names the exit code or the exception only, never the command's output or its command line."""
+
+
 def _blank(name: str, mode: str = SUBSCRIPTION) -> dict:
     return {"name": name, "mode": mode, "label": name, "model": None, "dispatcher_model": None, "small_model": None,
-            "effort": None, "daily_cap_usd": None, "gateway": None, "env": {}, "settings": {}}
+            "effort": None, "daily_cap_usd": None, "gateway": None, "env": {}, "settings": {}, "chosen_at": None}
 
 
 def builtin() -> dict:
@@ -185,7 +205,19 @@ def validate(p) -> list:
     for k in _credential_env(env):
         errs.append(f"env.{k}: looks like a credential; a profile stores commands, never keys")
     errs += [f"env.{k}: {why}" for k, why in _owned_env(env)]
+    if p.get("chosen_at") is not None and not _iso_time(p["chosen_at"]):
+        errs.append("chosen_at: must be an ISO time or null")
     return errs
+
+
+def _iso_time(v) -> bool:
+    if not isinstance(v, str):
+        return False
+    try:
+        datetime.fromisoformat(v)
+    except ValueError:
+        return False
+    return True
 
 
 def base_model(name: str) -> str:
@@ -193,39 +225,51 @@ def base_model(name: str) -> str:
     return name[:-len(LONG_CONTEXT)] if name.endswith(LONG_CONTEXT) else name
 
 
-def _model_errors(p: dict) -> list:
-    """The models the profile names that `gateway.models_command` does not list. A name ending in `[1m]` counts as
-    listed when its base name is; it is stored and passed with the marker. The command's output is only parsed,
-    never shown: it may hold more than model names."""
-    cmd = (p.get("gateway") or {}).get("models_command")
-    if not cmd:
-        return []
+def _listed(cmd: str, timeout: int) -> list:
+    """The JSON list of model names `cmd` prints. Raises ModelsUnavailable naming the exit code or the exception
+    only: an error never shows the command's output (it may hold more than model names) or its command line. The
+    list itself is only parsed here; `model_choices` shows only its entries shaped like a model name."""
     try:
         r = subprocess.run(cmd, shell=True, stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                           errors="replace", timeout=MODELS_TIMEOUT)
+                           errors="replace", timeout=timeout)
     except subprocess.TimeoutExpired:
-        return [f"gateway.models_command: failed (no answer within {MODELS_TIMEOUT} s)"]
+        raise ModelsUnavailable(f"gateway.models_command: failed (no answer within {timeout} s)") from None
     except (OSError, subprocess.SubprocessError) as e:
-        return [f"gateway.models_command: failed ({type(e).__name__})"]
+        raise ModelsUnavailable(f"gateway.models_command: failed ({type(e).__name__})") from None
     if r.returncode != 0:
-        return [f"gateway.models_command: failed (exit {r.returncode})"]
+        raise ModelsUnavailable(f"gateway.models_command: failed (exit {r.returncode})")
     try:
         known = json.loads(r.stdout)
     except (ValueError, RecursionError):
         known = None
     if not (isinstance(known, list) and all(isinstance(m, str) for m in known)):
-        return ["gateway.models_command: must print a JSON list of model names"]
+        raise ModelsUnavailable("gateway.models_command: must print a JSON list of model names")
+    return known
+
+
+def _model_errors(p: dict, known: list = None) -> list:
+    """The models the profile names that `gateway.models_command` does not list. A name ending in `[1m]` counts as
+    listed when its base name is; it is stored and passed with the marker. `known`: the list fetched for this same
+    choice just before (the full list of `fetch_models`), checked instead, so the command does not run again."""
+    cmd = (p.get("gateway") or {}).get("models_command")
+    if not cmd:
+        return []
+    if known is None:
+        try:
+            known = _listed(cmd, MODELS_TIMEOUT)
+        except ModelsUnavailable as e:
+            return [str(e)]
     return [f"{f}: {p[f]} is not offered by the gateway" for f in ("model", "dispatcher_model", "small_model")
             if p.get(f) and p[f] not in known and base_model(p[f]) not in known]
 
 
 # -- the store -------------------------------------------------------------------------------------------------------
 
-def save(data, p: dict) -> dict:
-    """Validate `p` (and its models against `gateway.models_command`), then write it. Raises ProfileError with
-    every reason."""
+def save(data, p: dict, known: list = None) -> dict:
+    """Validate `p` (and its models against `gateway.models_command`, or against `known`, the list fetched for this
+    same choice just before, with no command run), then write it. Raises ProfileError with every reason."""
     p = {**_blank(p.get("name") if isinstance(p, dict) else ""), **(p if isinstance(p, dict) else {})}
-    errs = validate(p) or _model_errors(p)
+    errs = validate(p) or _model_errors(p, known)
     if errs:
         raise ProfileError("; ".join(errs))
     target = path(data, p["name"])
@@ -354,6 +398,94 @@ def page_profile(data) -> dict:
     return load(data, SUBSCRIPTION)
 
 
+# -- choosing the model and effort -----------------------------------------------------------------------------------
+# Read only by `ap2 profile`: a worker start never asks, it runs the active profile as it is stored.
+
+def now() -> str:
+    """The time a choice is made: local time with its UTC offset, to the second (ISO 8601)."""
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def needs_choice(data, p: dict) -> bool:
+    """True when `p`'s model and effort were never chosen (no `chosen_at`). The subscription never needs a choice,
+    built in or stored: v2 has no migration, and a subscription-only user is never asked. `data` is unused today; it
+    keeps the call the same as the other profile functions."""
+    return p.get("name") != SUBSCRIPTION and not p.get("chosen_at")
+
+
+def _with_long(names) -> list:
+    """Every claude-* model but haiku gets its 1M context variant first, then the plain name; others as they are.
+    No name twice."""
+    out = []
+    for m in names:
+        base = base_model(m)
+        pair = ([base + LONG_CONTEXT, base] if base.startswith("claude-") and not base.startswith("claude-haiku-")
+                else [m])
+        out += [x for x in pair if x not in out]
+    return out
+
+
+def fetch_models(data, p: dict) -> tuple:
+    """`(shown, known)` for `p`, fetched now on every call (never cached), with the models command run once.
+    `shown`: the models `p` may be chosen to run, as `model_choices` returns them. `known`: what a save checks the
+    profile's models against (`save(data, p, known)`): every entry the models command printed, with the `[1m]`
+    variant and the plain name of each claude-* entry but haiku added (as `_with_long` does for `shown`), none
+    dropped, so a listed small model of another shape still saves. With no models command both are the same list.
+    Raises ModelsUnavailable when the command fails, and SpendError (a ConfigError) when the price override is
+    broken."""
+    cmd = (p.get("gateway") or {}).get("models_command") if p.get("mode") == "gateway" else None
+    if cmd:
+        listed = _listed(cmd, CHOICE_TIMEOUT)
+        return _with_long(m for m in listed if MODEL_NAME.fullmatch(m)), _with_long(listed)
+    from assistant import spend  # imported here: spend reads transcripts, which a profile load never needs
+    shown = _with_long(m for m in spend.prices(data) if m.startswith("claude-")) + [DEFAULT_MODEL]
+    return shown, shown
+
+
+def model_choices(data, p: dict) -> list:
+    """The models `p` may be chosen to run, fetched now on every call (never cached). A gateway with a models
+    command: the entries of the list it prints that are shaped like a model name (`MODEL_NAME`); any other entry is
+    dropped, never shown. Otherwise (the subscription, or a gateway with no models command) the priced claude-*
+    models of `spend.prices(data)`, then `default`. Raises as `fetch_models` does."""
+    return fetch_models(data, p)[0]
+
+
+def recommended_model(models: list):
+    return RECOMMENDED_MODEL if RECOMMENDED_MODEL in models else (models[0] if models else None)
+
+
+def choices(data, p: dict, models: list = None) -> dict:
+    """What `p` can choose from, fetched now (or `models`, fetched by the caller just before). Raises
+    ModelsUnavailable."""
+    models = model_choices(data, p) if models is None else models
+    return {"profile": p["name"], "models": models, "efforts": list(EFFORTS),
+            "recommended_model": recommended_model(models), "recommended_effort": RECOMMENDED_EFFORT}
+
+
+def check_effort(effort) -> None:
+    if effort not in EFFORTS:
+        raise ProfileError(f"effort {effort!r} is not offered; choose one of: {', '.join(EFFORTS)}")
+
+
+def check_model(model, models: list) -> None:
+    if model not in models:
+        raise ProfileError(f"model {model!r} is not offered; choose one of: {', '.join(models)}")
+
+
+def choose(data, name: str, model: str, effort: str, models: list = None, known: list = None) -> dict:
+    """Save `name`'s model and effort, and mark it chosen. The model is checked against the list fetched now (or
+    `models`, fetched by the caller for this same choice); the saved file against the full list of the same fetch
+    (`known`, which defaults to `models`), so one choice runs the models command once. `default` is stored as a null
+    model. Nothing is written on a refusal. Returns the saved profile."""
+    p = load(data, name)
+    if models is None:
+        models, known = fetch_models(data, p)
+    check_model(model, models)
+    check_effort(effort)
+    p.update(model=None if model == DEFAULT_MODEL else model, effort=effort, chosen_at=now())
+    return save(data, p, models if known is None else known)
+
+
 # -- the settings overlay -------------------------------------------------------------------------------------------
 
 def overlay(p: dict) -> dict:
@@ -405,6 +537,10 @@ def from_args(a) -> dict:
     p = _blank(a.name, "gateway" if a.gateway else SUBSCRIPTION)
     p.update(label=a.label or a.name, model=a.model, dispatcher_model=a.dispatcher_model,
              small_model=a.small_model, effort=a.effort)
+    if a.model == DEFAULT_MODEL:  # Claude Code's own default model, stored as null
+        p["model"] = None
+    if a.model and a.effort:  # both given: chosen at creation (`ap2 profile add` checks them against the list)
+        p["chosen_at"] = now()
     if a.gateway:
         p["gateway"] = {"base_url": a.base_url, "key_command": a.key_command, "refresh_command": a.refresh_command,
                         "rotate_command": a.rotate_command, "models_command": a.models_command}

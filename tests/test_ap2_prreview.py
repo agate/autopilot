@@ -45,7 +45,9 @@ TITLE = "Retry failed card payments once, 2 seconds later"
 GH_PR_FILES = """query($owner:String!, $name:String!, $n:Int!, $after:String){ repository(owner:$owner, name:$name){
  pullRequest(number:$n){ headRefOid baseRefOid additions deletions
   files(first:100, after:$after){ pageInfo{ hasNextPage endCursor } nodes{ path } } } } }"""
-GH_SINCE_JQ = "{status: .status, merges: [.commits[] | select(.parents | length > 1) | .sha]}"
+GH_SINCE_JQ = ("{status: .status, merges: [.commits[] | select(.parents | length > 1) | .sha], "
+               "more: (if (.total_commits | type) == \"number\" then .total_commits > (.commits | length) "
+               "else null end)}")
 GH_SYNC_FIELDS = "state,headRefOid,reviewRequests,latestReviews,author"
 
 
@@ -418,6 +420,57 @@ class PlainWordsTest(Case):
         self.assertEqual(len(words["what"]["en"]) - len("octo-dev asked you to review PR #7: "), 120)
 
 
+    def test_the_pr_number_comes_from_the_card_key_not_a_slack_message_id(self):
+        # A Slack record's id is a message ts; the card's key says which PR it is.
+        record = {"id": "1730000000.123456", "author": "U0EXAMPLE2", "text": "PTAL"}
+        words = prreview.plain_for(record, {"kind": "pr-review", "key": KEY}, ("en",))
+        self.assertEqual(words["what"]["en"], "U0EXAMPLE2 asked you to review PR #42: PTAL")
+        with self.subTest("a key that is not owner/repo#number falls back to the record's id"):
+            words = prreview.plain_for({"id": "7", "text": "x"}, {"key": "C0123:1.2"}, ("en",))
+            self.assertEqual(words["what"]["en"], "Someone asked you to review PR #7: x")
+        with self.subTest("no PR number in the key and no record id"):
+            words = prreview.plain_for({"text": "x"}, {"key": "C0123:1.2"}, ("en",))
+            self.assertEqual(words["what"]["en"], "Someone asked you to review PR #?: x")
+
+
+class PrOfTest(unittest.TestCase):
+    def pr(self, link):
+        card = {"id": "c1", "kind": "pr-review", "key": KEY, "source": {"name": "s", "link": link}}
+        return prreview.pr_of(card)
+
+    def test_the_source_link_is_the_pr_url_only_when_it_is_that_pr(self):
+        github = f"https://github.com/{REPO}/pull/42"
+        cases = [
+            (github, github),
+            (github + "/", github + "/"),
+            (github + "/files", github + "/files"),
+            (github + "?w=1", github + "?w=1"),
+            (github + "#discussion_r1", github + "#discussion_r1"),
+            (f"https://git.example.com/{REPO}/pull/42", f"https://git.example.com/{REPO}/pull/42"),
+            ("https://slack.com/archives/C0123ABCD/p1730000000123456?thread_ts=1730000000.123456",  # checkpkg: ignore
+             github),
+            (f"https://github.com/{REPO}/pull/420", github),
+            (f"https://github.com/{REPO}/pull/4", github),
+            (f"https://github.com/example/gadgets/pull/42", github),
+            (f"https://github.com/{REPO}/issues/42", github),
+            (f"http://github.com/{REPO}/pull/42", github),
+            (f"https://github.com/{REPO}/pull/42 x", github),
+            (f"https://evil.example/x/{REPO}/pull/42", github),  # checkpkg: ignore
+            (f"https://a b/{REPO}/pull/42", github),  # checkpkg: ignore
+            (github + "/ x", github),
+            (None, github),
+            (7, github),
+        ]
+        for link, url in cases:
+            with self.subTest(link=link):
+                self.assertEqual(self.pr(link), {"repo": REPO, "number": 42, "url": url})
+
+    def test_a_dot_in_the_repo_name_is_a_dot_not_any_character(self):
+        card = {"id": "c1", "kind": "pr-review", "key": "acme/my.repo#3",
+                "source": {"name": "s", "link": "https://github.com/acme/myXrepo/pull/3"}}
+        self.assertEqual(prreview.pr_of(card),
+                         {"repo": "acme/my.repo", "number": 3, "url": "https://github.com/acme/my.repo/pull/3"})
+
 # --- criterion 3: the plan ---------------------------------------------------------------------------------------
 
 def git(repo, *args):
@@ -579,11 +632,18 @@ class PlanTest(Case):
             self.assertIsNone(out["whole_pr"])
         for since, words in (("since_merge", "merge commit (e5f6a7b)"), ("since_diverged", "rewritten"),
                              ("since_behind", "rewritten since the last review (compare status behind)"),
-                             ("since_missing", "no longer on GitHub")):
+                             ("since_missing", "no longer on GitHub"),
+                             ("since_more", "more commits since the last review than GitHub's compare lists (250), "
+                                            "so a merge commit among them cannot be ruled out"),
+                             ("since_merge_more", "merge commit (e5f6a7b)")):
             with self.subTest(since):
                 out, _ = self.plan(cid, table(b_pages, head=B, since=since), stage="delta")
                 self.assertEqual(out["compare"], compare(BASE, B))
                 self.assertIn(words, out["whole_pr"])
+        for since in ("since_no_more", "since_more_text"):
+            with self.subTest(f"{since}: a reply without a boolean more is an error, not a silent delta"):
+                with self.assertRaisesRegex(prreview.ReviewError, "unexpected reply"):
+                    self.plan(cid, table(b_pages, head=B, since=since), stage="delta")
         with self.subTest("a compare that fails for another reason is an error, not a whole-PR review"):
             with self.assertRaisesRegex(prreview.ReviewError, "HTTP 502") as cm:
                 self.plan(cid, table(b_pages, head=B, since="since_error"), stage="delta")
@@ -1497,6 +1557,67 @@ class SyncTest(Case):
             self.assertEqual((out["state"], out["changed"]), ("new_commits", False))
             self.assertEqual(self.store().get(cid), before)
 
+    def test_a_card_a_slack_ask_made_is_never_request_removed(self):
+        """A Slack ask's card (its link is the message, not the PR's page) was never asked on GitHub, so no review
+        request there does not close it; merged, closed and the user's own review still do."""
+        base = {k: v for k, v in self.card().items() if k not in ("id", "created_at", "updated_at", "audit")}
+        ask = {"id": "1730000000.123456", "author": "U0EXAMPLE2", "at": "1730000000.123456",
+               "text": "PTAL <https://github.com/example/widgets/pull/42>", "pr": KEY}
+        base["source"] = {"name": "slack-mentions", "record": ask, "raw": None,
+                          "link": "https://slack.com/archives/C0123ABCD/p1730000000123456"}  # checkpkg: ignore
+        base["feed"] = "slack-mentions"
+        nobody = own_view(author="octo-dev")
+        for name, view, state, lane in (
+                ("no request, no review", nobody, "not_reviewed", "needs"),
+                ("the user's review", own_view(author="octo-dev", reviews=[("octo-me", "APPROVED")]), "reviewed",
+                 "done"),
+                ("merged", own_view(author="octo-dev", state="MERGED"), "merged", "done")):
+            with self.subTest(name):
+                cid = self.store().add(base, by="test")["id"]
+                out = self.sync(cid, view)
+                self.assertEqual((out["state"], out["lane"]), (state, lane))
+                self.assertEqual(self.store().get(cid)["lane"], lane)
+
+
+    def test_a_card_whose_link_names_the_pr_or_is_not_text_can_lose_its_request(self):
+        """Only a link that is text naming no `/<repo>/pull/<number>` holds back request_removed: a card with no
+        link, a non-text one, or one naming this PR on another scheme, host or path still closes."""
+        base = {k: v for k, v in self.card().items() if k not in ("id", "created_at", "updated_at", "audit")}
+        nobody = own_view(author="octo-dev")
+        for name, link in (("no link", None), ("a non-text link", 7),
+                           ("http on another host", f"http://ghe.example.com/{REPO}/pull/42"),
+                           ("a path before the repo", f"https://corp.example.com/github/{REPO}/pull/42")):
+            with self.subTest(name):
+                card = dict(base, source=dict(base["source"]))
+                if link is None:
+                    card["source"].pop("link", None)
+                else:
+                    card["source"]["link"] = link
+                cid = self.store().add(card, by="test")["id"]
+                out = self.sync(cid, nobody)
+                self.assertEqual((out["state"], out["lane"]), ("request_removed", "done"))
+                self.assertEqual(self.store().get(cid)["audit"][-1]["did"], "the review request was removed")
+
+    def test_a_link_that_only_looks_like_this_pr_holds_back_request_removed(self):
+        """A link names this PR only as `/<repo>/pull/<number>` exactly: a longer number, a repo whose `.` is
+        another character, or a longer owner is another page, so the card keeps waiting (not_reviewed)."""
+        base = {k: v for k, v in self.card().items() if k not in ("id", "created_at", "updated_at", "audit", "pr")}
+        views = fixture("pr-view.json")
+        nobody = own_view(author="octo-dev")
+        for name, key, link in (
+                ("a longer number", KEY, f"https://github.com/{REPO}/pull/420"),
+                ("a dot in the repo is not any character", "acme/my.repo#3", "https://github.com/acme/myXrepo/pull/3"),
+                ("a longer owner", KEY, f"https://github.com/my{REPO}/pull/42")):
+            with self.subTest(name):
+                repo, number = key.split("#")
+                card = dict(base, key=key, source=dict(base["source"], link=link))
+                cid = self.store().add(card, by="test")["id"]
+                run = Replay([{"argv": ["pr", "view", number, "--repo", repo, "--json", GH_SYNC_FIELDS],
+                               "stdout": nobody},
+                              {"argv": ["api", "user", "--jq", ".login"], "stdout": views["user"]}])
+                out = prreview.sync(self.data, cid, cfg=self.cfg, run=run)
+                self.assertEqual((out["state"], out["lane"]), ("not_reviewed", "needs"))
+                self.assertEqual(self.store().get(cid)["lane"], "needs")
 
 def own_view(head=A, state="OPEN", reviews=(), requests=(), author="octo-me"):
     """A pr view reply for a PR whose author is `author` (the recorded user is octo-me)."""
@@ -1591,12 +1712,19 @@ class RecordedCallsTest(unittest.TestCase):
     @unittest.skipUnless(shutil.which("jq"), "jq is not on PATH")
     def test_the_since_filter_lists_only_merge_commits(self):
         merge, plain = "e5f6a7b8" * 5, "f6a7b8c9" * 5
-        reply = {"status": "ahead", "ahead_by": 2, "commits": [
-            {"sha": plain, "parents": [{"sha": A}]},
-            {"sha": merge, "parents": [{"sha": plain}, {"sha": BASE}]}]}
-        out = subprocess.run([shutil.which("jq"), "-c", GH_SINCE_JQ], input=json.dumps(reply), text=True,
-                             capture_output=True, timeout=30, check=True).stdout
-        self.assertEqual(json.loads(out), {"status": "ahead", "merges": [merge]})
+        commits = [{"sha": plain, "parents": [{"sha": A}]}, {"sha": merge, "parents": [{"sha": plain}, {"sha": BASE}]}]
+        for total, more in ((2, False), (100, True), (300, True)):
+            with self.subTest(total_commits=total):
+                # GitHub's compare lists at most 250 commits but counts them all in total_commits.
+                reply = {"status": "ahead", "ahead_by": total, "total_commits": total, "commits": commits}
+                out = subprocess.run([shutil.which("jq"), "-c", GH_SINCE_JQ], input=json.dumps(reply), text=True,
+                                     capture_output=True, timeout=30, check=True).stdout
+                self.assertEqual(json.loads(out), {"status": "ahead", "merges": [merge], "more": more})
+        with self.subTest("a reply without total_commits gives more: null, which whole_pr_reason refuses"):
+            reply = {"status": "ahead", "ahead_by": 2, "commits": commits}
+            out = subprocess.run([shutil.which("jq"), "-c", GH_SINCE_JQ], input=json.dumps(reply), text=True,
+                                 capture_output=True, timeout=30, check=True).stdout
+            self.assertEqual(json.loads(out), {"status": "ahead", "merges": [merge], "more": None})
 
 
 # --- criterion 8: nothing is posted ------------------------------------------------------------------------------
