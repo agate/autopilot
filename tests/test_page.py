@@ -430,6 +430,32 @@ class AccessTest(unittest.TestCase):
         self.assertIn('kind: "cap"', PAGE)
 
 
+class UsageValueTest(unittest.TestCase):
+    """The usage value is never clipped: it sizes to its content and the bar shrinks instead."""
+
+    def rule(self, selector: str) -> str:
+        start = PAGE.index(selector + " {")
+        return PAGE[start:PAGE.index("}", start)]
+
+    def test_value_has_no_fixed_narrow_width_or_clip(self):
+        uval = self.rule(".uval")
+        self.assertIn("white-space: nowrap", uval)
+        self.assertIn("font-variant-numeric: tabular-nums", uval)
+        for bad in ("overflow", "text-overflow"):
+            self.assertNotIn(bad, uval)
+        self.assertNotRegex(uval, r"(?<![-\w])(max-)?width:")
+        urows = self.rule(".urows")
+        self.assertIn("minmax(0, 1fr)", urows)
+        self.assertNotIn("narrow", PAGE)
+
+    def test_money_formats_whole_dollars_with_separator(self):
+        money = [ln for ln in PAGE.splitlines() if "const money =" in ln and "toLocaleString" in ln][0].split("//")[0].strip().rstrip(";")
+        out = node(money + """
+console.log(money(1234) + '|' + money(512) + ' / ' + money(500) + '|' + money(0));""")
+        self.assertEqual(out, "$1,234|$512 / $500|$0")
+        self.assertIn('money(u.today) + " / " + money(u.cap_today)', PAGE)
+
+
 class ExplainedCardTest(unittest.TestCase):
     """A card that explains itself shows its one sentence, then each section in a fixed order."""
 

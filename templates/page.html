@@ -263,9 +263,17 @@ details.fold > summary + * { margin-top: 8px }
 .state-line .st.ok { color: var(--ok) } .state-line .st.warn { color: var(--warn) } .state-line .st.crit { color: var(--crit) }
 .state-line .meta, .ps > .meta { font-size: 12px }
 /* Usage: label | bar | value | reset, one row each */
-.urows { display: grid; grid-template-columns: auto minmax(36px, 1fr) auto auto; gap: 7px 10px; align-items: center }
+.urows { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; gap: 7px 10px; align-items: center }
+.urows > * { min-width: 0 }
 .ulabel { color: var(--ink-2); white-space: nowrap }
-.uval { text-align: right; white-space: nowrap; font-size: 12.5px }
+.uval { text-align: right; white-space: nowrap; font-size: 12.5px; font-variant-numeric: tabular-nums; min-width: max-content }
+/* Phone: the bar gives up its column and the value wraps under the label instead of clipping. */
+@media (max-width: 440px) {
+  .urows { grid-template-columns: auto minmax(0, 1fr) auto }
+  .urows .meter { grid-column: 2 / -1 }
+  .uval { grid-column: 1 / 3; text-align: left; white-space: normal }
+  .ureset { grid-column: 3; grid-row: auto }
+}
 .uval.warn { color: var(--warn) } .uval.crit { color: var(--crit) }
 .ureset { color: var(--muted); font-size: 11.5px; white-space: nowrap; text-align: right }
 .meter { height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden }
@@ -1043,12 +1051,12 @@ function renderStatus() {
 
   const used = b.credits_used_usd || 0, limit = b.credits_limit_usd || 0;
   const acc = S.meta.access || null, gw = !!acc && acc.profile.mode === "gateway", u = (acc && acc.usage) || {};
-  const money = (n) => "$" + (n || 0).toFixed(0);   // whole dollars: the value column is narrow
+  const money = (n) => "$" + Math.round(n || 0).toLocaleString("en-US");   // whole dollars with a thousands separator
   const windowRows = (b.windows || []).map((w) => usageRow(windowLabel(w), Math.round(w.percent || 0), "", w.resets_at ? rel(w.resets_at) : "")).flat();
   // Gateway workers pay by the dollar, so their rows are dollars against today's limit. The page's own sessions
   // still use the subscription window, so that row stays.
   const gwRows = gw ? [
-    usageRow(L("usage_today"), u.cap_today ? Math.round((u.today || 0) / u.cap_today * 100) : 0, money(u.today) + "/" + money(u.cap_today), ""),
+    usageRow(L("usage_today"), u.cap_today ? Math.round((u.today || 0) / u.cap_today * 100) : 0, money(u.today) + " / " + money(u.cap_today), ""),
     usageRow(L("usage_week"), 0, money(u.week), ""),
     usageRow(L("usage_month"), 0, money(u.month), ""),
     usageRow(L("usage_page_session"), u.session_pct == null ? 0 : u.session_pct, u.session_pct == null ? "–" : "", ""),
