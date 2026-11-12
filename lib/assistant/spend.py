@@ -144,7 +144,7 @@ def prices(data) -> dict:
 
 
 def _model_key(model) -> str:
-    m = re.sub(r"\[[^\]]*\]$", "", model or "")
+    m = re.sub(r"\[[^\[\]]*\]$", "", model or "")
     return re.sub(r"-\d{8}$", "", m)
 
 
@@ -217,7 +217,7 @@ def _parse_file(path: Path, table: dict) -> list:
     for n, raw in enumerate(lines):
         try:
             d = json.loads(raw)
-        except ValueError:
+        except (ValueError, RecursionError):  # a line nested too deep for the parser is broken, not fatal
             continue
         msg = d.get("message") if isinstance(d, dict) else None
         u = msg.get("usage") if isinstance(msg, dict) else None

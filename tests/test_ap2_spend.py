@@ -281,6 +281,22 @@ class RequestCostsTest(SpendCase):
         self.assertEqual(spend._model_key("claude-haiku-4-5[1m]"), "claude-haiku-4-5")
         self.assertEqual(spend._model_key("claude-haiku-4-5-20251001"), "claude-haiku-4-5")
 
+    def test_a_model_name_of_many_brackets_is_read_in_linear_time(self):
+        hostile = "[" * 200000
+        start = time.monotonic()
+        keys = [spend._model_key(hostile), spend._model_key(hostile + "x]")]
+        self.assertLess(time.monotonic() - start, 2.0)  # a quadratic scan of these takes about a minute
+        self.assertEqual(keys, [hostile, hostile[:-1]])
+
+    def test_a_line_nested_too_deep_is_skipped_not_an_error(self):
+        self.transcript.parent.mkdir(parents=True)
+        lines = (FIX / "streaming.jsonl").read_text().splitlines() + ["[" * 100000]
+        self.transcript.write_text("\n".join(lines) + "\n")
+        self.launch()
+        self.assertAlmostEqual(self.totals()["month"], STREAMING_USD)
+        self.assertEqual(sorted(self.settle(session_id=SID)["reqs"]), ["req_1"])
+        self.assertEqual(sorted(self.rows("settled.jsonl")[-1]["reqs"]), ["req_1"])
+
 
 # -- 2. prices ------------------------------------------------------------------------------------------------------
 
@@ -532,8 +548,9 @@ class ResolveTest(SpendCase):
 
     def test_unresolved_launch_from_earlier_month_is_not_unknown(self):
         self.listing.clear()
-        self.launch(session="")
-        self.launch("efgh5678", session=SID_B)  # resolved, but no transcript and nothing settled
+        mon = datetime(2026, 11, 30, 8, 0, tzinfo=TZ)  # the Monday of the week that holds Dec 2
+        self.launch(session="", at=mon)
+        self.launch("efgh5678", session=SID_B, at=mon)  # resolved, but no transcript and nothing settled
         self.assertIs(self.totals(datetime(2026, 12, 2, 9, 0, tzinfo=TZ))["unknown"], False)
 
     def test_a_row_with_a_session_id_needs_no_listing(self):
@@ -657,6 +674,12 @@ class SettleTest(SpendCase):
         self.assertIs(line["unsettled"], True)
         self.assertEqual(line["short"], SHORT)
         self.assertIs(self.totals()["unknown"], True)
+        # An unsettled row that names its session: only it can keep spend unknown once SHORT is found and priced.
+        self.launch("efgh5678", session=SID_B)
+        self.assertIs(self.settle(session_id=SID_B)["unsettled"], True)
+        self.listing.append({"id": SHORT, "sessionId": SID})
+        self.put()
+        self.assertIs(self.totals(NOW + timedelta(seconds=601))["unknown"], True)
 
     def test_dedupe_survives_the_original_being_settled_and_removed(self):
         self.put("days.jsonl")
