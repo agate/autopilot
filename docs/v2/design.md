@@ -1462,9 +1462,9 @@ Calls the author made without asking (check them):
   - Routes, JSON in and out: `GET /` (the page), `GET /api/state` (mode, languages, lane counts, `running`, the
     projects with `done`/`total` from their children, the heartbeat, `usage: null` and the page's `url`),
     `GET /api/cards?lane=&kind=&parent=&q=&limit=` (`{total, cards}`, each a row: `id`, `title`
-    (`{<lang>: text}` for each configured language, a gap
-    filled from the primary language, or null when the card has none; the projects in `/api/state` too), `kind`,
-    `lane`,
+    (`{<lang>: text}` for each configured language, a gap filled as `cards.title_for` picks it (the primary language's
+    slot, else any other non-blank slot, the first in sorted key order), or null when no slot has words; the projects in
+    `/api/state` too), `kind`, `lane`,
     `pri`, `feed`, `parent`, `origin`, `ask_type`, `plain_where` per language, `updated_at`; lane order, then by
     `pri` and the newest change in Needs you, Running and Planned, History newest first; `q` goes through the
     store's search and the other filters apply to its result; a `q` over 500 characters or 50 words is 400, so a
