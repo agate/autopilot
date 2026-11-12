@@ -202,6 +202,17 @@ class AtLimitTest(unittest.TestCase):
         self.assertEqual((d["next"], d["result"], d["ended_by"]), ("end", "converged", "converged"))
         self.assertIsNone(d["plan"])
 
+    def test_non_behavior_fixes_at_the_limit_after_a_behavior_round_are_checked(self):
+        nb_c = finding("c-2", "Correctness", behavior=False)
+        nb_t = finding("t-2", "Test value", behavior=False)
+        rec = record(rnd(1, [R1_FINDING], commit=SHA1), rnd(2, [nb_c, nb_t], commit=SHA2), limit=2)
+        d = prloop.decide(rec)
+        self.assertEqual((d["next"], d["result"], d["ended_by"]), ("check", None, None))
+        self.assertIsNone(prloop.ask(rec))
+        want = [("Correctness", [nb_c]), ("Test value", [nb_t])]
+        self.assertEqual([(e["angle"]["name"], e["answers"]) for e in d["plan"]], want)
+        self.assertEqual([(e["angle"]["name"], e["answers"]) for e in prloop.plan(rec)], want)
+
     def test_explicit_null_fix_check_is_no_check(self):
         rec = at_limit(fix_check=None)
         self.assertEqual(prloop.decide(rec)["next"], "check")
@@ -246,6 +257,9 @@ class AtLimitTest(unittest.TestCase):
         got = prloop.plan(rec)
         self.assertEqual([e["angle"]["name"] for e in got], ["Correctness"])
         self.assertEqual(got[0]["answers"], [ci, CORR_FINDING])
+        not_ci = finding("ci-x", "Test value")
+        got = prloop.plan(record(rnd(1, [not_ci], commit=SHA1), limit=1))
+        self.assertEqual([(e["angle"]["name"], e["answers"]) for e in got], [("Test value", [not_ci])])
 
     def test_plan_follows_the_rounds_angle_order(self):
         rec = record(rnd(1, [TEST_FINDING, CORR_FINDING], commit=SHA1), limit=1)
@@ -651,6 +665,8 @@ class ReadTest(unittest.TestCase):
             ("null angle on a non-CI finding", change(lambda r: r["rounds"][0]["findings"][0].update(angle=None)),
              r"rounds\[0\]\.findings\[0\]\.angle"),
             ("fix with no commit", change(lambda r: r["rounds"][0].update(commit=None)), r"rounds\[0\]\.commit"),
+            ("non-behavior fix with no commit", json.dumps(record(rnd(1, [finding(
+                "c-1", "Correctness", behavior=False)]))).encode(), r"rounds\[0\]\.commit"),
             ("bad sha", change(lambda r: r["rounds"][1].update(commit="HEAD~1")), r"rounds\[1\]\.commit"),
             ("upper-case sha", change(lambda r: r["rounds"][1].update(commit=SHA2.upper())), r"rounds\[1\]\.commit"),
             ("short sha", change(lambda r: r["rounds"][1].update(commit="abc12")), r"rounds\[1\]\.commit"),
