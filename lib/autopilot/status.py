@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 from datetime import datetime, timezone
 
-from autopilot import budget, cap, cli, config, events, paths, state, text, workers
+from autopilot import budget, cap, cli, config, events, paths, profile, state, text, workers
 
 
 def cap_warning(gcfg: dict):
@@ -83,6 +83,10 @@ def _stop(args: list) -> int:
     return 0
 
 
+# Settings that moved into the profiles: `ap config` no longer sets them.
+MOVED = dict(profile._MOVED)
+
+
 @cli.command("config")
 def _config(args: list) -> int:
     """Global settings: `ap config list [--json]`, `get [key]`, `set key=value ...`, `reset key ...`.
@@ -118,6 +122,11 @@ def _config(args: list) -> int:
         if any(k == "active_profile" for k, _, _ in pairs):
             # The settings files must change with it, which only `ap profile use` does.
             print("active_profile: use `ap profile use <name>` (it rewrites the settings files too)", file=sys.stderr)
+            return 2
+        moved = [k for k, _, _ in pairs if k in MOVED]
+        if moved:
+            print(f"{moved[0]}: moved into the profile as {MOVED[moved[0]]}; see `ap profile show <name>` "
+                  "(and `ap profile add` to set it)", file=sys.stderr)
             return 2
         for k, _, v in pairs:
             if args[0] == "reset":

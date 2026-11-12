@@ -50,6 +50,17 @@ class ConfigRefusesActiveProfileTest(Base):
         self.assertEqual(config.load_global()["active_profile"], "subscription")
 
 
+class ConfigRefusesMovedKeysTest(Base):
+    def test_moved_model_keys_point_at_ap_profile(self):
+        for key in ("models.dispatcher", "models.worker", "worker_effort", "reply_check.model"):
+            for argv in (("config", "set", f"{key}=x"), ("config", "reset", key)):
+                code, out = self.run_cli(*argv)
+                self.assertEqual(code, 2, argv)
+                self.assertIn("ap profile", out)
+        raw = (self.data / "config.json").read_text()
+        self.assertNotIn("worker_effort", raw)
+
+
 class UseAppliesFirstTest(Base):
     def test_a_failed_apply_keeps_the_active_name_and_raises(self):
         with mock.patch.object(perms, "_write", side_effect=OSError("disk full")):
