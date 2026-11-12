@@ -148,6 +148,15 @@ class TailTest(Case):
         t = self.tail()
         self.assertEqual(([e["status"] for e in t["errors"]], t["reply_at"]), ([429], None))
 
+    def test_a_tail_cut_inside_a_multi_byte_character_still_reads_the_error(self):
+        # The transcript writer leaves non-ASCII raw, so the cut can land inside a character: it must not void the tail.
+        p = self.transcript([json.dumps(reply(text="好" * (apistop.TAIL_BYTES // 3 + 1000)), ensure_ascii=False),
+                             limit_line()])
+        data = p.read_bytes()
+        self.assertGreater(len(data), apistop.TAIL_BYTES)
+        self.assertTrue(0x80 <= data[len(data) - apistop.TAIL_BYTES] < 0xC0)  # a UTF-8 continuation byte
+        self.assertEqual([e["status"] for e in self.tail()["errors"]], [429])
+
     def test_a_file_that_fits_keeps_its_first_line(self):
         self.transcript([limit_line()])
         self.assertEqual(len(self.tail()["errors"]), 1)
