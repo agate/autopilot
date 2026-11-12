@@ -46,7 +46,7 @@ GH_PR_FILES = """query($owner:String!, $name:String!, $n:Int!, $after:String){ r
  pullRequest(number:$n){ headRefOid baseRefOid additions deletions
   files(first:100, after:$after){ pageInfo{ hasNextPage endCursor } nodes{ path } } } } }"""
 GH_SINCE_JQ = "{status: .status, merges: [.commits[] | select(.parents | length > 1) | .sha]}"
-GH_SYNC_FIELDS = "state,headRefOid,reviewRequests,latestReviews"
+GH_SYNC_FIELDS = "state,headRefOid,reviewRequests,latestReviews,author"
 
 
 def fixture(name):
@@ -79,7 +79,7 @@ def table(pages, head=A, since=None, reviewed=A, view=None):
     if view:
         views = fixture("pr-view.json")
         out.append({"argv": ["pr", "view", "42", "--repo", REPO, "--json", GH_SYNC_FIELDS],
-                    "stdout": views[view]})
+                    "stdout": view if isinstance(view, dict) else views[view]})
         out.append({"argv": ["api", "user", "--jq", ".login"], "stdout": views["user"]})
     return out
 
@@ -142,15 +142,15 @@ class Case(unittest.TestCase):
     def store(self):
         return Store(self.data, cfg=self.cfg)
 
-    def read_request(self, reply=None):
+    def read_request(self, reply=None, source="github-review-requests"):
         raw = self.tmp / "gh-search-prs.json"
         shutil.copy(reply or SCAN / "gh-search-prs.json", raw)
-        result = Engine(self.data, cfg=self.cfg).read_saved("github-review-requests", raw)
+        result = Engine(self.data, cfg=self.cfg).read_saved(source, raw)
         self.assertEqual(result["dropped"], [])
         return result
 
-    def card(self):
-        self.read_request()
+    def card(self, source="github-review-requests"):
+        self.read_request(source=source)
         return next(c for c in self.store().list() if c.get("key") == KEY)
 
     def plan(self, card_id, entries, stage="review", checkout=None):
@@ -165,9 +165,9 @@ class Case(unittest.TestCase):
         rep["card"] = card_id
         return rep
 
-    def reviewed_card(self):
+    def reviewed_card(self, source="github-review-requests"):
         """A card with the recorded full review on it (head A, correctness-1 open)."""
-        cid = self.card()["id"]
+        cid = self.card(source)["id"]
         self.plan(cid, table(fixture("graphql-head-a.json")))
         self.put_report(cid, self.report("report-review.json", cid))
         prreview.apply(self.data, cid, cfg=self.cfg)
@@ -314,6 +314,79 @@ class PlainWordsTest(Case):
                 what = prreview.plain_for({}, {"key": "example/widgets#42", "title": title}, ("en",))["what"]["en"]
                 self.assertFalse(what.rstrip().endswith(":"), what)
                 self.assertIn("example/widgets#42", what)
+
+    def test_an_own_pr_has_its_own_words(self):
+        """A card from github-my-prs is the user's own PR: it reads as "Your PR", and its do line says to fix
+        findings on the branch, not to approve or ask for changes."""
+        f = fixture("report-review.json")["findings"]["confirmed"][0]
+        tldr = {"en": "Changes: one retry is missing.", "zh": "Changes：少了一次重试。"}
+        own = {"feed": prreview.OWN_FEED}
+        self.assertEqual(prreview.OWN_FEED, "github-my-prs")
+        with self.subTest("before a review"):
+            words = prreview.plain_for({"id": "42", "author": "octo-me", "text": TITLE}, own, LANGS)
+            self.assertEqual(words, {
+                "what": {"en": f"Your PR #42: {TITLE}", "zh": f"你的 PR #42：{TITLE}"},
+                "where": {"en": "Not reviewed yet.", "zh": "还没有审查。"},
+                "do": {"en": "Nothing yet; open it again once its review has run.",
+                       "zh": "现在不用做什么；审查跑完后再打开它。"}})
+        for n, en, zh in (
+                (0, "Read the review; nothing needs fixing.", "看一下审查结果；没有要修的。"),
+                (1, "Read the 1 finding, then fix it on your branch if you agree.",
+                 "看一下这 1 条发现，你认同的话就在你的分支上修好它。"),
+                (3, "Read the 3 findings, then fix the ones you agree with on your branch.",
+                 "看一下这 3 条发现，然后在你的分支上修好你认同的那些。")):
+            with self.subTest("after a review", n=n):
+                card = dict(own, verdict={"tldr": tldr},
+                            findings={"confirmed": [f] * min(n, 2), "questions": [f] * max(n - 2, 0)})
+                words = prreview.plain_for({"id": "42", "author": "octo-me", "text": TITLE}, card, LANGS)
+                self.assertEqual(words, {"what": {"en": f"Your PR #42: {TITLE}", "zh": f"你的 PR #42：{TITLE}"},
+                                         "where": tldr, "do": {"en": en, "zh": zh}})
+        with self.subTest("with no source record the title is the card's"):
+            card = {"feed": prreview.OWN_FEED, "key": "o/r#5", "title": {"en": "Fix it", "zh": "修好它"}}
+            self.assertEqual(prreview.plain_for(None, card, LANGS)["what"],
+                             {"en": "Your PR #5: Fix it", "zh": "你的 PR #5：修好它"})
+
+    def test_any_other_feed_keeps_the_review_request_words(self):
+        f = fixture("report-review.json")["findings"]["confirmed"][0]
+        tldr = {"en": "Changes: one retry is missing.", "zh": "Changes：少了一次重试。"}
+        record = {"id": "42", "author": "octo-dev", "text": TITLE}
+        for feed in ("github-review-requests", "slack-mentions", None, 7):
+            with self.subTest(feed=feed):
+                before = prreview.plain_for(record, {"feed": feed}, LANGS)
+                self.assertEqual(before, {
+                    "what": {"en": f"octo-dev asked you to review PR #42: {TITLE}",
+                             "zh": f"octo-dev 请你审查 PR #42：{TITLE}"},
+                    "where": {"en": "Not reviewed yet.", "zh": "还没有审查。"},
+                    "do": {"en": "Nothing yet; open it again once its review has run.",
+                           "zh": "现在不用做什么；审查跑完后再打开它。"}})
+                after = prreview.plain_for(record, {"feed": feed, "verdict": {"tldr": tldr},
+                                                    "findings": {"confirmed": [f]}}, LANGS)
+                self.assertEqual(after["do"], {
+                    "en": "Read the 1 finding, then approve or ask for changes on GitHub yourself.",
+                    "zh": "看一下这 1 条发现，然后自己在 GitHub 上批准或要求修改。"})
+
+    def test_the_engine_gives_an_own_pr_card_its_words(self):
+        card = self.card("github-my-prs")
+        self.assertEqual((card["kind"], card["feed"]), ("pr-review", "github-my-prs"))
+        self.assertEqual(card["plain"]["what"], {"en": f"Your PR #42: {TITLE}", "zh": f"你的 PR #42：{TITLE}"})
+        gadgets = next(c for c in self.store().list() if c.get("key") == "example/gadgets#7")
+        self.assertEqual(gadgets["plain"]["what"]["en"], "Your PR #7: Show the delivery date on the order page")
+
+    def test_a_reread_of_an_own_pr_keeps_its_words(self):
+        cid = self.reviewed_card("github-my-prs")
+        card = self.store().get(cid)
+        self.assertEqual(card["plain"]["do"], {"en": "Read the 1 finding, then fix it on your branch if you agree.",
+                                               "zh": "看一下这 1 条发现，你认同的话就在你的分支上修好它。"})
+        reply = json.loads((SCAN / "gh-search-prs.json").read_text())
+        reply[0]["title"] = "Retry failed card payments once, 5 seconds later"
+        changed = self.tmp / "changed.json"
+        changed.write_text(json.dumps(reply))
+        item = next(i for i in self.read_request(changed, "github-my-prs")["items"] if i["key"] == KEY)
+        self.assertEqual((item["action"], item["card"]), ("update", cid))
+        card = self.store().get(cid)
+        self.assertEqual(card["plain"]["what"]["en"], "Your PR #42: Retry failed card payments once, 5 seconds later")
+        self.assertEqual(card["plain"]["where"], fixture("report-review.json")["tldr"])
+        self.assertEqual(card["plain"]["do"]["en"], "Read the 1 finding, then fix it on your branch if you agree.")
 
     def test_a_long_title_is_cut_at_120_characters(self):
         words = prreview.plain_for({"id": "7", "author": "octo-dev", "text": "x" * 300 + "\nsecond line"}, {},
@@ -1058,6 +1131,19 @@ class ApplyTest(Case):
                          [(a["name"], a["origin"]) for a in rep["angles"]])
         self.assertEqual({a["why"] for a in out["angles"]}, {"same angle as the last review"})
 
+    def test_apply_on_an_own_pr_writes_its_own_words(self):
+        cid = self.card("github-my-prs")["id"]
+        self.plan(cid, table(fixture("graphql-head-a.json")))
+        rep = self.report("report-review.json", cid)
+        rep["findings"]["questions"] = [self.question()]
+        self.put_report(cid, rep)
+        card = prreview.apply(self.data, cid, cfg=self.cfg)
+        self.assertEqual(card["plain"], {
+            "what": {"en": f"Your PR #42: {TITLE}", "zh": f"你的 PR #42：{TITLE}"},
+            "where": rep["tldr"],
+            "do": {"en": "Read the 2 findings, then fix the ones you agree with on your branch.",
+                   "zh": "看一下这 2 条发现，然后在你的分支上修好你认同的那些。"}})
+
     def test_fixed_and_answered_are_kept_across_deltas(self):
         cid = self.two_finding_card()
         earlier = self.store().get(cid)["findings"]
@@ -1386,6 +1472,88 @@ class SyncTest(Case):
             out = self.sync(cid, "open_head_b")
             self.assertEqual((out["state"], out["changed"]), ("new_commits", False))
             self.assertEqual(self.store().get(cid), before)
+
+
+def own_view(head=A, state="OPEN", reviews=(), requests=(), author="octo-me"):
+    """A pr view reply for a PR whose author is `author` (the recorded user is octo-me)."""
+    return {"state": state, "headRefOid": head, "author": {"login": author} if isinstance(author, str) else author,
+            "reviewRequests": [{"__typename": "User", "login": r} for r in requests],
+            "latestReviews": [{"author": {"login": who}, "state": how, "submittedAt": "2026-11-11T10:00:00Z"}
+                              for who, how in reviews]}
+
+
+class OwnPrSyncTest(Case):
+    """The user's own PR (its author is the `gh api user` login): it is never in its own reviewRequests and a
+    comment the user leaves shows in latestReviews, so only merged and closed end it."""
+
+    sync = SyncTest.sync
+
+    def own_card(self, reviewed=None):
+        """A fresh github-my-prs card for PR 42 (the store does not hold keys unique, so each row adds one)."""
+        if not hasattr(self, "base"):
+            self.base = {k: v for k, v in self.card("github-my-prs").items()
+                         if k not in ("id", "created_at", "updated_at", "audit", "pr")}
+        cid = self.store().add(self.base, by="test")["id"]
+        if reviewed:
+            self.store().update(cid, {"pr": {"repo": REPO, "number": 42, "reviewed_sha": reviewed}}, by="test")
+        return cid
+
+    def test_an_own_pr_with_no_review_request_stays_open(self):
+        cid = self.own_card()
+        out = self.sync(cid, own_view())
+        self.assertEqual((out["state"], out["lane"]), ("not_reviewed", "needs"))
+        card = self.store().get(cid)
+        self.assertEqual((card["lane"], card["pr"]["head_sha"], card["audit"][-1]["did"]),
+                         ("needs", A, "sync: not_reviewed"))
+
+    def test_an_own_pr_with_the_users_own_comment_is_not_reviewed(self):
+        mine = [("octo-me", "COMMENTED")]
+        for view, reviewed, state in ((own_view(reviews=mine), None, "not_reviewed"),
+                                      (own_view(head=B, reviews=mine), A, "new_commits"),
+                                      (own_view(reviews=mine), A, "current"),
+                                      (own_view(reviews=mine + [("octo-ops", "APPROVED")]), A, "current"),
+                                      (own_view(reviews=[("octo-me", "APPROVED")], requests=["octo-me"]), A,
+                                       "current")):
+            with self.subTest(state=state, reviews=view["latestReviews"]):
+                cid = self.own_card(reviewed)
+                out = self.sync(cid, view)
+                self.assertEqual((out["state"], out["lane"]), (state, "needs"))
+                self.assertEqual(self.store().get(cid)["lane"], "needs")
+
+    def test_an_own_pr_ends_when_merged_or_closed(self):
+        for state, want, did in (("MERGED", "merged", "the PR was merged"), ("CLOSED", "closed", "the PR was closed")):
+            with self.subTest(state):
+                cid = self.own_card(A)
+                out = self.sync(cid, own_view(state=state, reviews=[("octo-me", "COMMENTED")]))
+                self.assertEqual((out["state"], out["lane"]), (want, "done"))
+                card = self.store().get(cid)
+                self.assertEqual((card["lane"], card["audit"][-1]["did"]), ("done", did))
+
+    def test_the_author_not_the_feed_decides_in_sync(self):
+        """A card from github-review-requests whose PR the user wrote is still the user's own PR in sync."""
+        base = {k: v for k, v in self.card().items() if k not in ("id", "created_at", "updated_at", "audit")}
+        cid = self.store().add(base, by="test")["id"]
+        self.assertEqual(self.sync(cid, own_view())["state"], "not_reviewed")
+
+    def test_a_reply_with_no_author_is_not_an_own_pr(self):
+        """An older recorded reply (no author field), a null author (a deleted account) or another author:
+        sync works as before, so a PR with no review request and the user's review ends."""
+        no_field = {k: v for k, v in own_view().items() if k != "author"}
+        for name, view, state, did in (
+                ("no author field", no_field, "request_removed", "the review request was removed"),
+                ("a null author", own_view(author=None), "request_removed", "the review request was removed"),
+                ("a login of another", own_view(author="octo-dev"), "request_removed",
+                 "the review request was removed"),
+                ("an author with no login", own_view(author={}), "request_removed", "the review request was removed"),
+                ("an author that is text", own_view(author="octo-me") | {"author": "octo-me"}, "request_removed",
+                 "the review request was removed"),
+                ("the user's comment, null author", own_view(author=None, reviews=[("octo-me", "COMMENTED")]),
+                 "reviewed", "you reviewed it on GitHub")):
+            with self.subTest(name):
+                cid = self.own_card(A)
+                out = self.sync(cid, view)
+                self.assertEqual((out["state"], out["lane"]), (state, "done"))
+                self.assertEqual(self.store().get(cid)["audit"][-1]["did"], did)
 
 
 class RecordedCallsTest(unittest.TestCase):
