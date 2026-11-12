@@ -4,6 +4,7 @@ the real home or ~/.claude."""
 from __future__ import annotations
 
 import copy
+import io
 import json
 import os
 import re
@@ -98,6 +99,27 @@ class Replay:
                                                    out if isinstance(out, str) else json.dumps(out),
                                                    e.get("stderr", ""))
         return subprocess.CompletedProcess(argv, 1, "", f"no recorded reply for {argv[1:]}\n")
+
+
+# Whether and how deep json.loads raises RecursionError depends on the Python version and platform (3.14 stops only
+# when the C stack runs out), so no real depth under the size limit fails everywhere. The tests fake it instead, for
+# this one text only: `json` is the shared module, so every other read still parses for real.
+DEEP_TEXT = '[[["nested too deeply"]]]'
+TOO_DEEP = RecursionError("maximum recursion depth exceeded while decoding a JSON array from a unicode string")
+
+
+def too_deep_to_read(module: str):
+    """Make `json.loads`, as `assistant.<module>` calls it, raise the RecursionError a too-deep text raises when it
+    is given DEEP_TEXT (as str or bytes)."""
+    real = json.loads
+
+    def loads(s, *a, **kw):
+        text = bytes(s).decode("utf-8", "replace") if isinstance(s, (bytes, bytearray)) else s
+        if text == DEEP_TEXT:
+            raise TOO_DEEP
+        return real(s, *a, **kw)
+
+    return mock.patch(f"assistant.{module}.json.loads", side_effect=loads)
 
 
 class Case(unittest.TestCase):
@@ -482,9 +504,14 @@ class VerdictTest(Ap2Case):
         self.assertTrue(r.stderr.startswith("ap2: cannot read '-'"), r.stderr)
 
     def test_a_file_nested_too_deeply(self):
-        r = self.ap2("review", "verdict", "--file", "-", stdin="[" * 100000)
-        self.assertEqual(r.returncode, 1)
-        self.assertEqual(r.stderr.strip(), "ap2: cannot read '-': nested too deeply")
+        # In-process, so json.loads can be made to raise: a subprocess cannot be patched.
+        path = self.tmp / "deep.json"
+        path.write_text(DEEP_TEXT)
+        with too_deep_to_read("cli"), mock.patch.object(sys, "stdout", io.StringIO()) as out, \
+                mock.patch.object(sys, "stderr", io.StringIO()) as err:
+            code = cli.main(["review", "verdict", "--file", str(path), "--data", str(self.data)])
+        self.assertEqual((code, out.getvalue()), (1, ""))
+        self.assertEqual(err.getvalue(), f"ap2: cannot read {str(path)!r}: nested too deeply\n")
 
 
 # --- criterion 5: the report is checked --------------------------------------------------------------------------
@@ -572,8 +599,9 @@ class CheckTest(Case):
             self.assertEqual(len(errors), 1)
             self.assertTrue(errors[0].startswith("prreview.json: not JSON"), errors)
         with self.subTest("nested too deeply"):
-            path.write_text("[" * 100000)
-            errors = prreview.check(self.data, self.cid, cfg=self.cfg)["errors"]
+            path.write_text(DEEP_TEXT)
+            with too_deep_to_read("prreview"):
+                errors = prreview.check(self.data, self.cid, cfg=self.cfg)["errors"]
             self.assertEqual(errors, ["prreview.json: not JSON (nested too deeply)"])
         with self.subTest("missing"):
             path.unlink()
