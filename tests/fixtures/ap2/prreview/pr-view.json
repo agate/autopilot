@@ -94,6 +94,46 @@
     ],
     "latestReviews": []
   },
+  "team_only_changes_requested": {
+    "state": "OPEN",
+    "headRefOid": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+    "reviewRequests": [
+      {
+        "__typename": "Team",
+        "name": "Payments",
+        "slug": "payments"
+      }
+    ],
+    "latestReviews": [
+      {
+        "author": {
+          "login": "octo-me"
+        },
+        "state": "CHANGES_REQUESTED",
+        "submittedAt": "2026-11-11T10:00:00Z"
+      }
+    ]
+  },
+  "team_only_commented": {
+    "state": "OPEN",
+    "headRefOid": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+    "reviewRequests": [
+      {
+        "__typename": "Team",
+        "name": "Payments",
+        "slug": "payments"
+      }
+    ],
+    "latestReviews": [
+      {
+        "author": {
+          "login": "octo-me"
+        },
+        "state": "COMMENTED",
+        "submittedAt": "2026-11-11T10:00:00Z"
+      }
+    ]
+  },
   "other_user_only": {
     "state": "OPEN",
     "headRefOid": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",

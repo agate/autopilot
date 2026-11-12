@@ -401,6 +401,68 @@ class PlanTest(Case):
         self.assertTrue(calls)
         self.assertFalse([c for c in calls if "fetch" in c or "pull" in c], calls)
 
+    def write_user_angles(self):
+        """The user's layer (`<data>/review/angles.yaml`, design 6.1): one angle for the PR's billing/ file."""
+        (self.data / "review").mkdir(exist_ok=True)
+        (self.data / angles.USER_FILE).write_text(
+            '- name: Payments safety\n  question: "Can this change charge a customer twice?"\n'
+            '  when: { paths: ["billing/**"] }\n  brief: "Read every caller of the charge functions."\n')
+
+    def checkout(self, review_yaml=None):
+        """A git checkout with one commit (holding `.autopilot/review.yaml` when given); returns (path, head)."""
+        repo = self.tmp / "checkout"
+        repo.mkdir()
+        git(repo, "init", "-q")
+        if review_yaml is not None:
+            (repo / ".autopilot").mkdir()
+            (repo / ".autopilot" / "review.yaml").write_text(review_yaml)
+        else:
+            (repo / "README").write_text("x\n")
+        git(repo, "add", ".")
+        git(repo, "commit", "-q", "-m", "init")
+        return repo, git(repo, "rev-parse", "HEAD")
+
+    def test_the_user_layer(self):
+        cid = self.card()["id"]
+        self.write_user_angles()
+        with self.subTest("no checkout"):
+            out, _ = self.plan(cid, table(fixture("graphql-head-a.json")))
+            self.assertEqual(out["repo_layer"], "no checkout given")
+            self.assertIn(("Payments safety", "user"), [(a["name"], a["origin"]) for a in out["angles"]])
+        repo, _ = self.checkout()
+        with self.subTest("a checkout that lacks the head"):
+            out, _ = self.plan(cid, table(fixture("graphql-head-a.json")), checkout=str(repo))
+            self.assertEqual(out["repo_layer"], f"{repo} does not have {A[:7]}")
+            self.assertIn(("Payments safety", "user"), [(a["name"], a["origin"]) for a in out["angles"]])
+
+    def test_a_delta_keeps_user_and_repo_angles(self):
+        cid = self.card()["id"]
+        self.write_user_angles()
+
+        def set_reviewed(pairs):
+            block = {"angles": [{"name": n, "origin": o, "why": {"en": "x", "zh": "x"}} for n, o in pairs]}
+            self.store().update(cid, {"pr": {"repo": REPO, "number": 42, "reviewed_sha": A}, "verdict": block},
+                                by="test")
+
+        with self.subTest("a user angle, no checkout"):
+            stored = [("Correctness", "built-in"), ("Accuracy", "built-in"), ("Payments safety", "user")]
+            set_reviewed(stored)
+            out, _ = self.plan(cid, table(fixture("graphql-head-b.json"), head=B, since="since_clean"),
+                               stage="delta")
+            self.assertEqual(out["stage"], "delta")
+            self.assertEqual([(a["name"], a["origin"]) for a in out["angles"]], stored)
+        repo, head = self.checkout(
+            '- name: Billing safety\n  question: "Can a retry run after the order was refunded?"\n'
+            '  when: { paths: ["billing/**"] }\n  brief: "Follow the refund path."\n')
+        with self.subTest("a repo angle, the checkout has the head"):
+            stored = [("Correctness", "built-in"), ("Accuracy", "built-in"), ("Billing safety", "repo"),
+                      ("Payments safety", "user")]
+            set_reviewed(stored)
+            out, _ = self.plan(cid, table(with_head(fixture("graphql-head-b.json"), head), head=head,
+                                          since="since_clean"), stage="delta", checkout=str(repo))
+            self.assertEqual((out["stage"], out["repo_layer"]), ("delta", f"{repo} at {head[:7]}"))
+            self.assertEqual([(a["name"], a["origin"]) for a in out["angles"]], stored)
+
     def test_deltas(self):
         cid = self.card()["id"]
         b_pages = fixture("graphql-head-b.json")
@@ -994,14 +1056,17 @@ class ApplyTest(Case):
 
     def test_fixed_and_answered_are_kept_across_deltas(self):
         cid = self.two_finding_card()
+        earlier = self.store().get(cid)["findings"]
+        confirmed, question = earlier["confirmed"][0], earlier["questions"][0]
         self.delta(cid, [{"id": "correctness-1", "state": "fixed"}, {"id": "q-1", "state": "answered"}])
         card = prreview.apply(self.data, cid, cfg=self.cfg)
         # An answered question is not counted as fixed.
         self.assertEqual(card["audit"][-1]["did"], f"delta review {B[:7]}: approve, 1 fixed, 0 open")
         self.delta(cid, [], head=C, reviewed=B, at="2026-11-11T12:00:00Z")
         card = prreview.apply(self.data, cid, cfg=self.cfg)
-        self.assertEqual([(f["id"], f["fixed_in"]) for f in card["findings"]["fixed"]], [("correctness-1", B)])
-        self.assertEqual([(f["id"], f["fixed_in"]) for f in card["findings"]["answered"]], [("q-1", B)])
+        # The whole finding is kept, as the card had it, with the head it was settled in.
+        self.assertEqual(card["findings"]["fixed"], [dict(confirmed, fixed_in=B)])
+        self.assertEqual(card["findings"]["answered"], [dict(question, fixed_in=B)])
 
     def test_a_full_review_starts_fixed_and_answered_empty(self):
         cid = self.two_finding_card()
@@ -1245,7 +1310,9 @@ class SyncTest(Case):
         base = {k: v for k, v in self.card().items() if k not in ("id", "created_at", "updated_at", "audit")}
         for view, state, did in (("merged", "merged", "the PR was merged"), ("closed", "closed", "the PR was closed"),
                                  ("reviewed", "reviewed", "you reviewed it on GitHub"),
-                                 ("no_request", "request_removed", "the review request was removed"),
+                                 ("team_only_changes_requested", "reviewed", "you reviewed it on GitHub"),
+                                 ("team_only_commented", "reviewed", "you reviewed it on GitHub"),
+                                 ("no_request","request_removed", "the review request was removed"),
                                  ("other_user_only", "request_removed", "the review request was removed")):
             with self.subTest(view):
                 cid = self.store().add(base, by="test")["id"]
