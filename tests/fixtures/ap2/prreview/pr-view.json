@@ -94,5 +94,16 @@
     ],
     "latestReviews": []
   },
+  "other_user_only": {
+    "state": "OPEN",
+    "headRefOid": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+    "reviewRequests": [
+      {
+        "__typename": "User",
+        "login": "octo-other"
+      }
+    ],
+    "latestReviews": []
+  },
   "user": "octo-me\n"
 }

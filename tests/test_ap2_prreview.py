@@ -426,6 +426,12 @@ class PlanTest(Case):
             out, _ = self.plan(cid, table(b_pages, head=B, since="since_clean"), stage="delta")
             self.assertEqual([a["name"] for a in out["angles"]], ["Correctness", "Accuracy"])
             self.assertEqual(out["angles"][1]["origin"], "built-in")
+            # Each reviewer's prompt is built from the kept angle, so it carries the table's question, brief, file
+            # and origin, not just its name.
+            now = angles.load(self.data)
+            for a in out["angles"]:
+                want = {k: v for k, v in now.get(a["name"]).summary().items() if k != "when"}
+                self.assertEqual({k: v for k, v in a.items() if k != "why"}, want)
         with self.subTest("fewer than 2 left: picked anew"):
             self.set_reviewed(cid, names=("Correctness", "Gone angle"))
             out, _ = self.plan(cid, table(b_pages, head=B, since="since_clean"), stage="delta")
@@ -538,6 +544,15 @@ class CheckCliTest(Ap2Case):
         self.assertFalse(missing.exists())
 
 
+class VerdictCliDataTest(Ap2Case):
+    def test_verdict_leaves_a_missing_data_folder_alone(self):
+        missing = self.tmp / "nope"
+        r = self.ap2("review", "verdict", "--file", "-", "--data", str(missing), stdin=json.dumps(buckets()))
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        self.assertEqual(json.loads(r.stdout)["verdict"], "approve")
+        self.assertFalse(missing.exists())
+
+
 class VerdictTest(Ap2Case):
     def verdict(self, obj):
         r = self.ap2("review", "verdict", "--file", "-", stdin=json.dumps(obj))
@@ -643,6 +658,23 @@ class CheckTest(Case):
         self.plan(self.cid, table(fixture("graphql-head-b.json"), head=B, since="since_clean"), stage="delta")
         self.assertEqual(self.errors(self.report("report-delta.json", self.cid)), [])
 
+    def test_a_delta_marks_only_the_earlier_confirmed_and_question_ids(self):
+        rejected = {k: v for k, v in good_finding(id="r-1", severity="nit").items() if k != "checked"}
+        rejected["reason"] = {"en": "Not a bug.", "zh": "不是问题。"}
+        out_of_scope = {k: v for k, v in good_finding(id="o-1", severity="nit").items() if k != "checked"}
+        rep = self.report("report-review.json", self.cid)
+        rep["findings"].update(rejected=[rejected], out_of_scope=[out_of_scope])
+        self.assertEqual(self.errors(rep), [])
+        prreview.apply(self.data, self.cid, cfg=self.cfg)
+        self.assertEqual([f["id"] for f in self.store().get(self.cid)["findings"]["rejected"]], ["r-1"])
+        self.assertEqual([f["id"] for f in self.store().get(self.cid)["findings"]["out_of_scope"]], ["o-1"])
+        self.plan(self.cid, table(fixture("graphql-head-b.json"), head=B, since="since_clean"), stage="delta")
+        delta = self.report("report-delta.json", self.cid)
+        self.assertEqual(delta["earlier"], [{"id": "correctness-1", "state": "fixed"}])
+        self.assertEqual(self.errors(delta), [])
+        card = prreview.apply(self.data, self.cid, cfg=self.cfg)
+        self.assertEqual(card["verdict"]["head_sha"], B)
+
     def test_bad_reports(self):
         good = self.report("report-review.json", self.cid)
 
@@ -665,6 +697,16 @@ class CheckTest(Case):
                  "tldr.en: 201 characters; at most 200"),
                 ("an en TL;DR not starting with its verdict", bad(tldr={"en": "Looks risky.", "zh": "有风险。"}),
                  "tldr.en: must start with the verdict, 'Changes'"),
+                ("an en TL;DR starting with another verdict", bad(tldr={"en": "Approve: fine.", "zh": "没问题。"}),
+                 "tldr.en: must start with the verdict, 'Changes'"),
+                ("a two-line zh TL;DR", bad(tldr={"en": "Changes: x.", "zh": "一。\n二。"}),
+                 "tldr.zh: must be one line"),
+                ("a 201-character zh TL;DR", bad(tldr={"en": "Changes: x.", "zh": "一" * 201}),
+                 "tldr.zh: 201 characters; at most 200"),
+                ("a carriage return in the TL;DR", bad(tldr={"en": "Changes: a\rb", "zh": "一。"}),
+                 "tldr.en: must be one line"),
+                ("a line separator in the TL;DR", bad(tldr={"en": "Changes: a\u2028b", "zh": "一。"}),
+                 "tldr.en: must be one line"),
                 ("angles not the plan's", bad(angles=good["angles"][:2]), "angles: must be the plan's angles"),
                 ("the plan's angles out of order", bad(angles=good["angles"][::-1]),
                  "angles: must be the plan's angles"),
@@ -688,7 +730,9 @@ class CheckTest(Case):
                 ("a bad ci", bad(checks={"ci": "yellow", "notes": good["checks"]["notes"]}), "checks.ci: must be"),
                 ("an unknown field", bad(score=3), "score: not a field of the report"),
                 ("another card", bad(card="c-20200101-000000-000000"), f"card: must be {self.cid}"),
-                ("earlier on a full review", bad(earlier=[]), "earlier: only in a delta review")):
+                ("earlier on a full review", bad(earlier=[]), "earlier: only in a delta review"),
+                ("since_last on a full review", bad(since_last={"en": "x", "zh": "x"}),
+                 "since_last: only in a delta review")):
             with self.subTest(name):
                 errors = self.errors(rep)
                 self.assertTrue(any(words in e for e in errors), errors)
@@ -793,6 +837,8 @@ class CheckTest(Case):
                  "(it is in rejected)"),
                 ("fixed on an id still listed", bad(findings={"confirmed": [still]}),
                  "correctness-1 is fixed but is still listed in findings.confirmed"),
+                ("fixed on an id moved to another bucket", bad(findings={"rejected": [moved]}),
+                 "correctness-1 is fixed but is still listed in findings.rejected"),
                 ("answered on a confirmed id",
                  bad(earlier=[{"id": "correctness-1", "state": "answered"}, {"id": "q-1", "state": "answered"}]),
                  "correctness-1 is a confirmed finding; mark it fixed"),
@@ -1144,7 +1190,8 @@ class SyncTest(Case):
         base = {k: v for k, v in self.card().items() if k not in ("id", "created_at", "updated_at", "audit")}
         for view, state, did in (("merged", "merged", "the PR was merged"), ("closed", "closed", "the PR was closed"),
                                  ("reviewed", "reviewed", "you reviewed it on GitHub"),
-                                 ("no_request", "request_removed", "the review request was removed")):
+                                 ("no_request", "request_removed", "the review request was removed"),
+                                 ("other_user_only", "request_removed", "the review request was removed")):
             with self.subTest(view):
                 cid = self.store().add(base, by="test")["id"]
                 out = self.sync(cid, view)
