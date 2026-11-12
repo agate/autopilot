@@ -1541,12 +1541,12 @@ Calls the author made without asking (check them):
       **[decided by the builder]** A plain `#` at a word start (`--note "a #b"` quoted, or `--note x #comment`
       after a space) stays allowed in v1, as it was: quoted it is plain text, and after a space bash starts a
       comment, which only shortens the note, so bash still runs the one park command. The tokenizer now keeps
-      `#comment` as a token, which v1's tail rules accept. A word-start `#` comment that holds a punctuation
-      character (`;`, `&`, `|`, `<`, `>`, `(`, `)`), an unbalanced quote or a trailing backslash, such as
-      `--note x # ; later`, is now refused, though it was allowed before and bash runs only the park command:
-      after `shlex` a quoted `"#"`
-      and an unquoted word-start `#` give the same token, so dropping the comment could hide a real `; cmd`, and
-      refusing fails closed (as v2's hook does). The other way round, a word-start comment now counts as words
+      `#comment` as a token, which v1's tail rules accept. A word-start `#` comment that holds an unquoted,
+      unescaped punctuation character (`;`, `&`, `|`, `<`, `>`, `(`, `)`), an unbalanced quote or a trailing
+      backslash, such as `--note x # ; later`, is now refused, though it was allowed before and bash runs only
+      the park command: after `shlex` a quoted `"#"` and an unquoted word-start `#` give the same token, so
+      dropping the comment could hide a real `; cmd`, and refusing fails closed (as v2's hook does). Punctuation
+      quoted or escaped inside such a comment (`# "a; b"`, `# a\;b`) stays allowed, as before. The other way round, a word-start comment now counts as words
       in a short line, so `<ap> worker park a T #x y` and `<ap> worker park #a b c`, refused before, are now
       allowed: bash still runs only `ap worker park` with too few arguments, which fails its own argument check.
     - The deny reason names that command with the worker's own card and role filled in, and the window and its
