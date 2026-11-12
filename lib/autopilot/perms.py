@@ -242,6 +242,7 @@ def run_one_off(ap: str, decision_id: str) -> str:
     since = _epoch(action.get("running_since"))
     if since and time.time() - since < ONEOFF_TIMEOUT_S + 60:
         raise ValueError(f"{decision_id} is running since {action['running_since']}")
+    workers.check_allowed()   # at the cap, with a failing key or a broken profile, nothing outward runs
     gcfg, apcfg = config.load_global(), config.load_ap(ap)
     settings = one_off_settings(ap, action["tool"])
     prof = profiles.launch_profile(settings)   # refused when the file is for another profile

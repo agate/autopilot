@@ -4,6 +4,7 @@ import ast
 import json
 import subprocess
 import unittest
+from datetime import datetime, timezone
 from unittest import mock
 
 from tests.helpers import ROOT, TempData, write_ap
@@ -48,6 +49,8 @@ class LaunchBase(unittest.TestCase):
         profile.save(g)
         write_files("a")
         profile.use("g")
+        # The key check runs before every launch; a test that mocks subprocess.run must find it answered already.
+        profile.check_key(profile.active(), datetime.now(timezone.utc))
 
 
 class LaunchTest(LaunchBase):

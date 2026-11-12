@@ -102,6 +102,22 @@ def _record(short: str, kind: str, ap, p: dict) -> None:
         pass
 
 
+BLOCKING = ("cap", "key", "profile")
+
+
+def check_allowed() -> None:
+    """Raise RuntimeError (and launch nothing) when the budget allows no new worker for a reason only the user
+    can clear: the gateway's daily cap, a failing key, or an active profile that cannot be loaded. Every worker
+    launch and every one-off action calls this, whatever the pass decided."""
+    w = budget.current(config.load_global(), datetime.now(timezone.utc))["workers"]
+    if w.get("allow") != 0 or w.get("reason") not in BLOCKING:
+        return
+    why = {"cap": f"the gateway's daily cap is reached ({w.get('cause') or 'spent'}); answer the cap card first",
+           "key": f"the gateway key does not work: {w.get('error')}. {profile.KEY_FIX}",
+           "profile": f"{w.get('error')}. {profile.PROFILE_FIX}"}[w["reason"]]
+    raise RuntimeError(f"no session started: {why}")
+
+
 def _saved_session(ap: str, task: str, role: str) -> str:
     t = next((t for t in state.load(ap)["tasks"] if t["id"] == task), {})
     return (t.get("sessions") or {}).get(role) or ""
@@ -109,6 +125,7 @@ def _saved_session(ap: str, task: str, role: str) -> str:
 
 def start(ap: str, task: str, role: str, cwd: str, prompt: str, needs: list = None, resume: bool = False) -> dict:
     """Start a worker. With resume, continue the task's saved session for this role (a fix round)."""
+    check_allowed()
     gcfg, apcfg = config.load_global(), config.load_ap(ap)
     port_range = ports(gcfg["port_base"], next_slot(all_workers(), gcfg["port_base"]))
     old = next((w for w in state.load(ap)["workers"] if w["task"] == task and w["role"] == role), None)
@@ -161,6 +178,7 @@ def start(ap: str, task: str, role: str, cwd: str, prompt: str, needs: list = No
 
 
 def resume(ap: str, worker: dict) -> dict:
+    check_allowed()
     gcfg = config.load_global()
     prompt = ("Your session was interrupted. Continue the task from where you stopped; "
               "check your worktree and run files first.")
@@ -303,6 +321,14 @@ def _cmd(args: list) -> int:
               " | ap worker park <ap> <task> <role> --note TEXT | ap worker list <ap> [--json]", file=sys.stderr)
         return 2
     sub, ap, task, role = args[:4]
+    try:
+        return _run(sub, ap, task, role, args)
+    except RuntimeError as e:
+        print(f"ap worker {sub}: {e}", file=sys.stderr)
+        return 1
+
+
+def _run(sub: str, ap: str, task: str, role: str, args: list) -> int:
     if sub == "start":
         prompt = open(_opt(args, "--prompt-file")).read()
         needs = [n for n in (_opt(args, "--needs", "") or "").split(",") if n]

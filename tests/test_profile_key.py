@@ -8,8 +8,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from tests.helpers import TempData
-from autopilot import budget, config, profile, publish, usage, workers
+from tests.helpers import TempData, write_ap
+from autopilot import budget, config, profile, publish, state, usage, workers
 
 NOW = datetime(2026, 3, 10, 15, 0, tzinfo=timezone.utc)
 URL = "https://llm-gateway.example.com/anthropic"
@@ -36,13 +36,48 @@ class Base(unittest.TestCase):
 class KeyTest(Base):
     def test_key_failure_blocks_launch_without_fallback(self):
         self.use(key="exit 1")
-        with mock.patch.object(workers, "_launch") as launch:
-            cur = budget.current(config.load_global(), NOW)
-        self.assertEqual(cur["workers"]["allow"], 0)
-        self.assertEqual(cur["workers"]["reason"], "key")
-        launch.assert_not_called()
-        self.assertEqual(profile.active()["name"], "gw")
+        write_ap(self.data, "a")
+        cur = budget.current(config.load_global(), NOW)
+        self.assertEqual((cur["workers"]["allow"], cur["workers"]["reason"]), (0, "key"))
         self.assertIsNone(cur["passes"]["allow"])   # page sessions run on the subscription and go on
+        with mock.patch.object(workers, "_launch") as launch:
+            with self.assertRaises(RuntimeError) as cm:
+                workers.start("a", "T-1", "implement", str(self.data), "go")
+        launch.assert_not_called()
+        self.assertIn("key", str(cm.exception))
+        self.assertEqual(profile.active()["name"], "gw")
+        self.assertEqual(state.load("a")["workers"], [])
+
+    def test_the_cap_blocks_start_resume_and_one_off(self):
+        from autopilot import perms, spend
+        self.use(key="echo k")
+        write_ap(self.data, "a")
+        w = {"task": "T-1", "role": "implement", "session_id": "s1", "short_id": "x", "cwd": str(self.data)}
+        with state.mutate("a") as st:
+            st["decisions"] = [{"id": "D1", "status": "answered", "answer": "yes", "kind": "ask",
+                                "action": {"tool": "mcp__x__send_message", "prompt": "p", "option": "yes"},
+                                "title": {"en": "t"}, "body": {"en": "b"}, "options": [], "links": [],
+                                "created_at": "2026-01-01T00:00:00Z"}]
+        spent = {"today": 900.0, "week": 900.0, "month": 900.0, "unknown": False, "unknown_today": False}
+        self.assertIsNone(profile.check_key(profile.active(), datetime.now(timezone.utc)))   # cached: the key works
+        with mock.patch.object(spend, "totals", return_value=spent), mock.patch.object(workers, "_launch") as launch, \
+                mock.patch("subprocess.run") as run:
+            for call in (lambda: workers.start("a", "T-1", "implement", str(self.data), "go"),
+                         lambda: workers.resume("a", w), lambda: perms.run_one_off("a", "D1")):
+                with self.assertRaises(RuntimeError) as cm:
+                    call()
+                self.assertIn("daily cap", str(cm.exception))
+        launch.assert_not_called()
+        run.assert_not_called()
+
+    def test_a_broken_active_profile_blocks_start(self):
+        write_ap(self.data, "a")
+        config.set_setting("active_profile", "ghost")
+        with mock.patch.object(workers, "_launch") as launch:
+            with self.assertRaises(RuntimeError) as cm:
+                workers.start("a", "T-1", "implement", str(self.data), "go")
+        launch.assert_not_called()
+        self.assertIn("ghost", str(cm.exception))
 
     def test_key_ok_does_not_block(self):
         self.use(key="echo k")
