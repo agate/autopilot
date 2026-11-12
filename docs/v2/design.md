@@ -2232,7 +2232,9 @@ Calls the author made without asking (check them):
      read-only apart from the cache.
   9. `ap2 spend [--mode gateway|subscription] [--json] [--transcripts P] [--data PATH]` (default `gateway`) prints
      today, this week and this month in dollars with two decimals, and, when `unknown` is set, a line saying so with
-     the unpriced model ids and the unmatched launches of today. `--json` prints the `totals()` dict. Exit 0; a
+     the unpriced model ids and the unmatched launches of today. A total clamped to `sys.float_info.max` (item 10)
+     prints as `too large to show` with no `$`, never a 309-digit amount; a finite total below the clamp prints in
+     full. `--json` prints the `totals()` dict. Exit 0; a
      ledger file that cannot be read (or a symlink) prints one `ap2: ...` line and exits 1. Any other `OSError`
      names the side that failed when the error names its file (under the transcripts folder: "cannot read the
      transcripts in <projects>"; under the data folder: the ledger), else both folders, still one line, exit 1.
@@ -2244,13 +2246,26 @@ Calls the author made without asking (check them):
         (1 GiB) is not read at all and is one unknown request (`~file`). A file that grows past it while it is read
         stops there: the requests read so far count, plus one unknown request (`~file`). Unknown, never $0. Lines
         split at `\n` only (JSONL), so a raw U+2028 inside a JSON string no longer splits that line.
-      - A transcript that cannot be checked is missing. An `OSError` from `transcripts.find` (a project folder
-        made unenterable) means no transcript: unknown spend past the grace, and `settle` writes an `unsettled`
-        row. A subagent file that cannot be checked is left out, and a cached file that cannot be checked is
-        dropped from the cache. `transcripts.find` itself is unchanged.
+      - A transcript that cannot be found is missing. An `OSError` from `transcripts.find` (a project folder
+        made unenterable) still means no transcript: unknown spend past the grace, and `settle` writes an
+        `unsettled` row. A cached file that cannot be checked is dropped from the cache. `transcripts.find` itself is
+        unchanged.
+      - **[decided by the builder]** A file that is there but cannot be read is unknown, never $0 (this replaces
+        the first hardening's "left out" for a subagent file). A transcript or subagent file that exists but cannot
+        be read or checked (made `chmod 000`), a read that fails part way (the requests read so far still count),
+        and a subagents folder that cannot be listed (listed with `os.scandir` and each file checked with
+        `Path.stat`, which raise on every Python, where `Path.glob` skips the folder silently on 3.12 and
+        `Path.is_file` says False on 3.14) each give one unknown request (key `~unreadable`), and `settle` writes it
+        into the settled row like any other unknown request. That result is never cached, so the next read tries the
+        file again (a `chmod` back keeps the file's mtime and size). The cache's key changes once, so a cache
+        written before this rule (which holds such a file as no requests) is priced again. A request id the file
+        gives that starts with `~` gets one more `~`, so a forged `~unreadable` (or `~<line>`) never reads as a key
+        the parser makes. A file that is gone (`FileNotFoundError`, a race with a deletion), no subagents folder,
+        and a link to a FIFO or a device are still nothing.
       - No infinite totals. A sum too big for a number (about a million forged requests) is clamped: `today`,
         `week` or `month` that is not finite becomes `sys.float_info.max` (finite, over any cap) and sets
-        `unknown` (and `unknown_today` for `today`), so `ap2 spend --json` stays valid JSON.
+        `unknown` (and `unknown_today` for `today`), so `ap2 spend --json` stays valid JSON; the text output prints
+        it as `too large to show` (item 9).
   - Two fixes v1 made after its first night on real data (ported fixed, not as v1 first shipped):
     - A grace for new launches. A launch younger than 900 s that is not resolved yet or whose session has no
       transcript yet sets neither `unknown` nor `unknown_today` and is not in `unknown_launches`; its resolution is

@@ -193,15 +193,16 @@ def plain_problems(plain, languages: tuple) -> list:
         for lang in languages:
             if lang not in texts or texts[lang] is None:
                 problems.append(f"plain.{line}.{lang} missing")
-            elif not (isinstance(texts[lang], str) and texts[lang].strip()):
+            elif blank(texts[lang]):
                 problems.append(f"plain.{line}.{lang} is empty")
     return problems
 
 
 def blank(text) -> bool:
-    """True when a title slot has no words: it is not a text, or it holds only characters that Python's
-    `str.strip()` or the page's `String.prototype.trim()` treats as white space (what `strip()` removes, plus
-    U+FEFF). The local page's `blankText` keeps the same rule, so both sides skip the same slots."""
+    """True when a title slot or a plain-words slot has no words: it is not a text, or it holds only characters that
+    Python's `str.strip()` or the page's `String.prototype.trim()` treats as white space (what `strip()` removes,
+    plus U+FEFF). `title_problems` and `plain_problems` call such a slot empty; the local page's `blankText` keeps the
+    same rule for titles, so both sides skip the same slots."""
     return not (isinstance(text, str) and text.replace("\ufeff", "").strip())
 
 

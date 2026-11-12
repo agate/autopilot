@@ -236,6 +236,9 @@ class PlainWordsTest(StoreCase):
         ("where.zh blank", lambda p: p["where"].update(zh="  \n"), "plain.where.zh is empty"),
         ("what.zh not text", lambda p: p["what"].update(zh=3), "plain.what.zh is empty"),
         ("where not a map", lambda p: p.update(where="here"), "plain.where.en missing; plain.where.zh missing"),
+        # One rule for "empty" (cards.blank): U+FEFF alone, or with white space, has no words, as in a title slot.
+        ("what.en only U+FEFF", lambda p: p["what"].update(en="\ufeff"), "plain.what.en is empty"),
+        ("do.zh U+FEFF and white space", lambda p: p["do"].update(zh="\ufeff \x1c"), "plain.do.zh is empty"),
     ]
 
     def test_each_missing_line_and_language_is_refused_on_add(self):
@@ -258,6 +261,17 @@ class PlainWordsTest(StoreCase):
                     self.store.update(added["id"], {"plain": p}, by="w")
                 self.assertEqual(str(e.exception), message)
         self.assertEqual(self.store.get(added["id"]), added)
+
+    def test_words_next_to_an_invisible_character_are_words(self):
+        p = plain(("en", "zh"))
+        p["where"]["en"] = "\ufeffHere"
+        added = self.store.add(card(plain=p), by="w")
+        self.assertEqual(added["plain"]["where"]["en"], "\ufeffHere")
+        for text in NOT_BLANK_SLOTS:
+            with self.subTest(text=text):
+                p = plain(("en", "zh"))
+                p["what"]["en"] = text
+                self.assertEqual(self.store.update(added["id"], {"plain": p}, by="w")["plain"]["what"]["en"], text)
 
     def test_no_plain_block_names_every_line(self):
         c = card()
@@ -418,6 +432,18 @@ class BlankTest(unittest.TestCase):
     def test_title_problems_calls_a_bom_only_slot_empty(self):
         self.assertEqual(cards.title_problems({"en": "\ufeff", "zh": "  "}, ("en", "zh")),
                          ["title.en is empty", "title.zh is empty"])
+
+    def test_plain_words_and_titles_agree_on_every_slot(self):
+        for text in BLANK_SLOTS + NOT_BLANK_SLOTS:
+            with self.subTest(text=text):
+                plain_words = cards.plain_problems({line: {"en": text} for line in cards.PLAIN_LINES}, ("en",))
+                title = cards.title_problems({"en": text}, ("en",))
+                if text is None:  # an absent or null plain-words slot is missing, not empty
+                    self.assertEqual(plain_words, [f"plain.{line}.en missing" for line in cards.PLAIN_LINES])
+                    continue
+                self.assertEqual(plain_words, [f"plain.{line}.en is empty" for line in cards.PLAIN_LINES]
+                                 if cards.blank(text) else [])
+                self.assertEqual(bool(plain_words), bool(title))
 
 
 class TitleForTest(unittest.TestCase):

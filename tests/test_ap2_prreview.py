@@ -20,7 +20,7 @@ from unittest import mock
 
 from tests.helpers import ROOT
 from tests.test_ap2_cli import temp_inside_the_accounts_claude
-from assistant import angles, cli, prreview, roles, templates
+from assistant import angles, cards, cli, prreview, roles, templates
 from assistant.config import Config
 from assistant.engine import Engine
 from assistant.store import Store, write_json
@@ -317,6 +317,22 @@ class PlainWordsTest(Case):
         self.assertNotEqual(words["do"]["zh"], prreview.PHRASES["zh"]["do_none"])
         self.assertEqual(words["do"]["zh"], prreview.PHRASES["zh"]["do_zero"])
 
+    def test_a_tldr_of_only_invisible_characters_falls_back_to_another(self):
+        """A TL;DR slot the store calls empty (only U+FEFF and spaces) is not used for the where line."""
+        with self.subTest("one blank slot uses another language's TL;DR"):
+            card = {"verdict": {"tldr": {"en": "Changes: x.", "zh": "\ufeff"}}}
+            words = prreview.plain_for({"id": "42", "text": TITLE}, card, LANGS)
+            self.assertEqual(words["where"]["zh"], "Changes: x.")
+            self.assertEqual(words["do"]["zh"], prreview.PHRASES["zh"]["do_zero"])
+            self.assertEqual(cards.plain_problems(words, LANGS), [])
+        with self.subTest("every slot blank reads as not reviewed yet"):
+            card = {"verdict": {"tldr": {"en": "\ufeff \n", "zh": "\ufeff"}}}
+            words = prreview.plain_for({"id": "42", "text": TITLE}, card, LANGS)
+            for lang in LANGS:
+                self.assertEqual(words["where"][lang], prreview.PHRASES[lang]["where_none"])
+                self.assertEqual(words["do"][lang], prreview.PHRASES[lang]["do_none"])
+            self.assertEqual(cards.plain_problems(words, LANGS), [])
+
     def test_with_no_source_record_the_title_is_the_cards(self):
         for title, zh in (("Fix it", "Fix it"), ({"en": "Fix it", "zh": "修好它"}, "修好它")):
             with self.subTest(title=title):
@@ -479,6 +495,17 @@ class PrOfTest(unittest.TestCase):
         for link, url in cases:
             with self.subTest(link=link):
                 self.assertEqual(self.pr(link), {"repo": REPO, "number": 42, "url": url})
+
+    def test_a_source_that_is_not_a_map_gives_the_url_from_the_key(self):
+        github = f"https://github.com/{REPO}/pull/42"
+        missing = object()
+        cases = [github, [github], 7, True, None, {}, missing]
+        for source in cases:
+            with self.subTest(source="no source key" if source is missing else source):
+                card = {"id": "c1", "kind": "pr-review", "key": KEY}
+                if source is not missing:
+                    card["source"] = source
+                self.assertEqual(prreview.pr_of(card), {"repo": REPO, "number": 42, "url": github})
 
     def test_a_dot_in_the_repo_name_is_a_dot_not_any_character(self):
         card = {"id": "c1", "kind": "pr-review", "key": "acme/my.repo#3",

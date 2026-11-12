@@ -742,8 +742,8 @@ def plain_for(record, card, langs) -> dict:
                  or (card.get("key") if isinstance(card.get("key"), str) else ""))
         out["what"][lang] = p["what"].format(author=author or p["someone"], id=number, title=title)
         said = tldr.get(lang) if tldr else None
-        if tldr and not (isinstance(said, str) and said.strip()):
-            said = next((t for t in tldr.values() if isinstance(t, str) and t.strip()), None)
+        if tldr and cards.blank(said):
+            said = next((t for t in tldr.values() if not cards.blank(t)), None)
         out["where"][lang] = said if tldr and said else p["where_none"]
         if not (tldr and said):
             out["do"][lang] = p["do_none"]

@@ -335,9 +335,11 @@ class _Maker:
                          record, parent, ask={"type": ASK[d["kind"]], "from": "v1"} if open_ else None)
 
     def kept(self, old, new: dict) -> dict:
-        """`new` with `old`'s non-blank texts in the languages that are not configured."""
+        """`new` with `old`'s non-blank texts in the languages that are not configured. Non-blank is `cards.blank`, so
+        a text of only U+FEFF and white space is dropped like an empty one, and words next to U+FEFF are kept as
+        they are."""
         extra = {k: v for k, v in old.items() if isinstance(k, str) and k not in self.langs
-                 and isinstance(v, str) and v.strip()} if isinstance(old, dict) else {}
+                 and not cards.blank(v)} if isinstance(old, dict) else {}
         return {**new, **extra}
 
     def closed(self, old: dict) -> dict:
