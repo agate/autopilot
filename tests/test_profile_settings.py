@@ -91,6 +91,11 @@ class ProfileSettingsTest(unittest.TestCase):
             self.assertNotIn("permissions", ov)
             self.assertNotIn("hooks", ov)
 
+    def test_subscription_overlay_blanks_api_key(self):
+        with TempData():
+            ov = profile.overlay(profile.load("subscription"))
+            self.assertEqual(ov["env"]["ANTHROPIC_API_KEY"], "")
+
     def test_apply_swaps_profile(self):
         with TempData():
             profile.save(gateway())

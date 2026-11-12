@@ -139,16 +139,17 @@ def servers_from_stream(stream: str) -> list:
     return []
 
 
-def discover(claude_bin: str, cwd: str) -> tuple:
-    """The tools and the MCP server names a session in `cwd` starts with."""
+def discover(claude_bin: str, cwd: str, settings) -> tuple:
+    """The tools and the MCP server names a session in `cwd` starts with, under the profile in `settings`.
+    This is a `-p` run, not a background session: it has no short id, so it cannot be priced (see spend)."""
     out = subprocess.run([claude_bin, "-p", "Reply with the single word OK.", "--output-format", "stream-json",
-                          "--verbose"], cwd=cwd, capture_output=True, text=True, timeout=180,
+                          "--verbose", "--settings", str(settings)], cwd=cwd, capture_output=True, text=True, timeout=180,
                          stdin=subprocess.DEVNULL)
     return parse_discovery(out.stdout), servers_from_stream(out.stdout)
 
 
-def discover_tools(claude_bin: str, cwd: str) -> list:
-    return discover(claude_bin, cwd)[0]
+def discover_tools(claude_bin: str, cwd: str, settings) -> list:
+    return discover(claude_bin, cwd, settings)[0]
 
 
 def tool_prefix(server: str) -> str:
@@ -164,7 +165,11 @@ def _write(path, obj) -> None:
 def write_for(ap: str) -> list:
     """Discover the tools a session in this autopilot's repo has and write its permission floors."""
     gcfg, apcfg = config.load_global(), config.load_ap(ap)
-    tools, found = discover(workers.claude_bin(gcfg), apcfg["repo"])
+    # Discovery runs under the profile a worker will run under (a gateway has no claude.ai tools), but without
+    # the floor's deny list: a denied tool must still show up, or the next write would drop its deny rule.
+    probe = paths.ap_dir(ap) / "settings-discover.json"
+    _write(probe, profiles.overlay(profiles.active()))
+    tools, found = discover(workers.claude_bin(gcfg), apcfg["repo"], probe)
     _write(paths.ap_dir(ap) / "settings.json", generate(tools, role="worker", profile=profiles.active()))
     disp = paths.data_root() / "settings-dispatcher.json"
     known = set()

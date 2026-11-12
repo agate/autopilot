@@ -146,7 +146,7 @@ def use(name: str) -> None:
 # ---- settings overlay ----
 
 _BLANKED_ENV = ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL",
-                "ANTHROPIC_DEFAULT_HAIKU_MODEL")
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_API_KEY")
 
 
 def overlay(p: dict) -> dict:
@@ -196,6 +196,15 @@ def page_profile() -> dict:
 
 def light_settings() -> Path:
     return paths.data_root() / "settings-light.json"
+
+
+def ensure_light() -> Path:
+    """The light settings file, written from the page profile when it is not there yet."""
+    f = light_settings()
+    if not f.exists():
+        from autopilot import perms
+        perms._write(f, merge(perms.static_settings("light"), overlay(page_profile())))
+    return f
 
 
 def apply() -> list:

@@ -8,7 +8,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 
-from autopilot import budget, cli, config, events, paths, sessions, shellenv, state
+from autopilot import budget, cli, config, events, paths, profile, sessions, shellenv, spend, state
 
 AGENTS = {"implement": "autopilot:implementer", "review": "autopilot:reviewer"}
 PROTECTED_ENV = ("AUTOPILOT_", "ANTHROPIC_", "CLAUDE")
@@ -48,10 +48,11 @@ def build_start(gcfg: dict, apcfg: dict, ap: str, task: str, role: str, prompt: 
         argv += ["--agent", AGENTS[role]]
     else:
         prompt = "/autopilot:pr-loop " + prompt
-    if gcfg["models"].get("worker"):
-        argv += ["--model", gcfg["models"]["worker"]]
-    if gcfg.get("worker_effort"):
-        argv += ["--effort", gcfg["worker_effort"]]
+    p = profile.active()
+    if p.get("model"):
+        argv += ["--model", p["model"]]
+    if p.get("effort"):
+        argv += ["--effort", p["effort"]]
     argv.append(prompt)
     return argv, _env("worker")
 
@@ -86,6 +87,21 @@ def _launch(argv: list, cwd: str, env: dict) -> str:
     return m.group(1)
 
 
+def _settle(short: str) -> None:
+    """Price a finished session. Never raises: pricing must not stop a cleanup."""
+    try:
+        spend.settle(short)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _record(short: str, kind: str, ap, p: dict) -> None:
+    try:
+        spend.record_launch(short, kind, ap, p)
+    except Exception:  # noqa: BLE001 - spend bookkeeping must not undo a started session
+        pass
+
+
 def _saved_session(ap: str, task: str, role: str) -> str:
     t = next((t for t in state.load(ap)["tasks"] if t["id"] == task), {})
     return (t.get("sessions") or {}).get(role) or ""
@@ -109,20 +125,23 @@ def start(ap: str, task: str, role: str, cwd: str, prompt: str, needs: list = No
         raise RuntimeError(f"{ap} {task}: no saved {role} session to resume")
     if sid:
         # Flags on --resume start a copy under a new id; -n keeps the worker's name on that copy.
-        argv = ([argv[0], "--bg", "--resume", sid, "-n", sessions.name_for(ap, task, role)]
-                + argv[argv.index("--permission-mode"):argv.index("--settings") + 2])
+        argv = ([argv[0], "--bg", "--resume", sid, "-n", sessions.name_for(ap, task, role),
+                 "--settings", argv[argv.index("--settings") + 1]]
+                + argv[argv.index("--permission-mode"):argv.index("--permission-mode") + 2])
         argv.append(prompt if role in AGENTS else "/autopilot:pr-loop " + prompt)
     if parked:
         # The parked session sits idle; the copy that continues takes its place.
         subprocess.run([claude_bin(gcfg), "stop", parked["short_id"]], capture_output=True, timeout=60)
     short = _launch(argv, cwd, env)
+    _record(short, "worker", ap, profile.active())
     name = sessions.name_for(ap, task, role)
     listed = sessions.list_all(claude_bin(gcfg))
     found = sessions.find_by_id(short, listed) or sessions.find(name, listed)
     rec = {"task": task, "role": role, "session_name": name,
            "session_id": (found or {}).get("sessionId") or "", "short_id": short,
            "ports": port_range,
-           "needs": list(needs or []), "started_at": events.now_iso(), "resumes": 0, "cwd": str(cwd)}
+           "needs": list(needs or []), "started_at": events.now_iso(), "resumes": 0, "cwd": str(cwd),
+           "profile": profile.active()["name"]}
     with state.mutate(ap) as st:
         st["workers"] = [w for w in st["workers"] if not (w["task"] == task and w["role"] == role)] + [rec]
     if parked:
@@ -139,14 +158,24 @@ def resume(ap: str, worker: dict) -> dict:
     gcfg = config.load_global()
     prompt = ("Your session was interrupted. Continue the task from where you stopped; "
               "check your worktree and run files first.")
-    argv = [claude_bin(gcfg), "--bg", "--resume", worker["session_id"], prompt]
+    settings = paths.ap_dir(ap) / "settings.json"
+    if not settings.exists():
+        raise RuntimeError(f"{ap}: no permission floor yet; run `ap perms write {ap}` first")
+    p = profile.active()
+    argv = [claude_bin(gcfg), "--bg", "--resume", worker["session_id"], "--settings", str(settings), prompt]
     short = _launch(argv, worker.get("cwd") or str(paths.ap_dir(ap)), _env("worker"))
+    _record(short, "worker", ap, p)
+    # --settings on --resume starts a copy under a new id (like start's flags do): follow it.
+    found = sessions.find_by_id(short, sessions.list_all(claude_bin(gcfg)))
     with state.mutate(ap) as st:
         for w in st["workers"]:
             if w["task"] == worker["task"] and w["role"] == worker["role"]:
                 w["short_id"] = short
+                if (found or {}).get("sessionId"):
+                    w["session_id"] = found["sessionId"]
                 w["resumes"] = w.get("resumes", 0) + 1
                 w["started_at"] = events.now_iso()
+                w["profile"] = p["name"]
                 worker = w
     events.append(ap, "worker_resumed", {"task": worker["task"], "role": worker["role"], "short_id": short})
     return worker
@@ -184,6 +213,7 @@ def end(ap: str, task: str, role: str) -> None:
             if w["task"] == task and w["role"] == role:
                 tokens = usage.session_tokens(w.get("session_id"))
                 subprocess.run([claude_bin(gcfg), "stop", w["short_id"]], capture_output=True, timeout=60)
+                _settle(w["short_id"])
                 for t in st["tasks"]:
                     if t["id"] == task and w.get("session_id"):
                         t.setdefault("sessions", {})[role] = w["session_id"]
@@ -201,6 +231,10 @@ def cleanup(ap: str, task: str) -> list:
         for t in st["tasks"]:
             if t["id"] == task:
                 for sid in (t.pop("sessions", None) or {}).values():
+                    # `claude rm` takes the full session id; pricing needs the short id of the same session.
+                    hit = next((s for s in sessions.list_all(claude_bin(gcfg)) or [] if s.get("sessionId") == sid), None)
+                    if hit and hit.get("id"):
+                        _settle(hit["id"])
                     subprocess.run([claude_bin(gcfg), "rm", sid], capture_output=True, timeout=60)
                     removed.append(sid)
     events.append(ap, "task_cleaned", {"task": task, "sessions": len(removed)})

@@ -4,7 +4,7 @@ import json
 import subprocess
 import time
 
-from autopilot import access, config, lock, ops, paths, sessions, workers
+from autopilot import access, config, lock, ops, paths, profile, sessions, spend, workers
 
 NAME = "autopilot · dispatch"
 
@@ -30,8 +30,9 @@ def build_command(gcfg: dict, repo: str, aps: list) -> tuple:
         settings = paths.package_root() / "settings" / "dispatcher.json"
     argv = [workers.claude_bin(gcfg), "--bg", "-n", NAME, "--permission-mode", gcfg["permission_mode"],
             "--settings", str(settings)]
-    if gcfg["models"].get("dispatcher"):
-        argv += ["--model", gcfg["models"]["dispatcher"]]
+    s = profile.page_profile()
+    if s.get("dispatcher_model") or s.get("model"):
+        argv += ["--model", s.get("dispatcher_model") or s["model"]]
     argv.append(prompt)
     env = workers._env("dispatcher")
     return argv, env
@@ -46,6 +47,8 @@ def _last_pass() -> dict:
 
 def _cleanup(claude: str, short: str, remove: bool = True) -> None:
     for sub in (("stop", "rm") if remove else ("stop",)):
+        if sub == "rm":
+            workers._settle(short)
         subprocess.run([claude, sub, short], capture_output=True, timeout=60)
 
 
@@ -79,6 +82,7 @@ def run(gcfg: dict, active: list, poll_s: float = 10, timeout_s: float = None) -
                 pass
             argv, env = build_command(gcfg, repo, aps)
             short = workers._launch(argv, repo, env)
+            workers._record(short, "dispatcher", None, profile.page_profile())
             began = time.monotonic()
             deadline = began + timeout_s
             timed_out, seen_busy = True, False

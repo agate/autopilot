@@ -12,7 +12,7 @@ import json
 import subprocess
 from datetime import datetime, timedelta
 
-from autopilot import config, paths, sessions, state, usage, workers
+from autopilot import config, paths, profile, sessions, spend, state, usage, workers
 
 NAME = "autopilot · replies"
 SYSTEM = ("You check one database collection with the ArtifactData tool and reply with the number of documents only. "
@@ -107,6 +107,8 @@ def parse(path, url: str):
 
 def _cleanup(claude: str, short: str) -> None:
     for sub in ("stop", "rm"):
+        if sub == "rm":
+            workers._settle(short)
         try:
             subprocess.run([claude, sub, short], capture_output=True, timeout=60, stdin=subprocess.DEVNULL)
         except (OSError, subprocess.SubprocessError):
@@ -120,8 +122,9 @@ def check(gcfg: dict, url: str, poll_s: float = 2) -> dict:
     claude = workers.claude_bin(gcfg)
     prompt = (f"Load the ArtifactData tool with ToolSearch (query select:ArtifactData) if needed, then call it: "
               f"action list, url {url}, collection replies. Reply with only the number of documents.")
-    argv = [claude, "--bg", "-n", NAME, "--model", rc.get("model") or "haiku", "--strict-mcp-config",
-            "--setting-sources", "project", f"--disallowedTools={DISALLOWED}", "--system-prompt", SYSTEM,
+    s = profile.page_profile()
+    argv = [claude, "--bg", "-n", NAME, "--model", s.get("small_model") or "haiku", "--strict-mcp-config",
+            "--settings", str(profile.ensure_light()), "--setting-sources", "project", f"--disallowedTools={DISALLOWED}", "--system-prompt", SYSTEM,
             "--allowedTools=ArtifactData", "--", prompt]
     cwd = paths.data_root() / "replies-check"   # no CLAUDE.md or project settings here
     cwd.mkdir(parents=True, exist_ok=True)
@@ -129,6 +132,7 @@ def check(gcfg: dict, url: str, poll_s: float = 2) -> dict:
         short = workers._launch(argv, str(cwd), workers._env("replies"))
     except (RuntimeError, OSError, subprocess.SubprocessError) as e:
         return {"ok": False, "error": f"could not start the check: {e}"}
+    workers._record(short, "replies", None, s)
     try:
         s, why = sessions.wait_turn(claude, short, float(rc.get("timeout_s") or 120), poll_s)
         if why:

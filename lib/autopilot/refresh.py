@@ -19,7 +19,7 @@ import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from autopilot import access, config, lock, paths, publish, replies, sessions, usage, workers
+from autopilot import access, config, lock, paths, profile, publish, replies, sessions, usage, workers
 
 NAME = "autopilot · page refresh"
 LIGHT = ("meta", "autopilots", "tasks", "workers", "decisions", "reports")
@@ -189,16 +189,17 @@ def verify(path, url: str, plan: dict):
 
 def run_session(gcfg: dict, url: str, prompt: str, cwd, poll_s: float = 2) -> dict:
     """Run the prompt in a throwaway Haiku session. {"ok": True, "transcript": path} or {"ok": False, "error"}."""
-    rc = gcfg.get("reply_check") or {}
     claude = workers.claude_bin(gcfg)
     folder = Path(cwd).resolve()   # the plan's file paths are resolved the same way (prepare)
-    argv = [claude, "--bg", "-n", NAME, "--model", rc.get("model") or "haiku", "--strict-mcp-config",
-            "--setting-sources", "project", f"--disallowedTools={DISALLOWED}", "--system-prompt", SYSTEM,
+    s = profile.page_profile()
+    argv = [claude, "--bg", "-n", NAME, "--model", s.get("small_model") or "haiku", "--strict-mcp-config",
+            "--settings", str(profile.ensure_light()), "--setting-sources", "project", f"--disallowedTools={DISALLOWED}", "--system-prompt", SYSTEM,
             f"--allowedTools=ArtifactData,Read(/{folder}/**)", "--", prompt]
     try:
         short = workers._launch(argv, str(folder), workers._env("refresh"))
     except (RuntimeError, OSError, subprocess.SubprocessError) as e:
         return {"ok": False, "error": f"{START_ERROR}: {e}"}
+    workers._record(short, "refresh", None, s)
     try:
         s, why = sessions.wait_turn(claude, short, TIMEOUT_S, poll_s)
         if why:
