@@ -233,6 +233,21 @@ class RoleTest(Case):
                 self.assertIn(banned, rules)
                 self.assertNotIn(banned, outside)
 
+    def test_the_process_file_names_every_whole_pr_reason(self):
+        # whole_pr_reason gives three reasons; the role's own file must name all three, with the compare limit
+        # read from the constant so changing it without the doc fails here.
+        text = " ".join(PROCESS.read_text(encoding="utf-8").split())
+        sentence = re.search(r"`whole_pr` is set when (.*?);", text)
+        self.assertIsNotNone(sentence, "no `whole_pr` is set when ... sentence in step 2")
+        sentence = sentence.group(1)
+        for reason in ("merge commit", f"({prreview.COMPARE_LISTS})", "rewritten"):
+            with self.subTest(reason=reason):
+                self.assertIn(reason, sentence)
+        # Step 3 points back at the list rather than naming fewer reasons.
+        step3 = re.search(r"When `whole_pr` is set, `compare` is the whole PR \((.*?)\)", text)
+        self.assertIsNotNone(step3, "no `whole_pr` parenthesis in step 3")
+        self.assertEqual(step3.group(1), "for one of the reasons in step 2")
+
 
 # --- criterion 2: a review request becomes a card in plain words -------------------------------------------------
 
