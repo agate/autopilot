@@ -2418,8 +2418,9 @@ Calls the author made without asking (check them):
      can resume), and the card's ask is `{type: fix, reason: gateway_refused, role, text}`. The text says the
      gateway refuses this conversation every time, so resuming it there will not help, and gives three commands:
      `ap2 profile use subscription`, `ap2 worker start <card> <role> --resume`, then `ap2 profile use <the worker's
-     profile>` to switch back. It is a worker ask (kind `refused`): any start of that role and `finish` close it,
-     as the paused hint. No profile or key is touched.
+     profile>` to switch back. When the worker's own profile is already the subscription, it gives only the resume
+     command and says the worker already ran on the subscription. It is a worker ask (kind `refused`): any start of
+     that role and `finish` close it, as the paused hint. No profile or key is touched.
   5. A replaced session is stopped. `start --resume` with no parked record (the card's saved session, after a
      pause or an answer) stops that saved session first, through the stop that settles its spend, when the listing
      still shows it (matched by `sessionId`) and does not mark it `state: stopped`. A parked record's resume and the

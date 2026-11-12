@@ -848,11 +848,16 @@ class Workers:
             return {"type": "fix", "role": role, "reason": ATTACH, "stage": "paused",
                     "text": f"Stopped after {BLOCKED_MIN} minutes at a permission prompt. Resume it with `{resume}`."}
         back = rec.get("profile") or profiles.SUBSCRIPTION
-        return {"type": "fix", "role": role, "reason": REFUSED,
-                "text": ("Stopped: a gateway's safety guard refused this worker's conversation. The gateway refuses "
-                         "this conversation every time, so resuming it there will not help. Resume this one worker "
-                         f"on the subscription: run `ap2 profile use {profiles.SUBSCRIPTION}`, then `{resume}`, "
-                         f"then `ap2 profile use {back}` to switch back.")}
+        text = ("Stopped: a gateway's safety guard refused this worker's conversation. The gateway refuses this "
+                "conversation every time, so resuming it there will not help. ")
+        if back == profiles.SUBSCRIPTION:
+            # Already the subscription: a switch there and back again is no step at all.
+            text += (f"This worker already ran on the subscription: resume it with `{resume}` while the "
+                     "subscription is the active profile.")
+        else:
+            text += (f"Resume this one worker on the subscription: run `ap2 profile use {profiles.SUBSCRIPTION}`, "
+                     f"then `{resume}`, then `ap2 profile use {back}` to switch back.")
+        return {"type": "fix", "role": role, "reason": REFUSED, "text": text}
 
     def end(self, card_id: str, role: str, by: str = BY) -> dict:
         """Stop a worker and keep its session on the card, so a later round can resume it. Works in shadow mode."""

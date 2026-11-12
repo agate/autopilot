@@ -78,7 +78,7 @@ def tail(projects, session_id) -> Optional[dict]:
             start = max(0, h.tell() - TAIL_BYTES)
             h.seek(start)
             lines = h.read().decode("utf-8", "replace").splitlines()
-    except (OSError, ValueError):  # ValueError: not a session id
+    except (OSError, TypeError, ValueError):  # TypeError: no projects folder; ValueError: not a session id
         return None
     if start:
         lines = lines[1:]  # cut off at its start

@@ -3225,6 +3225,18 @@ class GatewayRefusedTest(ApiStopCase):
         self.assertEqual(self.bg_calls()[-1]["argv"][1:3], ["--resume", a["session_id"]])
         self.assertIsNone(self.get(a["card"])["ask"])
 
+    def test_a_refused_subscription_worker_is_told_only_to_resume(self):
+        w = self.workers()
+        a = self.start(w)
+        with resources.Registry(self.data).locked() as records:
+            records[0]["profile"] = "subscription"  # its own profile is already the subscription
+        self.stopped_on(a, refused_line(iso(self.clock())))
+        self.assertEqual(w.check()[0]["did"], "paused")
+        ask = self.get(a["card"])["ask"]
+        self.assertEqual(ask["reason"], "gateway_refused")
+        self.assertIn("already ran on the subscription", ask["text"])
+        self.assertEqual(re.findall(r"`([^`]+)`", ask["text"]), [f"ap2 worker start {a['card']} implement --resume"])
+
     def test_a_refusal_never_touches_a_profile(self):
         w = self.workers()
         a = self.start(w)

@@ -144,6 +144,7 @@ class TailTest(Case):
         self.assertIsNone(apistop.tail(self.projects, None))
         self.assertIsNone(apistop.tail(self.projects, "../escape"))
         self.assertIsNone(apistop.tail(self.projects / "nowhere", SID))
+        self.assertIsNone(apistop.tail(None, SID))  # no projects folder at all: None, never a TypeError
         p = self.transcript([limit_line()])
         p.chmod(0)
         self.addCleanup(p.chmod, 0o600)
