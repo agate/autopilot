@@ -8,6 +8,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import math
 import os
 import re
 import shutil
@@ -337,11 +338,13 @@ class CardTest(CapCase):
             self.assertNotIn("太大，无法显示", words, lang)
 
     def test_usd_marks_only_the_clamp_value(self):
+        below = math.nextafter(sys.float_info.max, 0)  # the largest finite value below the clamp
         for x, lang, want in ((sys.float_info.max, "en", "too large to show"),
                               (sys.float_info.max, "zh", "太大，无法显示"),
                               (sys.float_info.max, "zh-CN", "太大，无法显示"),
                               (sys.float_info.max, "fr", "too large to show"),
                               (1e20, "zh", "$100,000,000,000,000,000,000.00"), (512.5, "en", "$512.50"),
+                              (1e300, "en", f"${1e300:,.2f}"), (below, "zh", f"${below:,.2f}"),
                               (0, "zh", "$0.00"), (None, "en", "$?"), (True, "en", "$?"), ("5", "zh", "$?")):
             with self.subTest(x=x, lang=lang):
                 self.assertEqual(cap._usd(x, lang), want)
