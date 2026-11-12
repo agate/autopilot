@@ -20,6 +20,7 @@ _PRICE_KEYS = ("input", "output", "cache_read", "cache_write_5m", "cache_write_1
 _LONG_PROMPT_TOKENS = 100_000
 _RETRY_S = 600          # retry resolving one short id at most this often
 _GIVE_UP_S = 2 * 86400  # and stop trying once its launch is older than this
+_P_KINDS = ("discover", "oneoff")   # `-p` runs: the only kinds whose no-id row stops holding the cap
 _NO_ID_HOLD_S = 1800    # a launch with no session id holds the daily cap this long
 _clock = time.time
 
@@ -389,7 +390,8 @@ def totals(now: datetime, mode: str = "gateway") -> dict:
         if s not in c["shorts"] and this_month(ln):
             out["unknown"] = True
             # A `-p` run that gave no session id can never be matched; after 30 minutes it stops holding today.
-            no_id = s.startswith("unknown-") and _clock() - _launch_epoch(ln) > _NO_ID_HOLD_S
+            # A worker or dispatcher row with no id keeps holding it for the rest of the day: it may still run.
+            no_id = s.startswith("unknown-") and ln.get("kind") in _P_KINDS and _clock() - _launch_epoch(ln) > _NO_ID_HOLD_S
             if launch_day(ln) == today and not no_id:
                 out["unknown_today"] = True
                 launches += 1

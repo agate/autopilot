@@ -389,6 +389,13 @@ class TotalsTest(SpendCase):
         t = spend.totals(NOW)
         self.assertEqual((t["unknown"], t["unknown_today"]), (True, False))
 
+    def test_a_workers_launch_without_a_session_id_keeps_blocking_the_whole_day(self):
+        for kind in ("worker", "dispatcher"):
+            spend.record_session("", kind, "checkout", profile())
+        self.clock += 5 * 3600
+        t = spend.totals(NOW)
+        self.assertEqual((t["unknown"], t["unknown_today"]), (True, True))
+
     def test_totals_name_the_unpriced_models_of_today(self):
         self.put("unknown.jsonl")
         self.launch()
