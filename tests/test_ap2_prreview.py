@@ -283,6 +283,10 @@ class PlainWordsTest(Case):
             card = dict(base, findings={"confirmed": [f], "rejected": [f], "out_of_scope": [f], "fixed": [f]})
             words = prreview.plain_for({"id": "42", "text": TITLE}, card, LANGS)
             self.assertTrue(words["do"]["en"].startswith("Read the 1 finding, then"), words["do"]["en"])
+        with self.subTest("a confirmed nit is open"):
+            card = dict(base, findings={"confirmed": [dict(f, severity="nit")]})
+            words = prreview.plain_for({"id": "42", "text": TITLE}, card, LANGS)
+            self.assertTrue(words["do"]["en"].startswith("Read the 1 finding, then"), words["do"]["en"])
 
     def test_a_regional_language_uses_its_base_language_words(self):
         words = prreview.plain_for({"id": "42", "text": TITLE}, {}, ("en", "zh-TW"))
@@ -1322,6 +1326,31 @@ class SyncTest(Case):
                 self.assertEqual(card["lane"], "done")
                 self.assertEqual(card["audit"][-1]["did"], did)
                 self.assertEqual(card["pr"]["head_sha"], fixture("pr-view.json")[view]["headRefOid"])
+
+    def test_the_card_closes_after_a_review_by_ap2(self):
+        """Merged, closed, reviewed and request_removed come before not_reviewed, new_commits and current: a card
+        ap2 already reviewed (at the same head, or at an older one) closes the same way a fresh card does."""
+        base = {k: v for k, v in self.card().items() if k not in ("id", "created_at", "updated_at", "audit")}
+        views = fixture("pr-view.json")
+        for view, reviewed, state, did in (
+                ("merged", B, "merged", "the PR was merged"), ("merged", A, "merged", "the PR was merged"),
+                ("closed", A, "closed", "the PR was closed"),
+                ("reviewed", A, "reviewed", "you reviewed it on GitHub"),
+                ("team_only_changes_requested", A, "reviewed", "you reviewed it on GitHub"),
+                ("team_only_commented", A, "reviewed", "you reviewed it on GitHub"),
+                ("reviewed_head_b_team", A, "reviewed", "you reviewed it on GitHub"),
+                ("no_request", A, "request_removed", "the review request was removed"),
+                ("other_user_only", A, "request_removed", "the review request was removed")):
+            with self.subTest(view=view, reviewed=reviewed[:7]):
+                cid = self.store().add(base, by="test")["id"]
+                self.store().update(cid, {"pr": {"repo": REPO, "number": 42, "reviewed_sha": reviewed}}, by="test")
+                out = self.sync(cid, view)
+                self.assertEqual((out["state"], out["lane"], out["reviewed_sha"]), (state, "done", reviewed))
+                card = self.store().get(cid)
+                self.assertEqual(card["lane"], "done")
+                self.assertEqual(card["audit"][-1]["did"], did)
+                self.assertEqual(card["pr"]["reviewed_sha"], reviewed)
+                self.assertEqual(card["pr"]["head_sha"], views[view]["headRefOid"])
 
     def test_a_write_during_the_sync_is_kept(self):
         cid = self.card()["id"]

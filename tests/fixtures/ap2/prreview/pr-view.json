@@ -145,5 +145,25 @@
     ],
     "latestReviews": []
   },
+  "reviewed_head_b_team": {
+    "state": "OPEN",
+    "headRefOid": "b2c3d4e5b2c3d4e5b2c3d4e5b2c3d4e5b2c3d4e5",
+    "reviewRequests": [
+      {
+        "__typename": "Team",
+        "name": "Payments",
+        "slug": "payments"
+      }
+    ],
+    "latestReviews": [
+      {
+        "author": {
+          "login": "octo-me"
+        },
+        "state": "COMMENTED",
+        "submittedAt": "2026-11-11T10:00:00Z"
+      }
+    ]
+  },
   "user": "octo-me\n"
 }
