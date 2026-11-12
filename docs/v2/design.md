@@ -73,7 +73,9 @@ Anti-goals (failure even if it "works"):
   source engine, routine runs) write the object with the same words in each slot, because they quote a record or
   the user's routine title and nothing in the code can translate. A writer that can write both languages (a scan
   session, a worker, `ap2 card add`) gives the object with real words per language. A reader picks a language's
-  slot, else the primary's (`cards.title_for`); the local page shows only the page language's title. Translating
+  slot, else the primary's, else **[decided by the builder]** any other non-blank slot, the first in sorted
+  key order (`cards.title_for`, and the page's `titleIn`): a stored title's words beat "Untitled" after the
+  primary language changes. The local page shows only one title, never two languages side by side. Translating
   quotes is the proposed line below (open question 4), not part of this rule.
 - **[proposed]** A reply drafted for someone else stays in the language that person wrote in. On the
   other-language page its meaning is shown separately, and Copy leaves the meaning out. A quote shows the
@@ -655,6 +657,82 @@ asked the user twice for the same reason (v1 PRs #21 and #25 on `v2`). v1 keeps 
 4. The card and the round report say the loop ended through a check of the fix, and link its findings.
 5. A loop that stops for any other reason (not converging, the same finding twice, a design call) asks as before.
 
+How it is built (`lib/assistant/prloop.py`):
+
+- **[decided by the builder]** Where. One pure module, standard library only, with no new `ap2` command and no
+  runner: it decides the loop's end from recorded round results, writes the check reviewers' briefs, and turns the
+  end into card fields. It runs no agent, no `git`, no `gh` and no other program. v1's `commands/pr-loop.md` and
+  the `pr-loop` role's brief in the `code` template stay as they are (6.3's rule in that brief would contradict
+  v1's own stop rule in the same prompt). The check reviewers are the shipped `reviewer-angle` role: no new role,
+  no new tools.
+- **[decided by the builder]** The round limit. `ROUND_LIMIT = 20` (the user's answer for this autopilot's v1
+  loops: "keep looping until a round is clean, at most 20 rounds"); it is also the most allowed. A record may set a
+  lower `limit`, a whole number from 1 to 20 (a bool is refused); a caller that wants a lower limit writes it into
+  the record before the first round; `decide(record, limit)` only checks a call limit against the record's (its
+  `limit`, else 20) and refuses one that differs, so every function reads the same limit. The check of the fix is
+  not a round and does not count toward it.
+- **[decided by the builder]** The record, v2's `prloop.json`. v1's top-level keys (`result`, `reason`, `head`,
+  `ci`, `rounds`, `followups`, `questions`) keep their meaning; v2 adds `limit`, `fix_check` and `ended_by`
+  (`round`, `converged`, `fix_check`, `stop`). Each round is `{"n", "angles", "findings", "commit", "ci", "stop"}`:
+  `angles` the picked angles as `angles.pick` returns them (Correctness always among them), `commit` the fix commit
+  (7-40 lowercase hex characters, or null when nothing was fixed), `ci` `green` or `red` on the round's head, `stop`
+  null or the loop's one-line reason (the same finding twice, a fix that failed, the branch moved). A finding is
+  `{"id", "angle", "bucket"}` plus optional `behavior` (default true), `where`, `text`, `reason`; `bucket` is v1's
+  triage bucket (`fix`, `out_of_scope`, `invalid`, `owner`); `angle` names one of the round's angles, or is null
+  only for a CI finding (id `ci-<n>`). `fix_check` is null or `{"commit", "ci", "reviewers": [{"angle", "answers",
+  "findings"}]}`, `angle` there the angle's name. `read(path)` reads at most `sources.MAX_SOURCE` bytes and checks
+  every rule; a broken file is a `PrLoopError` (a `ValueError`) naming the file and the field
+  (`rounds[2].findings[0].bucket`). Also refused: unknown keys, rounds not numbered 1, 2, 3 ... in order, a round
+  past the limit, a round after one that ended the loop, a `fix` finding in a round with no commit (unless the
+  round records a `stop`, such as a fix that failed), a check whose reviewers or answers differ from the plan, a
+  stored `result` or `ended_by` that the rounds do not give, and a record nested more than `store.MAX_DEPTH` (200)
+  deep, refused at any call depth.
+- **[decided by the builder]** The decision. `decide(record)` returns `{"next", "result", "ended_by", "reason",
+  "plan"}`, `next` one of `round`, `check`, `end`, checked in this order on the last round: a `stop` or any `owner`
+  finding ends `stopped` (`ended_by: stop`, point 5: it asks as before); no `fix` finding and CI green ends `clean`
+  (`round`); this and the round before with no `fix` finding whose `behavior` is true ends `converged` (v1's rule);
+  a round below the limit gives `round`; at the limit with fixes, `check` with its plan. No rounds yet gives
+  `round`. v1's "not converging" stop is its round limit; here the limit always goes through the check, so there
+  is no separate one. A limit round with no fix and CI red has nothing to check and ends `stopped` (`round`).
+- **[decided by the builder]** Who checks. `plan(record)`: one entry per angle with at least one `fix` finding in
+  the last round, in that round's `angles` order, each `{"angle": <the picked angle>, "commit", "answers": [the fix
+  findings it answers, verbatim]}`. A CI finding (id `ci-<n>`, whatever its `angle`) goes to Correctness. An angle
+  whose findings were all `invalid` or `out_of_scope` gets no check reviewer: the fix commit answers none of them.
+  `plan(record)` refuses (a `PrLoopError`) a record where no check is due, exactly when `decide` does not give
+  `check`; otherwise its list equals `decide(record)["plan"]`.
+- **[decided by the builder]** What a check reviewer reads. `check_brief(entry, pr, worktree)` is the prompt for one
+  fresh `reviewer-angle` session: the angle's name, question and brief; the PR number, the worktree and the fix
+  commit; "read only this commit: `git show <commit>`, the findings below, and the code the commit touches"; each
+  answered finding verbatim (as JSON, marked as data); v1's return contract and that NO FINDINGS is a good answer;
+  read-only, no edits, no comments. Nothing from an earlier round but the answered findings: no earlier
+  reviewer's words, no other angle's findings.
+- **[decided by the builder]** The check's outcome. `record_check(record, results, ci)` returns a new record with
+  `fix_check` set (and `result`, `ended_by`, `reason`, `head` and `ci` from the end it gives); `results` maps each
+  planned angle to its triaged findings, the same buckets as a round, verified in the loop's own session as v1's
+  triage says. It finds something when any finding is `fix` or `owner`, or CI on the fix commit is `red` (each
+  counts as one thing); `invalid` and `out_of_scope` findings are listed but do not block. Nothing found ends
+  `clean` (`ended_by: fix_check`, point 2; `ap merge-check` still decides). Something found ends `stopped`
+  (`fix_check`), the reason naming how many things: no more fixing (point 3).
+- **[decided by the builder]** At most once. `record_check` refuses a record that already has a `fix_check`, one
+  whose last round is below the limit, fixed nothing, stopped or converged (any record where `decide` does not
+  give `check`), and `results` that miss a planned angle or add one; `plan` refuses the same records. `read` and
+  `decide` refuse a round after a `fix_check` and a round past the limit. With a check recorded, `decide` only ever
+  returns `end`.
+- **[decided by the builder]** The card and the report (point 4). `report(record)` is the last lines of the round
+  report: `Fix:` and `Next:`, and on a check `Check of the fix · commit <short sha> · reviewers: <angles> · <found
+  nothing: clean | found <n>: asking you>` then `Findings: prloop.json fix_check.reviewers`. `summary(record)` is
+  the card's `prloop` field: `result`, `ended_by`, `reason` (null while the loop runs), `next`, `limit`, the round
+  count, and `fix_check` with its findings. `ask(record)`: none for `clean` or `converged`; for a check that found
+  something an `approve` ask, `{"type": "approve", "from": "prloop", "role": "pr", "reason": "fix_check", "commit",
+  "findings", "text"}`, the text saying how many things the check found in which commit and that nothing more is
+  fixed until the user decides; for any other stop an `answer` ask with the reason. `from` is `prloop`, never
+  `worker`, so a worker start or finish never closes it. `apply(store, card_id, record, by)` writes the `prloop`
+  field with `store.update`, then the ask with `store.update_checked` only when the card has no open ask (or
+  already this one); another open ask is kept and `apply` returns False, the summary still landing. It writes only
+  the card, in the data folder, so shadow mode allows it.
+- Not built here: the v2 PR loop runner that calls `decide` and starts the check reviewers (v2's `pr` role keeps
+  running v1's `/autopilot:pr-loop` until then), writing `prloop.json` from the worker's done path, and any merge.
+
 ## 7. Scheduling
 
 ### 7.1 The gate **[decided, from v1]**
@@ -941,8 +1019,11 @@ Calls the author made without asking (check them):
   `extends:`, checks), `form.py` (the form, the path language, `{field}` patterns and derived fields) and
   `engine.py` (read, fill, check, link and key, sort, card); scan sessions: `scan.py` (the plan, the brief, the
   save-raw hook and the take); review angles: `angles.py` (the three layers, kinds, globs and the picker,
-  design 6.1) with the built-in table in `review/angles.yaml` at the plugin root; for workers, `workers.py`,
-  `resources.py`, `transcripts.py` and `projects.py` (see the workers entry below); the local page:
+  design 6.1) with the built-in table in `review/angles.yaml` at the plugin root; how the PR loop ends:
+  `prloop.py` (the loop's record, the decision, the one check of the fix and the card's fields, design 6.3);
+  for workers, `workers.py`, `resources.py`, `transcripts.py` and `projects.py` (see the workers entry below);
+  access profiles: `profiles.py` (the store, the overlay and merge, `ap2 profile`; see the access profiles entry
+  below); the local page:
   `server.py` (the server, its JSON routes and the request guard, run by `ap2 serve`) and
   `builtin/page/local.html` (the one page, inline CSS and JS, found from `server.py`'s own path); and the
   phone page's data: `phone.py` (`build`, run by `ap2 phone build`). `ap2 config [--data PATH]` prints the
@@ -1420,7 +1501,8 @@ Calls the author made without asking (check them):
     card lacks, or holds as null or blank text, is an error (`BriefError`) naming every such field; a value must
     be text or a number. A filled value is not read again. Built-in briefs use only `{id}`, a field every
     stored card has, because `title` is optional. `{title}` fills the primary language's title
-    (`cards.title_for`), so a brief names the same words for a text or a per-language title.
+    (`cards.title_for`, so a per-language title without a primary slot fills its first non-blank slot), so a
+    brief names the same words for a text or a per-language title.
   - No added tools or permissions: a key that would widen a role is refused anywhere in the file (top level,
     a `roles` entry, a button), before any other check, with one error class `TemplateWidenError` naming the
     file, line and key. The keys, compared without letter case, `-`, `_` or spaces: `tools`, `tool`,
@@ -1488,9 +1570,9 @@ Calls the author made without asking (check them):
   - Routes, JSON in and out: `GET /` (the page), `GET /api/state` (mode, languages, lane counts, `running`, the
     projects with `done`/`total` from their children, the heartbeat, `usage: null` and the page's `url`),
     `GET /api/cards?lane=&kind=&parent=&q=&limit=` (`{total, cards}`, each a row: `id`, `title`
-    (`{<lang>: text}` for each configured language, a gap
-    filled from the primary language, or null when the card has none; the projects in `/api/state` too), `kind`,
-    `lane`,
+    (`{<lang>: text}` for each configured language, a gap filled as `cards.title_for` picks it (the primary language's
+    slot, else any other non-blank slot, the first in sorted key order), or null when no slot has words; the projects in
+    `/api/state` too), `kind`, `lane`,
     `pri`, `feed`, `parent`, `origin`, `ask_type`, `plain_where` per language, `updated_at`; lane order, then by
     `pri` and the newest change in Needs you, Running and Planned, History newest first; `q` goes through the
     store's search and the other filters apply to its result; a `q` over 500 characters or 50 words is 400, so a
@@ -1702,7 +1784,8 @@ Calls the author made without asking (check them):
     start or timed out), nothing starts: the `WorkerError` says to list them in `projects/<name>.yaml` `tools`. On a dead
     worker's resume that counts as its one resume; a parked worker is stopped as when its resume cannot start. An in-place resume first
     checks that the worker's folder is still there, so a gone worktree says "cannot start the session". The branch is the card's `branch`, else the pattern with the card's `key` (else its id) and the first
-    three words of its title in the primary language. The session gets them the way v1 passes setup:
+    three words of its title as `cards.title_for` picks it for the primary language (that slot, else any other
+    non-blank slot). The session gets them the way v1 passes setup:
     `--settings <run dir>/settings-<role>.json`
     (the permission floor: v1's outward-tool and Bash denials, plus `Edit` denials on the data folder's own files
     (including the user's `templates/**` and `sources/**`, the rules the worker floor in `roles.py` promises; every
@@ -1719,7 +1802,7 @@ Calls the author made without asking (check them):
     instructions to follow." A user template may fill a card field from a source into a brief (6), so the worker
     is told once, in its own instructions, how to read it. Each filled value is not quoted or fenced: the brief
     keeps the raw value, as the design's template example fills it.
-  - Session: `claude --bg -n "<card> · <role>" --permission-mode auto --settings ... [--agent ...] --effort xhigh`
+  - Session: `claude --bg -n "<card> · <role>" --permission-mode auto --settings ... [--agent ...] [--model <profile model>] --effort xhigh`
     (v1's defaults; the `pr` role runs `/autopilot:pr-loop` instead of an agent, until templates and roles define
     v2's own). A resume is `claude --bg --resume <id> -n ... --permission-mode ... --settings ... <prompt>`.
     The resume id comes from the card or the worker list, so it is checked first: letters, digits and `-`, not
@@ -1852,6 +1935,100 @@ Calls the author made without asking (check them):
     `ap2 worker list`, `start CARD ROLE [--cwd P] [--prompt-file F] [--needs A,B] [--resume]`,
     `end CARD ROLE [--transcripts P]`, `check [--transcripts P] [--usage P]`,
     `park CARD ROLE [--note T] [--usage P]`, `answer CARD TEXT...`, `finish CARD [--transcripts P]`.
+- **[decided by the builder]** Access profiles (slice 1 of the port of v1's access profiles): the store,
+  `ap2 profile`, and every worker start and resume on the active profile. Ported from v1's `lib/autopilot/profile.py`
+  into `lib/assistant/profiles.py`, never imported (v1's version writes v1's data folder). v1 and v2 keep separate
+  profiles, and later separate caps: v2 replaces v1.
+  - What a profile is. How a worker reaches Claude: the Claude subscription, or a Claude-compatible gateway reached
+    with a key command (`apiKeyHelper`), so a key is never written in any file. Fields (v1's schema): `name`,
+    `mode` (`subscription | gateway`), `label`, `model`, `dispatcher_model`, `small_model`, `effort`,
+    `daily_cap_usd`, `gateway {base_url, key_command, refresh_command, rotate_command, models_command}`, `env`,
+    `settings`. Names follow the profile rule (`profiles.PROFILE_NAME`: like a project name, plus `_`, 40 at most,
+    because a profile is often named after a gateway project such as `team_project`), not the project rule
+    (`projects.NAME`, unchanged). One rule serves `path`, `validate`, `names` and `active_name`, so a name `save`
+    accepts always loads, lists and becomes active (v1 once saved one it could not load).
+    - **[decided by the builder]** The error text is "lowercase letters, digits, - and _, starting with a letter
+      (40 at most)", the same in `validate` (`name: ...`) and `path` (`not a profile name: ...`), kept in
+      `profiles.NAME_RULE`.
+  - Where it is kept. Each profile is `<data>/profiles/<name>.json`, written with `store.write_json` (JSON, not
+    YAML, because code writes it, as with routines). The active name is `<data>/active-profile.json`
+    `{"name": ...}`; with no such file it is `subscription`. It is not a `config.yaml` key (those keys are pinned).
+    `profiles/` is made on the first save, so the data folder's layout (`datadir.FOLDERS`) is unchanged. A symlink
+    at `profiles/`, at a profile file or at `active-profile.json` is refused (an lstat check), with one line naming
+    the link (3.4). Nothing reads or writes v1's data folder.
+  - The built-in `subscription` profile always exists: `label: Subscription`, `model: null`, `effort: xhigh`
+    (`workers.EFFORT`). With no profiles stored, a worker's argv is exactly as before. A stored
+    `profiles/subscription.json` replaces it. There is no migration.
+  - No silent fallback. A missing or broken active profile (its file gone, unreadable, or failing the checks
+    below, or a broken `active-profile.json`) raises `ProfileError`, a `ConfigError`, so `ap2` prints one line and
+    exits 1. The line names the file and the fix: `ap2 profile list`, then `ap2 profile use <name>`. No worker
+    starts or resumes: a `check` notes it on the worker's line and resumes nothing (a dead worker's one resume is
+    not used up).
+  - Checks (v1's): a gateway needs `base_url` (http or https), `key_command`, `small_model` and
+    `daily_cap_usd > 0`; `settings` may not hold `permissions`, `hooks`, `apiKeyHelper` or `disableAllHooks`; `env`
+    and `settings.env` may not hold a credential-looking name (`KEY`, `TOKEN`, `SECRET`, `PASSWORD`), a name the
+    overlay sets or blanks, a cloud-provider switch, or (v2's addition) any `AP2_*` or `AUTOPILOT_*` name. On save,
+    `gateway.models_command` runs (`shell=True`, 30 s) and every model the profile names must be in the JSON list it
+    prints; its output is only parsed, never printed or kept. A list holding anything but texts is refused with the
+    same "must print a JSON list of model names" line. A model (`model`, `dispatcher_model` or `small_model`) may
+    end in `[1m]` (`profiles.LONG_CONTEXT`, Claude Code's marker for the 1M context window): it is checked without
+    the marker (`profiles.base_model` strips one trailing `[1m]`, nothing else), and stored and passed with it, to
+    `--model` and `ANTHROPIC_MODEL` alike.
+    - **[decided by the builder]** `small_model` may end in `[1m]` too (the same check for all three fields, as in
+      v1), and only the exact lowercase `[1m]` is stripped: `[2m]` or `[1M]` must be listed as written.
+    - **[decided by the builder]** The `[1m]` launch check sits in `tests/test_ap2_profiles.py` and imports `opt`
+      from `tests.test_ap2_profile_launch` inside the test (a top-level import would be circular: that module imports
+      this one).
+  - Overlay and merge (v1's, with `AP2_PROFILE` for `AUTOPILOT_PROFILE`). `overlay(p)` is the settings a profile
+    owns, never `permissions` or `hooks`. The subscription blanks `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`,
+    `ANTHROPIC_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL` and `ANTHROPIC_API_KEY`, and
+    these blanks win over the profile's own env, so a worker bills the subscription even when the shared
+    background daemon carries gateway variables. A gateway sets `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL` (`""` with
+    no model), `ANTHROPIC_SMALL_FAST_MODEL` and `ANTHROPIC_DEFAULT_HAIKU_MODEL` to `small_model`,
+    `ENABLE_TOOL_SEARCH=true` and `apiKeyHelper = key_command`, and blanks `ANTHROPIC_AUTH_TOKEN` and
+    `ANTHROPIC_API_KEY` (they outrank the helper). Both modes blank `CLAUDE_CODE_USE_BEDROCK`,
+    `CLAUDE_CODE_USE_VERTEX` and `CLAUDE_CODE_USE_FOUNDRY` last. `merge(floor, overlay)` keeps the floor's
+    `permissions`, `hooks` and `AP2_*` variables (all but `AP2_PROFILE`), which win; the rest comes from the
+    overlay. `workers.floor(..., profile)` returns that merge, so the deny list, the allow list and the hooks are
+    exactly what a subscription start gets. `AP2_PROFILE` is in `_env`, so it is in the process env and the
+    settings env alike.
+  - When a profile is read. Once per start or resume, before it is planned: `start` (a fresh start, `--resume`,
+    `answer`) and an in-place resume of a dead or parked worker (`_plan_resume`) each take the active profile at
+    that moment. Its name is kept on the worker record (`profile`) and on the card's `sessions.<role>.profile`.
+    `ap2 profile use` rewrites no settings file: v2 writes each worker's floor at its own launch, so a running
+    worker keeps its profile (design of the access profiles, 7) and only its next start or resume moves.
+  - Model and effort. A fresh start gets `--model <profile model>` when the profile has one and
+    `--effort <profile effort>` when it has one, after `--agent`. A resume gets neither (8.2): a resumed gateway
+    session takes its model from the overlay's `ANTHROPIC_MODEL`.
+  - Tool discovery runs with the profile's settings. `_discover(cwd, env, settings)` passes
+    `--settings <run dir>/settings-discover-<role>.json`, which holds the overlay only, no `permissions` or
+    `hooks`: a probe under the deny floor would not list the denied tools. When the active profile is not the page
+    profile (by name; a gateway always), a second probe runs with the page profile's overlay
+    (`settings-discover-<role>-page.json`), and the floor denies the outward tools and not-connected servers either
+    probe found: a gateway session never sees the claude.ai connectors. On the subscription, one probe. Both run
+    outside the worker list's lock; either failing fails the start. A project that lists `tools` runs no probe.
+    The discovery files are covered by the existing `sessions/**/settings-*.json` Edit denial.
+  - Page sessions. `profiles.page_profile()` is always the subscription profile: claude.ai tools cannot be used
+    through a gateway (the access profiles design, 11). This slice uses it for the second probe; every later
+    dispatcher, scan, answer-read or refresh launch uses it too, with a generated `--settings`. No launch point
+    may skip `--settings`: a test walks every function in `lib/assistant/` and fails one that holds `--bg` or `-p`
+    without `--settings`.
+  - Workers cannot edit the profiles: `profiles/**` and `active-profile.json` are in `PROTECTED`, so every worker
+    floor Edit-denies them.
+  - Commands, each with `--data PATH`, JSON on stdout, one `ap2: ...` line and exit 1 on an error:
+    `ap2 profile list` (`{active, active_error, profiles}`; it works with a broken active profile, since it is the
+    fix), `show NAME` (the profile: its commands, never a key), `add NAME --subscription|--gateway [--base-url U]
+    [--key-command C] [--refresh-command C] [--rotate-command C] [--models-command C] [--daily-cap N] [--label L]
+    [--model M] [--dispatcher-model M] [--small-model M] [--effort E] [--env K=V ...] [--settings-file F]`,
+    `use NAME` (prints `{"active": new, "was": old}`, so `ap2 profile use <was>` undoes it) and `remove NAME`
+    (refuses `subscription` and the active profile, and refuses any name while active-profile.json exists but holds no
+    name at all: unreadable, bad JSON or no string `name`). `add` refuses a name that exists (`subscription` included)
+    and the gateway flags on a `--subscription` profile, and prints the saved profile. `list` and `show` create
+    nothing; `add`, `use` and `remove` write only inside the data folder, so they work in shadow mode.
+  - Not in this slice: the spend ledger, the daily cap and its card, key health, refresh and rotation (`rotate`),
+    and the page's badge and switch. Until the cap lands, a gateway worker has no daily cap: acceptable because v2
+    is not installed and runs no unattended loop, and workers start only in live mode, by hand. Until then a
+    gateway worker still parks at the subscription's park line (it stops work, never spends more).
 - **[decided by the builder]** v1 import (10, 11 question 5), read-only, in `importv1.py`.
   - Command: `ap2 import-v1 [--data PATH] [--from DIR] [--project NAME ...] [--dry-run]`. `--from` defaults to
     v1's own data root (`AUTOPILOT_DATA`, else `~/.claude/autopilot-data`, v1's `paths.data_root()`). A project is
@@ -1868,8 +2045,9 @@ Calls the author made without asking (check them):
     `state.load` or `mutate` (they take a lock file inside v1's folder). Nothing is created or changed under
     `--from`.
   - Cards (feed `v1-import`, audit `by: v1-import`, each with `project: <name>`): a `project` card
-    (`key: v1:<name>`, title the name, `lane: done` when the project has tasks and every one is `done` or
-    `skipped`, else `running`; `source.record` keeps `repo`, `branch_pattern`, `branch_prefix` and the folder); a
+    (`key: v1:<name>`, title the name in each configured language, `lane: done` when the project has tasks and
+    every one is `done` or `skipped`, else `running`; `source.record` keeps `repo`, `branch_pattern`,
+    `branch_prefix` and the folder); a
     `code` card per task under it (`key: v1:<name>:<task id>`, `status` v1's, lanes `todo` -> planned,
     `in_progress`/`in_review` -> running, `blocked` -> needs, `done`/`skipped` -> done; `P1` when `critical`, else
     `P2`; `origin: found` when v1's is, else `source`; `source.record` keeps `pr`, `branch`, `depends_on`,
@@ -1884,10 +2062,31 @@ Calls the author made without asking (check them):
     (1,000) characters is shown as its key, before it is parsed; a template with a format spec, conversion, index
     or attribute, one that does not parse, or one that would fill past `MAX_LABEL` characters, is shown as
     written) from the package's `templates/labels.<lang>.json` with the v1 folder's `labels.<lang>.json` on top
-    (where v1 keeps its page translations), falling back to `en`, then to the key. `title` is the primary
-    language's text. Plain words come from fixed phrases (`importv1.PHRASES`, `en` and `zh`): `what` is the title,
-    `where` names the project (and task, with its v1 status), `do` says it is a read-only copy and to act on v1's
-    page. A configured language with no phrases is refused before anything is written.
+    (where v1 keeps its page translations), falling back to `en`, then to the key. `title` is one text per
+    configured language, each slot the same text as that language's `plain.what` (a v1 title empty or blank in one
+    language falls back as above, then to the task's or decision's id, so no slot is empty). Plain words come from
+    fixed phrases (`importv1.PHRASES`, `en` and `zh`): `what` is the title, `where` names the project (and task,
+    with its v1 status), `do` says it is a read-only copy and to act on v1's page. A configured language with no
+    phrases is refused before anything is written.
+  - **[decided by the builder]** The project card's title is the project name in every configured language's
+    slot (`{en: shop, zh: shop}`), the same words in each slot as code-made titles (not one text), so every card
+    the import writes has the same title shape.
+  - **[decided by the builder]** A closed question card's title is its old words, one slot per language: each slot is
+    the old card's `plain.what` text in that language, else its old title in that language, else in the primary
+    language, else any other non-blank slot (`cards.title_for`, so an old one-text title and an old object title
+    both work), else the decision id. It
+    equals the closed card's `plain.what`. In a language no longer configured, a closed question card keeps the old
+    card's `what` (so its title) and `where` words (they cannot be made again from v1), so adding that language back
+    finds them; its `do` there is the closed phrase, not the old one.
+  - **[decided by the builder]** A card an older import wrote with a one-text title is moved to the per-language
+    title by the next run, when that run still makes or closes it (`title` is one of the fields a re-run updates:
+    `action: update`, its `id`, `parent` and audit history kept), and is `unchanged` on the run after that. A
+    question card that was already closed and whose decision has left state.json is closed again once for this: its
+    title changes, and so do its plain words in a language added since (filled in as for any closed card); the run
+    after that leaves it out of the report, as any such card. One whose settled decision is still in state.json is
+    made from it like any other card (`update` once, then `unchanged`). A task card whose task left v1, and the cards
+    of a project gone from v1, are not made by the run any more and keep the title they had (as a card never removed
+    keeps its other fields). No separate migration step.
   - Re-run: the same key (among this feed's cards) updates `title`, `plain`, `lane`, `status`, `ask` and
     `source` when they changed, and leaves the card alone when nothing did. A card is never removed (a task gone
     from v1 keeps its card). `--dry-run` writes nothing, not even the data folder's layout, and reports

@@ -433,8 +433,8 @@ class ListTest(ServerCase):
         self.assertEqual(server.row({"title": "T"}, langs)["title"], {"en": "T", "zh": "T"})
         self.assertEqual(server.row({"title": {"en": "E", "zh": "Z"}}, langs)["title"], {"en": "E", "zh": "Z"})
         self.assertEqual(server.row({"title": {"en": "E"}}, langs)["title"], {"en": "E", "zh": "E"})
-        self.assertEqual(server.row({"title": {"zh": "Z"}}, langs)["title"], {"en": None, "zh": "Z"})
-        for title in (None, 3, {}, {"ja": "J"}):
+        self.assertEqual(server.row({"title": {"zh": "Z"}}, langs)["title"], {"en": "Z", "zh": "Z"})
+        for title in (None, 3, {}, {"en": "", "zh": " "}, {"ja": 3}):
             with self.subTest(title=title):
                 self.assertIsNone(server.row({"title": title}, langs)["title"])
         self.assertIsNone(server.row({}, langs)["title"])
@@ -442,6 +442,20 @@ class ListTest(ServerCase):
             with self.subTest(title=title):
                 self.assertIsNone(server.row({"title": title}, langs)["title"])
         self.assertEqual(server.row({"title": {"ja": "J"}}, ("ja", "en"))["title"], {"ja": "J", "en": "J"})
+        self.assertEqual(server.row({"title": {"de": "D", "ja": "J"}}, ("ja", "en"))["title"], {"ja": "J", "en": "J"})
+
+    def test_titles_falls_back_to_any_non_blank_slot(self):
+        # A title with neither the viewer's nor the primary language (say the primary changed) still shows words.
+        card = {"title": {"ja": "再試行"}}
+        self.assertEqual(server.titles(card, ("en", "zh")), {"en": "再試行", "zh": "再試行"})
+        self.assertEqual(server.row(card, ("en", "zh"))["title"], {"en": "再試行", "zh": "再試行"})
+        self.assertEqual(server.titles({"title": {"ko": "b", "ja": "a"}}, ("en",)), {"en": "a"})
+        self.assertEqual(server.titles({"title": {"ko": "a", "ja": "b"}}, ("en",)), {"en": "b"})
+        self.assertEqual(server.titles({"title": {"en": "Retry", "ja": "x"}}, ("en", "zh")),
+                         {"en": "Retry", "zh": "Retry"})
+        self.assertEqual(server.titles({"title": {"en": "Retry", "de": "x"}}, ("en", "zh")),
+                         {"en": "Retry", "zh": "Retry"})
+        self.assertIsNone(server.titles({"title": {"ja": " "}}, ("en", "zh")))
 
     def test_state_projects_have_the_title_in_every_language(self):
         zh = Config(secondary_language="zh")
@@ -1119,11 +1133,14 @@ const out = [
   titleIn('One text from an older reply'),
   titleIn(null), titleIn(undefined), titleIn(''), titleIn('   '), titleIn({}), titleIn({ja: 'x'}), titleIn(3),
   titleIn(null, 'c-id'), titleIn({en: 'E'}, 'c-id'),
+  titleIn({en: '', zh: ' '}), titleIn({ko: 'b', ja: 'a'}), titleIn({ko: 'a', ja: 'b'}),
+  titleIn({en: 'Retry', ja: 'x'}), titleIn({ja: 3}, 'c-id'),
+  titleIn({en: 'Retry', de: 'x'}), titleIn(['', 'x']),
 ];
 S.lang = 'en';
 out.push(titleIn({en: 'Retry payments', zh: '重试付款'}), titleIn({zh: '只有中文'}));
 S.state = {primary_language: 'ja', languages: ['ja', 'en']};
-out.push(titleIn({ja: 'J'}));
+out.push(titleIn({ja: 'J'}), titleIn({de: 'D', ja: 'J'}));
 console.log(JSON.stringify(out));
 """
         out = subprocess.run(["node", "-e", js], capture_output=True, text=True, timeout=30)
@@ -1131,7 +1148,9 @@ console.log(JSON.stringify(out));
         self.assertEqual(json.loads(out.stdout), [
             "重试付款", "English only", "English only", "One text from an older reply",
             "[card.untitled]", "[card.untitled]", "[card.untitled]", "[card.untitled]", "[card.untitled]",
-            "[card.untitled]", "[card.untitled]", "c-id", "E", "Retry payments", "[card.untitled]", "J"])
+            "x", "[card.untitled]", "c-id", "E", "[card.untitled]", "a", "b",
+            "Retry", "c-id", "Retry", "[card.untitled]",
+            "Retry payments", "只有中文", "J", "J"])
 
     def test_the_pages_search_caps_match_the_servers(self):
         text = PAGE.read_text(encoding="utf-8")
