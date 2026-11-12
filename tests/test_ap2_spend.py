@@ -24,7 +24,7 @@ from unittest import mock
 from tests.helpers import ROOT
 from tests.test_ap2_profiles import gateway
 from tests.test_ap2_workers import FAKE, PROJECT, WorkerCase
-from assistant import profiles, spend, transcripts
+from assistant import cli, profiles, spend, transcripts
 
 FIX = ROOT / "tests" / "fixtures" / "spend"
 TZ = timezone(timedelta(hours=-5))
@@ -786,6 +786,221 @@ class SettleTest(SpendCase):
             self.settle()
 
 
+class _ReadSpy:
+    """A binary file that records the size each read asks for; it has no `__iter__`, so a read must name a size."""
+
+    def __init__(self, f, asks):
+        self.f, self.asks = f, asks
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return self.f.__exit__(*exc)
+
+    def fileno(self):
+        return self.f.fileno()
+
+    def read(self, n=-1):
+        self.asks.append(n)
+        return self.f.read(n)
+
+    def readline(self, n=-1):
+        self.asks.append(n)
+        return self.f.readline(n)
+
+
+class HardeningTest(SpendCase):
+    """Inputs a worker controls never break the ledger: a huge line or file, a folder it made unenterable, a sum
+    too big for a number."""
+
+    CAP = 4096
+
+    def patch(self, obj, name, value):
+        p = mock.patch.object(obj, name, value)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def spy(self):
+        asks, real = [], os.fdopen
+
+        def fdopen(fd, mode="r", *a, **kw):  # only a transcript's binary read is watched
+            f = real(fd, mode, *a, **kw)
+            return _ReadSpy(f, asks) if mode == "rb" else f
+        self.patch(spend.os, "fdopen", fdopen)
+        return asks
+
+    def line(self, rid, size=None):
+        """NEW as request `rid`; padded to `size` bytes with its newline (a priced line, were it parsed)."""
+        s = json.dumps(dict(NEW, requestId=rid))
+        if size is not None:
+            s = s[:-1] + ', "pad": "' + "x" * (size - len(s) - 12) + '"}'
+            self.assertEqual(len(s) + 1, size)
+        return s + "\n"
+
+    def write(self, *lines):
+        self.transcript.parent.mkdir(parents=True, exist_ok=True)
+        self.transcript.write_text("".join(lines))
+
+    def test_the_caps_are_the_values_the_design_names(self):
+        # The other tests patch the caps down; these are the real ones (16 MiB a line, 1 GiB a file).
+        self.assertEqual((spend.MAX_LINE_BYTES, spend.MAX_FILE_BYTES), (16 << 20, 1 << 30))
+
+    def test_a_line_over_the_cap_is_one_unknown_request_and_the_rest_keep_their_cost(self):
+        self.patch(spend, "MAX_LINE_BYTES", self.CAP)
+        self.write(self.line("req_a"), self.line("req_long", self.CAP + 1), self.line("req_b"))
+        items = spend._parse_file(self.transcript, spend.prices(self.data))
+        self.assertEqual([i["id"] for i in items], ["req_a", "~1", "req_b"])
+        self.assertEqual(items[1], {"id": "~1", "ts": None, "model": "", "usd": None})
+        self.assertEqual([round(i["usd"], 6) for i in (items[0], items[2])], [1.0, 1.0])
+        self.launch(at=TODAY_8)
+        t = self.totals()
+        self.assertAlmostEqual(t["month"], 2.0)
+        self.assertEqual((t["unknown"], t["unknown_today"]), (True, True))
+
+    def test_a_line_over_the_cap_still_counts_toward_the_line_numbers_after_it(self):
+        self.patch(spend, "MAX_LINE_BYTES", self.CAP)
+        bare = dict(NEW, message={k: v for k, v in NEW["message"].items() if k != "id"})
+        bare.pop("requestId", None)  # no request id and no message id: keyed by its line number
+        self.write(self.line("req_a"), self.line("req_long", self.CAP + 1), json.dumps(bare) + "\n")
+        items = spend._parse_file(self.transcript, spend.prices(self.data))
+        self.assertEqual([(i["id"], i["usd"] is None) for i in items], [("req_a", False), ("~1", True), ("~2", False)])
+
+    def test_a_line_at_the_cap_is_parsed_and_a_long_last_line_is_skipped(self):
+        self.patch(spend, "MAX_LINE_BYTES", self.CAP)
+        last = self.line("req_end", 3 * self.CAP + 7)[:-1]  # several chunks long, and no newline at the end
+        self.write(self.line("req_at", self.CAP), self.line("req_b"), last)
+        items = spend._parse_file(self.transcript, spend.prices(self.data))
+        self.assertEqual([i["id"] for i in items], ["req_at", "req_b", "~2"])
+        self.assertEqual([i["usd"] for i in items][2], None)
+        self.write(self.line("req_a"), self.line("req_at", self.CAP + 1)[:-1])  # exactly the cap, then the end of file
+        self.assertEqual([i["id"] for i in spend._parse_file(self.transcript, spend.prices(self.data))],
+                         ["req_a", "req_at"])
+
+    def test_no_read_asks_for_more_than_the_line_cap(self):
+        self.patch(spend, "MAX_LINE_BYTES", self.CAP)
+        asks = self.spy()
+        self.write(self.line("req_a"), self.line("req_long", 5 * self.CAP), self.line("req_b"))
+        items = spend._parse_file(self.transcript, spend.prices(self.data))
+        self.assertEqual([i["id"] for i in items], ["req_a", "~1", "req_b"])
+        self.assertTrue(asks)
+        self.assertTrue(all(isinstance(n, int) and 0 < n <= self.CAP for n in asks), asks)
+
+    def test_a_file_over_the_size_cap_is_not_read_and_is_unknown(self):
+        self.patch(spend, "MAX_FILE_BYTES", 1 << 20)
+        self.write(self.line("req_a"))
+        os.truncate(self.transcript, (1 << 20) + 1)  # sparse: a hole after the line
+        asks = self.spy()
+        self.assertEqual(self.costs(), [{"day": None, "model": "", "usd": None}])
+        self.assertEqual(asks, [])  # not read at all
+        self.launch(at=TODAY_8)
+        t = self.totals()
+        self.assertEqual((t["month"], t["unknown"], t["unknown_today"]), (0.0, True, True))
+        self.assertEqual(t["unknown_models"], ["an unnamed model"])
+
+    def test_a_line_separator_inside_a_json_string_keeps_its_line(self):
+        said = dict(NEW, message=dict(NEW["message"], content=[{"type": "text", "text": "a\u2028b\x85c"}]))
+        self.write(json.dumps(said, ensure_ascii=False) + "\n")
+        self.assertEqual([round(i["usd"], 6) for i in self.costs()], [1.0])
+
+    def test_reading_past_the_file_cap_stops_with_one_unknown(self):
+        f = io.BytesIO(b"a\n" * 10)  # a file that grew after its size was checked
+        self.assertEqual(list(spend._lines(f, 8, 7)), [(0, b"a\n"), (1, b"a\n"), (2, b"a\n"), (None, None)])
+        self.assertEqual(list(spend._lines(io.BytesIO(b"a\n" + b"x" * 30), 8, 1000)), [(0, b"a\n"), (1, None)])
+        f = io.BytesIO(b"x" * 100)  # one long line: skipping it stops once the cap is passed
+        self.assertEqual(list(spend._lines(f, 8, 20)), [(None, None)])
+        self.assertEqual(f.tell(), 24)
+        f = io.BytesIO(b"x" * 100)  # the skip reaches the cap exactly at a chunk's end: still one unknown
+        self.assertEqual(list(spend._lines(f, 8, 16)), [(None, None)])
+        self.assertEqual(f.tell(), 24)
+        # exactly the cap is still read
+        self.assertEqual(list(spend._lines(io.BytesIO(b"a\n" * 4), 8, 8)), [(i, b"a\n") for i in range(4)])
+
+    def test_a_file_that_grows_past_the_cap_keeps_the_requests_read_before_it(self):
+        self.write(self.line("req_a"), self.line("req_b"))
+        table = spend.prices(self.data)
+        self.patch(spend, "MAX_FILE_BYTES", len(self.line("req_a")) + 1)  # the cap falls inside the second line
+        real = os.fstat
+
+        def fstat(fd):  # the size check sees a tiny file, as if the file grew after it was checked
+            st = list(real(fd))
+            st[6] = 1
+            return os.stat_result(st)
+        self.patch(spend.os, "fstat", fstat)
+        items = spend._parse_file(self.transcript, table)
+        self.assertEqual([i["id"] for i in items], ["req_a", "~file"])
+        self.assertEqual(round(items[0]["usd"], 6), 1.0)
+        self.assertIsNone(items[1]["usd"])
+
+    def test_a_file_exactly_at_the_size_cap_is_read(self):
+        self.patch(spend, "MAX_FILE_BYTES", 1 << 20)
+        self.write(self.line("req_a"))
+        os.truncate(self.transcript, 1 << 20)  # the zero-filled rest is one broken line, skipped
+        items = spend._parse_file(self.transcript, spend.prices(self.data))
+        self.assertEqual([i["id"] for i in items], ["req_a"])
+
+    def unenterable(self, d):
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            self.skipTest("root enters any folder")
+        mode = d.stat().st_mode & 0o7777
+        d.chmod(0o600)
+        self.addCleanup(d.chmod, mode)  # runs before the temp folder's removal
+
+    def test_an_unenterable_transcript_folder_is_a_missing_transcript(self):
+        self.put()
+        self.launch()
+        self.assertAlmostEqual(self.totals()["month"], STREAMING_USD)  # the cache now holds the file
+        self.unenterable(self.transcript.parent)
+        t = self.totals()
+        self.assertEqual((t["month"], t["unknown"]), (0.0, True))
+        self.assertNotIn(str(self.transcript), self.cache()["files"])
+        row = self.settle(session_id=SID)
+        self.assertIs(row["unsettled"], True)
+        self.assertIs(self.rows("settled.jsonl")[-1]["unsettled"], True)
+
+    def test_a_subagent_file_that_cannot_be_checked_is_left_out(self):
+        self.put(sub="subagent.jsonl")
+        self.unenterable(self.transcript.parent / SID / "subagents")
+        self.assertEqual(spend._files(self.transcript), [self.transcript])
+        self.launch()
+        self.assertAlmostEqual(self.totals()["month"], STREAMING_USD)
+        self.assertEqual(sorted(self.settle(session_id=SID)["reqs"]), ["req_1"])
+
+    def test_a_subagents_folder_that_cannot_be_listed_leaves_only_the_main_transcript(self):
+        # Some Python versions let `glob` raise on an unreadable folder instead of skipping it.
+        self.put(sub="subagent.jsonl")
+        with mock.patch.object(Path, "glob", side_effect=PermissionError("denied")):
+            self.assertEqual(spend._files(self.transcript), [self.transcript])
+
+    def test_a_sum_too_big_for_a_number_is_clamped_and_unknown(self):
+        self.write(self.line("req_a"), self.line("req_b"))
+        self.launch(at=TODAY_8)
+        with mock.patch.object(spend, "_cost", return_value=sys.float_info.max):
+            t = self.totals()
+        for k in ("today", "week", "month"):
+            self.assertEqual(t[k], sys.float_info.max, k)
+        self.assertEqual((t["unknown"], t["unknown_today"]), (True, True))
+        json.loads(json.dumps(t), parse_constant=_no_constant)
+
+    def test_a_week_too_big_for_a_number_is_unknown_but_not_today(self):
+        old = dict(NEW, requestId="req_old", timestamp="2026-11-10T15:00:00Z")  # Tuesday
+        self.write(json.dumps(old) + "\n", self.line("req_c"))
+        self.launch()
+        fake = {"req_old": sys.float_info.max, "req_c": sys.float_info.max}
+        real = spend._parse_file
+
+        def parse(path, table):
+            return [dict(it, usd=fake.get(it["id"], it["usd"])) for it in real(path, table)]
+        with mock.patch.object(spend, "_parse_file", parse):
+            t = self.totals(NOW + timedelta(days=1))  # Thursday: Tuesday plus Wednesday overflows the week
+        self.assertEqual(t["week"], sys.float_info.max)
+        self.assertEqual((t["unknown"], t["unknown_today"], t["today"]), (True, False, 0.0))
+
+
+def _no_constant(name):
+    raise ValueError(f"not JSON: {name}")
+
+
 # -- 6. cache and the ledger's folder -------------------------------------------------------------------------------
 
 class LedgerTest(SpendCase):
@@ -1119,6 +1334,63 @@ class SpendCliTest(unittest.TestCase):
         self.assertEqual(r.stdout, "")
         self.assertEqual(len(r.stderr.splitlines()), 1, r.stderr)
         self.assertTrue(r.stderr.startswith("ap2: "), r.stderr)
+
+    def main(self, *args):
+        """`ap2 spend` in this process (so a test can patch the ledger), with no `claude` on PATH."""
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch("shutil.which", return_value=None), contextlib.redirect_stdout(out), \
+                contextlib.redirect_stderr(err):
+            code = cli.main(["spend", "--data", str(self.data), "--transcripts", str(self.projects), *args])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_a_transcript_error_names_the_transcripts_folder(self):
+        self.session()
+        bad = PermissionError(13, "Permission denied", str(self.projects / "-tmp-x" / f"{SID}.jsonl"))
+        with mock.patch.object(spend, "totals", side_effect=bad):
+            code, out, err = self.main()
+        self.assertEqual((code, out), (1, ""))
+        self.assertEqual(len(err.splitlines()), 1, err)
+        self.assertTrue(err.startswith(f"ap2: cannot read the transcripts in {self.projects}: "), err)
+        self.assertNotIn("spend ledger", err)
+
+    def test_a_ledger_error_names_the_ledger_and_any_other_error_names_both(self):
+        for name, says, not_says in ((str(self.data / "spend" / "cache.json"), "spend ledger", "transcripts"),
+                                     (None, "transcripts", None), ("/elsewhere/x.jsonl", "transcripts", None)):
+            bad = OSError(5, "Input/output error", name) if name else OSError("disk gone")
+            with mock.patch.object(spend, "totals", side_effect=bad):
+                code, out, err = self.main()
+            self.assertEqual((code, out, len(err.splitlines())), (1, "", 1), err)
+            self.assertTrue(err.startswith("ap2: cannot "), err)
+            self.assertIn(says, err)
+            self.assertIn(str(self.data / "spend"), err)
+            if not_says:
+                self.assertNotIn(not_says, err)
+            else:
+                self.assertIn(str(self.projects), err)
+
+    def test_an_unenterable_transcript_folder_is_not_an_error(self):
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            self.skipTest("root enters any folder")
+        self.session()
+        d = self.projects / "-tmp-x"
+        d.chmod(0o600)
+        self.addCleanup(d.chmod, 0o700)
+        r = self.ap2("--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = json.loads(r.stdout)
+        self.assertEqual((out["today"], out["unknown"]), (0.0, False))  # launched a minute ago: in its grace
+
+    def test_spend_json_with_a_sum_too_big_for_a_number_is_valid_json(self):
+        self.session()
+        line = dict(NEW, requestId="req_d", timestamp=(datetime.now(self.tz) - timedelta(seconds=4)).isoformat())
+        with open(self.projects / "-tmp-x" / f"{SID}.jsonl", "a") as f:
+            f.write(json.dumps(line) + "\n")
+        with mock.patch.object(spend, "_cost", return_value=sys.float_info.max):
+            code, out, err = self.main("--json")
+        self.assertEqual((code, err), (0, ""))
+        t = json.loads(out, parse_constant=_no_constant)
+        self.assertEqual(max(t["today"], t["week"], t["month"]), sys.float_info.max)  # local time: one of them
+        self.assertIs(t["unknown"], True)
 
     def test_usage_lists_spend(self):
         r = subprocess.run([sys.executable, str(ROOT / "bin" / "ap2"), "--help"], capture_output=True, text=True,
