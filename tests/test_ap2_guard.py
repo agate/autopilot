@@ -1210,7 +1210,7 @@ class DecideTest(unittest.TestCase):
         # judged as one of its own. The command of their line holds them as the input it may read.
         self.assertEqual([type(s) for s in segs],
                          [guard._Piped, guard._Body, guard._Body, guard._Body, guard._Script, str])
-        self.assertEqual(segs[0].bodies, ("a", "b", "E"))
+        self.assertEqual(segs[0].bodies, (("a", "b", "E"),))  # one shared chunk per heredoc line
         self.assertFalse([s for s in guard._segments("cat <<'E'\na\nE\nz") if isinstance(s, guard._Script)])
 
     def test_an_unquoted_heredoc_body_runs_its_substitutions_across_lines(self):
@@ -1695,6 +1695,97 @@ class DecideTest(unittest.TestCase):
         self.check([f"git commit -qm 'fix(v2): call run_ap2() once per card' && {PKG}/bin/ap2 card note C1 --text "
                     "done --data $AP2_DATA"], deny=False)
 
+    def test_data_flowing_from_a_guarded_path_into_a_writer_is_a_write(self):
+        """A group, a loop, a subshell or a substitution that lists a guarded path feeds the command after it as a
+        pipe does: into `xargs`, into a shell that reads its script from its input, or as the words of the command
+        around the substitution."""
+        rm = "r" + "m"
+        # A `{ ...; }` group, a loop, an `if`, a subshell and a substitution piped into `xargs`.
+        self.check([f"{{ ls {DATA}/items; }} | xargs touch",
+                    f"for f in {DATA}/items/*; do echo $f; done | xargs touch",
+                    f"echo $(ls {DATA}/items) | xargs touch",
+                    f"( ls {DATA}/items ) | xargs touch",
+                    f"(ls {DATA}/items; true) | xargs touch",
+                    f"if true; then ls {DATA}/items; fi | xargs touch",
+                    f"ls {DATA}/items | {{ cat; }} | xargs touch",
+                    f"{{ {{ ls {DATA}/items; }}; }} 2>/dev/null | xargs touch",
+                    f"echo `ls {DATA}/items` | xargs touch"], deny=True)
+        # A substitution that lists a guarded path gives its output as the words of a writer.
+        self.check([f"{rm} $(find {DATA}/items -name x)",
+                    f"{rm} `find {DATA}/items -name x`",
+                    f"chmod 600 $(find {DATA}/items -name x)",
+                    f"{rm} -f $(find {DATA} -name '*.lock')",
+                    f"{rm} $(find $AP2_DATA -name '*.lock')",
+                    f"{rm} \"$(find {DATA}/items -name x)\"",
+                    f"{rm} $(ls -d {DATA}/items/*)",
+                    f"{rm} $(echo $(ls {DATA}/items))",
+                    f"{rm} $(for f in {DATA}/items/*; do echo $f; done)",
+                    f"echo \"of={DATA}/x\" > /tmp/o; dd if=/dev/zero $(echo of={DATA}/x)"], deny=True)
+        self.check([f"{rm} $(find $AP2_RUN_DIR -name '*.tmp')",
+                    f"wc -l $(ls {DATA}) > $AP2_RUN_DIR/n",
+                    f"cat $(ls {DATA}/items/*.yaml) | head",
+                    f"echo \"$(ls {DATA}/items | wc -l) items\" >> $AP2_RUN_DIR/journal.md",
+                    f"grep -c x $(find {DATA}/items -name '*.yaml') > $AP2_RUN_DIR/counts.txt",
+                    f"dd if=$(ls {DATA}/items/C1.yaml) bs=1 count=10"], deny=False)
+        # A pipeline into a shell that reads its script from its input: one segment names a guarded path, one holds
+        # a write verb.
+        self.check([f"find {DATA}/items -name x | sed 's/^/{rm} /' | sh",
+                    f"find {DATA}/items -name x | awk '{{print \"{rm}\", $0}}' | sh",
+                    f"find {DATA}/items -name x | sed 's/^/{rm} /' | zsh",
+                    f"find {DATA}/items -name x | sed 's/^/{rm} /' | bash",
+                    f"find {DATA}/items -name x | sed 's/^/{rm} /' | sh -s",
+                    f"ls -d {DATA}/items/* | sed 's/^/touch /' | bash"], deny=True)
+        self.check([f"ls {DATA}/items | sed 's/^/wc -l /' | sh",
+                    f"find $AP2_RUN_DIR -name '*.tmp' | sed 's/^/{rm} /' | sh"], deny=False)
+        # `xargs` as any word of its segment (a runner the guard does not know before it, quotes removed), and
+        # inside a compound the pipe feeds.
+        self.check([f"find {DATA}/items -name x | timeout 5 xargs {rm}",
+                    f"find {DATA}/items -name x | caffeinate xargs {rm}",
+                    f"find {DATA}/items -name x | exec xargs {rm}",
+                    f"find {DATA}/items -name x | if true; then xargs {rm}; fi",
+                    f"find {DATA}/items -name x | while true; do xargs {rm}; done",
+                    f"find {DATA}/items -name x | {{ true; xargs {rm}; }}",
+                    f"find {DATA}/items -name x | xa''rgs {rm}",
+                    f"find {DATA}/items -name x | sudo xargs {rm}",
+                    f"find {DATA}/items -name x | stdbuf -o0 xargs {rm}",
+                    f"find {DATA} -name '*.tmp' | ${{SUDO}} xargs {rm}"], deny=True)
+        # Only an `xargs` in the compound reads the pipe here: a `find` inside the loop reads no input.
+        self.check([f"ls {DATA}/items | while read f; do find $AP2_RUN_DIR -name \"$f.tmp\" | xargs {rm}; done"],
+                   deny=False)
+        # The verb of an `xargs` segment is read with its redirects aside, also once its `$NAME`s are taken out.
+        self.check([f"find {DATA}/items -name '*.yaml' | xargs grep -l stale > $AP2_RUN_DIR/to-rm.txt",
+                    f"ls {DATA}/items | xargs -n1 basename > $AP2_RUN_DIR/rm-list.txt",
+                    f"ls {DATA}/items | xargs wc -l > $AP2_RUN_DIR/install-sizes.txt",
+                    f"ls {DATA}/items | xargs wc -l 2> $AP2_RUN_DIR/cp-errors.log",
+                    f"ls {DATA}/items | xargs -n1 basename > ${{AP2_RUN_DIR}}/rm-list.txt",
+                    f"ls {DATA}/items | xargs grep -l \"$PAT\" > {RUN}/rm-list.txt",
+                    f"rg -l stale {DATA}/items | xargs -n1 basename > \"$AP2_RUN_DIR\"/cp-plan.txt",
+                    f"ls {DATA}/items | xargs -n1 basename > /tmp/mv-plan.txt"], deny=False)
+        # A heredoc's body goes to the segment that holds its `<<` (and its pipe successors), or to its whole line
+        # when that segment closes a compound.
+        self.check([f"cat > $AP2_RUN_DIR/notes.md <<'EOF' && find $AP2_RUN_DIR -name '*.tmp' | xargs {rm} -f\n"
+                    f"Read {DATA}/config.yaml and {DATA}/items/C1.yaml\nEOF",
+                    f"find build -name '*.o' | xargs {rm} -f && cat > $AP2_RUN_DIR/notes.md <<'EOF'\n"
+                    f"checked {DATA}/config.yaml\nEOF"], deny=False)
+        self.check([f"cd /tmp && xargs touch <<'X'\n{DATA}/config.yaml\nX",
+                    f"true; xargs {rm} <<'X'\n{DATA}/config.yaml\nX",
+                    f"{{ ls; xargs {rm}; }} <<EOF\n{DATA}/config.yaml\nEOF",
+                    f"cat <<'X' | sed 's/^/{rm} /' | sh\n{DATA}/config.yaml\nX"], deny=True)
+        # The bodies are one shared chunk; a `((` read again as two subshells takes back what it gave earlier
+        # segments, so they get each chunk once.
+        segs = guard._segments("x | ((:$(} <<B\ny\nB\n) ) )")
+        self.assertEqual([s.bodies for s in segs[:2]], [(("y", "B"),), (("y", "B"),)])
+        self.assertIs(segs[0].bodies[0], segs[1].bodies[0])
+        # macOS sed edits in place with `-I` too.
+        self.check([f"echo \"-I .bak s/a/b/ {DATA}/config.yaml\" | xargs sed"], deny=True)
+        # A pipeline ends at a newline after a command: the next line's `xargs` reads nothing of it.
+        self.check([f"ls {DATA}/items | wc -l\nfind $AP2_RUN_DIR -name '*.tmp' | xargs {rm}"], deny=False)
+        # A reading `sed`, the package's own `ap2` as the source, and a `dd` with only an `if=`.
+        self.check([f"rg -l TODO {DATA}/items | xargs sed -n 1p",
+                    f"find {DATA}/items -print0 | xargs -0 sed -n 1p",
+                    f"{PKG}/bin/ap2 card list | xargs -I% touch $AP2_RUN_DIR/%.seen",
+                    f"ls {DATA}/items | xargs -I% dd if={DATA}/items/% bs=1 count=10"], deny=False)
+
     def test_each_run_directory_mention_in_a_word_is_judged_on_its_own(self):
         """A quoted journal line can name the run directory twice: each mention that stays inside it is fine, and a
         later one that leaves it is still denied."""
@@ -1962,7 +2053,27 @@ class DecideTest(unittest.TestCase):
                   "xargs sed": "ls $AP2_DATA | " + "xargs sed -n p | " * ((size - 30) // 17) + "xargs cat",
                   "xargs heredocs": ("xargs wc <<E | " * ((size - 20) // 30) + "xargs rm\n"
                                      + "$AP2_DATA/a\n" * ((size - 20) // 30) + "E\n"),
-                  "xargs |\\n": "ls $AP2_DATA |\n" * ((size - 10) // 15) + "xargs wc"}
+                  "xargs |\\n": "ls $AP2_DATA |\n" * ((size - 10) // 15) + "xargs wc",
+                  # A heredoc inside a `((` read again as two subshells, after a long pipeline into `xargs` (its
+                  # bodies were copied to each segment, again on each reading: quadratic), and with a closer
+                  # holding it (the whole line gets the bodies).
+                  "xargs (( heredoc": ("x|" * (size // 4) + "xargs wc ((:$(cat<<B\n" + "y\n" * (size // 4 - 20)
+                                       + "B\n) ) )"),
+                  "xargs (( heredoc }": ("x|" * (size // 4) + "xargs wc ((:$(} <<B\n" + "y\n" * (size // 4 - 20)
+                                         + "B\n) ) )"),
+                  "} <<": "x | " * (size // 8) + "} <<B\n" + "y\n" * (size // 4 - 10) + "B\n",
+                  # Compounds and substitutions that feed a command: groups, loops, subshells, nested ones, a
+                  # compound in a pipe, writers of substitutions, a pipeline into a shell.
+                  "{ } | xargs": fill("{ ls $AP2_DATA; } | ") + " | xargs rm",
+                  "{ nested": "{ " * (size // 6) + "ls $AP2_DATA" + "; }" * (size // 6 - 10) + " | xargs wc",
+                  "( nested": "( " * (size // 4) + "ls $AP2_DATA" + " )" * (size // 4 - 10) + " | xargs wc",
+                  "(; nested": "(a; " * (size // 6) + "ls" + ")" * (size // 6) + " | xargs wc",
+                  "for nested": "for f in a; do " * (size // 22) + "ls" + "; done" * (size // 22) + " | xargs wc",
+                  "if | then": "ls $AP2_DATA | if true; then " * (size // 34) + "xargs wc" + "; fi" * (size // 34),
+                  "$( writer nested": "touch" + " $(" * (size // 6) + "ls $AP2_RUN_DIR" + ")" * (size // 6),
+                  "$( writer": fill("touch $(ls $AP2_RUN_DIR) "), "` writer": fill("touch `ls $AP2_RUN_DIR` "),
+                  "| sed | sh": fill("ls $AP2_DATA | sed s/a/b/ | ") + " sh",
+                  "(( groups": fill("( ((x) ) "), "xargs words": "ls $AP2_DATA | " + "a xargs " * (size // 9)}
         # The slowest shapes (a shell's script read again in both `$$(` readings, about 0.3 s here) get a bound a
         # few times their time (1 s), so a slowdown of that much is seen well before the 2 s deadline; the rest
         # keep 2 s.
