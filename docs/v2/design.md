@@ -2118,9 +2118,9 @@ Calls the author made without asking (check them):
       - Bounded reads. A transcript is read one `\n` line at a time, each read asking for at most
         `MAX_LINE_BYTES` (16 MiB, the newline counted). A longer line is skipped to its end in chunks of that size,
         never held, and is one unknown request (key `~<line number>`). A file whose size is over `MAX_FILE_BYTES`
-        (1 GiB) is not read at all and is one unknown request (`~file`); so is a file that grows past it while it
-        is read. Unknown, never $0. Lines split at `\n` only (JSONL), so a raw U+2028 inside a JSON string no
-        longer splits that line.
+        (1 GiB) is not read at all and is one unknown request (`~file`). A file that grows past it while it is read
+        stops there: the requests read so far count, plus one unknown request (`~file`). Unknown, never $0. Lines
+        split at `\n` only (JSONL), so a raw U+2028 inside a JSON string no longer splits that line.
       - A transcript that cannot be checked is missing. An `OSError` from `transcripts.find` (a project folder
         made unenterable) means no transcript: unknown spend past the grace, and `settle` writes an `unsettled`
         row. A subagent file that cannot be checked is left out, and a cached file that cannot be checked is

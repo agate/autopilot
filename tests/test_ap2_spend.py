@@ -861,7 +861,7 @@ class HardeningTest(SpendCase):
         items = spend._parse_file(self.transcript, spend.prices(self.data))
         self.assertEqual([i["id"] for i in items], ["req_at", "req_b", "~2"])
         self.assertEqual([i["usd"] for i in items][2], None)
-        self.write(self.line("req_a"), self.line("req_at", self.CAP)[:-1])  # exactly the cap, then the end of file
+        self.write(self.line("req_a"), self.line("req_at", self.CAP + 1)[:-1])  # exactly the cap, then the end of file
         self.assertEqual([i["id"] for i in spend._parse_file(self.transcript, spend.prices(self.data))],
                          ["req_a", "req_at"])
 
@@ -895,6 +895,30 @@ class HardeningTest(SpendCase):
         f = io.BytesIO(b"a\n" * 10)  # a file that grew after its size was checked
         self.assertEqual(list(spend._lines(f, 8, 7)), [(0, b"a\n"), (1, b"a\n"), (2, b"a\n"), (None, None)])
         self.assertEqual(list(spend._lines(io.BytesIO(b"a\n" + b"x" * 30), 8, 1000)), [(0, b"a\n"), (1, None)])
+        f = io.BytesIO(b"x" * 100)  # one long line: skipping it stops once the cap is passed
+        self.assertEqual(list(spend._lines(f, 8, 20)), [(None, None)])
+        self.assertEqual(f.tell(), 24)
+        # exactly the cap is still read
+        self.assertEqual(list(spend._lines(io.BytesIO(b"a\n" * 4), 8, 8)), [(i, b"a\n") for i in range(4)])
+
+    def test_a_file_that_grows_past_the_cap_keeps_the_requests_read_before_it(self):
+        self.write(self.line("req_a"), self.line("req_b"))
+        real = spend._lines
+
+        def lines(f, cap, limit):  # the cap falls inside the second line, as if the file grew while it was read
+            return real(f, cap, len(self.line("req_a")) + 1)
+        self.patch(spend, "_lines", lines)
+        items = spend._parse_file(self.transcript, spend.prices(self.data))
+        self.assertEqual([i["id"] for i in items], ["req_a", "~file"])
+        self.assertEqual(round(items[0]["usd"], 6), 1.0)
+        self.assertIsNone(items[1]["usd"])
+
+    def test_a_file_exactly_at_the_size_cap_is_read(self):
+        self.patch(spend, "MAX_FILE_BYTES", 1 << 20)
+        self.write(self.line("req_a"))
+        os.truncate(self.transcript, 1 << 20)  # the zero-filled rest is one broken line, skipped
+        items = spend._parse_file(self.transcript, spend.prices(self.data))
+        self.assertEqual([i["id"] for i in items], ["req_a"])
 
     def unenterable(self, d):
         if hasattr(os, "geteuid") and os.geteuid() == 0:
