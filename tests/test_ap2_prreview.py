@@ -561,8 +561,13 @@ class VerdictTest(Ap2Case):
     def test_the_verdict(self):
         q = {k: v for k, v in good_finding(id="q-1", severity="nit").items() if k != "checked"}
         q["question"] = {"en": "Should a retry wait longer?", "zh": "重试要不要等更久？"}
+        unchecked = {k: v for k, v in good_finding().items() if k != "checked"}
+        rejected = dict(unchecked, reason={"en": "The retry already waits.", "zh": "重试已经会等。"})
+        out_of_scope = dict(unchecked, severity="blocker")
         for name, obj, want in (
                 ("a blocker", buckets(confirmed=[good_finding(severity="blocker")]), "changes"),
+                ("a rejected should-fix", buckets(rejected=[rejected]), "approve"),
+                ("an out-of-scope blocker", buckets(out_of_scope=[out_of_scope]), "approve"),
                 ("a should-fix", buckets(confirmed=[good_finding()]), "changes"),
                 ("only nits", buckets(confirmed=[good_finding(severity="nit")]), "approve"),
                 ("nothing", buckets(), "approve"),
@@ -917,11 +922,12 @@ class ApplyTest(Case):
         self.plan(cid, table(fixture("graphql-head-a.json")))
         rep = self.report("report-review.json", cid)
         rep["diagram"] = DIAGRAM
+        rep["checks"]["ci"] = "red"
         self.put_report(cid, rep)
         card = prreview.apply(self.data, cid, cfg=self.cfg)
         self.assertEqual(card["verdict"], {
             "verdict": "changes", "tldr": rep["tldr"], "background": rep["background"], "problem": rep["problem"],
-            "solution": rep["solution"], "diagram": DIAGRAM, "ci": "green", "notes": rep["checks"]["notes"],
+            "solution": rep["solution"], "diagram": DIAGRAM, "ci": "red", "notes": rep["checks"]["notes"],
             "angles": rep["angles"], "stage": "review", "head_sha": A, "reviewed_at": "2026-11-11T09:30:00Z"})
         self.assertEqual(set(card["reviews"][-1]), {"stage", "head_sha", "verdict", "at"})
         self.assertEqual({k: card["reviews"][-1][k] for k in ("stage", "head_sha", "verdict")},
@@ -967,6 +973,7 @@ class ApplyTest(Case):
         card = prreview.apply(self.data, cid, cfg=self.cfg)
         self.assertEqual(card["audit"][-1]["did"], f"delta review {B[:7]}: question, 1 fixed, 1 open")
         self.assertEqual(card["verdict"]["since_last"], rep["since_last"])
+        self.assertEqual(card["verdict"]["stage"], "delta")
 
     def test_stored_buckets_that_are_not_lists_do_not_break_a_delta(self):
         cid = self.two_finding_card()
@@ -1195,7 +1202,7 @@ class SyncTest(Case):
             with self.subTest(view):
                 cid = self.store().add(base, by="test")["id"]
                 out = self.sync(cid, view)
-                self.assertEqual(out["state"], state)
+                self.assertEqual((out["state"], out["lane"]), (state, "done"))
                 card = self.store().get(cid)
                 self.assertEqual(card["lane"], "done")
                 self.assertEqual(card["audit"][-1]["did"], did)
