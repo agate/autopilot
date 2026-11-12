@@ -1932,7 +1932,8 @@ Calls the author made without asking (check them):
       followed by a character that is no name character and no `/` (`echo "dir=$AP2_RUN_DIR, ok" > <run>/x`, the
       JSON `echo '{"cmd": "pytest --basetemp=<run>"}' > <run>/c.json`, the parens of `echo "(run_dir=$AP2_RUN_DIR)"
       >> <run>/j.md`, `echo "[dir=<run>]"` and `echo '<div data-dir=<run>>x</div>'`): a narrower rule would let
-      `echo "x of=<run>'" | xargs dd` through. Write the run directory with a `/` after it there.
+      `echo "x of=<run>'" | xargs dd` through (now denied: the `echo` names a path next to the run directory, and
+      `dd` under `xargs` takes the `of=` it reads, below). Write the run directory with a `/` after it there.
       The per-segment unquoted-`{` rule stays: without
       it a comma in a file name (`$AP2_RUN_DIR/a,b.txt`) would be refused. Still possible, and left as best effort: removing or copying into the run
       directory itself (`rm -rf $AP2_RUN_DIR`, `cp /tmp/settings-implement.json $AP2_RUN_DIR/`); ap2 writes the
@@ -2202,11 +2203,18 @@ Calls the author made without asking (check them):
       `commands[`, `aliases[`, ..., not after a name character, `-` or `.`; and zsh's `${PATH::=...}`, also inside
       `"..."`); a search-path setting (an unquoted `PATH=`, `path+=(`, `path[1]=`, `FPATH=`, `fpath=`, ..., not
       after a name character, `-` or `.`, so `PYTHONPATH=src`, `--path=x` and `sys.path=` are none; or the search
-      path's name, plain or in an assignment quoted or not, or one of zsh's name tables as a plain word, in a segment
-      where one of the setter commands above runs: `for PATH in ./b`, `read PATH <<< ./b`, `export "PATH=..."`,
-      `read -A commands <<< 'ap2 /bin/cp'` (zsh fills the command hash table from the words it reads); a plain
-      `path` argument, as in `git log -- path`, and a quoted pattern, `rg -n "path=" <pkg>/lib`, are none); a
-      `$'...'` it cannot decode; or a function definition. A heredoc body line is data, but in an unquoted body
+      path's name, plain or in an assignment quoted or not, in a segment where one of the setter commands above
+      runs: `for PATH in ./b`, `read PATH <<< ./b`, `export "PATH=..."`; a plain `path` argument, as in `git log --
+      path`, and a quoted pattern, `rg -n "path=" <pkg>/lib`, are none); one of zsh's name tables (`commands`,
+      `functions`, `aliases`, `galiases`, `saliases`) as the name a setter binds: a word before the `in` of a `for`
+      or `select`, a plain word (no flag, no redirect word) of `read`, `mapfile`, `readarray`, `declare`,
+      `typeset`, `local`, `export`, `readonly`, `integer`, `float`, `private`, `vared` or `getopts`, the word after
+      a `-v` of `printf` or `print`, or after a `-A` of `set` or `print` (`read -A commands <<< 'ap2 /bin/cp'`:
+      zsh fills the command hash table from the words it reads; `read -A functions <<< 'ls cp\ "$@"'` makes `ls`
+      run `cp`); as any other word it binds nothing, so `env PYTHONPATH=lib python3 -m pytest -k commands`, `for
+      d in commands skills; do ls <pkg>/$d; done`, `set -- commands`, `printf '%s\n' commands` and `read -r
+      name <<< commands` before an `ap2` call keep it trusted (any such word in a setter's segment was counted
+      before, which denied them); a `$'...'` it cannot decode; or a function definition. A heredoc body line is data, but in an unquoted body
       a name table counts (the shell expands `${commands[ap2]::=...}` there). When `ap2` is not trusted, an `ap2`
       segment gets no exemption: it is denied when it names a guarded path (any mention not under the own run
       directory or with a `$` after it; the `ap2` command word itself aside), and otherwise judged like any
@@ -2248,6 +2256,24 @@ Calls the author made without asking (check them):
       (the top level, or a single word for a fed segment), and not in a command that may rebind a name (there
       `bash -c 'ap2 src <data>/c'` after `export PATH=...` is still denied outright). `cp bash <data>/x` (`bash` is no command word there) and `bash -c 'cp a <data>/c'`
       stay denied.
+    - `xargs` runs its command on the words it reads, so a pipeline is also judged across its segments: a segment
+      that runs `xargs` (one of its command words, after runners too) with a write verb in its words (its redirects
+      aside: `| xargs -n1 basename > <run>/ids.txt` writes only the run directory, which the segment's own reading
+      judges) is a write when an earlier segment of its pipeline (back to its start; a `|` at the end of a line goes
+      on to the next one) or a heredoc body line of its line or of theirs names a guarded path outside the own run
+      directory (the package's `bin/ap2` run as a command aside). So `ls <data>/items/*.yaml | xargs sed -i ''
+      's/a/b/'`, `rg -l foo <data> | xargs sed -i '' ...`, `find <data> -name '*.tmp' -print0 | xargs -0 rm`, `echo
+      <data>/config.yaml | xargs rm` and `xargs touch <<'X'` with `<data>/config.yaml` in its body are denied, while
+      `ls $AP2_RUN_DIR/*.log | xargs wc -l`, `find $AP2_RUN_DIR -name '*.tmp' | xargs rm`, `ls <data>/items | xargs
+      -n1 basename`, `rg -l foo <data> | xargs grep -c bar` and `find <data> -name '*.yaml' | xargs cat` are allowed.
+      A `dd` or `sed` there may take its `of=` or its in-place flag from the words it reads, so an `of=` or a sed
+      in-place flag (`-i`, `-ni`, `--in-place`; not `-print0`) among them makes it a write too (`echo "x of=<run>'"
+      | xargs dd`, `echo "-i s/a/b/ <data>/c" | xargs sed`). Accepted false deny: copying out of the data folder
+      (`ls <data>/items | xargs -I{} cp {} $AP2_RUN_DIR/`: the words read may be the target), and a reading `sed`
+      fed by a command with an `-i` flag (`grep -ril x <data> | xargs sed -n 1p`). Best effort: a path inside a
+      `{ ...; }` group or a `for ... done` loop piped into `xargs`, a `$(...)` in an earlier segment (`echo $(ls
+      <data>) | xargs rm`), a runner the guard does not know (`sudo xargs`), and other readers of the pipe (`while
+      read f; do rm "$f"; done`, `parallel`).
     - Other bash 3.2 rules added with these: inside `"${...}"` bash 3.2 ends the quote at an inner `"`, so a `{`
       there brace-expands (`x=; echo "${x:-"{a,b}"}"` prints `a b`): any `{` inside a `"${...}"`, quoted inside it
       or not, counts as an unquoted `{` for the run-directory rule. Python's `fnmatch` reads `[^x]` as "`^` or

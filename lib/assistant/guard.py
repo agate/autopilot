@@ -37,8 +37,9 @@ unquoted extglob opener outside arithmetic, is denied when it names a guarded pa
 exemption only when nothing in the command, in any position and in every reading, can make the name run something
 else (`_ap2_trusted`: a word `alias`, `hash`, `source`, `eval`, `function`, ..., a `.` that may run, `ap2` as a name
 being bound outside an `ap2` call's own words (the word `ap2`, `ap2=`, `[ap2]`, ...; not `ap2` in a commit message), a
-name table such as `${commands[ap2]::=...}`, an unquoted `PATH=...` or a search-path or name-table name a setter
-such as `read` takes (`read -A commands`), a function definition, a `$'...'` it cannot decode); else an `ap2`
+name table such as `${commands[ap2]::=...}`, an unquoted `PATH=...`, the search path's name in a setter such as
+`read` or `export`, the name a setter binds when it is a zsh name table (`read -A commands`, `for aliases in ...`;
+not `pytest -k commands` or `for d in commands`), a function definition, a `$'...'` it cannot decode); else an `ap2`
 segment that names a guarded path is denied. A command that may make any
 name run something else (a function definition, `alias`, `hash`, `source` or `autoload` where it may run as a
 command, after redirects, assignments, `command --`, a substitution that may expand to nothing or inside `<(...)`
@@ -50,7 +51,11 @@ among its options (`echo '...' | sh`; `bash -s -- -c` has none), are read as a c
 writes nothing, the outer segment no longer reads the `-c` script word (the words after it, the script's `$1`...,
 stay, judged with the script's verb too) nor the words of a piped plain `echo` or `printf` (one command word, no
 `always` or closer; its redirects still count). A shell's name, or its script, before a word-final `}` counts as
-well (zsh's `{ ... | sh}`). A zsh script with a `(` that names a guarded path is a write (a fresh zsh has bare glob
+well (zsh's `{ ... | sh}`). A segment that runs `xargs` with a write verb (or a `dd` or `sed` that may take its
+`of=` or `-i` from the words it reads) writes what it reads: it is a write when an earlier segment of its pipeline,
+or a heredoc body line of its line, names a guarded path outside the own run directory (`_xargs_fed`: `ls
+<data>/items | xargs touch`; `| xargs wc -l` and `find $AP2_RUN_DIR ... | xargs rm` stay allowed). A zsh script
+with a `(` that names a guarded path is a write (a fresh zsh has bare glob
 qualifiers on). Heredoc body lines that end in a backslash are joined, as bash joins them (an
 even run of backslashes too, fail-closed); a `$'...'` delimiter is decoded as bash 3.2 and zsh both decode it, and
 a `$"..."` one (zsh keeps its `$`), one with a `$(`, `${`, `$[` or backtick in it, a `(` after it, or one it cannot
@@ -380,8 +385,25 @@ class _Script(str):
     zsh = False
 
 
-class _Pipe(str):
+class _Piped(str):
+    """A segment that reads a pipe or a heredoc: `prev` is the segment piped into it (a `_Pipe`, whose own `prev` goes
+    on back to the start of the pipeline), or None; `bodies` the heredoc body lines (`_Body`) of its line, which it
+    may read (`_xargs_fed`). A segment with neither is a plain `str`."""
+    prev = None
+    bodies = ()
+
+
+class _Pipe(_Piped):
     """A segment that a `|` or `|&` ends: its output is the next command's input."""
+
+
+def _link(text: str, pipe: bool, prev):
+    """The segment `text`, a `_Pipe` when a `|` ends it, with `prev`, the `_Pipe` before it in its pipeline (None
+    at the start of one)."""
+    seg = _Pipe(text) if pipe else _Piped(text) if prev is not None else text
+    if prev is not None:
+        seg.prev = prev
+    return seg
 
 
 class _Deep(Exception):
@@ -633,11 +655,12 @@ def _segments(cmd: str, pid: bool = True, budget=None, seen=None, sq: bool = Tru
     # (`brace`), the open arithmetic span if any (`arith`: `["(", open single (, index of its `((`, the state to
     # read it again from]` for `((` and `$((`, `["[", open [, None, None]` for `$[`), and the context's `kind`:
     # None at the top, `(` for `$(`, `{` for `"${`, `$` for `"$$(`, `a` for `"$((`. `stack` holds the saved
-    # states of the outer contexts, each with, for a `(`, the outer segment's (`parts`, `pending`).
+    # states of the outer contexts, each with, for a `(`, the outer segment's (`parts`, `pending`, `chain`).
     # The current segment is `parts` and then `cmd[start:]` (up to `cut`, where a comment ended it), and
     # `pending` the heredocs opened on its line: (delimiter, strip leading tabs).
     paren, brace, arith, kind, stack = 0, 0, None, None, []
     start, parts, cut, pending = 0, [], None, []
+    chain = None  # the `_Pipe` before the current segment in its pipeline, in the current context (`_link`)
     line = 0  # the index in `segs` of the first segment of the current line (`_heredocs`)
     if body:  # an unquoted heredoc body: read as a `"..."` word whose `"` is a plain character
         quote = '"'
@@ -680,7 +703,7 @@ def _segments(cmd: str, pid: bool = True, budget=None, seen=None, sq: bool = Tru
         elif c == "$" and arith is None and quote != "s" and i + 1 not in subs and cmd.startswith("$((", i) and (
                 _expands(cmd, i, esc)):
             again = (i, len(segs), start, parts, len(parts), cut, pending, esc, quote, paren, brace, kind, len(stack),
-                     line)
+                     line, chain)
             if quote == '"':
                 stack.append((quote, paren, brace, arith, kind, None))
                 quote, paren, brace, kind = None, 0, 0, "a"
@@ -691,8 +714,8 @@ def _segments(cmd: str, pid: bool = True, budget=None, seen=None, sq: bool = Tru
             new = new or "("  # a `$((` found to be two subshells is a `$(`
             if new == "(":
                 parts += (cmd[start:i + 2], "_")
-                stack.append((quote, paren, brace, arith, kind, (parts, pending)))
-                start, parts, cut, pending = i + 2, [], None, []
+                stack.append((quote, paren, brace, arith, kind, (parts, pending, chain)))
+                start, parts, cut, pending, chain = i + 2, [], None, [], None
             else:
                 stack.append((quote, paren, brace, arith, kind, None))
             quote, paren, brace, arith, kind = None, 0, int(new == "{"), None, new
@@ -736,7 +759,7 @@ def _segments(cmd: str, pid: bool = True, budget=None, seen=None, sq: bool = Tru
             if seen is not None and _opener(cmd, i, esc, kind):
                 seen.add("@")
             again = (i, len(segs), start, parts, len(parts), cut, pending, esc, quote, paren, brace, kind, len(stack),
-                     line)
+                     line, chain)
             arith = ["(", 0, i, again]
             i += 2
             continue
@@ -762,7 +785,8 @@ def _segments(cmd: str, pid: bool = True, budget=None, seen=None, sq: bool = Tru
             elif arith:  # the `((` was two subshells: read its text again as code, from the `((`
                 budget.spend(i - arith[3][0])
                 subs.add(arith[2])
-                i, size, start, parts, size_parts, cut, pending, esc, quote, paren, brace, kind, depth, line = arith[3]
+                (i, size, start, parts, size_parts, cut, pending, esc, quote, paren, brace, kind, depth, line,
+                 chain) = arith[3]
                 del segs[size:], parts[size_parts:], stack[depth:]
                 arith = None  # as it was at the `((`
                 continue
@@ -772,8 +796,8 @@ def _segments(cmd: str, pid: bool = True, budget=None, seen=None, sq: bool = Tru
                 if kind == "(":
                     text = "".join(parts) + cmd[start:cut if cut is not None else i]
                     if text:
-                        segs.append(text)
-                    parts, pending = stack[-1][5]  # a heredoc opened in there and still open has no body
+                        segs.append(_link(text, False, chain))
+                    parts, pending, chain = stack[-1][5]  # a heredoc opened in there and still open has no body
                     start, cut = i, None
                 quote, paren, brace, arith, kind = stack.pop()[:5]
         elif kind in ("$", "a"):
@@ -810,7 +834,13 @@ def _segments(cmd: str, pid: bool = True, budget=None, seen=None, sq: bool = Tru
         elif c in "\n;|&" and not brace and not (arith and c != ";") and not _in_redirect(cmd, i, esc):
             text = "".join(parts) + cmd[start:cut if cut is not None else i]
             nxt = cmd[i + 1:i + 2]
-            segs.append(_Pipe(text) if c == "|" and nxt != "|" else text)  # `|` and `|&` pipe, `||` does not
+            pipe = c == "|" and nxt != "|"  # `|` and `|&` pipe, `||` does not
+            segs.append(_link(text, pipe, chain))
+            # A pipeline goes on after a `|` and a newline (`ls |<newline>xargs ...`); any other separator ends it.
+            if pipe:
+                chain = segs[-1]
+            elif not (c == "\n" and chain is not None and not text.strip()):
+                chain = None
             parts, cut = [], None
             i += 2 if (c in "&|" and nxt == c) or (c == "|" and nxt == "&") else 1
             if c == "\n":
@@ -827,11 +857,12 @@ def _segments(cmd: str, pid: bool = True, budget=None, seen=None, sq: bool = Tru
         text = "".join(parts) + cmd[start:cut if cut is not None else n]
         if not stack:
             if (text or not segs) and not body:  # a heredoc body's own text is data: only its substitutions run
-                segs.append(text)
+                segs.append(_link(text, False, chain))
             return segs
         if text:
-            segs.append(text)
-        parts, start, cut = stack.pop()[5][0], n, None
+            segs.append(_link(text, False, chain))
+        outer = stack.pop()[5]
+        parts, chain, start, cut = outer[0], outer[2], n, None
 
 
 def _heredocs(cmd: str, i: int, segs: list, line: int, pending: list, sub: bool, pid: bool, budget, seen,
@@ -844,8 +875,9 @@ def _heredocs(cmd: str, i: int, segs: list, line: int, pending: list, sub: bool,
     such shell on the line), the whole body (leading tabs stripped for `<<-`) is also a `_Script`. An unquoted body
     with a `$(` or a backtick is also read as a `"..."` word is (`_segments` with `body`: its substitutions, which
     can run across lines, are segments of their own; a `'` or `"` outside them is a plain character), its length
-    spent from `budget`."""
-    n, closed = len(cmd), False
+    spent from `budget`. The body lines are also each segment's of the line `bodies` (`_Piped`): any of them may
+    read them (`xargs touch <<'EOF'`, `cat <<'EOF' | xargs touch`)."""
+    n, closed, first = len(cmd), False, len(segs)
     shells = [w for s in segs[line:] if not isinstance(s, _Body)
               and (w := _stdin_shell(_words(s, None, None, pid, None, sq)))]
     fed, zsh = bool(shells), any(_ZSH.search(w) for w in shells)  # fed: a shell reads the bodies
@@ -873,6 +905,14 @@ def _heredocs(cmd: str, i: int, segs: list, line: int, pending: list, sub: bool,
         if not quoted and ("$(" in script or "`" in script):
             budget.spend(len(script))
             segs.extend(_segments(script, pid, budget, seen, sq, True))
+    bodies = tuple(s for s in segs[first:] if isinstance(s, _Body))
+    if bodies:
+        for k in range(line, first):
+            seg = segs[k]
+            if not isinstance(seg, (_Body, _Script)):
+                if not isinstance(seg, _Piped):
+                    seg = segs[k] = _Piped(seg)
+                seg.bodies = seg.bodies + bodies if seg.bodies else bodies
     return min(i, n)
 
 
@@ -1592,6 +1632,9 @@ def _command_writes(cmd: str, marks: _Marks, depth: int, budget: _Budget) -> boo
                     if _scripts_write(parsed[j].words, marks, depth, budget, zsh):
                         return True
                     fed.add(j)
+        # `... | xargs <writer>`: the words xargs reads are its command's arguments.
+        if "xargs" in cmd and _xargs_fed(segs, parsed, marks, pid, sq, budget):
+            return True
         for j, (seg, p) in enumerate(zip(segs, parsed)):
             key = _alike(seg) and (seg, p.body, p.quoted, rebound, trusted, depth, j in fed)
             if key in budget.clean:
@@ -1600,6 +1643,86 @@ def _command_writes(cmd: str, marks: _Marks, depth: int, budget: _Budget) -> boo
                 return True
             if key:
                 budget.clean.add(key)
+    return False
+
+
+# A sed in-place flag among the words `xargs` reads (`_xargs_fed`): `-i`, `-i.bak`, a cluster of sed's own letters
+# with an `i` or `I` (`-ni`, `-Ei`; not `-print0`), `--in-place`.
+_FED_IN_PLACE = re.compile(r"-[EIabelnrsuz]*[iI]|--in-place")
+
+
+def _xargs_fed(segs: list, parsed: list, marks: _Marks, pid: bool, sq: bool, budget: _Budget) -> bool:
+    """Whether a segment of `segs` (`parsed` their `_Parsed`) that runs `xargs` (one of its command words, after
+    runners too) writes a guarded path it reads: an earlier segment of its pipeline (`_Piped.prev`, back to the start
+    of the pipeline), or a heredoc body line of its line or of theirs (`_Piped.bodies`), names a guarded path
+    outside the own run directory (`_Marks.unsafe`, the package's `bin/ap2` run as a command aside, as in
+    `_writes_guarded`), and the `xargs` segment holds a write verb (`_verb`: `ls <data>/items | xargs touch`, `rg -l
+    x <data> | xargs sed -i '' ...`, `xargs touch <<'EOF'`), or a `dd` with an `of=` or a `sed` with an in-place
+    flag (`_FED_IN_PLACE`) among the words it reads (`echo "of=<data>/x" | xargs dd`). A reader (`| xargs wc -l`,
+    `| xargs grep -c x`) and run-directory paths (`find $AP2_RUN_DIR -name '*.tmp' | xargs rm`) stay allowed. Each
+    segment and each set of body lines is judged once (a pipeline's state is carried along it), so a long pipeline
+    stays linear."""
+    index = {id(seg): j for j, seg in enumerate(segs)}
+    lines, piped = {}, {}  # id of a `bodies` tuple, or of a segment -> (unsafe, of=, in-place) of what it reads
+
+    def judge(words, p=None):
+        if p is not None:
+            written = set(p.targets)
+            run = {k for k in p.commands if words[k] not in written and marks.is_ap2(words[k])}
+            words = [w for k, w in enumerate(words) if k not in run]
+            unsafe = marks.unsafe(words, "{" in p.flags, "(" in p.flags)
+        else:
+            unsafe = marks.unsafe(words)
+        text = " ".join(words)
+        return unsafe, bool(_OF.search(text)), any(_FED_IN_PLACE.match(t) for t in text.split())
+
+    def either(a, b):
+        return a[0] or b[0], a[1] or b[1], a[2] or b[2]
+
+    def read(bodies):  # what a segment's heredoc body lines give it
+        if not bodies:
+            return False, False, False
+        key = id(bodies)
+        if key not in lines:
+            state = (False, False, False)
+            for b in bodies:
+                j = index.get(id(b))
+                if j is None:
+                    budget.spend(len(b))
+                    state = either(state, judge(_words(b, None, None, pid, None, sq)))
+                else:
+                    state = either(state, judge(parsed[j].words, parsed[j]))
+            lines[key] = state
+        return lines[key]
+
+    def fed(seg):  # what the segments piped into `seg` (and their body lines) give it
+        chain, prev = [], getattr(seg, "prev", None)
+        while prev is not None and id(prev) not in piped:
+            chain.append(prev)
+            prev = prev.prev
+        state = piped[id(prev)] if prev is not None else (False, False, False)
+        for prev in reversed(chain):
+            j = index.get(id(prev))
+            own = judge(parsed[j].words, parsed[j]) if j is not None else (marks.names(prev), True, True)
+            state = either(either(state, own), read(prev.bodies))
+            piped[id(prev)] = state
+        return state
+
+    for j, (seg, p) in enumerate(zip(segs, parsed)):
+        if p.body or not isinstance(seg, _Piped):
+            continue
+        if not any(p.words[k].rsplit("/", 1)[-1] == "xargs" for k in [*p.commands, *p.maybe]):
+            continue
+        unsafe, of, in_place = either(fed(seg), read(seg.bodies))
+        if not unsafe:
+            continue
+        # The verb in its words, its redirects aside (`| xargs -n1 basename > <run>/ids.txt` writes only the run
+        # directory, which the segment's own reading judges); also with each `$NAME` taken out, as `_verb` does.
+        text = " ".join(w for k, w in enumerate(p.words) if k not in p.ops) + " "
+        bare = _VAR_REF.sub("", seg) if "$" in seg else None
+        if (_writes(_harmless(text)) or (bare is not None and _writes(_harmless(" ".join(_words(bare)))))
+                or (of and _DD.search(text)) or (in_place and _SED.search(text))):
+            return True
     return False
 
 
@@ -1643,7 +1766,9 @@ class _Parsed:
     `events`, `flags`, the index of the first word after an unquoted closer (`loose`, len(words) for none), the
     indexes of its command words, its own command and the words that may run after all (`commands`, `lead`,
     `maybe`, from `_commands`), whether it is a heredoc body line (`body`), one of a heredoc with a quoted
-    delimiter (`quoted`), and whether a word is one of `_PATH_SETTERS` where it runs (`setter`)."""
+    delimiter (`quoted`), the indexes of its redirect words (`ops`), whether a word is one of `_PATH_SETTERS` where
+    it runs (`setter`), and whether such a setter takes one of zsh's name tables as a name it binds (`table`,
+    `_names_table`)."""
 
     def __init__(self, seg: str, pid: bool, sq: bool):
         self.targets, self.events, self.flags, self.body = [], [], set(), isinstance(seg, _Body)
@@ -1651,13 +1776,15 @@ class _Parsed:
         extra = {"ops": [], "glued": [], "loose": []}
         self.words = _words(seg, self.targets, self.events, pid, self.flags, sq, extra)
         self.loose = min(extra["loose"], default=len(self.words))
-        self.commands, self.lead, self.maybe = _commands(self.words, self.events, set(extra["ops"]),
-                                                         set(extra["glued"]))
+        self.ops = set(extra["ops"])  # the indexes of the words of its redirects
+        self.commands, self.lead, self.maybe = _commands(self.words, self.events, self.ops, set(extra["glued"]))
         self.commands_set = set(self.commands)
         # A setter counts where it runs (`_command_like`, or after an unquoted closer: `case x in x) read PATH`),
         # not as an argument (`git grep -n set -- path`, `rg -e for -e path`).
-        self.setter = any(w in _PATH_SETTERS and (k >= self.loose or _command_like(self, k))
-                          for k, w in enumerate(self.words))
+        setters = [k for k, w in enumerate(self.words)
+                   if w in _PATH_SETTERS and (k >= self.loose or _command_like(self, k))]
+        self.setter = bool(setters)
+        self.table = bool(setters) and _names_table(self, setters)
 
 
 def _stdin_shell(words: list):
@@ -1750,14 +1877,17 @@ def _rebinds(parsed: list) -> bool:
     or after `repeat N`), or as any word after an unquoted `)`, `]]` or `}` of its segment (`_Parsed.loose`: `case
     x in x) hash ...`, `for x (1) hash ...`, `if [[ -n x ]] hash ...`; fail-closed there, `grep -c 'x' f) hash`
     counts too, while the `}` of an empty `{}`, as in `-exec grep -l hash {} +`, is none), or holds a word that
-    sets a zsh name table (`_TABLE_ANY`: `functions[ap2]=...`, `: ${commands[ap2]::=/bin/cp}`, `${PATH::=...}`) or
-    the search path or zsh's function path (`_sets_path`: `PATH=/tmp:$PATH`, `fpath=(/tmp/fn)`). A rebinding name
+    sets a zsh name table (`_TABLE_ANY`: `functions[ap2]=...`, `: ${commands[ap2]::=/bin/cp}`, `${PATH::=...}`; or
+    the name a setter binds, `_Parsed.table`: `read -A commands`) or the search path or zsh's function path
+    (`_sets_path`: `PATH=/tmp:$PATH`, `fpath=(/tmp/fn)`). A rebinding name
     as an argument (`<pkg>/bin/ap2 source list`, `grep -i hash <data>/items/C1.yaml`, `find . -name x`, `rg
     "path=" lib`) rebinds nothing."""
     for p in parsed:  # `_Parsed` segments
         if p.body:
             continue
-        if "()" in p.flags or "$'" in p.flags or any(_TABLE_ANY.search(w) or _sets_path(p, w) for w in p.words):
+        if "()" in p.flags or "$'" in p.flags or p.table:
+            return True
+        if any(_TABLE_ANY.search(w) or _sets_path(p, w) for w in p.words):
             return True
         if any((w in _REBIND or w == ".") and (k >= p.loose or _command_like(p, k)) for k, w in enumerate(p.words)):
             return True
@@ -1784,9 +1914,17 @@ _TABLE_ANY = re.compile(r"(?<![A-Za-z0-9_.-])" + _TABLE_NAMES + r"(?:\[|\+?=)|\$
 # name character, `-` or `.`: `PYTHONPATH=src`, `--path=x` and `sys.path=` are none), and as a plain word.
 _PATH_SET = re.compile(r"(?<![A-Za-z0-9_.-])(?:PATH|path|FPATH|fpath)(?:\[|\+?=)")
 _PATH_WORDS = frozenset(("PATH", "path", "FPATH", "fpath"))
-# zsh's name tables as plain words a setter takes: `read -A commands <<< 'ap2 /bin/cp'` fills the command hash table
-# (`commands[ap2]` is then `/bin/cp`), and so may `typeset -A functions ...` or `for aliases in ...`.
+# zsh's name tables as the name a setter binds (`_names_table`): `read -A commands <<< 'ap2 /bin/cp'` fills the
+# command hash table (`commands[ap2]` is then `/bin/cp`), and so may `typeset -A functions ...` or `for aliases in
+# ...`; as any other word (`pytest -k commands`, `for d in commands skills`, `set -- commands`) it binds nothing.
 _TABLE_WORDS = frozenset(("functions", "aliases", "galiases", "saliases", "commands"))
+# The setters whose every plain word (no flag, no redirect word) may be a name they bind (`read -rA NAME`,
+# `typeset -A NAME`, `getopts OPTS NAME`); `for` and `select` bind the words before their `in`, and `printf` and
+# `print` the word after a `-v`, `set` (and `print`) the word after a `-A` (`set -A NAME ...`). `env`, `let`,
+# `trap`, `set --` and a plain `printf` or `print` bind none.
+_NAME_SETTERS = frozenset(("read", "mapfile", "readarray", "declare", "typeset", "local", "export", "readonly",
+                           "integer", "float", "private", "vared", "getopts"))
+_NAME_FLAGS = {"printf": "v", "print": "vA", "set": "A"}
 # The commands that set a variable named by a word (`for PATH in ./b`, `read PATH`, `printf -v PATH ...`, `export
 # "PATH=..."`, `env "PATH=..." cmd`, zsh's `set -A path ...`), or run a quoted text that can (`trap '...' DEBUG`).
 _PATH_SETTERS = frozenset(("for", "select", "read", "declare", "typeset", "export", "local", "readonly", "integer",
@@ -1797,13 +1935,45 @@ _PATH_SETTERS = frozenset(("for", "select", "read", "declare", "typeset", "expor
 def _sets_path(p, w) -> bool:
     """Whether the word `w` of the `_Parsed` segment `p` may set the search path or zsh's function path: an
     assignment to one whose `=` or `[` no quote made text (`_Word.mask`; a quoted `"path="` is a plain argument, as
-    in `rg "path=" lib`), or, in a segment where one of `_PATH_SETTERS` runs (`_Parsed.setter`), such a name or one
-    of zsh's name tables (`_TABLE_WORDS`: `read -A commands`) as a plain word, or an assignment quoted or not (`git
-    log -- path` names a file, and so does `git grep set -- path`)."""
+    in `rg "path=" lib`), or, in a segment where one of `_PATH_SETTERS` runs (`_Parsed.setter`), such a name as a
+    plain word, or an assignment quoted or not (`git log -- path` names a file, and so does `git grep set --
+    path`). A name table a setter binds is `_Parsed.table`."""
     for m in _PATH_SET.finditer(w):
         if w.mask is None or w.mask[m.end() - 1] != _HIDE:
             return True
-    return p.setter and (w in _PATH_WORDS or w in _TABLE_WORDS or bool(_PATH_SET.search(w)))
+    return p.setter and (w in _PATH_WORDS or bool(_PATH_SET.search(w)))
+
+
+def _names_table(p, setters: list) -> bool:
+    """Whether a setter of the `_Parsed` segment `p` (at the indexes `setters`, each one where it runs) takes one of
+    zsh's name tables (`_TABLE_WORDS`) as the name it binds: a word before the `in` (or `do`) of a `for` or
+    `select`; a plain word (no `-` or `+` flag, no redirect word) of one of `_NAME_SETTERS` (`read -A commands`,
+    `echo x | read -rA commands`, `vared commands`); the word after a flag with a `v` of `printf` or `print`, or with
+    an `A` of `set` or `print`, before any `--`. Each setter reads up to the next one, so the scan is linear. A name
+    table as any other word (`pytest -k commands`, `for d in commands`, `set -- commands`, `printf '%s' commands`,
+    `read -r x <<< commands`, `env`, `let`, `trap`) binds nothing."""
+    words = p.words
+    for n, k in enumerate(setters):
+        end = setters[n + 1] if n + 1 < len(setters) else len(words)
+        setter = words[k]
+        if setter in ("for", "select"):
+            for w in words[k + 1:end]:
+                if w in ("in", "do"):
+                    break
+                if w in _TABLE_WORDS:
+                    return True
+        elif setter in _NAME_SETTERS:
+            if any(words[i] in _TABLE_WORDS for i in range(k + 1, end) if i not in p.ops):
+                return True
+        elif setter in _NAME_FLAGS:
+            letters = _NAME_FLAGS[setter]
+            for i in range(k + 1, end - 1):
+                w = words[i]
+                if w == "--" or w[:1] not in "-+":
+                    break
+                if any(c in letters for c in w[1:]) and words[i + 1] in _TABLE_WORDS:
+                    return True
+    return False
 
 
 # `ap2` as a name being bound, in a word with its quotes removed: the word `ap2` (`hash -p /bin/cp ap2`, `autoload
@@ -1826,7 +1996,8 @@ def _ap2_trusted(readings) -> bool:
     is not when any word is one of `_REBIND`, a `.` that may run (`_dot_runs`), `ap2` as a name being bound
     (`_ap2_bound`: `hash ap2=...`, `commands[ap2]`, `autoload -U ap2`; not the command word of an `ap2` segment,
     nor its arguments after it when it runs nothing else: `ap2 card note C1 --text "ap2"`; not `ap2` inside a longer
-    word, as in a commit message), a name table (`_TABLE_ANY`) or a search-path setting (`_sets_path`), or when a
+    word, as in a commit message), a name table (`_TABLE_ANY`, or as the name a setter binds: `_Parsed.table`) or a
+    search-path setting (`_sets_path`), or when a
     segment defines a function (a `()`) or holds a `$'...'` this reading cannot decode. A heredoc body line is
     data: only a name table there counts (an unquoted body expands `${commands[ap2]::=...}`); a body a shell reads is
     that shell's script, judged on its own one level deeper (a child shell rebinds nothing in this one)."""
@@ -1836,7 +2007,7 @@ def _ap2_trusted(readings) -> bool:
                 if not p.quoted and any(_TABLE_ANY.search(w) for w in p.words):
                     return False
                 continue
-            if "()" in p.flags or "$'" in p.flags:
+            if "()" in p.flags or "$'" in p.flags or p.table:
                 return False
             lead = p.lead if _runs_ap2(p.words, p.lead) else None  # its arguments too, when it runs nothing else
             args = lead is not None and not _runs_more(seg, pid, sq)
@@ -2133,7 +2304,9 @@ def _late(signum, frame):
 def _judge(raw: bytes, env):
     """The verdict on the bytes `main` read (at most MAX_STDIN + 1). Past MAX_STDIN, a v2 worker's Bash call is
     denied outright: the rest was never read. A judgement that runs past `DEADLINE` (a timer signal, which also
-    stops a slow regex match) falls back to `_fallback`."""
+    stops a slow regex match) falls back to `_fallback`. The timer is one-shot and turned off inside the block that
+    catches it, so a signal that lands after the judgement returned and before the timer is off is caught there too
+    (`_fallback` then gives the verdict); the old handler is put back last."""
     if len(raw) > MAX_STDIN:
         return _deny() if env.get("AP2_ROLE") and b'"Bash"' in raw else None
     armed, before = False, None
@@ -2146,28 +2319,34 @@ def _judge(raw: bytes, env):
             pass
     try:
         try:
-            payload = json.loads(raw.decode("utf-8"))
-        except RecursionError:
-            return _fallback(raw, env)
-        return decide(payload, env) if isinstance(payload, dict) else None
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except RecursionError:
+                return _fallback(raw, env)
+            return decide(payload, env) if isinstance(payload, dict) else None
+        finally:
+            if armed:
+                signal.setitimer(signal.ITIMER_REAL, 0)
     except _Late:
         return _fallback(raw, env)
     finally:
         if armed:
-            signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGALRM, before if before is not None else signal.SIG_DFL)
 
 
 def main(argv: list, stdin=None) -> int:
     """`ap2 hook-guard`: the payload on stdin, the deny JSON (or nothing) on stdout, exit 0 always. Any argument is
-    no opinion."""
+    no opinion. A `_Late` that gets out of `_judge` (the timer fired as it was set) is judged by `_fallback`."""
     try:
         if argv or not os.environ.get("AP2_ROLE") or stdin is None:
             return 0
         raw = getattr(stdin, "buffer", stdin).read(MAX_STDIN + 1)
         if isinstance(raw, str):
             raw = raw.encode("utf-8")
-        out = _judge(raw, os.environ)
+        try:
+            out = _judge(raw, os.environ)
+        except _Late:  # the timer fired before `_judge` could catch it: judged with no timer, never no opinion
+            out = _fallback(raw, os.environ)
         if out:  # unbuffered: a closed stdout raises here, not again at interpreter exit
             os.write(1, (json.dumps(out) + "\n").encode())
     except Exception:  # noqa: BLE001 - a hook must never break the session

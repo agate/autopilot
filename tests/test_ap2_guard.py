@@ -3,6 +3,7 @@ data folder or the package. Unit tests call `guard.decide` over a table of comma
 `bin/ap2 hook-guard` with a payload on stdin and a temp HOME."""
 from __future__ import annotations
 
+import io
 import json
 import os
 import random
@@ -1206,8 +1207,10 @@ class DecideTest(unittest.TestCase):
         segs = guard._segments("bash <<'E'\na\nb\nE\nz")
         self.assertEqual([s for s in segs if isinstance(s, guard._Script)], ["a\nb\n"])
         # The body lines stay data lines of the outer command (a child shell rebinds nothing in it); the script is
-        # judged as one of its own.
-        self.assertEqual([type(s) for s in segs], [str, guard._Body, guard._Body, guard._Body, guard._Script, str])
+        # judged as one of its own. The command of their line holds them as the input it may read.
+        self.assertEqual([type(s) for s in segs],
+                         [guard._Piped, guard._Body, guard._Body, guard._Body, guard._Script, str])
+        self.assertEqual(segs[0].bodies, ("a", "b", "E"))
         self.assertFalse([s for s in guard._segments("cat <<'E'\na\nE\nz") if isinstance(s, guard._Script)])
 
     def test_an_unquoted_heredoc_body_runs_its_substitutions_across_lines(self):
@@ -1609,6 +1612,89 @@ class DecideTest(unittest.TestCase):
         self.check(["eval 'ap2 ( ) { cp \"$@\"; }'; ap2 /tmp/src $AP2_DATA/config.yaml",
                     "x='ap2 () { cp \"$@\"; }'; ap2 /tmp/src $AP2_DATA/config.yaml"], deny=True)
 
+    def test_xargs_fed_a_guarded_path_writes_it_with_its_verb(self):
+        """`xargs` runs its command on the words it reads: a pipeline that lists a guarded path and ends in `xargs`
+        with a write verb writes there, and so does an `xargs` whose heredoc names one. Readers and the run
+        directory stay allowed."""
+        rm = "r" + "m"
+        self.check([f"ls {DATA}/items/*.yaml | xargs sed -i '' 's/a/b/'",
+                    f"rg -l foo {DATA} | xargs sed -i '' 's/a/b/'",
+                    f"find {DATA} -name '*.yaml' | xargs sed -i '' 's/a/b/'",
+                    f"echo {DATA}/config.yaml | xargs {rm}",
+                    f"find {DATA} -name '*.tmp' -print0 | xargs -0 {rm}",
+                    f"find $AP2_DATA -name '*.tmp' | xargs -I{{}} {rm} {{}}",
+                    f"ls {DATA}/items | xargs -n1 touch",
+                    f"ls {DATA}/items | grep yaml | env LC_ALL=C nohup xargs touch",
+                    f"ls {DATA}/items |\nxargs touch",
+                    f"ls {DATA}/items |& xargs touch",
+                    f"ls {DATA}/items | xargs {rm} $(true)",
+                    f"ls {DATA}/items | xargs {rm} `true`",
+                    f"x=$(ls {DATA}/items | xargs {rm})",
+                    f"bash -c 'ls {DATA}/items | xargs {rm}'",
+                    f"xargs touch <<'X'\n{DATA}/config.yaml\nX",
+                    f"xargs touch <<X\n{DATA}/config.yaml\nX",
+                    f"cat <<'X' | xargs touch\n{DATA}/config.yaml\nX",
+                    f"cat <<'X' |\n{DATA}/config.yaml\nX\nxargs touch",
+                    f"xargs touch <<< {DATA}/config.yaml",
+                    # `dd` and `sed` take their `of=` and `-i` from the words xargs reads.
+                    f"echo \"x of={RUN}'\" | xargs dd",
+                    f"echo \"of={DATA}/config.yaml\" | xargs dd if=/dev/zero",
+                    f"echo \"-i s/a/b/ {DATA}/config.yaml\" | xargs sed",
+                    f"xargs dd <<'X'\nof={DATA}/config.yaml\nX"], deny=True)
+        self.check(["ls $AP2_RUN_DIR/*.log | xargs wc -l",
+                    f"find $AP2_RUN_DIR -name '*.tmp' | xargs {rm}",
+                    f"ls {DATA}/items | xargs -n1 basename",
+                    f"rg -l foo {DATA} | xargs grep -c bar",
+                    f"find {DATA} -name '*.yaml' | xargs cat",
+                    f"find {DATA} -name '*.yaml' -print0 | xargs -0 wc -l | sort -n > $AP2_RUN_DIR/sizes.txt",
+                    f"rg -l TODO {DATA}/items | xargs head -3",
+                    f"ls {DATA}/items | xargs -n1 basename > $AP2_RUN_DIR/ids.txt",
+                    f"ls {DATA}/items; find $AP2_RUN_DIR -name '*.tmp' | xargs {rm}",
+                    f"xargs {rm} <<'X'\n$AP2_RUN_DIR/a.tmp\nX",
+                    f"xargs cat <<'X'\n{DATA}/config.yaml\nX",
+                    f"cat <<'X' > $AP2_RUN_DIR/note.md\nsee {DATA}\nX\nls | xargs wc -l"], deny=False)
+
+    def test_finding_rows_of_the_sixteenth_round_pin_their_rules(self):
+        """Rows that fail when the rule they name is taken out, and words such as `commands` that a setter does not
+        take as a name."""
+        # A name table counts only as a name a setter binds; anywhere else it is a plain word.
+        self.check([f"env PYTHONPATH=lib python3 -m pytest -k commands -q && {PKG}/bin/ap2 card note C1 --text ok",
+                    "for t in commands workers guard; do python3 -m unittest tests.test_ap2_$t; done 2>&1 | tail -3; "
+                    f"{PKG}/bin/ap2 card note C1 --text 'tests pass'",
+                    f"for d in commands skills agents; do ls {PKG}/$d | wc -l; done",
+                    f"env LANG=C rg -n commands {PKG}/lib",
+                    f"set -- commands skills; {PKG}/bin/ap2 card show C1",
+                    f"printf '%s\\n' commands agents; {PKG}/bin/ap2 card list",
+                    f"for d in commands functions; do rg -c \"$d\" {DATA}/items; done",
+                    f"bash <<'EOF'\nset -Eeuo pipefail\nfor d in commands agents; do\n  ls {PKG}/$d\ndone\nEOF",
+                    f"bash -c 'for d in commands agents; do ls {PKG}/$d; done'",
+                    f"read -r name <<< commands; ls {PKG}/$name",
+                    f"let n=1 commands; {PKG}/bin/ap2 card list"], deny=False)
+        self.check(["for commands in 'ap2 /bin/cp'; do :; done; ap2 src.txt $AP2_DATA/config.yaml",
+                    "select aliases in x; do break; done; ap2 src.txt $AP2_DATA/config.yaml",
+                    "typeset -A commands; ap2 src.txt $AP2_DATA/config.yaml",
+                    "set -A commands ap2 /bin/cp; ap2 src.txt $AP2_DATA/config.yaml",
+                    "print -v commands x; ap2 src.txt $AP2_DATA/config.yaml",
+                    "read -rA commands <<< 'ap2 /bin/cp'; ap2 src.txt $AP2_DATA/config.yaml",
+                    "vared commands; ap2 src.txt $AP2_DATA/config.yaml"], deny=True)
+        # `functions` (zsh's function table: `ls` then runs `cp "$@"`), `galiases` and `saliases` (a global alias
+        # and a suffix alias: `src.txt` runs `cp src.txt`) filled by `read -A`.
+        self.check(["read -A functions <<< 'ls cp\\ \"$@\"'; ls src.txt $AP2_DATA/config.yaml",
+                    "read -A functions <<< 'ls cp\\ \"$@\"'\nls src.txt $AP2_DATA/config.yaml",
+                    "read -A galiases <<< 'ls cp'; : $(ls src.txt $AP2_DATA/config.yaml)",
+                    "read -A saliases <<< 'txt cp'; : $(src.txt $AP2_DATA/config.yaml)"], deny=True)
+        # `local`, `private` and `let` set the search path by the name they take.
+        self.check(["local \"PATH=/tmp/b\"; ap2 src.txt $AP2_DATA/config.yaml",
+                    "private \"PATH=/tmp/b\"; ap2 src.txt $AP2_DATA/config.yaml",
+                    "let 'PATH=1'; ap2 src.txt $AP2_DATA/config.yaml"], deny=True)
+        # bash 4+ binds a command name in its hash table through `BASH_CMDS` (bash 3.2 has no such array).
+        self.check(["BASH_CMDS[ap2]=/bin/cp; ap2 src.txt $AP2_DATA/config.yaml"], deny=True)
+        # `${PATH:=...}` sets an unset search path, as `${PATH::=...}` does any.
+        self.check(["unset PATH; : ${PATH:=./b}; ap2 src.txt $AP2_DATA/config.yaml"], deny=True)
+        # `ap2` after a name character inside a word (`run_ap2()`) binds nothing.
+        self.check([f"git commit -qm 'fix(v2): call run_ap2() once per card' && {PKG}/bin/ap2 card note C1 --text "
+                    "done --data $AP2_DATA"], deny=False)
+
     def test_each_run_directory_mention_in_a_word_is_judged_on_its_own(self):
         """A quoted journal line can name the run directory twice: each mention that stays inside it is fine, and a
         later one that leaves it is still denied."""
@@ -1867,7 +1953,16 @@ class DecideTest(unittest.TestCase):
                   "$' unshared": fill("$'a\\d' $'\\C-@x' x$'\\0' "), "$' alone NUL": fill("$'\\0' "),
                   '<<$"': fill('cat <<$"E" x\n'),
                   "$' zsh prefixes": "cp a $'" + "\\C-\\M-" * ((size - 20) // 6) + "'" + tail,
-                  "$' readings": fill("$'\\d' $'\\x41' ")}
+                  "$' readings": fill("$'\\d' $'\\x41' "),
+                  # Long pipelines ending in `xargs`, each `xargs` fed the ones before it, heredocs on their line.
+                  "| xargs": "ls $AP2_RUN_DIR | " * ((size - 10) // 18) + "xargs rm",
+                  "xargs chain": "ls $AP2_RUN_DIR | " + "xargs rm | " * ((size - 30) // 11) + "xargs rm",
+                  "xargs readers": "ls $AP2_DATA | " + "xargs wc $x | " * ((size - 30) // 14) + "xargs wc",
+                  "xargs dd": "echo of=x | " + "xargs dd | " * ((size - 30) // 11) + "xargs dd",
+                  "xargs sed": "ls $AP2_DATA | " + "xargs sed -n p | " * ((size - 30) // 17) + "xargs cat",
+                  "xargs heredocs": ("xargs wc <<E | " * ((size - 20) // 30) + "xargs rm\n"
+                                     + "$AP2_DATA/a\n" * ((size - 20) // 30) + "E\n"),
+                  "xargs |\\n": "ls $AP2_DATA |\n" * ((size - 10) // 15) + "xargs wc"}
         # The slowest shapes (a shell's script read again in both `$$(` readings, about 0.3 s here) get a bound a
         # few times their time (1 s), so a slowdown of that much is seen well before the 2 s deadline; the rest
         # keep 2 s.
@@ -1903,6 +1998,38 @@ class DecideTest(unittest.TestCase):
         self.assertIsNone(guard._judge(json.dumps(bash("echo x > /tmp/x")).encode(), WORKER))
         self.assertEqual(guard.signal.getitimer(guard.signal.ITIMER_REAL), (0.0, 0.0))
         self.assertIs(guard.signal.getsignal(guard.signal.SIGALRM), mine)
+
+    def test_a_deadline_that_fires_as_the_timer_is_turned_off_still_gives_a_verdict(self):
+        """The one-shot timer can fire after the judgement returned and before the timer is turned off: that late
+        signal is judged by `_fallback` (never taken for no opinion), and the timer and the old handler are still
+        put back. A `_Late` that gets out of `_judge` all the same is judged by `_fallback` in `main`."""
+        if not hasattr(guard.signal, "setitimer"):
+            self.skipTest("no setitimer")
+        real = guard.signal.setitimer
+
+        def late_off(which, seconds, *rest):  # the signal lands as the timer is turned off
+            real(which, seconds, *rest)
+            if seconds == 0:
+                raise guard._Late
+
+        def mine(signum, frame):
+            pass
+
+        self.addCleanup(guard.signal.signal, guard.signal.SIGALRM, guard.signal.signal(guard.signal.SIGALRM, mine))
+        raw = json.dumps(bash(f"echo x > {DATA}/config.yaml")).encode()
+        with mock.patch.object(guard, "decide", lambda payload, env: guard._deny()), \
+                mock.patch.object(guard.signal, "setitimer", late_off):
+            self.assertTrue(denied(guard._judge(raw, WORKER)))
+        self.assertEqual(guard.signal.getitimer(guard.signal.ITIMER_REAL), (0.0, 0.0))
+        self.assertIs(guard.signal.getsignal(guard.signal.SIGALRM), mine)
+        writes = []
+        with mock.patch.object(guard, "_judge", side_effect=guard._Late), \
+                mock.patch.object(guard.os, "write", lambda fd, data: writes.append((fd, data))), \
+                mock.patch.dict(guard.os.environ, WORKER):
+            self.assertEqual(guard.main([], io.BytesIO(raw)), 0)
+        self.assertEqual(len(writes), 1)
+        self.assertEqual(writes[0][0], 1)
+        self.assertTrue(denied(json.loads(writes[0][1])))
 
     def test_the_harmless_redirects_match_v1(self):
         v1 = re.compile(r"\d*>&\d+|&>>?\s*/dev/null|\d*>>?\s*/dev/null")
