@@ -32,9 +32,10 @@ failed stop again. A parked worker resumes by the active profile's rules: the su
 `--usage`), or the gateway's cap (no usage file). A gateway worker is never parked by the subscription's windows.
 
 A worker whose turn stopped (idle, blocked or dead) may have stopped on an API error: `check` reads the end of its
-transcript (`apistop.py`) before it acts. A usage or spend limit parks it (`reason: limit`, only `workers.json` is
-written, so this works in shadow mode) until the reset the message names plus the resume delay, else for a back-off
-of 30 minutes doubling to 4 hours (`limit_parks` counts the limit parks in a row); the parked resume continues it.
+transcript (`apistop.py`) before it acts. A usage or spend limit parks it (`reason: limit`; only `workers.json` is
+written, and the card's attach ask is closed when the worker was at a prompt, so this works in shadow mode) until the
+reset the message names plus the resume delay, else for a back-off of 30 minutes doubling to 4 hours (`limit_parks`
+counts the limit parks in a row); the parked resume continues it.
 A gateway's safety-guard refusal stops it at once (`refused`, paused) and the card asks the user to resume that one
 worker on the subscription. Only an error of the current run counts (from 2 minutes before its start). `list` says
 which (`api_stop`) without writing anything. A `--resume` start stops the saved session it replaces when the listing

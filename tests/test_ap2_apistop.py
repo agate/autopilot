@@ -117,6 +117,15 @@ class TailTest(Case):
         self.assertEqual(t["errors"], [])
         self.assertEqual(t["reply_at"], datetime(2026, 11, 12, 3, 0, tzinfo=timezone.utc))
 
+    def test_a_raw_line_separator_inside_a_reply_does_not_split_its_line(self):
+        # The transcript writer leaves U+2028 raw inside a JSON string; only "\n" ends a line.
+        raw = json.dumps(reply("2026-11-12T03:00:00Z", text="one two"), ensure_ascii=False)
+        self.assertIn(" ", raw)
+        self.transcript([limit_line(), raw])
+        t = self.tail()
+        self.assertEqual(t["errors"], [])
+        self.assertEqual(t["reply_at"], datetime(2026, 11, 12, 3, 0, tzinfo=timezone.utc))
+
     def test_only_the_last_64_kib_are_read_and_the_cut_line_is_dropped(self):
         filler = reply(text="x" * 500)
         big = [reply("2026-11-12T01:30:00Z")] + [filler] * 300 + [limit_line()]
@@ -242,6 +251,7 @@ class ResetTimeTest(unittest.TestCase):
         base = self.at("2026-12-31T20:00:00+00:00")
         self.assertEqual(apistop.reset_time("resets Jan 2, 9am (UTC)", base), self.at("2027-01-02T09:00:00+00:00"))
         self.assertEqual(apistop.reset_time("resets Dec 31, 9pm (UTC)", base), self.at("2026-12-31T21:00:00+00:00"))
+        self.assertEqual(apistop.reset_time("resets Dec 31, 7pm (UTC)", base), self.at("2026-12-31T19:00:00+00:00"))
 
     def test_unreadable_is_none(self):
         base = self.at("2026-11-12T02:32:42+00:00")

@@ -2960,8 +2960,9 @@ class LimitParkFromTranscriptTest(ApiStopCase):
         # A second check before the resume time changes nothing and reads no transcript (the record is parked).
         before = (self.data / "workers.json").read_bytes()
         self.clock.advance(60)
-        with mock.patch.object(workers_mod.apistop, "tail", side_effect=AssertionError("read again")):
+        with mock.patch.object(workers_mod.apistop, "tail", side_effect=AssertionError("read again")) as t:
             out = w.check(usage_file=self.quiet())
+        t.assert_not_called()  # check() turns a raise into a note, so the call itself is what is checked
         self.assertEqual([(o["state"], o["did"]) for o in out], [("parked", "nothing")])
         self.assertEqual((self.data / "workers.json").read_bytes(), before)
         # Past 20:45 in Los Angeles (04:45Z the next day), in live mode: it resumes with LIMIT_RESUME.
@@ -3123,8 +3124,9 @@ class ApiStopIgnoredTest(ApiStopCase):
         say(self.fake_home, a["session_id"], limit_line(iso(self.clock())))
         for state, status in (("working", "busy"), ("working", "idle"), ("blocked", "busy")):
             self.set_agent(a["short_id"], state=state, status=status)
-            with mock.patch.object(workers_mod.apistop, "tail", side_effect=AssertionError("read")):
+            with mock.patch.object(workers_mod.apistop, "tail", side_effect=AssertionError("read")) as t:
                 out = w.check()
+            t.assert_not_called()  # check() turns a raise into a note, so the call itself is what is checked
             self.assertNotEqual(out[0]["did"], "parked", (state, status))
 
     def test_an_error_from_before_the_run_is_history(self):

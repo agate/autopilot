@@ -77,7 +77,7 @@ def tail(projects, session_id) -> Optional[dict]:
             h.seek(0, 2)
             start = max(0, h.tell() - TAIL_BYTES)
             h.seek(start)
-            lines = h.read().decode("utf-8", "replace").splitlines()
+            lines = h.read().decode("utf-8", "replace").split("\n")  # not splitlines: U+2028 stays raw in a line
     except (OSError, TypeError, ValueError):  # TypeError: no projects folder; ValueError: not a session id
         return None
     if start:
