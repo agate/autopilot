@@ -12,7 +12,8 @@
   `key` (a Slack review ask keys on its PR, `{pr}`, so it lands on the GitHub review request's card). Each category
   is one of `sort`'s; a user's `<category>: null` turns that one off. To turn the PR keying off, also sort that
   category elsewhere (`sort: { review_request: question }`), since a `pr-review` card needs a PR key. A user file
-  that re-sorts a `key_for` category without setting that category's `key_for` is refused.
+  that changes the sort of a `key_for` category without setting that category's `key_for` is refused, anywhere in
+  an `extends:` chain; writing the same value is not a change.
 - Every problem raises `SourceError`, whose message starts with the file it is about.
 """
 from __future__ import annotations
@@ -183,9 +184,10 @@ class Loader:
             base_layer = self._layer(base)
             if base_layer is None:
                 raise SourceError(f"{f.path}: line {line}: extends {base}, but there is no source named {base}")
-        merged, files = self._resolve(base_layer, base, chain + ((layer, name),))
+        prev, files = self._resolve(base_layer, base, chain + ((layer, name),))
         over = {k: v for k, v in f.data.items() if k != "extends"}
-        merged = merge(merged, over)
+        merged = merge(prev, over)
+        _check_re_sort(f, prev, over, merged)
         merged["source"] = name
         return merged, files + [f.path]
 
@@ -207,6 +209,29 @@ class Loader:
     def load_all(self) -> list:
         """Every source, by name. One bad file fails the whole call, naming that file."""
         return [self.load(n) for n in self.names()]
+
+
+def _check_re_sort(f: _File, prev: dict, over: dict, merged: dict) -> None:
+    """Refuse a layer that changes the sort of a `key_for` category but leaves its `key_for` to the file it extends.
+
+    Else a Slack ask sorted to `question` would make a question card keyed on its PR, and the GitHub review request
+    would land on that card. Checked at every layer of an `extends:` chain; writing the base's own sort is no change.
+    Shapes that are not maps are left to `validate`, which reports them.
+    """
+    kf, sort, own_sort, own_kf = (merged.get("key_for"), merged.get("sort"), over.get("sort"), over.get("key_for"))
+    if not (isinstance(kf, dict) and isinstance(sort, dict) and isinstance(own_sort, dict)):
+        return
+    base_sort = prev.get("sort") if isinstance(prev.get("sort"), dict) else {}
+    for cat, pattern in kf.items():
+        if pattern is None or cat not in own_sort or (isinstance(own_kf, dict) and cat in own_kf):
+            continue
+        if cat in base_sort and sort.get(cat) == base_sort[cat]:
+            continue
+        line = f.lines.get(("sort", cat), f.lines.get(("sort",)))
+        where = f"line {line}: " if line is not None else ""
+        raise SourceError(f"{f.path}: {where}sort.{cat}: re-sorted here while key_for.{cat} still keys it on "
+                          f"{pattern} (from the file this extends); set key_for.{cat} too (null keys it on key "
+                          f"again)")
 
 
 def merge(base: dict, over: dict) -> dict:
@@ -360,10 +385,6 @@ def validate(src: Source, lines: Optional[dict] = None) -> Source:
             if not any(kind == "field" for kind, _ in parts):
                 fail(f"key_for.{cat} must name at least one {{field}}, or every such item would be one card: "
                      f"{pattern!r}", at)
-            # `lines` holds only this file's own keys, so an entry missing there came from the file it extends.
-            if ("sort", cat) in lines and ("key_for", cat) not in lines:
-                fail(f"sort.{cat}: re-sorted here while key_for.{cat} still keys it on {pattern} (from the file "
-                     f"this extends); set key_for.{cat} too (null keys it on key again)", ("sort", cat))
             src.key_for[cat] = parts
 
     if "instructions" in d and not _text(d["instructions"]):

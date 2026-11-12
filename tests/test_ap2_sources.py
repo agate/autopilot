@@ -465,11 +465,45 @@ class KeyForTest(SourceCase):
                                         "sort: { review_request: question }\n")
         with self.assertRaises(SourceError) as cm:
             Loader(self.data, plugin_dir=sources.PLUGIN_DIR).load("slack-mentions")
-        base = sources.PLUGIN_DIR / "slack-mentions.yaml"
-        self.assertEqual(str(cm.exception),
-                         f"{p} (merged over {base}): line 3: sort.review_request: re-sorted here while "
-                         "key_for.review_request still keys it on {pr} (from the file this extends); set "
-                         "key_for.review_request too (null keys it on key again)")
+        self.assertEqual(str(cm.exception), self.re_sorted(p, 3))
+
+    @staticmethod
+    def re_sorted(path, line):
+        return (f"{path}: line {line}: sort.review_request: re-sorted here while key_for.review_request still "
+                "keys it on {pr} (from the file this extends); set key_for.review_request too (null keys it on key "
+                "again)")
+
+    def test_re_sorting_a_key_for_category_is_refused_anywhere_in_the_chain(self):
+        # The bad file is in the middle: a source extending it fails too, naming that file and its line.
+        p = self.user("slack-mentions", "extends: slack-mentions\nsettings: { me: U0EXAMPLE1 }\n"
+                                        "sort: { review_request: question }\n")
+        self.user("slack-team", "extends: slack-mentions\n")
+        with self.assertRaises(SourceError) as cm:
+            Loader(self.data, plugin_dir=sources.PLUGIN_DIR).load("slack-team")
+        self.assertEqual(str(cm.exception), self.re_sorted(p, 3))
+
+    def test_a_block_style_re_sort_names_the_category_line(self):
+        p = self.user("slack-mentions", "extends: slack-mentions\nsettings: { me: U0EXAMPLE1 }\n"
+                                        "sort:\n  review_request: question\n")
+        with self.assertRaises(SourceError) as cm:
+            Loader(self.data, plugin_dir=sources.PLUGIN_DIR).load("slack-mentions")
+        self.assertEqual(str(cm.exception), self.re_sorted(p, 4))
+
+    def test_writing_the_same_sort_as_the_base_loads(self):
+        self.user("slack-mentions", "extends: slack-mentions\nsettings: { me: U0EXAMPLE1 }\n"
+                                    "sort: { review_request: pr-review }\n")
+        src = Loader(self.data, plugin_dir=sources.PLUGIN_DIR).load("slack-mentions")
+        self.assertEqual(src.sort["review_request"], "pr-review")
+        self.assertEqual(src.key_for, {"review_request": form.parse_pattern("{pr}")})
+
+    def test_re_sorting_over_an_inherited_null_loads(self):
+        # `a` turned the PR keying off, so `b` may sort review asks anywhere without saying so again.
+        self.user("a", "extends: slack-mentions\nsettings: { me: U0EXAMPLE1 }\n"
+                       "sort: { review_request: question }\nkey_for: { review_request: null }\n")
+        self.user("b", "extends: a\nsort: { review_request: fyi }\n")
+        src = Loader(self.data, plugin_dir=sources.PLUGIN_DIR).load("b")
+        self.assertEqual(src.key_for, {})
+        self.assertEqual(src.sort["review_request"], "fyi")
 
     def test_re_sorting_a_key_for_category_with_its_key_for_loads(self):
         self.user("slack-mentions", "extends: slack-mentions\nsettings: { me: U0EXAMPLE1 }\n"
