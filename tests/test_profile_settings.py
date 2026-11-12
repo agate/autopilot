@@ -150,6 +150,26 @@ class ProfileSettingsTest(unittest.TestCase):
         self.assertEqual(out["hooks"], {"h": 1})
         self.assertEqual(out["apiKeyHelper"], "k")
 
+    def test_floor_autopilot_env_wins_over_the_overlay(self):
+        floor = {"permissions": {"deny": []}, "env": {"AUTOPILOT_ROLE": "worker", "AUTOPILOT_DATA": "/d"}}
+        out = profile.merge(floor, {"env": {"AUTOPILOT_ROLE": "dispatcher", "AUTOPILOT_DATA": "/x",
+                                            "AUTOPILOT_PROFILE": "g"}})
+        self.assertEqual(out["env"], {"AUTOPILOT_ROLE": "worker", "AUTOPILOT_DATA": "/d", "AUTOPILOT_PROFILE": "g"})
+
+    def test_validate_rejects_names_autopilot_owns(self):
+        for name in ("AUTOPILOT_ROLE", "AUTOPILOT_PROFILE", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL",
+                     "ANTHROPIC_SMALL_FAST_MODEL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_FOUNDRY"):
+            for where in ("env", "settings"):
+                p = gateway()
+                if where == "env":
+                    p["env"] = {name: "x"}
+                else:
+                    p["settings"] = {"env": {name: "x"}}
+                self.assertTrue(any(name in e for e in profile.validate(p)), (where, name))
+        p = gateway()
+        p["settings"] = {"disableAllHooks": True}
+        self.assertTrue(any("disableAllHooks" in e for e in profile.validate(p)))
+
 
 if __name__ == "__main__":
     unittest.main()

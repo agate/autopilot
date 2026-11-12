@@ -14,7 +14,7 @@ from pathlib import Path
 from autopilot import cli, config, events, paths
 
 SUBSCRIPTION = "subscription"
-FORBIDDEN_SETTINGS = ("permissions", "hooks", "apiKeyHelper")
+FORBIDDEN_SETTINGS = ("permissions", "hooks", "apiKeyHelper", "disableAllHooks")
 _CREDENTIAL_WORDS = ("KEY", "TOKEN", "SECRET", "PASSWORD")
 _CREDENTIAL_NAMES = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")
 
@@ -84,12 +84,29 @@ def validate(p: dict) -> list:
                             + (" (put the key command in gateway.key_command)" if k == "apiKeyHelper" else ""))
         for k in _credential_env(settings.get("env")):
             errs.append(f"settings.env.{k}: looks like a credential; a profile stores commands, never keys")
+        errs += [f"settings.env.{k}: {why}" for k, why in _owned_env(settings.get("env"))]
     env = p.get("env") or {}
     if not isinstance(env, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items()):
         errs.append("env: must map names to strings")
     for k in _credential_env(env):
         errs.append(f"env.{k}: looks like a credential; a profile stores commands, never keys")
+    errs += [f"env.{k}: {why}" for k, why in _owned_env(env)]
     return errs
+
+
+def _owned_env(env) -> list:
+    """Variables autopilot itself sets in a profile's settings: a profile may not set them. [(name, why)]"""
+    if not isinstance(env, dict):
+        return []
+    out = []
+    for k in env:
+        if not isinstance(k, str):
+            continue
+        if k.upper().startswith("AUTOPILOT_"):
+            out.append((k, "autopilot sets its own AUTOPILOT_ variables"))
+        elif k.upper() in _BLANKED_ENV + _PROVIDER_ENV and k.upper() not in _CREDENTIAL_NAMES:
+            out.append((k, "set by the profile's own fields (gateway.base_url, model, small_model), or blanked"))
+    return out
 
 
 def _model_errors(p: dict) -> list:
@@ -236,12 +253,12 @@ def overlay(p: dict) -> dict:
 
 
 def merge(floor: dict, ov: dict) -> dict:
-    """Keep the floor's permissions, hooks and its AUTOPILOT_* variables (except AUTOPILOT_PROFILE); all else
-    comes from the overlay. Merging never changes a deny or allow list."""
+    """Keep the floor's permissions, hooks and its AUTOPILOT_* variables (except AUTOPILOT_PROFILE), which win
+    over the overlay; all else comes from the overlay. Merging never changes a deny or allow list."""
     out = {k: v for k, v in ov.items() if k not in ("permissions", "hooks", "env")}
     kept = {k: v for k, v in (floor.get("env") or {}).items()
             if k.startswith("AUTOPILOT_") and k != "AUTOPILOT_PROFILE"}
-    out["env"] = {**kept, **(ov.get("env") or {})}
+    out["env"] = {**(ov.get("env") or {}), **kept}   # the floor's role and data folder win
     out["permissions"] = floor["permissions"]
     if floor.get("hooks"):
         out["hooks"] = floor["hooks"]
