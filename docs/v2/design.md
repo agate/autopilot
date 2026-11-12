@@ -2032,10 +2032,11 @@ Calls the author made without asking (check them):
       `low, medium, high, xhigh, max`. The recommended entries are `claude-opus-5-5[1m]` (when offered, else the
       first model) and `high`. A failing models command raises `ModelsUnavailable` (a `ProfileError`) naming the exit
       code or the exception only, never its output or its command line.
-    - One fetch per choice. `choose(data, name, model, effort, models=None)` fetches the list once (or takes the one
-      the caller showed), refuses a model or an effort not offered (the error lists the choices), and saves with
-      `save(data, p, known=models)`, which checks the models against that same list and runs no command. Nothing
-      is written on a refusal. `add` fetches once too: the same list checks the flags, the save and the prompt.
+    - One fetch per choice. `choose(data, name, model, effort, models=None, known=None)` fetches once with
+      `profiles.fetch_models` (or takes the caller's lists), refuses a model not in the shown list or an effort not
+      offered (the error lists the choices), and saves with `save(data, p, known)`, the full list of that same fetch,
+      so no command runs again. Nothing is written on a refusal. `add` fetches once too: the shown list checks
+      `--model` and feeds the prompt, the full list checks the save.
     - `ap2 profile choices NAME` prints `{profile, models, efforts, recommended_model, recommended_effort}` (a fetch
       failure is one `ap2:` line, exit 1). `ap2 profile choose NAME [--model M] [--effort E]` saves both and prints
       the profile. A missing value is asked for in a terminal (`sys.stdin.isatty()`): a numbered list per value, the
@@ -2068,9 +2069,9 @@ Calls the author made without asking (check them):
       refused before anything is asked or printed, in `choose` too.
     - **[decided by the builder]** A models command that lists no models at all is one `ap2:` line at the prompt
       ("listed no models, so there is nothing to choose"), never an endless prompt.
-    - **[decided by the builder]** `add` without both flags now fetches the list (and so reads the price override
-      on a subscription profile) before it saves: the list the prompt shows comes from the fetch the save checked.
-      A broken `prices.json` therefore fails such an `add` with its one line.
+    - **[decided by the builder]** `add` now fetches the list before it saves (and so reads the price override
+      when the profile has no models command): the list the prompt shows comes from the fetch the save checked.
+      A broken `prices.json` therefore fails `add` with its one line.
     - **[decided by the builder]** The choices keep only the models command's entries shaped like a model name
       (`profiles.MODEL_NAME`, checked before the `[1m]` variants are added); any other entry is dropped and never
       shown. Why: the list is shown in a terminal and in logs (the choices JSON, the numbered list, the "choose one
@@ -2078,10 +2079,11 @@ Calls the author made without asking (check them):
       name never has: a gateway's error text or a terminal control sequence is never shown. A bare token shaped
       like a model name would still be shown (a gateway's model list holds no keys). The filter decides only what
       is shown and what may be picked as the profile's model; a save checks the profile's models against the full
-      list the command printed, from the same fetch (`profiles.fetch_models`), so a listed `small_model` of another
-      shape still saves. A save without a fetched list is unchanged: it only parses the output and shows none of
-      it. When every entry is dropped, it is a list with no models ("listed no models, so there is nothing to
-      choose").
+      list from the same fetch (`profiles.fetch_models`): every entry the command printed, with the `[1m]` variant
+      and the plain name of each `claude-*` entry but `claude-haiku-*` added (as `_with_long` does for the shown
+      list), none dropped, so a listed `small_model` of another shape still saves. A save without a fetched list is
+      unchanged: it only parses the output and shows none of it. When every entry is dropped, it is a list with no
+      models ("listed no models, so there is nothing to choose").
     - **[decided by the builder]** Ctrl-C at a prompt counts as "no choice made", like the end of input: one `ap2:`
       line and exit 1, never a traceback (`add` still says the profile is saved and how to finish it).
   - Model and effort. A fresh start gets `--model <profile model>` when the profile has one and

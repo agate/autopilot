@@ -428,10 +428,11 @@ def _with_long(names) -> list:
 def fetch_models(data, p: dict) -> tuple:
     """`(shown, known)` for `p`, fetched now on every call (never cached), with the models command run once.
     `shown`: the models `p` may be chosen to run, as `model_choices` returns them. `known`: what a save checks the
-    profile's models against (`save(data, p, known)`): every entry the models command printed, `[1m]` variants added,
-    with none dropped, so a listed small model of another shape still saves. With no models command both are the
-    same list. Raises ModelsUnavailable when the command fails, and SpendError (a ConfigError) when the price override
-    is broken."""
+    profile's models against (`save(data, p, known)`): every entry the models command printed, with the `[1m]`
+    variant and the plain name of each claude-* entry but haiku added (as `_with_long` does for `shown`), none
+    dropped, so a listed small model of another shape still saves. With no models command both are the same list.
+    Raises ModelsUnavailable when the command fails, and SpendError (a ConfigError) when the price override is
+    broken."""
     cmd = (p.get("gateway") or {}).get("models_command") if p.get("mode") == "gateway" else None
     if cmd:
         listed = _listed(cmd, CHOICE_TIMEOUT)

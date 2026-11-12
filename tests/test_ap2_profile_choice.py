@@ -336,7 +336,17 @@ class ChoicesCliTest(CliCase):
         self.assertEqual(json.loads(out)["models"], ["claude-opus-5-5[1m]", "claude-opus-5-5"])
         code, out, err = self.run_cli("choose", "g", "--model", "nope", "--effort", "high")
         self.assert_one_error(code, out, err, "model 'nope' is not offered")
-        for shown in (out, err):
+        self.assert_never_shown(out, err)
+        # g is still unchosen and not active: with no terminal, `choose` and `use` print the shown list only.
+        for argv in (("choose", "g"), ("use", "g")):
+            code, out, err = self.run_cli(*argv)
+            self.assertEqual(code, profiles.NEEDS_CHOICE, (argv, err))
+            self.assertEqual(json.loads(out)["models"], ["claude-opus-5-5[1m]", "claude-opus-5-5"], argv)
+            self.assert_never_shown(out, err)
+        self.assertTrue(profiles.needs_choice(self.data, profiles.load(self.data, "g")))
+
+    def assert_never_shown(self, *texts):
+        for shown in texts:
             self.assertNotIn("SECRETVALUE", shown)
             self.assertNotIn("\x1b", shown)
             self.assertNotIn("pwned", shown)
@@ -592,6 +602,25 @@ class AddCliTest(CliCase):
         # A model of another shape cannot be picked as the profile's model, though a save accepts it as small_model.
         self.assert_one_error(*self.run_cli("choose", "h", "--model", small, "--effort", "high"),
                               text="is not offered")
+        self.assert_one_error(*add("x", "--model", small, "--effort", "high"), text="is not offered")
+        self.assertFalse(self.file("x").exists())
+
+    def test_a_save_accepts_the_plain_name_of_a_listed_1m_entry(self):
+        # The command lists only the [1m] name; the shown list offers the plain name too, so a save takes it.
+        listed = '["claude-opus-5-5[1m]", "claude-haiku-4-5"]'
+
+        def add(name, *extra):
+            return self.run_cli("add", name, "--gateway", "--base-url", URL, "--key-command", "echo k",
+                                "--small-model", "claude-haiku-4-5", "--daily-cap", "5",
+                                "--models-command", counting(self.tmp, listed), *extra)
+
+        code, out, err = add("g", "--model", "claude-opus-5-5", "--effort", "high")
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(json.loads(out)["model"], "claude-opus-5-5")
+        self.assertEqual(add("h")[0], profiles.NEEDS_CHOICE)
+        code, out, err = self.run_cli("choose", "h", "--model", "claude-opus-5-5", "--effort", "high")
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(profiles.load(self.data, "h")["model"], "claude-opus-5-5")
 
     def test_a_broken_profile_is_refused_before_its_models_command_runs(self):
         code, out, err = self.run_cli("add", "g", "--gateway", "--base-url", URL, "--models-command",
