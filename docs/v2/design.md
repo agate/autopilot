@@ -624,12 +624,23 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   TL;DR (D18 still holds: the re-read changes only the words and the source block). Every other kind's words are
   unchanged.
 - **[decided by the builder]** `ap2 review sync CARD [--data PATH]` (points 5-6) reads `gh pr view <n> --repo
-  <repo> --json state,headRefOid,reviewRequests,latestReviews` and `gh api user --jq .login`, and prints `state`:
+  <repo> --json state,headRefOid,reviewRequests,latestReviews,author` and `gh api user --jq .login`, and prints `state`:
   `merged`, `closed`, `reviewed` (the user has a review in `latestReviews`), `request_removed` (no review, and
   neither the user nor any team is in `reviewRequests`; a team request keeps the card open, since its members are
   not read), then `not_reviewed`, `new_commits` (the head is not `pr.reviewed_sha`: a delta is due) or `current`.
   The first four move the card to lane `done` with the reason as `did` (a card already in `done` is left alone);
   every other state writes `pr.head_sha`. Only the card changes, in the data folder, so shadow mode allows it.
+- **[decided by the builder]** The user's own PRs (`github-my-prs` sorts them into `pr-review` too) are told apart
+  two ways. For words, by the card's `feed`: a card whose feed is `github-my-prs` reads "Your PR #<id>: <title>"
+  ("你的 PR #<id>：<title>"); its `where` line is the same as any PR review card's; its `do` line before a review is
+  the same wait, and after one is "Read the <n> findings, then fix the ones you agree with on your branch.", "Read
+  the 1 finding, then fix it on your branch if you agree." or, with none open, "Read the review; nothing needs
+  fixing." (`prreview.OWN_PHRASES`, in `en` and `zh`). The words follow the card's own `feed` (the source that
+  made it); a re-read by the other GitHub source keeps it, so the words do not flip. For `sync`, by the PR's author: when the reply's `author.login` is the
+  `gh api user` login, the user is never in their own `reviewRequests` and a comment they leave shows in
+  `latestReviews`, so `reviewed` and `request_removed` are never given; only `merged` and `closed` move the card to
+  `done`, else it is `not_reviewed`, `new_commits` or `current`. A reply with no author (an older recording, or a
+  null author for a deleted account) is not the user's own PR.
 - **[decided by the builder]** `apply` and `sync` read the card, do their slow part (the report check, the gh
   calls), then write with `store.update_checked`, which refuses when the card is no longer the one they read (a
   `ReviewError`: "card <id> changed while ...; run it again"), so neither overwrites a write that landed between.
@@ -638,8 +649,7 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   read, so they do not create it.
 - Not built here: starting the `pr-review` role on its own when a card is made, and running `apply` and `sync` from
   the worker's done path or the gate (they need the worker sessions); a Slack or other message asking for a review
-  landing on the same card (point 1, second half); own wording for the user's own PRs (`github-my-prs` sorts them
-  into `pr-review` too, so they read as a review request for now); and the PR loop's end (6.3).
+  landing on the same card (point 1, second half); and the PR loop's end (6.3).
 
 ### 6.3 How the PR loop ends **[decided by the user, 2026-11-10]**
 
