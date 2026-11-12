@@ -283,6 +283,21 @@ class TotalsTest(SpendCase):
                          {"short": SHORT, "kind": "worker", "ap": "checkout", "profile": "g1", "mode": "gateway"})
         self.assertTrue(line["at"])
 
+    def test_record_session_prices_a_p_run_by_session_id(self):
+        self.put()
+        spend.record_session(SID, "discover", "checkout", profile())
+        line = json.loads((self.data / "spend" / "launches.jsonl").read_text().splitlines()[0])
+        self.assertEqual((line["short"], line["kind"]), (SID, "discover"))
+        self.listing = []
+        self.transcript.unlink()   # settled lines outlive the transcript
+        t = spend.totals(NOW)
+        self.assertAlmostEqual(t["month"], STREAMING_USD)
+        self.assertFalse(t["unknown"])
+
+    def test_record_session_without_an_id_is_unknown_spend(self):
+        spend.record_session("", "oneoff", "checkout", profile())
+        self.assertIs(spend.totals(NOW)["unknown"], True)
+
     def test_record_launch_rejects_unknown_kind(self):
         with self.assertRaises(ValueError):
             spend.record_launch(SHORT, "bogus", None, profile())

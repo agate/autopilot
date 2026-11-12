@@ -142,6 +142,11 @@ def start(ap: str, task: str, role: str, cwd: str, prompt: str, needs: list = No
            "ports": port_range,
            "needs": list(needs or []), "started_at": events.now_iso(), "resumes": 0, "cwd": str(cwd),
            "profile": profile.active()["name"]}
+    if sid and (found or {}).get("sessionId") and found["sessionId"] != sid:
+        # The resumed copy has a new session id; the original stays on disk until the task is cleaned up.
+        rec["replaced_sessions"] = list((old or {}).get("replaced_sessions") or []) + [sid]
+    elif old and old.get("replaced_sessions"):
+        rec["replaced_sessions"] = list(old["replaced_sessions"])
     with state.mutate(ap) as st:
         st["workers"] = [w for w in st["workers"] if not (w["task"] == task and w["role"] == role)] + [rec]
     if parked:
@@ -162,7 +167,8 @@ def resume(ap: str, worker: dict) -> dict:
     if not settings.exists():
         raise RuntimeError(f"{ap}: no permission floor yet; run `ap perms write {ap}` first")
     p = profile.active()
-    argv = [claude_bin(gcfg), "--bg", "--resume", worker["session_id"], "--settings", str(settings), prompt]
+    argv = [claude_bin(gcfg), "--bg", "--resume", worker["session_id"],
+            "-n", sessions.name_for(ap, worker["task"], worker["role"]), "--settings", str(settings), prompt]
     short = _launch(argv, worker.get("cwd") or str(paths.ap_dir(ap)), _env("worker"))
     _record(short, "worker", ap, p)
     # --settings on --resume starts a copy under a new id (like start's flags do): follow it.
@@ -171,7 +177,8 @@ def resume(ap: str, worker: dict) -> dict:
         for w in st["workers"]:
             if w["task"] == worker["task"] and w["role"] == worker["role"]:
                 w["short_id"] = short
-                if (found or {}).get("sessionId"):
+                if (found or {}).get("sessionId") and found["sessionId"] != w["session_id"]:
+                    w["replaced_sessions"] = list(w.get("replaced_sessions") or []) + [w["session_id"]]
                     w["session_id"] = found["sessionId"]
                 w["resumes"] = w.get("resumes", 0) + 1
                 w["started_at"] = events.now_iso()
@@ -211,12 +218,21 @@ def end(ap: str, task: str, role: str) -> None:
         keep, tokens = [], usage.zero()
         for w in st["workers"]:
             if w["task"] == task and w["role"] == role:
-                tokens = usage.session_tokens(w.get("session_id"))
+                # The listing knows the session behind the short id; a resumed copy has a new session id.
+                hit = sessions.find_by_id(w["short_id"], sessions.list_all(claude_bin(gcfg)))
+                sid = (hit or {}).get("sessionId") or w.get("session_id")
+                tokens = usage.session_tokens(sid)
                 subprocess.run([claude_bin(gcfg), "stop", w["short_id"]], capture_output=True, timeout=60)
                 _settle(w["short_id"])
                 for t in st["tasks"]:
-                    if t["id"] == task and w.get("session_id"):
-                        t.setdefault("sessions", {})[role] = w["session_id"]
+                    if t["id"] == task:
+                        if sid:
+                            t.setdefault("sessions", {})[role] = sid
+                        old = [x for x in w.get("replaced_sessions") or [] if x != sid]
+                        if sid and sid != w.get("session_id") and w.get("session_id") not in old:
+                            old.append(w["session_id"])
+                        if old:
+                            t["replaced_sessions"] = sorted(set(t.get("replaced_sessions") or []) | set(old))
             else:
                 keep.append(w)
         st["workers"] = keep
@@ -230,7 +246,8 @@ def cleanup(ap: str, task: str) -> list:
     with state.mutate(ap) as st:
         for t in st["tasks"]:
             if t["id"] == task:
-                for sid in (t.pop("sessions", None) or {}).values():
+                ids = list((t.pop("sessions", None) or {}).values()) + list(t.pop("replaced_sessions", None) or [])
+                for sid in ids:
                     # `claude rm` takes the full session id; pricing needs the short id of the same session.
                     hit = next((s for s in sessions.list_all(claude_bin(gcfg)) or [] if s.get("sessionId") == sid), None)
                     if hit and hit.get("id"):

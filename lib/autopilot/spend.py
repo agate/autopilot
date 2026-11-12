@@ -67,6 +67,23 @@ def record_launch(short: str, kind: str, ap, p: dict) -> None:
         _save_cache(c)
 
 
+def record_session(session_id: str, kind: str, ap, p: dict) -> None:
+    """Record and price a finished `claude -p` run, which has no short id: the launch row is keyed by the full
+    session id and settled from its transcript. Without a session id the row is one `totals` reports as unknown."""
+    if kind not in KINDS:
+        raise ValueError(f"unknown launch kind {kind!r}")
+    key = session_id or f"unknown-{int(_clock() * 1000)}-{kind}"
+    _append("launches.jsonl", {"short": key, "kind": kind, "ap": ap, "profile": p["name"], "mode": p["mode"],
+                               "at": _now_iso()})
+    if not session_id:
+        return
+    tz = datetime.now().astimezone().tzinfo
+    c = _load_cache(_price_key(tz))
+    c["shorts"][session_id] = session_id
+    _save_cache(c)
+    settle(session_id)
+
+
 # --- prices ---
 
 def prices() -> dict:

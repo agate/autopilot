@@ -7,6 +7,7 @@ import unittest
 from unittest import mock
 
 from tests.helpers import ROOT, TempData, write_ap
+FAKE = str(ROOT / "tests" / "bin" / "fake-claude")
 from tests.test_profile_settings import URL, gateway, read, write_files
 from autopilot import config, dispatch, paths, perms, profile, replies, refresh, spend, state, workers
 
@@ -37,6 +38,9 @@ class LaunchBase(unittest.TestCase):
         self.data = self.td.__enter__()
         write_ap(self.data, "a")
         self.addCleanup(self.td.__exit__, None, None, None)
+        gc = config.load_global()
+        gc["tools"]["claude"] = FAKE   # never the machine's claude
+        config.save_global(gc)
         g = gateway()
         g.update(effort="high")
         g["model"] = "m1"
@@ -54,7 +58,7 @@ class LaunchTest(LaunchBase):
 
     def test_reply_check_uses_small_model(self):
         sub = profile.load("subscription")
-        sub["small_model"] = "haiku"
+        sub["small_model"] = "s1"
         profile.save(sub)
         seen = {}
 
@@ -64,12 +68,15 @@ class LaunchTest(LaunchBase):
 
         with mock.patch.object(workers, "_launch", launch):
             replies.check(config.load_global(), "https://x.example.com/a")
-        self.assertEqual(opt(seen["argv"], "--model"), "haiku")
+        self.assertEqual(opt(seen["argv"], "--model"), "s1")
         self.assertEqual(opt(seen["argv"], "--settings"), str(self.data / "settings-light.json"))
         self.assertEqual(opt(seen["argv"], "--setting-sources"), "project")
         self.assertEqual(read(self.data / "settings-light.json")["env"]["ANTHROPIC_BASE_URL"], "")
 
     def test_refresh_uses_light_settings(self):
+        sub = profile.load("subscription")
+        sub["small_model"] = "s1"
+        profile.save(sub)
         seen = {}
 
         def launch(argv, cwd, env):
@@ -78,12 +85,16 @@ class LaunchTest(LaunchBase):
 
         with mock.patch.object(workers, "_launch", launch):
             refresh.run_session(config.load_global(), "https://x.example.com/a", "p", self.data)
-        self.assertEqual(opt(seen["argv"], "--model"), "haiku")
+        self.assertEqual(opt(seen["argv"], "--model"), "s1")
         self.assertEqual(opt(seen["argv"], "--settings"), str(self.data / "settings-light.json"))
 
     def test_dispatcher_stays_on_subscription(self):
+        sub = profile.load("subscription")
+        sub["dispatcher_model"] = "d1"
+        profile.save(sub)
         argv, _ = dispatch.build_command(config.load_global(), str(self.data), ["a"])
         self.assertEqual(opt(argv, "--settings"), str(self.data / "settings-dispatcher.json"))
+        self.assertEqual(opt(argv, "--model"), "d1")
         self.assertEqual(read(self.data / "settings-dispatcher.json")["env"]["ANTHROPIC_BASE_URL"], "")
         rec = []
         with mock.patch.object(workers, "_launch", return_value="abcd1234"), \
@@ -154,15 +165,81 @@ class LaunchTest(LaunchBase):
     def test_write_for_discovers_with_the_active_profile(self):
         seen = {}
 
-        def disc(claude, cwd, settings):
-            seen["settings"] = settings
-            seen["body"] = read(settings)
+        def disc(claude, cwd, settings, ap=None, profile=None):
+            if "body" not in seen:   # the first probe is the worker's: the active profile
+                seen["settings"] = settings
+                seen["body"] = read(settings)
             return ["Bash"], []
 
         with mock.patch.object(perms, "discover", disc), mock.patch("autopilot.access.record_servers"):
             perms.write_for("a")
         self.assertEqual(seen["body"]["env"]["ANTHROPIC_BASE_URL"], URL)
         self.assertNotIn("permissions", seen["body"])
+
+    def test_dispatcher_floor_comes_from_the_page_profile_probe(self):
+        connector = "mcp__claude_ai_Slack__slack_send_message"
+        probes = []
+
+        def disc(claude, cwd, settings, ap=None, profile=None):
+            probes.append(settings.name)
+            if settings.name == "settings-discover-page.json":
+                return ["Bash", connector], ["claude_ai_Slack"]
+            return ["Bash"], []
+
+        with mock.patch.object(perms, "discover", disc), mock.patch("autopilot.access.record_servers") as rs:
+            perms.write_for("a")
+        self.assertEqual(probes, ["settings-discover.json", "settings-discover-page.json"])
+        self.assertIn(connector, read(self.data / "settings-dispatcher.json")["permissions"]["deny"])
+        self.assertNotIn(connector, read(self.data / "projects" / "a" / "settings.json")["permissions"]["deny"])
+        self.assertEqual(read(self.data / "projects" / "a" / "settings-discover-page.json")["env"]["ANTHROPIC_BASE_URL"], "")
+        self.assertEqual(rs.call_args[0][0], "a")
+
+    def test_one_probe_when_active_is_the_page_profile(self):
+        profile.use("subscription")
+        probes = []
+
+        def disc(claude, cwd, settings, ap=None, profile=None):
+            probes.append(settings.name)
+            return ["Bash"], []
+
+        with mock.patch.object(perms, "discover", disc), mock.patch("autopilot.access.record_servers"):
+            perms.write_for("a")
+        self.assertEqual(probes, ["settings-discover.json"])
+
+    def test_discover_records_spend_by_session_id(self):
+        rec = []
+
+        def run(argv, **kw):
+            init = json.dumps({"type": "system", "subtype": "init", "tools": ["Bash"], "mcp_servers": [],
+                               "session_id": "sess-d"})
+            return subprocess.CompletedProcess(argv, 0, init, "")
+
+        with mock.patch.object(subprocess, "run", run), \
+                mock.patch.object(perms.spend, "record_session", lambda *a: rec.append(a)):
+            perms.discover("claude", str(self.data), self.data / "s.json", "a", profile.active())
+        self.assertEqual([(r[0], r[1], r[2], r[3]["name"]) for r in rec], [("sess-d", "discover", "a", "g")])
+
+    def test_one_off_records_spend_by_session_id(self):
+        rec, seen = [], {}
+
+        def run(argv, **kw):
+            seen["argv"] = argv
+            return subprocess.CompletedProcess(argv, 0, json.dumps({"result": "sent", "session_id": "sess-o"}), "")
+
+        act = {"tool": "mcp__slack__slack_send_message", "prompt": "p", "option": "yes"}
+        self._decision(act)
+        with mock.patch.object(subprocess, "run", run), \
+                mock.patch.object(perms.spend, "record_session", lambda *a: rec.append(a)):
+            out = perms.run_one_off("a", "D1")
+        self.assertEqual(out, "sent")
+        self.assertEqual(opt(seen["argv"], "--output-format"), "json")
+        self.assertEqual([(r[0], r[1], r[2], r[3]["name"]) for r in rec], [("sess-o", "oneoff", "a", "g")])
+
+    def _decision(self, act):
+        with state.mutate("a") as st:
+            st["decisions"] = [{"id": "D1", "status": "answered", "answer": "yes", "action": act, "kind": "ask",
+                                "title": {"en": "t"}, "body": {"en": "b"}, "options": [], "links": [],
+                                "created_at": "2026-01-01T00:00:00Z"}]
 
     def test_one_off_passes_settings_and_runs_on_active(self):
         argv_seen = {}
@@ -172,14 +249,59 @@ class LaunchTest(LaunchBase):
             return subprocess.CompletedProcess(argv, 0, "done", "")
 
         act = {"tool": "mcp__slack__slack_send_message", "prompt": "p", "option": "yes"}
-        with state.mutate("a") as st:
-            st["decisions"] = [{"id": "D1", "status": "answered", "answer": "yes", "action": act, "kind": "ask",
-                                "title": {"en": "t"}, "body": {"en": "b"}, "options": [], "links": [],
-                                "created_at": "2026-01-01T00:00:00Z"}]
+        self._decision(act)
         with mock.patch.object(subprocess, "run", run):
             perms.run_one_off("a", "D1")
         f = opt(argv_seen["argv"], "--settings")
         self.assertEqual(read(paths.Path(f))["env"]["ANTHROPIC_BASE_URL"], URL)
+
+
+class SessionFollowTest(LaunchBase):
+    def _worker(self):
+        worker = {"task": "T-1", "role": "implement", "session_name": "a · T-1 · implement", "session_id": "orig",
+                  "short_id": "old1", "ports": [7100, 7109], "needs": [], "started_at": "2026-01-01T00:00:00Z",
+                  "resumes": 0, "cwd": str(self.data), "profile": "g"}
+        with state.mutate("a") as st:
+            st["workers"] = [worker]
+            st["tasks"] = [{"id": "T-1", "title": {"en": "t"}, "depends_on": [], "status": "in_progress", "link": "",
+                            "needs": [], "critical": False, "phase": "p", "origin": "source"}]
+        return worker
+
+    def test_resume_names_the_copy_and_end_keeps_the_new_session(self):
+        worker = self._worker()
+        listing = [{"id": "new2", "sessionId": "copy"}]
+        seen = {}
+
+        def launch(argv, cwd, env):
+            seen["argv"] = argv
+            return "new2"
+
+        with mock.patch.object(workers, "_launch", launch), mock.patch.object(workers.sessions, "list_all", return_value=listing), \
+                mock.patch.object(workers.spend, "record_launch"), mock.patch.object(workers.spend, "settle"), \
+                mock.patch.object(subprocess, "run"):
+            workers.resume("a", worker)
+            self.assertEqual(opt(seen["argv"], "-n"), "a · T-1 · implement")
+            w = state.load("a")["workers"][0]
+            self.assertEqual((w["session_id"], w["replaced_sessions"]), ("copy", ["orig"]))
+            # end() trusts the listing for the short id, not the stored id
+            with state.mutate("a") as st:
+                st["workers"][0]["session_id"] = "stale"
+            workers.end("a", "T-1", "implement")
+        t = state.load("a")["tasks"][0]
+        self.assertEqual(t["sessions"], {"implement": "copy"})
+        self.assertEqual(sorted(t["replaced_sessions"]), ["orig", "stale"])
+
+    def test_cleanup_removes_the_replaced_session_too(self):
+        self._worker()
+        with state.mutate("a") as st:
+            st["tasks"][0].update(sessions={"implement": "copy"}, replaced_sessions=["orig"])
+        removed, calls = [], []
+        with mock.patch.object(workers.sessions, "list_all", return_value=[]), \
+                mock.patch.object(subprocess, "run", lambda argv, **kw: calls.append(argv[1:])):
+            removed = workers.cleanup("a", "T-1")
+        self.assertEqual(calls, [["rm", "copy"], ["rm", "orig"]])
+        self.assertEqual(removed, ["copy", "orig"])
+        self.assertNotIn("replaced_sessions", state.load("a")["tasks"][0])
 
 
 class CleanupTest(LaunchBase):

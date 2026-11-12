@@ -109,8 +109,8 @@ class WorkersTest(unittest.TestCase):
             workers.resume("checkout", rec)
         argv = launch.call_args[0][0]
         self.assertEqual(argv[1:3], ["--bg", "--resume"])
-        self.assertEqual(argv[4:6], ["--settings", str(self.data / "projects" / "checkout" / "settings.json")])
-        self.assertEqual(len(argv), 7)
+        self.assertEqual(argv[6:8], ["--settings", str(self.data / "projects" / "checkout" / "settings.json")])
+        self.assertEqual(len(argv), 9)
 
 
 if __name__ == "__main__":

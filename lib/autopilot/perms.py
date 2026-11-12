@@ -7,7 +7,7 @@ import sys
 import time
 from datetime import datetime
 
-from autopilot import cli, config, events, paths, profile as profiles, state, workers
+from autopilot import cli, config, events, paths, profile as profiles, spend, state, workers
 
 # Outward actions, matched case-insensitively on the tool's own name (after mcp__<server>__).
 DENY_TOOL_PATTERNS = [re.compile(p, re.I) for p in (
@@ -139,17 +139,33 @@ def servers_from_stream(stream: str) -> list:
     return []
 
 
-def discover(claude_bin: str, cwd: str, settings) -> tuple:
+def session_from_stream(stream: str) -> str:
+    for line in stream.splitlines():
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(d, dict) and d.get("type") == "system" and d.get("subtype") == "init":
+            return str(d.get("session_id") or "")
+    return ""
+
+
+def discover(claude_bin: str, cwd: str, settings, ap=None, profile=None) -> tuple:
     """The tools and the MCP server names a session in `cwd` starts with, under the profile in `settings`.
-    This is a `-p` run, not a background session: it has no short id, so it cannot be priced (see spend)."""
+    A `-p` run has no short id: its spend is recorded by session id (`profile` is the profile it ran under)."""
     out = subprocess.run([claude_bin, "-p", "Reply with the single word OK.", "--output-format", "stream-json",
                           "--verbose", "--settings", str(settings)], cwd=cwd, capture_output=True, text=True, timeout=180,
                          stdin=subprocess.DEVNULL)
+    if profile is not None:
+        try:
+            spend.record_session(session_from_stream(out.stdout), "discover", ap, profile)
+        except Exception:  # noqa: BLE001 - spend bookkeeping must not fail discovery
+            pass
     return parse_discovery(out.stdout), servers_from_stream(out.stdout)
 
 
-def discover_tools(claude_bin: str, cwd: str, settings) -> list:
-    return discover(claude_bin, cwd, settings)[0]
+def discover_tools(claude_bin: str, cwd: str, settings, ap=None, profile=None) -> list:
+    return discover(claude_bin, cwd, settings, ap, profile)[0]
 
 
 def tool_prefix(server: str) -> str:
@@ -167,23 +183,31 @@ def write_for(ap: str) -> list:
     gcfg, apcfg = config.load_global(), config.load_ap(ap)
     # Discovery runs under the profile a worker will run under (a gateway has no claude.ai tools), but without
     # the floor's deny list: a denied tool must still show up, or the next write would drop its deny rule.
+    act, page = profiles.active(), profiles.page_profile()
     probe = paths.ap_dir(ap) / "settings-discover.json"
-    _write(probe, profiles.overlay(profiles.active()))
-    tools, found = discover(workers.claude_bin(gcfg), apcfg["repo"], probe)
+    _write(probe, profiles.overlay(act))
+    tools, found = discover(workers.claude_bin(gcfg), apcfg["repo"], probe, ap, act)
+    # The dispatcher runs on the page profile (the subscription), so its floor comes from what that profile sees:
+    # under a gateway the first probe has no claude.ai connector tools, and they must still be denied.
+    ptools, pfound = tools, found
+    if act["name"] != page["name"]:
+        pprobe = paths.ap_dir(ap) / "settings-discover-page.json"
+        _write(pprobe, profiles.overlay(page))
+        ptools, pfound = discover(workers.claude_bin(gcfg), apcfg["repo"], pprobe, ap, page)
     _write(paths.ap_dir(ap) / "settings.json", generate(tools, role="worker", profile=profiles.active()))
     disp = paths.data_root() / "settings-dispatcher.json"
     known = set()
     if disp.exists():
         cur = json.loads(disp.read_text())["permissions"]
         known = {t for t in cur["deny"] + cur.get("allow", []) if t.startswith("mcp__")}
-    floor = generate(sorted(known | set(denied_tools(tools)) | set(status_tools(tools))), role="dispatcher",
+    floor = generate(sorted(known | set(denied_tools(ptools)) | set(status_tools(ptools))), role="dispatcher",
                      authority=shared_authority(), profile=profiles.page_profile())
     _write(disp, floor)
     # The servers whose tools the dispatcher floor allows are the ones a pass needs: their access is checked.
     from autopilot import access
-    used = [s for s in found if any(a.startswith(tool_prefix(s)) for a in status_tools(tools))]
+    used = [s for s in pfound if any(a.startswith(tool_prefix(s)) for a in status_tools(ptools))]
     access.record_servers(ap, used)
-    return denied_tools(tools)
+    return list(dict.fromkeys(denied_tools(tools) + denied_tools(ptools)))
 
 
 def one_off_settings(ap: str, tool: str):
@@ -216,13 +240,19 @@ def run_one_off(ap: str, decision_id: str) -> str:
     # `--allowedTools` takes a list: give it one value with `=` and end the options with `--`, or it
     # reads the prompt as a second tool and claude exits asking for a prompt.
     argv = [workers.claude_bin(gcfg), "-p", "--permission-mode", "dontAsk", "--settings", str(settings),
-            f"--allowedTools={action['tool']}", "--", action["prompt"]]
+            "--output-format", "json", f"--allowedTools={action['tool']}", "--", action["prompt"]]
     try:
         out = subprocess.run(argv, cwd=apcfg["repo"], capture_output=True, text=True, timeout=ONEOFF_TIMEOUT_S,
                              stdin=subprocess.DEVNULL, env=workers._env("oneoff"))
         code, stdout, stderr = out.returncode, out.stdout, out.stderr
+        stdout, sid = _json_result(stdout)
     except subprocess.TimeoutExpired as e:
         code, stdout, stderr = -1, _text(e.stdout), _text(e.stderr) + f"\ntimed out after {ONEOFF_TIMEOUT_S}s"
+        sid = ""
+    try:
+        spend.record_session(sid, "oneoff", ap, profiles.active())
+    except Exception:  # noqa: BLE001 - spend bookkeeping must not fail an approved action
+        pass
     events.append(ap, "oneoff_done", {"decision": decision_id, "tool": action["tool"], "exit": code,
                                       "output": stdout[-1500:], "error": stderr[-1500:]})
     if code != 0:
@@ -231,6 +261,17 @@ def run_one_off(ap: str, decision_id: str) -> str:
         raise RuntimeError(f"{decision_id}: claude exited {code}: {(stderr or stdout).strip()[-500:]}")
     _set_action(ap, decision_id, running_since=None, done_at=events.now_iso())
     return stdout
+
+
+def _json_result(stdout: str) -> tuple:
+    """(the reply text, the session id) of a `--output-format json` run; the raw text and "" when it is not JSON."""
+    try:
+        d = json.loads(stdout)
+    except ValueError:
+        return stdout, ""
+    if not isinstance(d, dict):
+        return stdout, ""
+    return str(d.get("result") if d.get("result") is not None else ""), str(d.get("session_id") or "")
 
 
 def _set_action(ap: str, decision_id: str, **fields) -> None:
