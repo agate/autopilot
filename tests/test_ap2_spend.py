@@ -290,7 +290,7 @@ class RequestCostsTest(SpendCase):
 
     def test_a_line_nested_too_deep_is_skipped_not_an_error(self):
         self.transcript.parent.mkdir(parents=True)
-        lines = (FIX / "streaming.jsonl").read_text().splitlines() + ["[" * 100000]
+        lines = ["[" * 100000] + (FIX / "streaming.jsonl").read_text().splitlines()  # first: the rest still counts
         self.transcript.write_text("\n".join(lines) + "\n")
         self.launch()
         self.assertAlmostEqual(self.totals()["month"], STREAMING_USD)
@@ -483,6 +483,18 @@ class TotalsTest(SpendCase):
         self.assertEqual(self.totals()["unknown_models"], [])  # its request is dated yesterday
         self.assertEqual(self.totals(datetime(2026, 11, 10, 20, 0, tzinfo=TZ))["unknown_models"],
                          ["claude-nonesuch-9"])
+
+    def test_an_unprintable_model_name_is_an_unnamed_model(self):
+        surrogate = {"model": "\ud800", "usage": {"input_tokens": 10, "output_tokens": 0}}
+        escapes = dict(surrogate, model="x\u001b[2J\u001b[H  today  $0.00\u001b]0;pwned\u0007")
+        self.put(extra=[dict(NEW, requestId="req_s", message=surrogate),
+                        dict(NEW, requestId="req_e", message=escapes)])
+        self.launch()
+        t = self.totals()
+        self.assertEqual(t["unknown_models"], ["an unnamed model"])
+        self.assertFalse(any("\x1b" in m for m in t["unknown_models"]))
+        json.dumps(t).encode("utf-8")
+        ", ".join(t["unknown_models"]).encode("utf-8")  # what ap2 spend prints
 
     def test_a_naive_now_is_local_time(self):
         self.put()
@@ -702,6 +714,13 @@ class SettleTest(SpendCase):
         self.assertEqual(self.listed, before)  # the settled row names the session: no listing is asked
         self.assertAlmostEqual(t["month"], STREAMING_USD)
         self.assertEqual((t["unknown"], t["unknown_launches"]), (False, 0))
+
+    def test_a_request_id_that_utf_8_cannot_hold_still_settles(self):
+        self.put(extra=[dict(NEW, requestId="\ud800")])
+        self.launch()
+        row = self.settle(session_id=SID)
+        self.assertIn("req_1", row["reqs"])
+        self.assertEqual(self.rows("settled.jsonl")[-1]["reqs"], row["reqs"])
 
     def test_settle_by_session_id(self):
         self.put()

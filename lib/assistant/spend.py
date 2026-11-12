@@ -75,7 +75,7 @@ def _append(data, name: str, obj: dict) -> None:
     flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(_file(data, name), flags, 0o600)
     with os.fdopen(fd, "a", encoding="utf-8") as f:
-        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+        f.write(json.dumps(obj) + "\n")  # escaped: a lone surrogate in a transcript still writes
 
 
 def _read_lines(data, name: str) -> list:
@@ -235,8 +235,8 @@ def _parse_file(path: Path, table: dict) -> list:
             cost = _cost(table, model, u) if ts is not None else None
         except (TypeError, ValueError, OverflowError):  # a count that is not a number: unknown, never $0
             cost = None
-        per_req[rid] = {"id": rid, "ts": ts, "model": _model_key(model if isinstance(model, str) else ""),
-                        "usd": cost}
+        name = model if isinstance(model, str) and model.isprintable() else ""  # never printed raw: an unnamed model
+        per_req[rid] = {"id": rid, "ts": ts, "model": _model_key(name), "usd": cost}
     return list(per_req.values())
 
 
