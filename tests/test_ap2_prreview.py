@@ -20,7 +20,7 @@ from unittest import mock
 
 from tests.helpers import ROOT
 from tests.test_ap2_cli import temp_inside_the_accounts_claude
-from assistant import angles, cli, prreview, roles, templates
+from assistant import angles, cards, cli, prreview, roles, templates
 from assistant.config import Config
 from assistant.engine import Engine
 from assistant.store import Store, write_json
@@ -316,6 +316,22 @@ class PlainWordsTest(Case):
         self.assertEqual(words["where"]["zh"], "Changes: x.")
         self.assertNotEqual(words["do"]["zh"], prreview.PHRASES["zh"]["do_none"])
         self.assertEqual(words["do"]["zh"], prreview.PHRASES["zh"]["do_zero"])
+
+    def test_a_tldr_of_only_invisible_characters_falls_back_to_another(self):
+        """A TL;DR slot the store calls empty (only U+FEFF and spaces) is not used for the where line."""
+        with self.subTest("one blank slot uses another language's TL;DR"):
+            card = {"verdict": {"tldr": {"en": "Changes: x.", "zh": "\ufeff"}}}
+            words = prreview.plain_for({"id": "42", "text": TITLE}, card, LANGS)
+            self.assertEqual(words["where"]["zh"], "Changes: x.")
+            self.assertEqual(words["do"]["zh"], prreview.PHRASES["zh"]["do_zero"])
+            self.assertEqual(cards.plain_problems(words, LANGS), [])
+        with self.subTest("every slot blank reads as not reviewed yet"):
+            card = {"verdict": {"tldr": {"en": "\ufeff \n", "zh": "\ufeff"}}}
+            words = prreview.plain_for({"id": "42", "text": TITLE}, card, LANGS)
+            for lang in LANGS:
+                self.assertEqual(words["where"][lang], prreview.PHRASES[lang]["where_none"])
+                self.assertEqual(words["do"][lang], prreview.PHRASES[lang]["do_none"])
+            self.assertEqual(cards.plain_problems(words, LANGS), [])
 
     def test_with_no_source_record_the_title_is_the_cards(self):
         for title, zh in (("Fix it", "Fix it"), ({"en": "Fix it", "zh": "修好它"}, "修好它")):
