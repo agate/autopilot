@@ -80,10 +80,14 @@ Map the user's words to `ap profile` and confirm in one line:
 | "remove X" | Ask first, then `ap profile remove <name>` (the active one is refused) |
 
 - Choose model and effort: when `ap profile add` or `ap profile use` prints a choices JSON (`use` exits
-  3; nothing switched), run `ap profile choices <name> --json` for a fresh list. Ask with the question
-  tool: the models as options, the recommended one first and marked "(Recommended)"; then the efforts
-  the same way. Then `ap profile choose <name> --model <m> --effort <e>`, then `ap profile use <name>`
-  if this was a switch. Never pick for the user.
+  3; nothing switched), run `ap profile choices <name> --json` for a fresh list. If it exits non-zero
+  or the JSON holds an `error`, tell the user the error and stop. Otherwise ask with the question tool,
+  models first: options are `recommended_model` marked "(Recommended)" and up to 3 others (the other
+  `[1m]`/plain variant of the recommended model, then the next two models in list order), and the
+  question text lists every name in `models`. A typed "Other" answer counts only when it is exactly a
+  name in that list; otherwise ask again. Efforts the same way: `high` "(Recommended)" and 3 others, the
+  fifth reachable through Other. Then `ap profile choose <name> --model <m> --effort <e>`, then
+  `ap profile use <name>` if this was a switch. Never pick for the user.
 - Only workers and one-off actions use the active profile. Passes, answer reads and page refreshes
   always use the subscription.
 - Never print what a key command prints. Pass the command line as the user gave it, and show only

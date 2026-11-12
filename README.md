@@ -168,8 +168,9 @@ commands that print a key, never the key.
   ask in a terminal (a numbered list; Enter takes the recommended entry). Without a terminal, `add`
   saves the profile unchosen and `use` switches nothing (exit 3); both print the choices as JSON.
   On the page, a switch to such a profile opens a "Choose model and effort" card instead: pick, confirm,
-  and the gate checks the pick against a fresh list, saves it and switches. The built-in `subscription`
-  profile counts as chosen, so it never asks.
+  and the gate checks the pick against a fresh list, saves it and switches. A card nobody answers closes
+  after 6 hours, or when you switch profiles. The built-in `subscription` profile counts as chosen, and
+  re-applying the active profile never asks.
 - **Daily cap.** `--daily-cap` is dollars per local day. At the cap no new worker starts and
   running ones continue. One card on the page asks you to raise today's limit by 50% or 100%, or to
   pause. A raise adds to an earlier one, and the card opens again if spend crosses the raised limit.
