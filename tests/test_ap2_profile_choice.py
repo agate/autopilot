@@ -180,7 +180,9 @@ class ModelChoicesTest(Case):
         p = self.gateway(small_model="claude-opus-5-5",
                          listed=r'["claude-opus-5-5", "Bearer sk-ant-api03-SECRETVALUE", "\u001b]0;pwned\u0007x"]')
         self.assertEqual(profiles.model_choices(self.data, p), ["claude-opus-5-5[1m]", "claude-opus-5-5"])
-        for name in ("gpt-x", "claude-opus-5-5[1m]", "us.anthropic.claude-x-v1:0", "anthropic/claude-x", "a@b"):
+        # A bare token shaped like a model name matches: the shape drops error text and control characters only.
+        for name in ("gpt-x", "claude-opus-5-5[1m]", "us.anthropic.claude-x-v1:0", "anthropic/claude-x", "a@b",
+                     "claude_x", "Llama-3", "a" * 128, "sk-ant-x"):
             self.assertTrue(profiles.MODEL_NAME.fullmatch(name), name)
         for name in ("", "-x", "a b", "x\n", "a\x1bb", "x" * 129):
             self.assertIsNone(profiles.MODEL_NAME.fullmatch(name), name)
@@ -429,6 +431,15 @@ class ChooseCliTest(CliCase):
                 self.assertIn("ap2 profile choose g --model M --effort E", err)
         self.assertEqual(self.file().read_bytes(), before)
 
+    def test_a_closed_stdin_counts_as_no_terminal(self):
+        self.gateway()
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                mock.patch.object(sys, "stdin", None):  # `ap2 profile choose g <&-`
+            code = cli.main(["profile", "choose", "g", "--data", str(self.data)])
+        self.assertEqual(code, profiles.NEEDS_CHOICE, err.getvalue())
+        self.assertEqual(json.loads(out.getvalue())["profile"], "g")
+
     def test_bin_ap2_with_stdin_from_dev_null_exits_3(self):
         self.gateway()
         home = self.tmp / "home"
@@ -544,6 +555,44 @@ class AddCliTest(CliCase):
         self.assertTrue(err.endswith(last + "\n") and err.count("ap2: ") == 1, err)
         self.assertTrue(profiles.needs_choice(self.data, profiles.load(self.data, "g")))
 
+    def test_a_listed_small_model_of_another_shape_still_saves_and_is_never_shown(self):
+        listed = '["claude-opus-5-5", "anthropic/claude-haiku+latest"]'
+        small = "anthropic/claude-haiku+latest"
+
+        def add(name, *extra, **kw):
+            return self.run_cli("add", name, "--gateway", "--base-url", URL, "--key-command", "echo k",
+                                "--small-model", small, "--daily-cap", "5",
+                                "--models-command", counting(self.tmp, listed), *extra, **kw)
+
+        def once(call):
+            before = runs(self.tmp)
+            got = call()
+            self.assertEqual(runs(self.tmp) - before, 1)
+            return got
+
+        code, out, err = once(lambda: add("g", "--model", "claude-opus-5-5", "--effort", "high"))
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual((json.loads(out)["small_model"], json.loads(out)["model"]), (small, "claude-opus-5-5"))
+        code, out, err = once(lambda: add("h"))
+        self.assertEqual(code, profiles.NEEDS_CHOICE, err)
+        self.assertTrue(self.file("h").exists())
+        self.assertEqual(json.loads(out)["models"], ["claude-opus-5-5[1m]", "claude-opus-5-5"])  # never shown
+        self.assertNotIn(small, out)
+        code, out, err = once(lambda: self.run_cli("choose", "h", "--model", "claude-opus-5-5", "--effort", "high"))
+        self.assertEqual((code, err), (0, ""))
+        self.assertFalse(profiles.needs_choice(self.data, profiles.load(self.data, "h")))
+        # The prompt paths save against the full list too: `choose` and `use` in a terminal.
+        self.assertEqual(once(lambda: add("k"))[0], profiles.NEEDS_CHOICE)
+        code, out, err = once(lambda: self.run_cli("choose", "k", tty=True, answers=["", ""]))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(once(lambda: add("u"))[0], profiles.NEEDS_CHOICE)
+        code, out, err = once(lambda: self.run_cli("use", "u", tty=True, answers=["", ""]))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(profiles.active(self.data)["name"], "u")
+        # A model of another shape cannot be picked as the profile's model, though a save accepts it as small_model.
+        self.assert_one_error(*self.run_cli("choose", "h", "--model", small, "--effort", "high"),
+                              text="is not offered")
+
     def test_a_broken_profile_is_refused_before_its_models_command_runs(self):
         code, out, err = self.run_cli("add", "g", "--gateway", "--base-url", URL, "--models-command",
                                       counting(self.tmp), "--model", "gpt-x", "--effort", "high")
@@ -622,6 +671,7 @@ class WorkerNeverAsksTest(WorkerCase):
         self.assertTrue(profiles.needs_choice(self.data, p))
         profiles.use(self.data, "g")  # set by hand, never chosen
         with mock.patch("builtins.input", side_effect=AssertionError("a worker start asked")), \
+                mock.patch.object(profiles, "fetch_models", side_effect=AssertionError("a worker start fetched")), \
                 mock.patch.object(profiles, "model_choices", side_effect=AssertionError("a worker start fetched")):
             self.start()
         argv = self.bg_calls()[-1]["argv"]

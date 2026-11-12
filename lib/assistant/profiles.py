@@ -57,8 +57,10 @@ RECOMMENDED_EFFORT = "high"
 DEFAULT_MODEL = "default"  # Claude Code's own default model, stored as null
 CHOICE_TIMEOUT = 20  # seconds `gateway.models_command` may take when it lists the choices
 # The shape of a model name the choices may show (`gpt-x`, `claude-opus-5-5[1m]`, `us.anthropic.claude-x-v1:0`,
-# `anthropic/claude-x`): the list is shown in a terminal and in logs, so an entry of any other shape (a secret, a
-# control character) is dropped from the choices, never shown.
+# `anthropic/claude-x`): the list is shown in a terminal and in logs, so an entry with a space, a control character or
+# any other character a model name never has (a gateway's error text, a terminal control sequence) is dropped from the
+# choices, never shown. A bare token shaped like a model name would still be shown: a gateway's model list holds no
+# keys. What a save accepts is checked against the full list (`fetch_models`).
 MODEL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@\[\]-]{0,127}")
 NEEDS_CHOICE = 3  # `ap2 profile`'s exit code when a choice is needed and no terminal can ask for it
 
@@ -248,7 +250,7 @@ def _listed(cmd: str, timeout: int) -> list:
 def _model_errors(p: dict, known: list = None) -> list:
     """The models the profile names that `gateway.models_command` does not list. A name ending in `[1m]` counts as
     listed when its base name is; it is stored and passed with the marker. `known`: the list fetched for this same
-    choice just before (`model_choices`), checked instead, so the command does not run again."""
+    choice just before (the full list of `fetch_models`), checked instead, so the command does not run again."""
     cmd = (p.get("gateway") or {}).get("models_command")
     if not cmd:
         return []
@@ -423,17 +425,28 @@ def _with_long(names) -> list:
     return out
 
 
-def model_choices(data, p: dict) -> list:
-    """The models `p` may run, fetched now on every call (never cached). A gateway with a models command: the entries
-    of the list it prints that are shaped like a model name (`MODEL_NAME`); any other entry is dropped, never shown.
-    Otherwise (the subscription, or a gateway with no models command) the priced claude-* models of
-    `spend.prices(data)`, then `default`. Raises ModelsUnavailable when the command fails, and SpendError (a
-    ConfigError) when the price override is broken."""
+def fetch_models(data, p: dict) -> tuple:
+    """`(shown, known)` for `p`, fetched now on every call (never cached), with the models command run once.
+    `shown`: the models `p` may be chosen to run, as `model_choices` returns them. `known`: what a save checks the
+    profile's models against (`save(data, p, known)`): every entry the models command printed, `[1m]` variants added,
+    with none dropped, so a listed small model of another shape still saves. With no models command both are the
+    same list. Raises ModelsUnavailable when the command fails, and SpendError (a ConfigError) when the price override
+    is broken."""
     cmd = (p.get("gateway") or {}).get("models_command") if p.get("mode") == "gateway" else None
     if cmd:
-        return _with_long(m for m in _listed(cmd, CHOICE_TIMEOUT) if MODEL_NAME.fullmatch(m))
+        listed = _listed(cmd, CHOICE_TIMEOUT)
+        return _with_long(m for m in listed if MODEL_NAME.fullmatch(m)), _with_long(listed)
     from assistant import spend  # imported here: spend reads transcripts, which a profile load never needs
-    return _with_long(m for m in spend.prices(data) if m.startswith("claude-")) + [DEFAULT_MODEL]
+    shown = _with_long(m for m in spend.prices(data) if m.startswith("claude-")) + [DEFAULT_MODEL]
+    return shown, shown
+
+
+def model_choices(data, p: dict) -> list:
+    """The models `p` may be chosen to run, fetched now on every call (never cached). A gateway with a models
+    command: the entries of the list it prints that are shaped like a model name (`MODEL_NAME`); any other entry is
+    dropped, never shown. Otherwise (the subscription, or a gateway with no models command) the priced claude-*
+    models of `spend.prices(data)`, then `default`. Raises as `fetch_models` does."""
+    return fetch_models(data, p)[0]
 
 
 def recommended_model(models: list):
@@ -458,16 +471,18 @@ def check_model(model, models: list) -> None:
         raise ProfileError(f"model {model!r} is not offered; choose one of: {', '.join(models)}")
 
 
-def choose(data, name: str, model: str, effort: str, models: list = None) -> dict:
-    """Save `name`'s model and effort, checked against the list fetched now (or `models`, fetched by the caller for
-    this same choice), and mark it chosen. The same list checks the saved file, so one choice runs the models command
-    once. `default` is stored as a null model. Nothing is written on a refusal. Returns the saved profile."""
+def choose(data, name: str, model: str, effort: str, models: list = None, known: list = None) -> dict:
+    """Save `name`'s model and effort, and mark it chosen. The model is checked against the list fetched now (or
+    `models`, fetched by the caller for this same choice); the saved file against the full list of the same fetch
+    (`known`, which defaults to `models`), so one choice runs the models command once. `default` is stored as a null
+    model. Nothing is written on a refusal. Returns the saved profile."""
     p = load(data, name)
-    models = model_choices(data, p) if models is None else models
+    if models is None:
+        models, known = fetch_models(data, p)
     check_model(model, models)
     check_effort(effort)
     p.update(model=None if model == DEFAULT_MODEL else model, effort=effort, chosen_at=now())
-    return save(data, p, models)
+    return save(data, p, models if known is None else known)
 
 
 # -- the settings overlay -------------------------------------------------------------------------------------------

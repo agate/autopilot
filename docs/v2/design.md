@@ -1989,13 +1989,13 @@ Calls the author made without asking (check them):
     overlay sets or blanks, a cloud-provider switch, or (v2's addition) any `AP2_*` or `AUTOPILOT_*` name. On a save
     without a fetched list, `gateway.models_command` runs (`shell=True`, 30 s) and every model the profile names must
     be in the JSON list it prints; its output is only parsed, never printed or kept. `ap2 profile add`, `choose`,
-    `choices` and `use` fetch it with 20 s instead (`profiles.CHOICE_TIMEOUT`, see "Model and effort choice") and
-    show only the entries shaped like a model name (`profiles.MODEL_NAME`: a letter or digit, then up to 127 letters,
-    digits and `. _ : / @ [ ] -`), never any other output. A list holding anything but texts is refused with the
-    same "must print a JSON list of model names" line. A model (`model`, `dispatcher_model` or `small_model`) may
-    end in `[1m]` (`profiles.LONG_CONTEXT`, Claude Code's marker for the 1M context window): it is checked without
-    the marker (`profiles.base_model` strips one trailing `[1m]`, nothing else), and stored and passed with it, to
-    `--model` and `ANTHROPIC_MODEL` alike.
+    `choices`, and `use` when it must ask, fetch it with 20 s instead (`profiles.CHOICE_TIMEOUT`, see "Model and
+    effort choice") and show only the entries shaped like a model name (`profiles.MODEL_NAME`: a letter or digit,
+    then up to 127 letters, digits and `. _ : / @ [ ] -`), never any other output. A list holding anything but texts
+    is refused with the same "must print a JSON list of model names" line. A model (`model`, `dispatcher_model` or
+    `small_model`) may end in `[1m]` (`profiles.LONG_CONTEXT`, Claude Code's marker for the 1M context window): it is
+    checked without the marker (`profiles.base_model` strips one trailing `[1m]`, nothing else), and stored and
+    passed with it, to `--model` and `ANTHROPIC_MODEL` alike.
     - **[decided by the builder]** `small_model` may end in `[1m]` too (the same check for all three fields, as in
       v1), and only the exact lowercase `[1m]` is stripped: `[2m]` or `[1M]` must be listed as written.
     - **[decided by the builder]** The `[1m]` launch check sits in `tests/test_ap2_profiles.py` and imports `opt`
@@ -2069,14 +2069,19 @@ Calls the author made without asking (check them):
     - **[decided by the builder]** A models command that lists no models at all is one `ap2:` line at the prompt
       ("listed no models, so there is nothing to choose"), never an endless prompt.
     - **[decided by the builder]** `add` without both flags now fetches the list (and so reads the price override
-      on a subscription profile) before it saves: the list the prompt shows is the one the save checked. A broken
-      `prices.json` therefore fails such an `add` with its one line.
+      on a subscription profile) before it saves: the list the prompt shows comes from the fetch the save checked.
+      A broken `prices.json` therefore fails such an `add` with its one line.
     - **[decided by the builder]** The choices keep only the models command's entries shaped like a model name
       (`profiles.MODEL_NAME`, checked before the `[1m]` variants are added); any other entry is dropped and never
       shown. Why: the list is shown in a terminal and in logs (the choices JSON, the numbered list, the "choose one
-      of" error), so a secret-looking text or a control character the command prints must never reach them. A save
-      without a fetched list is unchanged: it only parses the output and shows none of it. When every entry is
-      dropped, it is a list with no models ("listed no models, so there is nothing to choose").
+      of" error), so the filter drops an entry with a space, a control character or any other character a model
+      name never has: a gateway's error text or a terminal control sequence is never shown. A bare token shaped
+      like a model name would still be shown (a gateway's model list holds no keys). The filter decides only what
+      is shown and what may be picked as the profile's model; a save checks the profile's models against the full
+      list the command printed, from the same fetch (`profiles.fetch_models`), so a listed `small_model` of another
+      shape still saves. A save without a fetched list is unchanged: it only parses the output and shows none of
+      it. When every entry is dropped, it is a list with no models ("listed no models, so there is nothing to
+      choose").
     - **[decided by the builder]** Ctrl-C at a prompt counts as "no choice made", like the end of input: one `ap2:`
       line and exit 1, never a traceback (`add` still says the profile is saved and how to finish it).
   - Model and effort. A fresh start gets `--model <profile model>` when the profile has one and

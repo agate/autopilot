@@ -404,10 +404,10 @@ def _profile_add(data, args) -> int:
     errs = profiles.validate(p)  # a broken profile is refused before its models command runs
     if errs:
         raise profiles.ProfileError("; ".join(errs))
-    models = profiles.model_choices(data, p)
+    models, known = profiles.fetch_models(data, p)  # the shown list, and the full one a save checks
     if args.model is not None:  # a flag value not offered is refused before anything is saved, asked or printed
         profiles.check_model(args.model, models)
-    saved = profiles.save(data, p, models)
+    saved = profiles.save(data, p, known)
     if not profiles.needs_choice(data, saved):
         _print_json(saved)
         return 0
@@ -416,7 +416,7 @@ def _profile_add(data, args) -> int:
         return _print_choices(c, f"{name} is saved, but its model and effort are not chosen yet: run "
                                  f"`ap2 profile choose {name} --model M --effort E` with values from the list above")
     try:
-        out = _prompt_choose(data, name, c, args.model, args.effort)
+        out = _prompt_choose(data, name, c, args.model, args.effort, known)
     except (EOFError, profiles.ProfileError) as e:
         why = "no choice made" if isinstance(e, EOFError) else str(e)
         raise profiles.ProfileError(f"{why}; {name} is saved without a chosen model and effort: "
@@ -432,13 +432,15 @@ def _profile_choose(data, args) -> int:
     if args.model is not None and args.effort is not None:
         _print_json(profiles.choose(data, name, args.model, args.effort))
         return 0
-    c = profiles.choices(data, profiles.load(data, name))
+    p = profiles.load(data, name)
+    models, known = profiles.fetch_models(data, p)
+    c = profiles.choices(data, p, models)
     if not _stdin_is_terminal():
         _check_given(c, args.model, args.effort)
         return _print_choices(c, f"no terminal to ask in: run `ap2 profile choose {name} --model M --effort E` "
                                  "with values from the list above")
     try:
-        out = _prompt_choose(data, name, c, args.model, args.effort)
+        out = _prompt_choose(data, name, c, args.model, args.effort, known)
     except EOFError:
         raise profiles.ProfileError("no choice made; nothing changed") from None
     _print_json(out)
@@ -456,12 +458,13 @@ def _profile_use(data, name: str) -> int:
     except profiles.ProfileError:
         current = None  # broken: `use` is its fix, so it goes on
     if name != current and profiles.needs_choice(data, p):
-        c = profiles.choices(data, p)
+        models, known = profiles.fetch_models(data, p)
+        c = profiles.choices(data, p, models)
         if not _stdin_is_terminal():
             return _print_choices(c, f"{name} has no model and effort chosen yet, so nothing switched: run "
                                      f"`ap2 profile choose {name} --model M --effort E`, then `ap2 profile use {name}`")
         try:
-            _prompt_choose(data, name, c)
+            _prompt_choose(data, name, c, known=known)
         except EOFError:
             raise profiles.ProfileError("no choice made; nothing changed") from None
     _print_json(profiles.use(data, name))
@@ -494,9 +497,10 @@ def _print_choices(c: dict, hint: str) -> int:
     return profiles.NEEDS_CHOICE
 
 
-def _prompt_choose(data, name: str, c: dict, model=None, effort=None) -> dict:
-    """Ask in the terminal for what is missing, then save the choice against the same list `c` shows. EOFError when
-    the input ends; ProfileError when a given value is not offered."""
+def _prompt_choose(data, name: str, c: dict, model=None, effort=None, known=None) -> dict:
+    """Ask in the terminal for what is missing, then save the choice: the model checked against the list `c` shows,
+    the saved file against `known`, the full list of the same fetch. EOFError when the input ends; ProfileError when
+    a given value is not offered."""
     from assistant import profiles
 
     _check_given(c, model, effort)
@@ -506,7 +510,7 @@ def _prompt_choose(data, name: str, c: dict, model=None, effort=None) -> dict:
         model = _ask(f"Model for {name}:", c["models"], c["recommended_model"])
     if effort is None:
         effort = _ask(f"Effort for {name}:", c["efforts"], c["recommended_effort"])
-    return profiles.choose(data, name, model, effort, c["models"])
+    return profiles.choose(data, name, model, effort, c["models"], known)
 
 
 def _ask(title: str, options: list, recommended) -> str:
