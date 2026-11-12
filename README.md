@@ -151,11 +151,25 @@ ap profile rotate team-gateway
 ```
 
 A gateway profile requires four options: `--base-url`, `--key-command`, `--small-model` and `--daily-cap`.
+A model name may end in `[1m]` (the 1M context window, as in `claude-opus-5-5[1m]`); the check against
+`--models-command` ignores that suffix.
 Other commands: `ap profile show <name>`, `ap profile remove <name>`. You can say the same in
 `/autopilot` ("create a profile ...", "switch to the subscription", "rotate the key"). Options:
 `--models-command`, `--dispatcher-model`, `--label`, `--settings-file`. A profile stores the
 commands that print a key, never the key.
 
+- **Choosing the model and effort.** A profile's model and effort are picked from a list fetched
+  just then, the first time it is set up or used. `ap profile choices <name> [--json]` prints the
+  models (a gateway's `--models-command` list, with the `[1m]` variant first for every Claude model but
+  Haiku; on the subscription the priced Claude models and `default`), the efforts (`low` to `max`) and
+  the recommended ones (`claude-opus-5-5[1m]` when offered, and `high`).
+  `ap profile choose <name> --model M --effort E` checks the values against a fresh list and saves them.
+  `ap profile add` without `--model` and `--effort`, and `ap profile use` on a profile not chosen yet,
+  ask in a terminal (a numbered list; Enter takes the recommended entry). Without a terminal, `add`
+  saves the profile unchosen and `use` switches nothing (exit 3); both print the choices as JSON.
+  On the page, a switch to such a profile opens a "Choose model and effort" card instead: pick, confirm,
+  and the gate checks the pick against a fresh list, saves it and switches. The built-in `subscription`
+  profile counts as chosen, so it never asks.
 - **Daily cap.** `--daily-cap` is dollars per local day. At the cap no new worker starts and
   running ones continue. One card on the page asks you to raise today's limit by 50% or 100%, or to
   pause. A raise adds to an earlier one, and the card opens again if spend crosses the raised limit.
