@@ -15,6 +15,7 @@ folder, so it works in shadow mode.
 """
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 import math
@@ -24,7 +25,7 @@ import stat
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, NamedTuple, Optional
 
 from assistant import transcripts
 from assistant.config import ConfigError
@@ -50,6 +51,9 @@ _MAX_TS = datetime(9998, 12, 31, tzinfo=timezone.utc).timestamp()
 # read at all and is one unknown request. Never $0, never dropped.
 MAX_LINE_BYTES = 16 * 1024 * 1024
 MAX_FILE_BYTES = 1024 * 1024 * 1024
+# A transcript or subagent file that exists but cannot be read or checked, a read that fails part way and a subagents
+# folder that cannot be listed are each one unknown request under this key, never $0; that result is never cached.
+UNREADABLE = "~unreadable"
 
 Listing = Optional[Callable[[], Optional[list]]]
 
@@ -207,16 +211,23 @@ def _has_tokens(u: dict) -> bool:
 def _parse_file(path: Path, table: dict) -> list:
     """One file's requests as {"id", "ts", "model", "usd"}; streaming writes several lines per requestId with
     growing counts, so only the last usage seen for each counts. `id` is the requestId (or message id) that a
-    resumed copy repeats, or a "~<line>" key local to this file. A line without a usable timestamp keeps ts None and
-    usd None: unknown spend, never dropped. Only a regular file is read (checked on the open file, so a FIFO or a
-    device swapped in after a check never blocks the read). The file is read one line (split at b"\n") at a time,
-    each read asking for at most MAX_LINE_BYTES: a longer line is one unknown request ("~<line>"), and a file larger
-    than MAX_FILE_BYTES is not read at all and is one unknown request ("~file")."""
+    resumed copy repeats (one that starts with "~" gets one more "~"), or a "~<line>" key local to this file. A line
+    without a usable timestamp keeps ts None and usd None: unknown spend, never dropped. Only a regular file is read
+    (checked on the open file, so a FIFO or a device swapped in after a check never blocks the read). The file is
+    read one line (split at b"\n") at a time, each read asking for at most MAX_LINE_BYTES: a longer line is one
+    unknown request ("~<line>"), and a file larger than MAX_FILE_BYTES is not read at all and is one unknown request
+    ("~file"). A file that is there but cannot be opened (or an `_Unreadable` from `_files`) is one unknown request
+    (UNREADABLE); a read that fails part way keeps the requests read so far and adds that one. A file that is gone
+    (it vanished after it was found) has none."""
+    if isinstance(path, _Unreadable):
+        return [_unknown(UNREADABLE)]
     per_req = {}
     try:
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
-    except OSError:
+    except FileNotFoundError:
         return []
+    except OSError:  # there but not readable (made chmod 000): unknown, never $0
+        return [_unknown(UNREADABLE)]
     try:
         with os.fdopen(fd, "rb") as f:
             st = os.fstat(f.fileno())
@@ -230,8 +241,8 @@ def _parse_file(path: Path, table: dict) -> list:
                     per_req[key] = _unknown(key)
                     continue
                 _parse_line(per_req, n, raw.decode("utf-8", errors="replace"), table)
-    except OSError:
-        return []
+    except OSError:  # the read failed part way (EIO): what was read counts, plus one unknown
+        per_req[UNREADABLE] = _unknown(UNREADABLE)
     return list(per_req.values())
 
 
@@ -281,7 +292,10 @@ def _parse_line(per_req: dict, n: int, raw: str, table: dict) -> None:
     if not _usable_ts(ts):
         ts = None
     model = msg.get("model")
-    rid = str(d.get("requestId") or msg.get("id") or f"~{n}")
+    rid = str(d.get("requestId") or msg.get("id") or "")
+    # An id the file gives that starts with "~" gets one more, so it never reads as a key the parser makes
+    # ("~<line>", "~file", UNREADABLE): a forged "~unreadable" would keep the whole file out of the cache.
+    rid = "~" + rid if rid.startswith("~") else rid or f"~{n}"
     try:
         cost = _cost(table, model, u) if ts is not None else None
     except (TypeError, ValueError, OverflowError):  # a count that is not a number: unknown, never $0
@@ -291,22 +305,37 @@ def _parse_line(per_req: dict, n: int, raw: str, table: dict) -> None:
     per_req[rid] = {"id": rid, "ts": ts, "model": _model_key(name), "usd": cost}
 
 
+class _Unreadable(NamedTuple):
+    """A path of a session that is there but cannot be listed or checked: one unknown request, never read."""
+    path: Path
+
+
 def _files(main: Path) -> list:
     """A session's transcript and its subagents' (`<dir>/<session id>/subagents/agent-*.jsonl`), only the ones that
-    are regular files (a link is followed: one to a FIFO or a device is left out). A subagent file that cannot be
-    checked (a folder made unenterable) is left out, never an error."""
+    are regular files (a link is followed: one to a FIFO or a device is left out). No subagents folder (or a file in
+    its place) is no subagents. A subagents folder that cannot be listed, and a subagent file that cannot be checked,
+    are each an `_Unreadable`: one unknown request, never left out. The folder is listed with `os.scandir` and each
+    file checked with `Path.stat`, which raise on every Python (`Path.glob` skips a folder it cannot list silently on
+    3.12, and `Path.is_file` says False for a file it cannot check on 3.14)."""
+    folder = main.parent / main.stem / "subagents"
     try:
-        subs = sorted((main.parent / main.stem / "subagents").glob("agent-*.jsonl"))
-    except OSError:
+        with os.scandir(folder) as it:
+            names = sorted(e.name for e in it if fnmatch.fnmatchcase(e.name, "agent-*.jsonl"))
+    except (FileNotFoundError, NotADirectoryError):
         return [main]
-    return [main] + [p for p in subs if _is_file(p)]
-
-
-def _is_file(p: Path) -> bool:
-    try:
-        return p.is_file()
-    except OSError:
-        return False
+    except OSError:  # there but not listable (made chmod 0o300 or 000)
+        return [main, _Unreadable(folder)]
+    out = [main]
+    for name in names:
+        p = folder / name
+        try:  # `Path.stat` raises on every Python (`Path.is_file` returns False on PermissionError on 3.14)
+            if stat.S_ISREG(p.stat().st_mode):
+                out.append(p)
+        except FileNotFoundError:  # it vanished after the listing
+            pass
+        except OSError:  # there but not checkable
+            out.append(_Unreadable(p))
+    return out
 
 
 def _find(projects, sid) -> Optional[Path]:
@@ -354,10 +383,15 @@ def request_costs(data, path, tz=None) -> list:
 
 # -- cache -----------------------------------------------------------------------------------------------------------
 
+# Mixed into the cache's key; bumped when a cached result's meaning changes, so a cache written before is priced
+# again. "2": an unreadable file is unknown spend, where a cache written before holds it as no requests ($0).
+_CACHE_FORMAT = "2"
+
+
 def _price_key(table: dict, zone: str) -> str:
-    """The cache's key: the prices and how the month is cut (`zone`: a fixed offset, or "local" and the offset this
-    month starts at)."""
-    return hashlib.sha1((json.dumps(table, sort_keys=True) + zone).encode()).hexdigest()
+    """The cache's key: the prices, how the month is cut (`zone`: a fixed offset, or "local" and the offset this
+    month starts at) and `_CACHE_FORMAT`."""
+    return hashlib.sha1((json.dumps(table, sort_keys=True) + zone + "|" + _CACHE_FORMAT).encode()).hexdigest()
 
 
 def _load_cache(data, key: Optional[str]) -> dict:
@@ -406,15 +440,27 @@ def _reqs(items: list, since: float) -> dict:
             for it in items if it["ts"] is None or it["ts"] >= since}
 
 
-def _cached_reqs(c: dict, f: Path, table: dict, since: float, seen: set) -> dict:
+def _cached_reqs(c: dict, f, table: dict, since: float, seen: set) -> dict:
+    """One file's requests (`_reqs`), from the cache while the file's [mtime, size] stamp holds. A result that holds
+    the UNREADABLE request is never cached (a chmod back keeps the stamp), and an older entry for that file is
+    dropped."""
+    if isinstance(f, _Unreadable):
+        return _reqs(_parse_file(f, table), since)
     try:
         st = f.stat()
-    except OSError:
+    except FileNotFoundError:
         return {}
+    except OSError:  # there but not checkable
+        return _reqs(_parse_file(_Unreadable(f), table), since)
     stamp = [st.st_mtime_ns, st.st_size]
     ent = c["files"].get(str(f))
     if not isinstance(ent, dict) or ent.get("stamp") != stamp or not isinstance(ent.get("reqs"), dict):
-        ent = {"stamp": stamp, "reqs": _reqs(_parse_file(f, table), since)}
+        reqs = _reqs(_parse_file(f, table), since)
+        if UNREADABLE in reqs:  # never cached: the next read tries the file again
+            if c["files"].pop(str(f), None) is not None:
+                c["dirty"] = True
+            return reqs
+        ent = {"stamp": stamp, "reqs": reqs}
         c["files"][str(f)] = ent
         c["dirty"] = True
     elif any(v[0] is not None and v[0] < since for v in ent["reqs"].values()):  # the month or the week moved on

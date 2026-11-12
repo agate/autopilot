@@ -958,19 +958,256 @@ class HardeningTest(SpendCase):
         self.assertIs(row["unsettled"], True)
         self.assertIs(self.rows("settled.jsonl")[-1]["unsettled"], True)
 
-    def test_a_subagent_file_that_cannot_be_checked_is_left_out(self):
-        self.put(sub="subagent.jsonl")
-        self.unenterable(self.transcript.parent / SID / "subagents")
-        self.assertEqual(spend._files(self.transcript), [self.transcript])
-        self.launch()
-        self.assertAlmostEqual(self.totals()["month"], STREAMING_USD)
-        self.assertEqual(sorted(self.settle(session_id=SID)["reqs"]), ["req_1"])
+    def unreadable(self, f):
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            self.skipTest("root reads any file")
+        mode = f.stat().st_mode & 0o7777
+        f.chmod(0o000)
+        self.addCleanup(f.chmod, mode)  # runs before the temp folder's removal
 
-    def test_a_subagents_folder_that_cannot_be_listed_leaves_only_the_main_transcript(self):
-        # Some Python versions let `glob` raise on an unreadable folder instead of skipping it.
+    def cached_files(self):
+        f = self.data / "spend" / "cache.json"
+        return json.loads(f.read_text())["files"] if f.exists() else {}
+
+    def test_an_unreadable_transcript_file_is_one_unknown_request(self):
+        self.put()
+        self.unreadable(self.transcript)
+        self.assertEqual(self.costs(), [{"day": None, "model": "", "usd": None}])
+        self.assertEqual(spend._parse_file(self.transcript, spend.prices(self.data)),
+                         [{"id": spend.UNREADABLE, "ts": None, "model": "", "usd": None}])
+        self.launch(at=TODAY_8)
+        t = self.totals()
+        self.assertEqual((t["month"], t["unknown"], t["unknown_today"]), (0.0, True, True))
+
+    def test_a_transcript_file_that_is_gone_is_nothing(self):
+        # It vanished between the find and the open: a race with a deletion, not a hidden file.
+        self.assertEqual(spend._parse_file(self.transcript, spend.prices(self.data)), [])
+
+    def test_a_read_that_fails_part_way_keeps_what_it_read_and_adds_one_unknown(self):
+        self.write(self.line("req_a"), self.line("req_b"))
+        real = spend._lines
+
+        def lines(f, cap, limit):
+            for i, got in enumerate(real(f, cap, limit)):
+                if i == 1:
+                    raise OSError(5, "Input/output error")
+                yield got
+        p = mock.patch.object(spend, "_lines", lines)
+        p.start()
+        self.addCleanup(p.stop)  # a second stop is a no-op
+        items = spend._parse_file(self.transcript, spend.prices(self.data))
+        self.assertEqual([i["id"] for i in items], ["req_a", spend.UNREADABLE])
+        self.assertEqual(round(items[0]["usd"], 6), 1.0)
+        self.assertIsNone(items[1]["usd"])
+        self.launch(at=TODAY_8)
+        t = self.totals()
+        self.assertAlmostEqual(t["month"], 1.0)
+        self.assertEqual((t["unknown"], t["unknown_today"]), (True, True))
+        self.assertNotIn(str(self.transcript), self.cached_files())
+        p.stop()  # the disk recovers; the file's stamp is unchanged
+        t = self.totals()
+        self.assertAlmostEqual(t["month"], 2.0)
+        self.assertIs(t["unknown"], False)
+
+    def test_an_unreadable_result_is_never_cached(self):
+        self.put()
+        self.launch()
+        st = self.transcript.stat()
+        self.unreadable(self.transcript)
+        t = self.totals()
+        self.assertEqual((t["month"], t["unknown"]), (0.0, True))
+        self.assertNotIn(str(self.transcript), self.cached_files())
+        self.transcript.chmod(0o600)
+        os.utime(self.transcript, ns=(st.st_atime_ns, st.st_mtime_ns))  # the same stamp as the first read saw
+        self.assertEqual(self.transcript.stat().st_mtime_ns, st.st_mtime_ns)
+        t = self.totals()
+        self.assertAlmostEqual(t["month"], STREAMING_USD)
+        self.assertIs(t["unknown"], False)
+        self.assertIn(str(self.transcript), self.cache()["files"])
+
+    def test_a_line_whose_request_id_is_the_unreadable_key_is_a_priced_request_and_cached(self):
+        # A worker writes its own transcript: an id it picks never reads as a key the parser makes.
+        by_msg = dict(NEW, message=dict(NEW["message"], id=spend.UNREADABLE))
+        by_msg.pop("requestId", None)  # no request id: keyed by its message id, escaped the same way
+        self.write(json.dumps(by_msg) + "\n")  # alone: with the line below it would be the same request
+        items = spend._parse_file(self.transcript, spend.prices(self.data))
+        self.assertEqual([(i["id"], round(i["usd"], 6)) for i in items], [("~~unreadable", 1.0)])
+        self.write(self.line(spend.UNREADABLE), self.line("~0"))
+        items = spend._parse_file(self.transcript, spend.prices(self.data))
+        self.assertEqual([i["id"] for i in items], ["~~unreadable", "~~0"])
+        self.assertEqual([round(i["usd"], 6) for i in items], [1.0, 1.0])
+        self.write(json.dumps(dict(NEW, requestId=5)) + "\n")  # an id that is not a string is made one
+        items = spend._parse_file(self.transcript, spend.prices(self.data))
+        self.assertEqual([(i["id"], round(i["usd"], 6)) for i in items], [("5", 1.0)])
+        self.write(self.line(spend.UNREADABLE), self.line("~0"))
+        self.launch(at=TODAY_8)
+        t = self.totals()
+        self.assertAlmostEqual(t["month"], 2.0)
+        self.assertIs(t["unknown"], False)
+        self.assertIn(str(self.transcript), self.cached_files())
+
+    def test_a_cached_entry_is_dropped_once_its_file_reads_as_unreadable(self):
+        self.put()
+        self.launch()
+        self.assertAlmostEqual(self.totals()["month"], STREAMING_USD)  # the cache now holds the file
+        self.assertIn(str(self.transcript), self.cache()["files"])
+        with self.transcript.open("a") as f:  # a new stamp, then unreadable: the old entry is not kept
+            f.write("\n")
+        self.unreadable(self.transcript)
+        t = self.totals()
+        self.assertEqual((t["month"], t["unknown"]), (0.0, True))
+        self.assertNotIn(str(self.transcript), self.cache()["files"])
+
+    def test_a_cache_written_before_the_unreadable_rule_is_priced_again(self):
+        # A run before the rule cached a chmod 000 file as no requests, under the key of that time: not kept.
+        self.put()
+        self.launch()
+        self.unreadable(self.transcript)
+        st = self.transcript.stat()
+        table = spend.prices(self.data)
+        old_key = hashlib.sha1((json.dumps(table, sort_keys=True) + NOW.strftime("%z")).encode()).hexdigest()
+        old = {"key": old_key, "shorts": {}, "tries": {},
+               "files": {str(self.transcript): {"stamp": [st.st_mtime_ns, st.st_size], "reqs": {}}}}
+        (self.data / "spend").mkdir(parents=True, exist_ok=True)
+        (self.data / "spend" / "cache.json").write_text(json.dumps(old))
+        t = self.totals()
+        self.assertEqual((t["month"], t["unknown"]), (0.0, True))
+
+    def test_a_file_that_cannot_be_checked_for_the_cache_is_unknown_and_not_cached(self):
+        self.put()
+        table = spend.prices(self.data)
+        real = Path.stat
+
+        def stat_(p, *a, **kw):  # only the transcript cannot be checked; every other path is stat'ed as usual
+            if p == self.transcript:
+                raise err
+            return real(p, *a, **kw)
+        unknown = {spend.UNREADABLE: [None, None, ""]}
+        for err in (PermissionError(13, "Permission denied", str(self.transcript)),
+                    OSError(5, "Input/output error", str(self.transcript))):
+            with self.subTest(err=err.errno), mock.patch.object(Path, "stat", stat_):
+                c, seen = {"files": {}}, set()
+                self.assertEqual(spend._cached_reqs(c, self.transcript, table, 0.0, seen), unknown)
+                self.assertNotIn(str(self.transcript), c["files"])
+                self.assertNotIn(str(self.transcript), seen)
+                st = real(self.transcript)
+                held = {"req_1": [1.0, 2.0]}  # an entry from before, its stamp still the file's
+                c = {"files": {str(self.transcript): {"stamp": [st.st_mtime_ns, st.st_size], "reqs": held}}}
+                seen = set()
+                self.assertEqual(spend._cached_reqs(c, self.transcript, table, 0.0, seen), unknown)
+                self.assertNotIn(str(self.transcript), seen)  # not seen: the save drops it
+
+    def test_a_file_that_is_gone_before_the_cache_checks_it_is_nothing(self):
+        # It vanished between the listing and the check: a race with a deletion, not a hidden file.
+        self.assertFalse(self.transcript.exists())
+        c, seen = {"files": {}}, set()
+        self.assertEqual(spend._cached_reqs(c, self.transcript, spend.prices(self.data), 0.0, seen), {})
+        self.assertEqual(c["files"], {})
+        self.assertNotIn(str(self.transcript), seen)
+
+    def test_a_transcript_file_whose_open_fails_with_another_error_is_one_unknown_request(self):
+        self.put()
+        real = os.open
+
+        def open_(p, *a, **kw):  # only the transcript's open fails; every other path opens as usual
+            if os.fspath(p) == str(self.transcript):
+                raise OSError(5, "Input/output error", str(p))
+            return real(p, *a, **kw)
+        with mock.patch.object(spend.os, "open", open_):
+            items = spend._parse_file(self.transcript, spend.prices(self.data))
+        self.assertEqual(items, [{"id": spend.UNREADABLE, "ts": None, "model": "", "usd": None}])
+
+    def test_a_subagents_folder_that_cannot_be_entered_is_unknown_spend(self):
         self.put(sub="subagent.jsonl")
-        with mock.patch.object(Path, "glob", side_effect=PermissionError("denied")):
+        folder = self.transcript.parent / SID / "subagents"
+        self.unenterable(folder)  # 0o600: its names list, but no file in it can be checked
+        self.assertEqual(spend._files(self.transcript),
+                         [self.transcript, spend._Unreadable(folder / "agent-1.jsonl")])
+        self.launch()
+        t = self.totals()
+        self.assertAlmostEqual(t["month"], STREAMING_USD)
+        self.assertIs(t["unknown"], True)
+        reqs = self.settle(session_id=SID)["reqs"]
+        self.assertEqual(sorted(reqs), ["req_1", f"~{SID}:1:unreadable"])
+        self.assertEqual(reqs[f"~{SID}:1:unreadable"], [None, None, ""])
+        self.assertEqual(self.rows("settled.jsonl")[-1]["reqs"], reqs)
+
+    def test_a_subagents_folder_that_cannot_be_listed_is_unknown_spend(self):
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            self.skipTest("root lists any folder")
+        self.put(sub="subagent.jsonl")
+        folder = self.transcript.parent / SID / "subagents"
+        folder.chmod(0o300)  # enterable, not listable
+        self.addCleanup(folder.chmod, 0o700)
+        self.assertEqual(spend._files(self.transcript), [self.transcript, spend._Unreadable(folder)])
+        self.launch()
+        t = self.totals()
+        self.assertAlmostEqual(t["month"], STREAMING_USD)
+        self.assertIs(t["unknown"], True)
+        self.assertEqual(sorted(self.settle(session_id=SID)["reqs"]), ["req_1", f"~{SID}:1:unreadable"])
+
+    def test_a_subagents_folder_whose_listing_raises_is_unknown_spend(self):
+        self.put(sub="subagent.jsonl")
+        folder = self.transcript.parent / SID / "subagents"
+        with mock.patch.object(spend.os, "scandir", side_effect=PermissionError("denied")):
+            self.assertEqual(spend._files(self.transcript), [self.transcript, spend._Unreadable(folder)])
+        with mock.patch.object(spend.os, "scandir", side_effect=OSError(5, "Input/output error")):
+            self.assertEqual(spend._files(self.transcript), [self.transcript, spend._Unreadable(folder)])
+
+    def test_no_subagents_folder_or_a_file_in_its_place_is_no_subagents(self):
+        self.put()
+        self.assertEqual(spend._files(self.transcript), [self.transcript])
+        (self.transcript.parent / SID).write_text("not a folder")
+        self.assertEqual(spend._files(self.transcript), [self.transcript])
+
+    def test_the_subagents_listing_keeps_only_agent_jsonl_names_in_order(self):
+        self.put()
+        d = self.transcript.parent / SID / "subagents"
+        d.mkdir(parents=True)
+        for n in ("agent-b.jsonl", "agent-a.jsonl", "other.jsonl", "agent-c.json", "Agent-d.jsonl"):
+            (d / n).write_text("")
+        self.assertEqual(spend._files(self.transcript), [self.transcript, d / "agent-a.jsonl", d / "agent-b.jsonl"])
+
+    def test_a_subagent_file_that_cannot_be_checked_is_unknown_spend(self):
+        self.put(sub="subagent.jsonl")
+        sub = self.transcript.parent / SID / "subagents" / "agent-1.jsonl"
+        real = Path.stat
+
+        def stat_(p, *a, **kw):  # only this one subagent cannot be checked; every other path is stat'ed as usual
+            if p == sub:
+                raise err
+            return real(p, *a, **kw)
+        for err in (PermissionError(13, "Permission denied", str(sub)), OSError(5, "Input/output error", str(sub))):
+            with self.subTest(err=err.errno), mock.patch.object(Path, "stat", stat_):
+                self.assertEqual(spend._files(self.transcript), [self.transcript, spend._Unreadable(sub)])
+                items = self.costs()
+                self.assertEqual(len(items), 2)
+                self.assertAlmostEqual(items[0]["usd"], STREAMING_USD)
+                self.assertEqual(items[1], {"day": None, "model": "", "usd": None})
+
+    def test_a_subagent_file_that_vanished_before_its_check_is_nothing(self):
+        self.put(sub="subagent.jsonl")
+        sub = self.transcript.parent / SID / "subagents" / "agent-1.jsonl"
+        real = Path.stat
+
+        def stat_(p, *a, **kw):  # it vanished between the listing and its check
+            if p == sub:
+                raise FileNotFoundError(2, "No such file or directory", str(p))
+            return real(p, *a, **kw)
+        with mock.patch.object(Path, "stat", stat_):
             self.assertEqual(spend._files(self.transcript), [self.transcript])
+        self.assertTrue(sub.exists())
+
+    def test_a_subagent_link_to_a_regular_file_is_followed(self):
+        self.put(sub="subagent.jsonl")
+        d = self.transcript.parent / SID / "subagents"
+        real = d.parent / "agent-1.real"  # outside the folder, so only the link is listed
+        (d / "agent-1.jsonl").rename(real)
+        (d / "agent-1.jsonl").symlink_to(real)
+        self.assertEqual(spend._files(self.transcript), [self.transcript, d / "agent-1.jsonl"])
+        self.unenterable(d)  # 0o600: the link lists, but it cannot be followed to check it
+        self.assertEqual(spend._files(self.transcript),
+                         [self.transcript, spend._Unreadable(d / "agent-1.jsonl")])
 
     def test_a_sum_too_big_for_a_number_is_clamped_and_unknown(self):
         self.write(self.line("req_a"), self.line("req_b"))
