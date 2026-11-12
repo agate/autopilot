@@ -124,6 +124,26 @@ found and first set up is in section 12.
 └── attachments/
 ```
 
+The data folder itself may be reached through a symlink (it is resolved when it is found), but the card store
+refuses a symlink inside it where it keeps its own files: `items/`, a month folder, a card file, `restore/`, a
+point file, `.store.lock`, `index.sqlite` (and its `-journal`, `-wal`, `-shm`) and `.index.stale`. The call fails
+with one line naming the link, so a link into v1's folder cannot carry a store write out of the v2 folder.
+
+- **[decided by the builder]** A link is refused, never followed to write and never replaced (pruning reads a
+  linked point, below): removing it is the user's choice. A link at a name right under the data folder (`items/`,
+  `restore/`, `.store.lock`, `index.sqlite` and its `-journal`, `-wal`, `-shm`, `.index.stale`) refuses every
+  store call, a read too, not only the calls that would touch it, so the check is one short list of `lstat` calls
+  per call. A linked month folder, card file or point file is refused by the calls that open it. The lock and
+  `.index.stale` are also opened with `O_NOFOLLOW` where the platform has it, for a link swapped in after the check.
+- **[decided by the builder]** Inside `items/`, any link is refused when listing or rebuilding the index meets it
+  (the store reads every folder there); in a month folder only a link with a card's file name is refused (other
+  names are skipped as before). Inside `restore/`, a linked point file is refused when it is put back; pruning
+  reads one but only ever removes the link itself, so it is left as it is.
+- **[decided by the builder]** The index's temp file `.index.sqlite.<pid>.tmp` is not checked: it is removed
+  before it is made, so a link there is dropped, not followed. The other folders the store never writes (`chat/`,
+  `sessions/`, `sources/`, `routines/`, `templates/`, `attachments/`) get the same guard in a later task, from the
+  code that writes them.
+
 v1's data is in `~/.claude/autopilot-data`. Moving it is part of the migration (section 10).
 
 ### 3.5 Conversations (transcripts)
@@ -894,7 +914,8 @@ Calls the author made without asking (check them):
   design 6.1) with the built-in table in `review/angles.yaml` at the plugin root; how the PR loop ends:
   `prloop.py` (the loop's record, the decision, the one check of the fix and the card's fields, design 6.3);
   for workers, `workers.py`, `resources.py`, `transcripts.py` and `projects.py` (see the workers entry below);
-  the local page:
+  access profiles: `profiles.py` (the store, the overlay and merge, `ap2 profile`; see the access profiles entry
+  below); the local page:
   `server.py` (the server, its JSON routes and the request guard, run by `ap2 serve`) and
   `builtin/page/local.html` (the one page, inline CSS and JS, found from `server.py`'s own path); and the
   phone page's data: `phone.py` (`build`, run by `ap2 phone build`). `ap2 config [--data PATH]` prints the
@@ -1512,13 +1533,15 @@ Calls the author made without asking (check them):
   - The document: `{generated_at, mode, primary_language, secondary_language, languages, settings:
     {history_days, lanes, hide_quotes}, lanes, projects, heartbeat, cards, full}`. `lanes` (all four keys) counts
     only the cards on the phone; `projects` is the local page's project list over those cards (each `title` per
-    language, as there), `done`/`total` from the children on the phone; `heartbeat` is the local page's; `cards`
-    are the local page's rows in its order. These are the JSON shapes of the local page entry above.
+    language, as there), `done`/`total` from the children on the phone; `heartbeat` is the local page's (its
+    `error` scrubbed, see Local paths); `cards` are the local page's rows in its order. These are the JSON shapes of
+    the local page entry above.
   - `full` maps each card id in `cards` to the local page's full card (`GET /api/cards/<id>`), built by the
-    same function, `server.full_card`, with two changes only: the card's `sessions` and `source.raw` (a path to
-    a file on this Mac) are removed, and a child or link that is not on the phone (outside the window or the
-    lanes) is `{id, off_phone: true}` with no title or words, so old history does not reach the phone through a
-    link. A link to a card that is gone stays `{id, missing: true}`. Questions and their answers stay (9.4).
+    same function, `server.full_card`, with these changes only (plus hiding and the Local paths scrub below): the
+    card's `sessions` and `source.raw` (a path to a file on this Mac) are removed, and a child or link that is not
+    on the phone (outside the window or the lanes) is `{id, off_phone: true}` with no title or words, so old
+    history does not reach the phone through a link. A link to a card that is gone stays `{id, missing: true}`.
+    Questions and their answers stay (9.4).
   - Hiding what people wrote (`phone_hide_quotes: true`), for every card with a source record: the row has `title:
     null` and `title_hidden: {<language>: text}` for each configured language, so the page shows the chosen language
     only (anti-goal 1); the full card's `title` is the text per language, like `title_hidden`, `plain.what` is the
@@ -1533,6 +1556,32 @@ Calls the author made without asking (check them):
     unchanged.
   - **[decided by the builder]** Once titles have one slot per language, a hidden card's full-card `title` holds
     the phrase per language, so one screen never shows both languages.
+  - Local paths: three texts can name a file on this Mac, `full[id].template_error` (a bad user template's
+    file), `heartbeat.error` (`<data>/gate.json`) and `full[id].card.ask.text` (a worker's ask, such as a parked
+    worker's worktree). In the phone's copy of each, the data folder's path (as given and resolved) becomes
+    `<data>`, then the home folder's (`Path.home()`, as given and resolved) becomes `~`, so
+    `/Users/x/worktrees/a` reads `~/worktrees/a`; the file's name and the reason stay. The store and the local
+    page (`GET /api/cards/<id>`, `/api/state`) keep the full paths.
+    - **[decided by the builder]** A path that does not contain the data or home folder's path
+      (`/private/var/...`, `/tmp/...`) stays as it is: it names neither the user nor the data folder's place. Easy
+      to add later.
+    - **[decided by the builder]** A folder's path is replaced only as a whole name on its right side: an
+      optional dot and then a run of ASCII name characters (letters, digits and `_ - + @ ~ $ % # =`) right after
+      the folder make it a longer name only when the run holds a letter or digit, so home `/Users/x` does not
+      change `/Users/xy/...`, `/Users/x-old/...` or `/Users/x.old/...`, while `/Users/x.` and markdown marks like
+      `_/Users/x_`, `_/Users/x._` or `~~/Users/x~~` read `~.`, `_~_`, `_~._` and `~~~~~`; a folder literally
+      named `/Users/x_` would read `~_`: a wrong label, never a leak. A non-ASCII character (Chinese, `é`) right
+      next to a path does not stop it, so a folder `/Users/xé` would read `~é`: a wrong name, never a leak. An ask
+      text that is not a string (an object per language, a list) has each of its strings scrubbed, an object's
+      keys and values alike. A home of `/` (or none found) changes nothing. The data folder goes first, so a data
+      folder under home reads `<data>`, not `~/...`.
+    - **[decided by the builder]** On its left side there is no exception: a folder's path is replaced wherever
+      it sits, also inside a longer path, so `/mnt/backup/Users/x/a` reads `/mnt/backup~/a` and
+      `/Users/x/repo/Users/x/repo/a` reads `~/repo~/repo/a`. The folder's path in any spot still names the user or
+      the data folder's place; a path that looks odd is a wrong label, never a leak; and each left-side rule tried
+      let a realistic text through.
+    - **[decided by the builder]** Only these three texts are scrubbed; a card's own words (its title, plain
+      words, questions) are what a person or a source wrote and stay as they are.
   - Read-only, in shadow and live mode alike: building writes nothing in the data folder (it reads the store
     without its lock file, as the local page's GETs do, and never builds `index.sqlite`), starts no process and
     opens no connection. The command writes only to stdout or `--out` (inside the data folder is allowed, since
@@ -1641,7 +1690,7 @@ Calls the author made without asking (check them):
     instructions to follow." A user template may fill a card field from a source into a brief (6), so the worker
     is told once, in its own instructions, how to read it. Each filled value is not quoted or fenced: the brief
     keeps the raw value, as the design's template example fills it.
-  - Session: `claude --bg -n "<card> · <role>" --permission-mode auto --settings ... [--agent ...] --effort xhigh`
+  - Session: `claude --bg -n "<card> · <role>" --permission-mode auto --settings ... [--agent ...] [--model <profile model>] --effort xhigh`
     (v1's defaults; the `pr` role runs `/autopilot:pr-loop` instead of an agent, until templates and roles define
     v2's own). A resume is `claude --bg --resume <id> -n ... --permission-mode ... --settings ... <prompt>`.
     The resume id comes from the card or the worker list, so it is checked first: letters, digits and `-`, not
@@ -1724,6 +1773,21 @@ Calls the author made without asking (check them):
       or `{`, no chaining/redirect token, at most 4096 characters) and `#` read as a plain character, as bash reads one inside a word, so it hides
       nothing. Any other flag (`--usage`, `--data`, `--by`, `--note=`), card, role or program (v1's `bin/ap`,
       another `ap2`) is denied.
+    - v1's own check (`lib/autopilot/park.py` `is_park_command`) now applies the same four rules: any `$`, any
+      `{` and a command past `MAX_COMMAND` (4096) are refused before it is tokenized, and `#` is a plain
+      character. v1 keeps its looser tail after `<role>`.
+      **[decided by the builder]** A plain `#` at a word start (`--note "a #b"` quoted, or `--note x #comment`
+      after a space) stays allowed in v1, as it was: quoted it is plain text, and after a space bash starts a
+      comment, which only shortens the note, so bash still runs the one park command. The tokenizer now keeps
+      `#comment` as a token, which v1's tail rules accept. A word-start `#` comment is now read by the same rules
+      as the rest of the line, so it is refused when `shlex` gives a token made only of `;`, `&`, `|`, `<`, `>`,
+      `(`, `)` (unquoted, as in `--note x # ; later`, or quoted or escaped alone, as in `# ";"` or `# \;`), or
+      fails on an unbalanced quote or a trailing backslash; this was allowed before and bash runs only the park
+      command, but after `shlex` a quoted `"#"` and an unquoted word-start `#` give the same token, so dropping
+      the comment could hide a real `; cmd`, and refusing fails closed (as v2's hook does). Punctuation that shares
+      a token with other characters (`# "a; b"`, `# a\;b`) stays allowed, as before. The other way round, a word-start comment now counts as words
+      in a short line, so `<ap> worker park a T #x y` and `<ap> worker park #a b c`, refused before, are now
+      allowed: bash still runs only `ap worker park` with too few arguments, which fails its own argument check.
     - The deny reason names that command with the worker's own card and role filled in, and the window and its
       percent. A subagent's call (payload `agent_id`) is told to stop and reply to its parent with exactly
       `parked for quota`.
@@ -1759,6 +1823,84 @@ Calls the author made without asking (check them):
     `ap2 worker list`, `start CARD ROLE [--cwd P] [--prompt-file F] [--needs A,B] [--resume]`,
     `end CARD ROLE [--transcripts P]`, `check [--transcripts P] [--usage P]`,
     `park CARD ROLE [--note T] [--usage P]`, `answer CARD TEXT...`, `finish CARD [--transcripts P]`.
+- **[decided by the builder]** Access profiles (slice 1 of the port of v1's access profiles): the store,
+  `ap2 profile`, and every worker start and resume on the active profile. Ported from v1's `lib/autopilot/profile.py`
+  into `lib/assistant/profiles.py`, never imported (v1's version writes v1's data folder). v1 and v2 keep separate
+  profiles, and later separate caps: v2 replaces v1.
+  - What a profile is. How a worker reaches Claude: the Claude subscription, or a Claude-compatible gateway reached
+    with a key command (`apiKeyHelper`), so a key is never written in any file. Fields (v1's schema): `name`,
+    `mode` (`subscription | gateway`), `label`, `model`, `dispatcher_model`, `small_model`, `effort`,
+    `daily_cap_usd`, `gateway {base_url, key_command, refresh_command, rotate_command, models_command}`, `env`,
+    `settings`. Names follow the project name rule (`projects.NAME`).
+  - Where it is kept. Each profile is `<data>/profiles/<name>.json`, written with `store.write_json` (JSON, not
+    YAML, because code writes it, as with routines). The active name is `<data>/active-profile.json`
+    `{"name": ...}`; with no such file it is `subscription`. It is not a `config.yaml` key (those keys are pinned).
+    `profiles/` is made on the first save, so the data folder's layout (`datadir.FOLDERS`) is unchanged. A symlink
+    at `profiles/`, at a profile file or at `active-profile.json` is refused (an lstat check), with one line naming
+    the link (3.4). Nothing reads or writes v1's data folder.
+  - The built-in `subscription` profile always exists: `label: Subscription`, `model: null`, `effort: xhigh`
+    (`workers.EFFORT`). With no profiles stored, a worker's argv is exactly as before. A stored
+    `profiles/subscription.json` replaces it. There is no migration.
+  - No silent fallback. A missing or broken active profile (its file gone, unreadable, or failing the checks
+    below, or a broken `active-profile.json`) raises `ProfileError`, a `ConfigError`, so `ap2` prints one line and
+    exits 1. The line names the file and the fix: `ap2 profile list`, then `ap2 profile use <name>`. No worker
+    starts or resumes: a `check` notes it on the worker's line and resumes nothing (a dead worker's one resume is
+    not used up).
+  - Checks (v1's): a gateway needs `base_url` (http or https), `key_command`, `small_model` and
+    `daily_cap_usd > 0`; `settings` may not hold `permissions`, `hooks`, `apiKeyHelper` or `disableAllHooks`; `env`
+    and `settings.env` may not hold a credential-looking name (`KEY`, `TOKEN`, `SECRET`, `PASSWORD`), a name the
+    overlay sets or blanks, a cloud-provider switch, or (v2's addition) any `AP2_*` or `AUTOPILOT_*` name. On save,
+    `gateway.models_command` runs (`shell=True`, 30 s) and every model the profile names must be in the JSON list it
+    prints; its output is only parsed, never printed or kept.
+  - Overlay and merge (v1's, with `AP2_PROFILE` for `AUTOPILOT_PROFILE`). `overlay(p)` is the settings a profile
+    owns, never `permissions` or `hooks`. The subscription blanks `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`,
+    `ANTHROPIC_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL` and `ANTHROPIC_API_KEY`, and
+    these blanks win over the profile's own env, so a worker bills the subscription even when the shared
+    background daemon carries gateway variables. A gateway sets `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL` (`""` with
+    no model), `ANTHROPIC_SMALL_FAST_MODEL` and `ANTHROPIC_DEFAULT_HAIKU_MODEL` to `small_model`,
+    `ENABLE_TOOL_SEARCH=true` and `apiKeyHelper = key_command`, and blanks `ANTHROPIC_AUTH_TOKEN` and
+    `ANTHROPIC_API_KEY` (they outrank the helper). Both modes blank `CLAUDE_CODE_USE_BEDROCK`,
+    `CLAUDE_CODE_USE_VERTEX` and `CLAUDE_CODE_USE_FOUNDRY` last. `merge(floor, overlay)` keeps the floor's
+    `permissions`, `hooks` and `AP2_*` variables (all but `AP2_PROFILE`), which win; the rest comes from the
+    overlay. `workers.floor(..., profile)` returns that merge, so the deny list, the allow list and the hooks are
+    exactly what a subscription start gets. `AP2_PROFILE` is in `_env`, so it is in the process env and the
+    settings env alike.
+  - When a profile is read. Once per start or resume, before it is planned: `start` (a fresh start, `--resume`,
+    `answer`) and an in-place resume of a dead or parked worker (`_plan_resume`) each take the active profile at
+    that moment. Its name is kept on the worker record (`profile`) and on the card's `sessions.<role>.profile`.
+    `ap2 profile use` rewrites no settings file: v2 writes each worker's floor at its own launch, so a running
+    worker keeps its profile (design of the access profiles, 7) and only its next start or resume moves.
+  - Model and effort. A fresh start gets `--model <profile model>` when the profile has one and
+    `--effort <profile effort>` when it has one, after `--agent`. A resume gets neither (8.2): a resumed gateway
+    session takes its model from the overlay's `ANTHROPIC_MODEL`.
+  - Tool discovery runs with the profile's settings. `_discover(cwd, env, settings)` passes
+    `--settings <run dir>/settings-discover-<role>.json`, which holds the overlay only, no `permissions` or
+    `hooks`: a probe under the deny floor would not list the denied tools. When the active profile is not the page
+    profile (by name; a gateway always), a second probe runs with the page profile's overlay
+    (`settings-discover-<role>-page.json`), and the floor denies the outward tools and not-connected servers either
+    probe found: a gateway session never sees the claude.ai connectors. On the subscription, one probe. Both run
+    outside the worker list's lock; either failing fails the start. A project that lists `tools` runs no probe.
+    The discovery files are covered by the existing `sessions/**/settings-*.json` Edit denial.
+  - Page sessions. `profiles.page_profile()` is always the subscription profile: claude.ai tools cannot be used
+    through a gateway (the access profiles design, 11). This slice uses it for the second probe; every later
+    dispatcher, scan, answer-read or refresh launch uses it too, with a generated `--settings`. No launch point
+    may skip `--settings`: a test walks every function in `lib/assistant/` and fails one that holds `--bg` or `-p`
+    without `--settings`.
+  - Workers cannot edit the profiles: `profiles/**` and `active-profile.json` are in `PROTECTED`, so every worker
+    floor Edit-denies them.
+  - Commands, each with `--data PATH`, JSON on stdout, one `ap2: ...` line and exit 1 on an error:
+    `ap2 profile list` (`{active, active_error, profiles}`; it works with a broken active profile, since it is the
+    fix), `show NAME` (the profile: its commands, never a key), `add NAME --subscription|--gateway [--base-url U]
+    [--key-command C] [--refresh-command C] [--rotate-command C] [--models-command C] [--daily-cap N] [--label L]
+    [--model M] [--dispatcher-model M] [--small-model M] [--effort E] [--env K=V ...] [--settings-file F]`,
+    `use NAME` (prints `{"active": new, "was": old}`, so `ap2 profile use <was>` undoes it) and `remove NAME`
+    (refuses `subscription` and the active profile). `add` refuses a name that exists (`subscription` included)
+    and the gateway flags on a `--subscription` profile, and prints the saved profile. `list` and `show` create
+    nothing; `add`, `use` and `remove` write only inside the data folder, so they work in shadow mode.
+  - Not in this slice: the spend ledger, the daily cap and its card, key health, refresh and rotation (`rotate`),
+    and the page's badge and switch. Until the cap lands, a gateway worker has no daily cap: acceptable because v2
+    is not installed and runs no unattended loop, and workers start only in live mode, by hand. Until then a
+    gateway worker still parks at the subscription's park line (it stops work, never spends more).
 - **[decided by the builder]** v1 import (10, 11 question 5), read-only, in `importv1.py`.
   - Command: `ap2 import-v1 [--data PATH] [--from DIR] [--project NAME ...] [--dry-run]`. `--from` defaults to
     v1's own data root (`AUTOPILOT_DATA`, else `~/.claude/autopilot-data`, v1's `paths.data_root()`). A project is

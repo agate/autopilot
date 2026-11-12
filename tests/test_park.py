@@ -5,9 +5,11 @@ import io
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -201,6 +203,150 @@ class HookTest(Base):
                              capture_output=True, text=True)
         self.assertEqual(out.returncode, 0)
         self.assertLess(time.monotonic() - t, 1.0)
+
+
+def _before(cmd: str) -> bool:
+    """`park.is_park_command` as it was before it refused `$`, `{`, a long command and read `#` as a plain
+    character: the reference the same-answer table below compares against."""
+    if not cmd or "\n" in cmd or "`" in cmd or "$(" in cmd:
+        return False
+    try:
+        lex = shlex.shlex(cmd, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        toks = list(lex)
+    except ValueError:
+        return False
+    if any(t and set(t) <= park.PUNCT for t in toks):
+        return False
+    return len(toks) >= 6 and toks[0] == park._ap_bin() and toks[1:3] == ["worker", "park"]
+
+
+class ParkCommandRulesTest(Base):
+    """The park command check refuses what bash would not run as one plain park command."""
+    WORKER = {"AUTOPILOT_ROLE": "worker"}
+    OWN = f"{AP} worker park checkout PROJ-1 implement"
+
+    def denied(self, cmd):
+        out = park.decide({"tool_name": "Bash", "tool_input": {"command": cmd}}, self.WORKER, usage((95,)), self.cfg)
+        return out is not None and out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def refused(self, cmd, was_allowed=True):
+        self.assertFalse(park.is_park_command(cmd))
+        self.assertTrue(self.denied(cmd))
+        if was_allowed:  # the hole this closes: the old check let it through
+            self.assertTrue(_before(cmd))
+
+    def test_a_hash_inside_a_word_hides_nothing(self):
+        # shlex used to drop `#;touch ...` as a comment; bash reads `#` inside a word as a plain character.
+        for cmd in (self.OWN + " --note x#;touch /tmp/pwned", self.OWN + "#; ls", self.OWN + " --note x#&&ls"):
+            with self.subTest(cmd=cmd):
+                self.refused(cmd)
+
+    def test_any_dollar_is_refused(self):
+        for note in ("${HOME}", "$HOME", '"$HOME"', "x$[1]"):
+            with self.subTest(note=note):
+                self.refused(self.OWN + " --note " + note)
+        for note in ("$((1+1))", "$(whoami)"):  # `$(` was refused already
+            self.refused(self.OWN + " --note " + note, was_allowed=False)
+
+    def test_any_brace_is_refused(self):
+        self.refused(f"{AP} worker park checkout PROJ-1 {{implement,--data=x}}")
+        self.refused(self.OWN + " --note {x,--data=/tmp/d}")
+        self.refused(self.OWN + ' --note "a {b}"')
+
+    def test_a_long_command_is_refused_before_it_is_tokenized(self):
+        self.assertEqual(park.MAX_COMMAND, 4096)
+        self.refused(self.OWN + ' --note "' + "a" * 5000 + '"')
+        huge = self.OWN + " --note " + "a" * 200000
+        t = time.monotonic()
+        with mock.patch.object(park.shlex, "shlex", side_effect=AssertionError("tokenized")):
+            self.assertFalse(park.is_park_command(huge))
+        self.assertLess(time.monotonic() - t, 0.5)
+        self.assertTrue(self.denied(huge))
+        head = self.OWN + " --note "
+        exact = head + "a" * (park.MAX_COMMAND - len(head))
+        self.assertEqual(len(exact), 4096)
+        self.assertTrue(park.is_park_command(exact))
+        self.assertFalse(self.denied(exact))
+        self.assertFalse(park.is_park_command(exact + "a"))
+
+    def test_other_lines_get_the_same_answer_as_before(self):
+        allowed = {
+            "bare": f"{AP} worker park a T r",
+            "with a note": f"{AP} worker park a T r --note x",
+            "single-quoted program": f"'{AP}' worker park checkout PROJ-1 implement",
+            "double-quoted program": f'"{AP}" worker park checkout PROJ-1 implement --note "x y"',
+            "a note with spaces": self.OWN + ' --note "tests green; next: write the evidence"',
+            "single-quoted note": self.OWN + " --note 'halfway; next: tests'",
+            "punctuation": self.OWN + ' --note "done: lib/autopilot/park.py, tests - next: docs."',
+            "unquoted punctuation": self.OWN + " --note step-2:park.py,done./next",
+            "escaped quotes": self.OWN + r' --note "say \"hi\" and it'"'"'s done"',
+            "a quoted # in a note": self.OWN + ' --note "PR #3 done"',
+            "words after the note": self.OWN + " --note a b c",
+            "another flag": self.OWN + " --data /tmp/d",
+            "two notes": self.OWN + " --note a --note b",
+        }
+        for name, cmd in allowed.items():
+            with self.subTest(name, cmd=cmd):
+                self.assertTrue(_before(cmd))
+                self.assertTrue(park.is_park_command(cmd))
+                self.assertFalse(self.denied(cmd))
+        refused = {tail: f"{AP} worker park a T r --note x{tail}"
+                   for tail in ("; rm -rf x", " && git push", " | sh", "\nls", " $(whoami)", " `id`")}
+        refused.update({cmd: cmd for cmd in (f"{AP} worker end a T r", "ap worker park a T r --note x",
+                                             f"{AP} worker parks a T r", f"{AP} worker park a T")})
+        refused.update({"redirect": self.OWN + " --note x > /tmp/f", "background": self.OWN + " --note x &",
+                        "unbalanced quote": self.OWN + ' --note "x', "empty": "", "subshell": f"({self.OWN})"})
+        for name, cmd in refused.items():
+            with self.subTest(name, cmd=cmd):
+                self.assertFalse(_before(cmd))
+                self.assertFalse(park.is_park_command(cmd))
+                self.assertTrue(self.denied(cmd))
+
+    def test_a_hash_at_a_word_start_is_allowed_as_before(self):
+        # Quoted, `#` is plain text; after a space bash starts a comment there, so it only shortens the note.
+        # Either way bash runs the one park command, and the check keeps allowing both, as it did before.
+        # Punctuation that shares a token with other characters is not a chaining token, so it stays allowed too.
+        for cmd in (self.OWN + ' --note "a #b"', self.OWN + " --note x #comment",
+                    self.OWN + ' --note x # "a; b"', self.OWN + r" --note x # a\;b"):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(_before(cmd))
+                self.assertTrue(park.is_park_command(cmd))
+                self.assertFalse(self.denied(cmd))
+        # The comment now counts as words, so a short line that was refused is allowed: bash still runs only
+        # `ap worker park` with too few arguments, which fails its own argument check.
+        for cmd in (f"{AP} worker park a T #x y", f"{AP} worker park #a b c"):
+            with self.subTest(cmd=cmd):
+                self.assertFalse(_before(cmd))
+                self.assertTrue(park.is_park_command(cmd))
+                self.assertFalse(self.denied(cmd))
+
+    def test_a_word_start_comment_with_punctuation_or_a_lone_quote_is_now_refused(self):
+        # bash runs only the park command here, but after shlex a quoted "#" and a word-start # give the same
+        # token, so the check cannot drop the comment without hiding a real `; cmd`: it fails closed, as v2's does.
+        for cmd in (self.OWN + " --note x # ; later", self.OWN + " --note x #(see PR)",
+                    self.OWN + " --note \"done\" # can't finish", self.OWN + " --note \"done\" # C:\\",
+                    self.OWN + ' --note x # ";"', self.OWN + r" --note x # \;"):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(_before(cmd))
+                self.assertFalse(park.is_park_command(cmd))
+                self.assertTrue(self.denied(cmd))
+
+    def test_a_hash_token_does_not_hide_a_chain_after_it(self):
+        # A quoted "#x" is plain text to bash, so the `;` after it chains a real command: the check must not drop
+        # what follows a `#` token, which is why a word-start comment with punctuation is refused.
+        self.refused(self.OWN + ' --note "#x" ; touch /tmp/pwned', was_allowed=False)
+        self.refused(self.OWN + " --note x #c ; later")
+
+    def test_the_command_the_instruction_names_passes(self):
+        text = park.reason({"kind": "session", "model": None, "percent": 95}, subagent=False)
+        m = re.search(r'(\S+ worker park <ap> <task> <role> --note "<[^"]*>")', text)
+        self.assertIsNotNone(m, text)
+        cmd = m.group(1).replace("<ap>", "checkout").replace("<task>", "PROJ-1").replace("<role>", "implement")
+        cmd = re.sub(r'"<[^"]*>"', '"tests green, next: write the evidence"', cmd)
+        self.assertEqual(cmd, self.OWN + ' --note "tests green, next: write the evidence"')
+        self.assertTrue(park.is_park_command(cmd))
+        self.assertFalse(self.denied(cmd))
 
 
 class ParkCommandTest(Base):
