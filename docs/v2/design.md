@@ -1898,7 +1898,15 @@ Calls the author made without asking (check them):
       part named `settings-*.json` at any depth, and at the run directory's top level only (where the floor's own
       `settings-<role>.json` files live, which `Edit` cannot change either) a part with a `[` or a glob that matches
       one (`settings*`,
-      `*`); `$AP2_RUN_DIR/media/*` is fine. Still possible, and left as best effort: removing or copying into the run
+      `*`); `$AP2_RUN_DIR/media/*` is fine. These glob, bracket, brace, comma and paren checks look at unquoted
+      characters only: bash and zsh glob and brace-expand no character a quote or a backslash made text, so JSON
+      or code in quotes after a run-directory path is text (`python3 -c "open('<run>/out.txt','w').write(str([1,2]))"`,
+      `echo '{"evidence": ["<run>/a.png"], "notes": ["x"]}' > <run>/handback.json`, a journal line
+      `"- tests: $AP2_RUN_DIR/test.txt [pass]"` or one with a markdown link). Each word carries a mask that hides
+      its quoted ones (inside a `"${...}"` nothing is hidden, below). A `..` part, a `$` or backtick and a
+      `settings-*.json` name count however they are quoted (`cp x "$AP2_RUN_DIR/../c"` and
+      `cp x "$AP2_RUN_DIR/settings-implement.json"` are denied). The per-segment unquoted-`{` rule stays: without
+      it a comma in a file name (`$AP2_RUN_DIR/a,b.txt`) would be refused. Still possible, and left as best effort: removing or copying into the run
       directory itself (`rm -rf $AP2_RUN_DIR`, `cp /tmp/settings-implement.json $AP2_RUN_DIR/`); ap2 writes the
       settings file again before every launch. And a symlink made inside the run directory that points out of it
       (`ln -s ../../config.yaml $AP2_RUN_DIR/l`, then a write to `$AP2_RUN_DIR/l`) can get past the guard: it
@@ -1963,7 +1971,13 @@ Calls the author made without asking (check them):
       opened inside a `$(...)` that closes on its own line has no body (bash runs the next lines). Inside
       `"..."` a `${...}` reads quotes afresh too, up to the `}` that closes it (bash prints `'}'` for
       `x=; echo "${x:-'}'}"`, and `"${x:-"a; b"}"` holds a nested
-      quote), and so does the `(...)` after a `$$` (`"$$(echo "'")"`: bash 3.2 reads the PID and then a `(...)`
+      quote), but a `'` in there, and inside arithmetic (`$((...))`, `((...))`, `$[...]`), hides no `$(...)` or
+      backtick: bash keeps it only to find the end (a backslash before it escapes nothing), so in
+      `"${x:-'$(cmd)'}"` and `$(( '$(cmd)' ))` the `cmd` runs and is a segment of its own (an `ap2` segment with
+      an unquoted `$[` loses its exemption too). bash 3.2 can also drop one level of backslashes in a backtick
+      there (`: "${x:-"`cp src $AP2_RUN_DIR/\*`"}"` copies onto the floor file), so a backtick's text inside a
+      `"${...}"` that holds a backslash is read a second time with one level taken out (fail-closed: a harmless
+      `"${x:-`ls <run>/\*`}"`-style write can be denied); and so does the `(...)` after a `$$` (`"$$(echo "'")"`: bash 3.2 reads the PID and then a `(...)`
       with its own quotes); nothing in that `(...)` runs or splits, so `cp a "$$(;)" <data>/x` stays one write.
       Bash 5.3 reads some of these as plain text instead (`"$$("<newline><cmd>` runs `<cmd>` there), so a
       command that holds `$$(` is judged in both readings and denied when either one writes. A backtick, inside
@@ -2008,8 +2022,19 @@ Calls the author made without asking (check them):
       matches the floor file), so it ends the word it is in, kept at its end, and after the run directory it is
       refused when the segment has one; and zsh reads a `}` that ends a word as a closing brace (`{ echo x >
       <run>/settings-implement.json}` writes the floor file, even with no `{` open), so a run-directory path is
-      also judged with any `}` at its end dropped. zsh syntax beyond these is best effort (for one, `cp x =ap2`
-      copies over the `ap2` that `PATH` finds).
+      also judged with any unquoted `}` at its end dropped. `>&|`, `>>&|`, `>&!` and `>>&!` redirect both
+      outputs into the next word (the `|` is no pipe). zsh treats a `'` inside `"${...}"` as a plain character
+      (`"${x:-'}"; <cmd>; : "'}"` runs `<cmd>`, where bash reads one word), so a command with a `'` and a `${` is
+      also judged in that reading, as the `$$(` readings are, and denied when one of them writes. A `${(` is a
+      flag group (`"${(e)x:-\$(cmd)}"` runs `cmd`): an `ap2` segment with one outside single quotes loses its
+      exemption, and a command that holds one and names a guarded path anywhere is denied. Options change how
+      words read (`setopt bareglobqual` makes `/(e:'cmd':)` run `cmd`, `setopt extendedglob` makes `(#qe:...)`
+      do so): like `extglob`, a command whose text (quotes and continuations taken out) holds `setopt`,
+      `unsetopt`, `emulate` or zsh's `options[...]`, or a `set` with a flag other than `-e`, `-u`, `-x`, `-v` and
+      `-o`/`+o` with an option other than `pipefail`, `errexit`, `nounset`, `xtrace` or `verbose`
+      (`set -euo pipefail` is fine), is denied when it names a guarded path anywhere; a quoted `'setopt'` in a
+      journal line next to a run-directory write is an accepted false deny. zsh syntax beyond these is best
+      effort (for one, `cp x =ap2` copies over the `ap2` that `PATH` finds).
     - A name rebound in the same command: a function definition (`name()`, `name ()`, `function name`, which
       covers bash's `command_not_found_handle` and zsh's `command_not_found_handler`), a command word `alias`,
       `unalias`, `hash`, `enable`, `builtin`, `functions`, `eval`, `source` or `.`, or a word that sets the search
@@ -2017,19 +2042,32 @@ Calls the author made without asking (check them):
       `commands[...]`) can make `ap2`, `<pkg>/bin/ap2` (bash allows `function <pkg>/bin/ap2 { ... }`) or any
       other name run a write (`ap2() { cp "$@"; }; ap2 src <data>/config.yaml`, `hash -p /bin/cp ap2`). In a
       command that holds one (heredoc body lines aside: they are data), no segment keeps the `ap2` exemption and
-      every segment that names a guarded path outside the own run directory is denied, whatever its verb; a
-      quoted `()` or `alias` is text. Accepted false deny: `source .venv/bin/activate && ls <data>/items`.
+      every segment that names the data folder or the package outside the own run directory is denied, whatever
+      its verb; a quoted `()` or `alias` is text. A segment whose only such mentions are run-directory paths with
+      a `$` or backtick after them (a value filled in at run time) is judged by its verb, as without the
+      rebinding, so `export PATH=$PWD/node_modules/.bin:$PATH; for p in home about; do playwright screenshot
+      <url>/$p $AP2_RUN_DIR/media/$p.png; done` and `source .venv/bin/activate && python shot.py --out
+      "$AP2_RUN_DIR/media/shot-$(date +%s).png"` are allowed; best effort there: `alias ls=cp; ls a
+      $AP2_RUN_DIR/$f` is allowed (a path built at run time, and a verb the rebinding changed). Accepted false
+      deny: `source .venv/bin/activate && ls <data>/items`. zsh's `functions -c f ap2`, `path=(...)`,
+      `commands+=(...)` and `functions+=(...)` rebind too.
     - A script a shell runs: in a segment with a word that is `sh`, `bash`, `zsh`, `ksh`, `dash` or `eval` (by
       name, by path, or after a character no name holds: zsh's `=sh`, `$@eval`), each later word that names a
       guarded path, and all of them joined by blanks (as `eval` joins them), is read again as a command of its own
       (its quotes hid its words, braces and line continuations: `bash -c 'tee $AP2_RUN_DIR/settings-implement.json
       < f'`, `bash -c 'touch {$AP2_RUN_DIR/..,x}/c'`, `sh -c 'cp a $AP2_\<newline>DATA/c'`), two levels deep;
-      a third level that names a guarded path is a write. `ssh host '...'` and `run.sh` are no shell here.
+      a third level that names a guarded path is a write. Below the top level only the joined text is read (it
+      holds each word). `ssh host '...'` and `run.sh` are no shell here. A shell with no `-c` (no flag word with a
+      `c`) reads its script from its input, so when a segment holds one, the words of every segment piped (`|` or
+      `|&`) before it in the command are read as a script the same way (`echo 'tee
+      $AP2_RUN_DIR/settings-implement.json < f' | sh` is denied; `cat $AP2_RUN_DIR/x | sh -c 'wc -l'` and
+      `echo hi | bash` are allowed). A file a shell reads (`sh run.sh`, `cat f | sh`) is best effort.
     - Other bash 3.2 rules added with these: inside `"${...}"` bash 3.2 ends the quote at an inner `"`, so a `{`
       there brace-expands (`x=; echo "${x:-"{a,b}"}"` prints `a b`): any `{` inside a `"${...}"`, quoted inside it
       or not, counts as an unquoted `{` for the run-directory rule. Python's `fnmatch` reads `[^x]` as "`^` or
-      `x`" and `[[:lower:]]` as a set and then `]`, so at the run directory's top level a part with a `[` is
-      refused outright (no floor-file write needs one; `$AP2_RUN_DIR/media/[ab].png` is fine). A lone backslash
+      `x`" and `[[:lower:]]` as a set and then `]`, so at the run directory's top level a part with an unquoted `[` is
+      refused outright (no floor-file write needs one; `$AP2_RUN_DIR/media/[ab].png`
+      is fine, and so is a quoted or escaped `\[`, which is text; `$AP2_RUN_DIR/x[ab].png` stays denied). A lone backslash
       at the very end of the command adds nothing (bash drops it), so `<run>/settings-implement.json\` is the
       floor file. A word that names the run directory more than once (a journal line, `"see $AP2_RUN_DIR/a.png and
       $AP2_RUN_DIR/b.png"`) is judged one mention at a time, each up to the next: every run-directory spelling
@@ -2077,9 +2115,15 @@ Calls the author made without asking (check them):
       again, took 3.8 s on 64 KiB). A substitution's text goes into its own segments only (the command
       around it holds `_`), so nested substitutions are each read once. Reading a `((` again as two subshells
       is capped: each `((` is read
-      again at most once, and once the text read again passes four times the command's length in all (many
+      again at most once, and once the text read again passes the judgement's budget (many
       nested `((` that each turn out to be subshells), the command is judged as one past 64 KiB is, denied when
-      it names a guarded path anywhere. A glob longer than 64 characters
+      it names a guarded path anywhere. That budget (four times the command's length plus 16 KiB) is shared by
+      everything one judgement reads again: each reading past the first (the `$$(` and zsh readings) spends the
+      command's length, and each shell's or piped script read again spends its own length, once per depth (a
+      script already judged is not read again by another reading); a shell's quoted script inside a quoted
+      script with many `$$(` took 2 s at 63 KiB before. Accepted: a `bash -c` script past about 16 KiB that holds
+      a `$$(` or a `'` and a `${` and names a guarded path can be denied for the budget alone. Each segment is
+      read as words once per reading. A glob longer than 64 characters
       at the run directory's top level is denied outright (fnmatch reads a pattern in quadratic time, 4 s on
       8,000 `[`; no floor file name is that long). A command longer than 64 KiB is not split: it is denied when it
       names a guarded path anywhere. As a safety net the hook gives one judgement 2 s (a timer signal, which also

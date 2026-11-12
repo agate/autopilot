@@ -686,9 +686,15 @@ class DecideTest(unittest.TestCase):
                     "=sh -c 'echo x > $AP2_RUN_DIR/\\.\\./\\.\\./config.yaml'",
                     "$@eval 'echo x >! $AP2_RUN_DIR/settings-implement.json\\'",
                     "${x}bash -c 'tee $AP2_RUN_DIR/settings-implement.json < src'",
-                    "bash -c \"sh -c \\\"zsh -c 'tee $AP2_RUN_DIR/settings-implement.json < src'\\\"\""], deny=True)
+                    "bash -c \"sh -c \\\"zsh -c 'tee $AP2_RUN_DIR/settings-implement.json < src'\\\"\"",
+                    # Each shell by name or by path, its script hiding a line continuation.
+                    "ksh -c 'cp src $AP2_\\\nDATA/config.yaml'", "dash -c 'cp src $AP2_\\\nDATA/config.yaml'",
+                    "/bin/sh -c 'cp src $AP2_\\\nDATA/config.yaml'", "/bin/bash -c 'cp src $AP2_\\\nDATA/config.yaml'",
+                    # A third shell level is past MAX_DEPTH: it is a write when it names a guarded path.
+                    "bash -c \"sh -c \\\"zsh -c 'echo hi > \\$AP2_RUN_DIR/x'\\\"\""], deny=True)
         self.check(['echo "${x:-a,b}" > $AP2_RUN_DIR/x', "cp ${f} $AP2_RUN_DIR/a,b.txt",
                     "bash -c 'echo hi > $AP2_RUN_DIR/x'", "bash -c 'ap2 card list --data $AP2_DATA'",
+                    "bash -c \"sh -c 'echo hi > $AP2_RUN_DIR/x'\"",
                     "ssh host 'cat x' > $AP2_RUN_DIR/c.txt; ls $AP2_DATA"], deny=False)
 
     def test_a_floor_glob_with_brackets_at_the_top_level_is_denied(self):
@@ -698,6 +704,120 @@ class DecideTest(unittest.TestCase):
                     "cp src $AP2_RUN_DIR/[[:lower:]]ettings-implement.json", "cp src $AP2_RUN_DIR/[[:alpha:]]*",
                     "cp src $AP2_RUN_DIR/[s]ettings-implement.json", "cp src $AP2_RUN_DIR/x[ab].png"], deny=True)
         self.check(["cp a $AP2_RUN_DIR/media/[ab].png", "rm -f $AP2_RUN_DIR/media/[!x]*.png"], deny=False)
+
+    def test_a_quoted_glob_bracket_brace_or_paren_after_the_run_directory_is_text(self):
+        """Bash and zsh glob and brace-expand no quoted character, so JSON or code in quotes after a run-directory
+        path is text; `..`, a `$` and a `settings-*.json` name still count however they are quoted."""
+        self.check([f"python3 -c \"import json; d=json.load(open('{RUN}/handback.json')); d['status']='done'; "
+                    f"json.dump(d, open('{RUN}/handback.json','w'))\"",
+                    f"python3 -c \"open('{RUN}/out.txt','w').write(str([1,2]))\"",
+                    f"echo '{{\"status\": \"done\", \"evidence\": [\"{RUN}/test.txt\"], \"notes\": [\"x\"]}}' "
+                    f"> {RUN}/handback.json",
+                    'echo "- tests: $AP2_RUN_DIR/test.txt [pass]" >> $AP2_RUN_DIR/journal.md',
+                    f'echo "- shot: {RUN}/home.png; PR: [#12](https://example.com/pull/12)" >> {RUN}/journal.md',
+                    f"echo '{{\"text\": \"Keep {RUN}/a.png as the hero [yes or no]?\"}}' > {RUN}/question.json",
+                    "bash -c \"python3 -c \\\"open('$AP2_RUN_DIR/x','w').write('[1]')\\\"\"",
+                    f". venv/bin/activate && python -c \"import json; "
+                    f"print(json.load(open('{RUN}/handback.json'))['status'])\"",
+                    "cp src $AP2_RUN_DIR/x\\[ab\\].png", 'echo x > "$AP2_RUN_DIR/a $AP2_RUN_DIR/*"'], deny=False)
+        self.check(["cp src $AP2_RUN_DIR/[^x]ettings-implement.json",
+                    "cp src $AP2_RUN_DIR/[[:lower:]]ettings-implement.json", "cp src $AP2_RUN_DIR/[[:alpha:]]*",
+                    "touch {$AP2_RUN_DIR/..,x}/c", "cp src $AP2_RUN_DIR/(settings-implement.json)",
+                    'cp x "$AP2_RUN_DIR/../c"', 'cp x "$AP2_RUN_DIR/settings-implement.json"',
+                    'cp x "$AP2_RUN_DIR/settings-*.json"', 'cp x "$AP2_RUN_DIR"/[s]"ettings-implement.json"',
+                    'cp x "$AP2_RUN_DIR/$f"', 'echo y > "$AP2_RUN_DIR/x"/..', "cp x $AP2_RUN_DIR/\\.\\./c"], deny=True)
+        word = guard._words("echo '[a]'b\\*\"{,}\"(")[1]
+        self.assertEqual((word, word.mask), ("[a]b*{,}(", "\x00a\x00b\x00\x00\x00\x00("))
+        self.assertIsNone(guard._words("a b")[1].mask)
+
+    def test_a_quote_inside_a_quoted_expansion_or_arithmetic_hides_no_substitution(self):
+        """Inside `"${...}"`, `$[...]`, `$((...))` and `((...))` bash keeps a `'` only to find the end: a `$(...)` or
+        backtick in there runs."""
+        self.check([f"ap2 card list \"${{x:-'$(cp src {DATA}/config.yaml)'}}\"",
+                    f"ap2 card list \"${{x:-'`cp src {DATA}/config.yaml`'}}\"",
+                    f"ap2 card list $[ '$(cp src {DATA}/config.yaml)' ]",
+                    "echo \"${x:-'$(cp src $AP2_RUN_DIR/settings-implement.json)'}\"",
+                    "echo $(( '$(cp src $AP2_RUN_DIR/settings-implement.json)' ))",
+                    "(( '$(cp src $AP2_RUN_DIR/settings-implement.json)' ))",
+                    "echo \"$(( '$(cp src $AP2_RUN_DIR/settings-implement.json)' ))\"",
+                    "echo $[ '`cp src $AP2_RUN_DIR/settings-implement.json`' ]",
+                    # A backslash before a `'` there escapes nothing (bash closes the quote at it).
+                    "echo \"${x:-'a\\'$(cp src $AP2_RUN_DIR/settings-implement.json)}\"",
+                    # bash 3.2 can drop a backslash level in a backtick there: `\\*` globs the floor file.
+                    ": \"${x:-'}\"; `cp src $AP2_RUN_DIR/\\*`; : \"'}\"", ': "${x:-"`cp src $AP2_RUN_DIR/\\*`"}"',
+                    ': "${x:-a"`cp src $AP2_RUN_DIR/\\*`"}"'], deny=True)
+        self.check(["echo \"${x:-'\\$(cp src $AP2_RUN_DIR/settings-implement.json)'}\" > /tmp/x",
+                    "echo \"${x:-'}'}\" > $AP2_RUN_DIR/a.txt", "ap2 card note C1 --data $AP2_DATA --text \"${x:-'a'}\""],
+                   deny=False)
+        self.assertEqual(guard._segments("a \"${x:-'$(b; c)'}\" d"), ["b", " c", "a \"${x:-'$(_)'}\" d"])
+
+    def test_zsh_reads_a_quote_inside_a_quoted_expansion_as_a_plain_character(self):
+        """zsh closes `"${x:-'}"` at its first `}`: the command is also judged in that reading."""
+        self.check([f"ap2 card list \"${{x:-'}}\"; cp src {DATA}/config.yaml; : \"'}}\"",
+                    "echo \"${x:-'}\"; cp src $AP2_RUN_DIR/settings-implement.json; : \"'}\""], deny=True)
+        self.assertEqual(guard._segments("a \"${x:-'}\"; b; \"'}\"", sq=False), ["a \"${x:-'}\"", " b", " \"'}\""])
+
+    def test_zsh_flags_and_option_changes_with_a_guarded_path_are_denied(self):
+        """zsh's `${(e)...}` runs the value as code, and `setopt`, `unsetopt`, `emulate`, `options[...]` and
+        `set -o` can turn on glob qualifiers (`/(e:'cmd':)`): with a guarded path in the command, they deny."""
+        self.check([f"ap2 card list \"${{(e)x:-\\$(cp src {DATA}/config.yaml)}}\"",
+                    f"ap2 card list \"${{(e):-\\$(cp src {DATA}/config.yaml)}}\"",
+                    "echo \"${(e):-\\$(cp src $AP2_RUN_DIR/settings-implement.json)}\"",
+                    "setopt bareglobqual; ap2 card list /(e:'cp src $AP2_DATA/config.yaml':)",
+                    "setopt extendedglob; ap2 card list /(#qe:'cp src $AP2_DATA/config.yaml':)",
+                    "unsetopt no_bare_glob_qual; ap2 card list /(e:'cp src $AP2_DATA/config.yaml':)",
+                    "set -o bareglobqual; ap2 card list /(e:'cp src $AP2_DATA/config.yaml':)",
+                    "set +o nobareglobqual; ap2 card list /(e:'cp src $AP2_DATA/config.yaml':)",
+                    "set -eo extendedglob; ap2 card list /(#qe:'cp src $AP2_DATA/config.yaml':)",
+                    "options[bareglobqual]=on; ap2 card list /(e:'cp src $AP2_DATA/config.yaml':)",
+                    "emulate ksh; ap2 card list --data $AP2_DATA", "s\\etopt x; ap2 card list --data $AP2_DATA",
+                    # Accepted false deny: the words are looked for in the text, quoted or not, as `extglob` is.
+                    "echo 'setopt' > $AP2_RUN_DIR/n.txt"], deny=True)
+        self.check(["set -euo pipefail; echo x >> $AP2_RUN_DIR/journal.md", "set -x; ap2 card list --data $AP2_DATA",
+                    "set +e; set -o errexit -o nounset; ls $AP2_DATA",
+                    "git config set x; ls $AP2_DATA"], deny=False)
+        for cmd in ("setopt x", "set -o x", "set -G", "a=${(e)b}", "options+=(x on)"):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(guard._options(cmd))
+        for cmd in ("set -euo pipefail", "set -- a b", "reset -o x", "echo set", "offset -x"):
+            with self.subTest(cmd=cmd):
+                self.assertFalse(guard._options(cmd))
+
+    def test_a_zsh_ampersand_noclobber_redirect_is_a_write_not_a_pipe(self):
+        """zsh's `>&|`, `>>&|`, `>&!` and `>>&!` redirect both outputs into the next word."""
+        self.check(["echo x >&| $AP2_DATA/config.yaml", "echo x >>&| $AP2_DATA/config.yaml",
+                    "ap2 card list >&! $AP2_DATA/config.yaml", "ap2 card list >>&| $AP2_DATA/config.yaml",
+                    "ap2 card list >&|$AP2_DATA/config.yaml"], deny=True)
+        self.check(["ap2 card list >&| /tmp/x --data $AP2_DATA", "echo x \\>&| cat"], deny=False)
+        self.assertEqual(guard._segments("a >&| f | b"), ["a >&| f ", " b"])
+        targets = []
+        guard._words("a >&| x >>&! y", targets)
+        self.assertEqual(targets, ["x", "y"])
+
+    def test_a_script_piped_into_a_shell_is_read_as_a_script(self):
+        """A shell with no `-c` reads its script from its input: the words piped into it are read as one."""
+        self.check(["echo 'tee $AP2_RUN_DIR/settings-implement.json < f' | sh",
+                    "printf '%s\\n' 'cp src $AP2_\\\nDATA/config.yaml' | bash -e",
+                    "echo 'cp src $AP2_\\\nDATA/config.yaml' | tr a a | /bin/zsh",
+                    "echo 'ap2 card list > $AP2_DATA/config.yaml' |& sh -s"], deny=True)
+        self.check(["cat $AP2_RUN_DIR/x | sh -c 'wc -l'", "echo hi | bash", "cat $AP2_RUN_DIR/x | sh",
+                    "echo 'cp src $AP2_\\\nDATA/config.yaml' || sh", "echo 'cp src $AP2_\\\nDATA/c' | eval wc"],
+                   deny=False)
+        self.assertIs(type(guard._segments("a | b")[0]), guard._Pipe)
+        self.assertIs(type(guard._segments("a || b")[0]), str)
+
+    def test_a_rebound_name_keeps_run_directory_paths_built_at_run_time_judged_by_their_verb(self):
+        """After `export PATH=...` or `source`, a data-folder or package mention is still denied outright, but a
+        run-directory path with a `$` after it is judged by the segment's verb, as without the rebinding."""
+        self.check(["export PATH=$PWD/node_modules/.bin:$PATH; for p in home about; do "
+                    "playwright screenshot http://localhost:3000/$p $AP2_RUN_DIR/media/$p.png; done",
+                    'source .venv/bin/activate && python scripts/shot.py --out "$AP2_RUN_DIR/media/shot-$(date +%s).png"',
+                    'export PATH="$HOME/.local/bin:$PATH"; ls $AP2_RUN_DIR/media/$NAME',
+                    # Accepted, best effort: `ls` runs `cp`, and `$f` is built at run time.
+                    "alias ls=cp; ls a $AP2_RUN_DIR/$f"], deny=False)
+        self.check(["source .venv/bin/activate && cp x $AP2_RUN_DIR/$f", "export PATH=/tmp/b:$PATH; ap2 x $AP2_DATA",
+                    "export PATH=/tmp/b:$PATH; ap2 card list $AP2_RUN_DIR/../../config.yaml",
+                    f"export PATH=/tmp/b:$PATH; {PKG}/bin/ap2 card list"], deny=True)
 
     def test_a_name_rebound_in_the_same_command_is_no_ap2_call(self):
         """A function, an alias, a `hash` entry or a not-found handler can make `ap2` (or any name) run anything: a
@@ -719,8 +839,23 @@ class DecideTest(unittest.TestCase):
                     "builtin alias ap2=cp\nap2 src $AP2_DATA/config.yaml",
                     "eval 'ap2() { cp \"$@\"; }'; ap2 src $AP2_DATA/config.yaml",
                     f'function {PKG}/bin/ap2 {{ cp "$@"; }}; {PKG}/bin/ap2 src $AP2_DATA/config.yaml',
-                    'f() { cp "$@"; }; f src $AP2_DATA/config.yaml', 'x ap2 () { cp "$@"; }; ap2 src $AP2_DATA/c'],
+                    'f() { cp "$@"; }; f src $AP2_DATA/config.yaml', 'x ap2 () { cp "$@"; }; ap2 src $AP2_DATA/c',
+                    # `source` and `.` run a file that can define one; zsh's `functions -c` copies one.
+                    "echo 'ap2(){ cp \"$@\"; }' > /tmp/f.sh; source /tmp/f.sh; ap2 src $AP2_DATA/config.yaml",
+                    "echo 'ap2(){ cp \"$@\"; }' > /tmp/f.sh; . /tmp/f.sh; ap2 src $AP2_DATA/config.yaml",
+                    'f(){ cp "$@"; }; functions -c f ap2; ap2 src $AP2_DATA/config.yaml',
+                    # zsh's arrays `path`, `commands` and `functions`, set whole or added to.
+                    "path=(/tmp/b $path); ap2 src $AP2_DATA/config.yaml",
+                    "commands+=(ap2 /bin/cp); ap2 src $AP2_DATA/config.yaml",
+                    "functions+=(ap2 'cp \"$@\"'); ap2 src $AP2_DATA/config.yaml",
+                    # Blanks inside a definition's `()`.
+                    'ap2(  ) { cp "$@"; }; ap2 src $AP2_DATA/config.yaml',
+                    'ap2 (\t) { cp "$@"; }; ap2 src $AP2_DATA/config.yaml'],
                    deny=True)
+        # `functions -c f ap2` on its own (`f` defined elsewhere, such as in the shell's startup files) rebinds too.
+        for seg in ("functions -c f ap2", "source x", ". x", "path+=(/tmp/b)"):
+            with self.subTest(seg=seg):
+                self.assertTrue(guard._rebinds([guard._Parsed(seg, True, True)]))
         self.check(["ap2 card list > /tmp/x", 'f() { echo hi; }; f > "$AP2_RUN_DIR/x"',
                     'echo "f() and alias" > /tmp/x; ap2 card list --data $AP2_DATA',
                     "ap2 card note C1 --text 'see hash()' --data $AP2_DATA",
@@ -742,7 +877,7 @@ class DecideTest(unittest.TestCase):
         self.check(['cp x "$AP2_RUN_DIR/$f"', 'echo x > "$AP2_RUN_DIR/a $AP2_RUN_DIR/../../config.yaml"',
                     'echo x > "$AP2_RUN_DIR/a $AP2_DATA/config.yaml"', "echo x > $AP2_RUN_DIR/..$AP2_RUN_DIR",
                     'echo x > "$AP2_RUN_DIR/a $AP2_RUN_DIR/settings-implement.json"',
-                    'echo x > "$AP2_RUN_DIR/a $AP2_RUN_DIR/*"', "echo x > $AP2_RUN_DIR/a$AP2_RUN_DIR$f"], deny=True)
+                    'echo x > "$AP2_RUN_DIR/a $AP2_RUN_DIR/"*', "echo x > $AP2_RUN_DIR/a$AP2_RUN_DIR$f"], deny=True)
 
     def test_a_variable_after_the_run_directory_is_not_trusted(self):
         self.check(["cp a.png $AP2_RUN_DIR/$f", "cp a.png ${AP2_RUN_DIR}/media/${f}",
@@ -896,7 +1031,19 @@ class DecideTest(unittest.TestCase):
                   "run dir twice": fill('"$AP2_RUN_DIR/a $AP2_RUN_DIR/b '), "( mid": fill("a("),
                   "()": fill("() "), "bash -c {": fill("{a,b} ", "bash -c '"), "[ top": fill("$AP2_RUN_DIR/[a "),
                   "extglob @ seen": fill("a@(b) "), "shells": fill("bash -c "), "eval": fill("eval $AP2_DATA "),
-                  "shells quoted": fill("'", "bash -c " + "'bash -c " * 50)}
+                  "shells quoted": fill("'", "bash -c " + "'bash -c " * 50),
+                  # A shell's script read again, in both `$$(` readings, with many mentions in it.
+                  "sh $$( words": pad('sh sh "$$(x)" ' + "$$(x)$AP2_RUN_DIR " * ((size - 20) // 18)),
+                  "sh $$( quoted": pad("sh sh '" + "$$(x)$AP2_RUN_DIR " * ((size - 20) // 18) + "\"$$(x)\"'"),
+                  "sh $$( run dir": pad('sh sh "$$(x)" ' + '$AP2_RUN_DIR/a"$$(x)" ' * ((size - 20) // 22)),
+                  "soft ${'": fill("'$(a) ", '"${x:-'), "soft ((": fill("'$(a)' ", "(( "),
+                  "soft $[": fill("'$(a)' ", "ap2 $[ "), "zsh ${'": fill("\"${x:-'}\" $AP2_RUN_DIR/a "),
+                  "${(": fill('"${(e)x:-a} ', "ap2 "), "setopt": fill("setopt x; set -o y; "),
+                  "set -o": fill("-euo pipefail ", "set "), ">&|": fill(">&| a ", "ap2 "),
+                  "| sh": fill("echo 'tee $AP2_RUN_DIR/a' | sh | "), "| into sh": fill("echo 'a' | ") + "| sh",
+                  "quoted globs": fill("[x]{a,b}*?(y) $AP2_RUN_DIR/", "echo '"),
+                  "${ ` \\": fill("`a \\* b` ", '"${x:-'), "rebound run dir $": fill("ls $AP2_RUN_DIR/$f ", "source x; "),
+                  "all readings": fill("\"${x:-'$(a)'}\" $$(x)$AP2_RUN_DIR ", 'sh "$$(x)" "${x:-\'}" ')}
         for name, cmd in shapes.items():
             with self.subTest(name):
                 self.assertLessEqual(len(cmd), guard.MAX_COMMAND)
