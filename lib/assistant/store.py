@@ -144,7 +144,7 @@ class Store:
             # O_NOFOLLOW: a link swapped in after _guard's check is still refused, not opened
             fd = os.open(str(lock), os.O_CREAT | os.O_RDWR | NOFOLLOW, 0o644)
         except OSError as e:
-            if e.errno == errno.ELOOP and lock.is_symlink():
+            if e.errno in (errno.ELOOP, errno.EMLINK) and lock.is_symlink():  # EMLINK: FreeBSD's O_NOFOLLOW
                 self._refuse_link(lock)
             raise
         try:

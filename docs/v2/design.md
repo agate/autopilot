@@ -129,10 +129,12 @@ refuses a symlink inside it where it keeps its own files: `items/`, a month fold
 point file, `.store.lock`, `index.sqlite` (and its `-journal`, `-wal`, `-shm`) and `.index.stale`. The call fails
 with one line naming the link, so a link into v1's folder cannot carry a store write out of the v2 folder.
 
-- **[decided by the builder]** A link is refused, never followed and never replaced: removing it is the user's
-  choice. Any one of these links refuses every store call, a read too, not only the calls that would touch it, so
-  the check is one short list of `lstat` calls per call. The lock and `.index.stale` are also opened with
-  `O_NOFOLLOW` where the platform has it, for a link swapped in after the check.
+- **[decided by the builder]** A link is refused, never followed to write and never replaced (pruning reads a
+  linked point, below): removing it is the user's choice. A link at a name right under the data folder (`items/`,
+  `restore/`, `.store.lock`, `index.sqlite` and its `-journal`, `-wal`, `-shm`, `.index.stale`) refuses every
+  store call, a read too, not only the calls that would touch it, so the check is one short list of `lstat` calls
+  per call. A linked month folder, card file or point file is refused by the calls that open it. The lock and
+  `.index.stale` are also opened with `O_NOFOLLOW` where the platform has it, for a link swapped in after the check.
 - **[decided by the builder]** Inside `items/`, any link is refused when listing or rebuilding the index meets it
   (the store reads every folder there); in a month folder only a link with a card's file name is refused (other
   names are skipped as before). Inside `restore/`, a linked point file is refused when it is put back; pruning

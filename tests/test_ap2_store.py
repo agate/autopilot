@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import os
 import re
@@ -1141,7 +1142,9 @@ class LinkedCardTest(LinkCase):
         target = self.outside / month.name
         shutil.move(str(month), str(target))
         month.symlink_to(target, target_is_directory=True)
+        points = files(self.data / "restore")
         self.assert_every_call_refused(month, target, only=self.CARD_CALLS)
+        self.assertEqual(files(self.data / "restore"), points)  # a refused restore saves no point first
         (self.data / "index.sqlite").unlink()
         with self.assertRaisesRegex(CardError, f"^{re.escape(str(month))} is a symlink"):
             self.store.search("vendor")  # met by the rebuild too
@@ -1151,7 +1154,9 @@ class LinkedCardTest(LinkCase):
         target = self.outside / path.name
         shutil.move(str(path), str(target))
         path.symlink_to(target)
+        points = files(self.data / "restore")
         self.assert_every_call_refused(path, self.outside, only=self.CARD_CALLS[1:])
+        self.assertEqual(files(self.data / "restore"), points)  # a refused restore saves no point first
         (self.data / "index.sqlite").unlink()
         with self.assertRaisesRegex(CardError, f"^{re.escape(str(path))} is a symlink"):
             self.store.search("vendor")  # met by the rebuild too
@@ -1230,6 +1235,29 @@ class LinkedStoreFileTest(LinkCase):
             with self.store._locked():
                 self.fail("the lock was taken through a link")
         self.assertEqual(target.read_bytes(), b"v1 owns this file\n")
+
+    def test_a_linked_lock_is_refused_where_the_platform_has_no_o_nofollow(self):
+        # Without O_NOFOLLOW the open would follow the link: the lstat check before it is all that refuses it.
+        link = self.data / ".store.lock"
+        target = self.outside / "lock"
+        target.write_bytes(b"v1 owns this file\n")
+        link.unlink()
+        link.symlink_to(target)
+        with mock.patch("assistant.store.NOFOLLOW", 0):
+            self.assert_every_call_refused(link, self.outside)
+        self.assertEqual(target.read_bytes(), b"v1 owns this file\n")
+
+    @unittest.skipIf(fcntl is None, "needs flock")
+    def test_the_lock_maps_emlink_to_the_symlink_refusal(self):
+        # FreeBSD's O_NOFOLLOW fails on a link with EMLINK, not ELOOP: it is the same refusal.
+        link = self.data / ".store.lock"
+        link.unlink()
+        link.symlink_to(self.outside / "lock")
+        with mock.patch("assistant.store.os.open", side_effect=OSError(errno.EMLINK, "Too many links")):
+            with self.assertRaisesRegex(CardError, f"^{re.escape(str(link))} is a symlink"):
+                with self.store._locked():
+                    self.fail("the lock was taken through a link")
+        self.assertFalse((self.outside / "lock").exists())
 
     def test_the_stale_marker_is_made_without_following_a_link(self):
         # A link swapped in after the check: mark_stale() alone still refuses to make the marker at its target.
