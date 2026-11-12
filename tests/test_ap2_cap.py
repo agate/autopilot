@@ -133,6 +133,19 @@ class AllowanceTest(CapCase):
         self.assertEqual((a["allow"], a["reason"]), (0, "cap"))
         self.assertIn("the store is locked", a["card_error"])
 
+    def test_a_card_that_could_not_be_written_is_made_next_time(self):
+        self.spent = totals(500.0)
+        with mock.patch.object(Store, "add", side_effect=CardError("the store is locked")):
+            a = self.allow()
+        self.assertEqual((a["allow"], a["reason"]), (0, "cap"))
+        self.assertIn("the store is locked", a["card_error"])
+        self.assertEqual(self.cap_cards(), [])
+        a = self.allow()  # the state was not saved as open: the card is tried again
+        self.assertNotIn("card_error", a)
+        [c] = self.cap_cards()
+        s = cap.state(self.data, self.now)
+        self.assertEqual((s["card"], s["card_id"]), ("open", c["id"]))
+
     def test_switching_gateway_profiles_sums_for_the_cap(self):
         profiles.save(self.data, gateway("g2", daily_cap_usd=1.5))
         profiles.use(self.data, "g2")
@@ -315,6 +328,29 @@ class CardTest(CapCase):
         self.spent = totals(10.0)
         tomorrow = datetime(2026, 11, 12, 9, 0, tzinfo=TZ)
         self.assertEqual(self.allow(now=tomorrow)["reason"], "ok")
+        c = self.store.get(cid)
+        self.assertIsNone(c["ask"])
+        self.assertEqual(c["lane"], "done")
+
+    def test_opening_todays_card_closes_yesterdays(self):
+        self.spent = totals(500.0)
+        self.allow()
+        cid = cap.state(self.data, self.now)["card_id"]
+        self.spent = totals(1.0, unknown_today=True)
+        tomorrow = datetime(2026, 11, 12, 9, 0, tzinfo=TZ)
+        self.assertEqual(self.allow(now=tomorrow)["reason"], "cap")
+        c = self.store.get(cid)
+        self.assertIsNone(c["ask"])
+        self.assertEqual(c["lane"], "done")
+        new = cap.state(self.data, tomorrow)["card_id"]
+        self.assertNotEqual(new, cid)
+        self.assertEqual(self.store.get(new)["lane"], "needs")
+
+    def test_answer_after_midnight_closes_yesterdays_card(self):
+        self.spent = totals(500.0)
+        self.allow()
+        cid = cap.state(self.data, self.now)["card_id"]
+        self.answer("raise50", now=datetime(2026, 11, 12, 0, 10, tzinfo=TZ))
         c = self.store.get(cid)
         self.assertIsNone(c["ask"])
         self.assertEqual(c["lane"], "done")
@@ -659,6 +695,16 @@ class PauseTest(CapWorkerCase):
         ask = self.get(a["card"])["ask"]
         self.assertEqual((ask["type"], ask["reason"]), ("fix", workers_mod.DIED))
 
+    def test_pause_stops_workers_when_the_listing_fails(self):
+        self.use_gateway()
+        a, b = self.start(), self.start()
+        w = self.workers()
+        with mock.patch.object(w, "_listing", return_value=None):  # the listing failed: unknown, not dead
+            out = self.pause(w)
+        self.assertEqual(sorted(self.stops()), sorted([a["short_id"], b["short_id"]]))
+        self.assertEqual([r["parked"]["kind"] for r in self.records()], ["cap", "cap"])
+        self.assertEqual(len(out["stopped"]), 2)
+
     def pause_during_launch(self):
         """Patch `Workers._launch` so a pause runs on another thread while the launch holds the worker list's lock:
         the launch waits until the pause thread asks for the lock, then launches for real. Returns the patch and a
@@ -904,6 +950,17 @@ class ParkSplitTest(CapWorkerCase):
         self.use_gateway()  # switching profiles does not change the worker's own
         self.assertEqual(w.park(a["card"], "implement", "x", usage_file=usage_file(self.tmp / "u.json", 97))
                          ["percent"], 97)
+
+    def test_park_works_when_the_workers_profile_is_gone(self):
+        self.use_gateway()
+        w = self.workers()
+        a = self.start(w)
+        self.assertEqual(self.records()[0]["profile"], "g")
+        self.use_subscription()
+        profiles.remove(self.data, "g")  # the worker's own profile cannot be loaded: the subscription's rule
+        rec = w.park(a["card"], "implement", "x", usage_file=usage_file(self.tmp / "u.json", 97))
+        self.assertEqual(rec["percent"], 97)
+        self.assertEqual(self.records()[0]["parked"]["reason"], "quota")
 
 
 # -- 10. ap2 cap ------------------------------------------------------------------------------------------------------------
