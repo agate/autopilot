@@ -45,6 +45,12 @@ class SpendCase(unittest.TestCase):
         p = mock.patch("autopilot.sessions.list_all", side_effect=lambda *_: self.listing)
         p.start()
         self.addCleanup(p.stop)
+        self.clock = datetime(2026, 11, 11, 8, 0, tzinfo=TZ).timestamp()
+        for target, val in (("autopilot.spend._clock", lambda: self.clock),
+                            ("autopilot.spend._now_iso", lambda: datetime.fromtimestamp(self.clock, TZ).isoformat())):
+            q = mock.patch(target, side_effect=val)
+            q.start()
+            self.addCleanup(q.stop)
         self.transcript = self.home / ".claude" / "projects" / "-tmp-x" / f"{SID}.jsonl"
 
     def put(self, fixture="streaming.jsonl", sub=None):
@@ -145,13 +151,91 @@ class TotalsTest(SpendCase):
         self.launch("zzzz9999")
         self.assertAlmostEqual(spend.totals(NOW)["month"], STREAMING_USD)
 
-    def test_unresolved_short_id_is_skipped_then_found(self):
+    def test_unresolved_short_id_is_unknown_then_found(self):
+        self.put()
+        self.listing.clear()
+        self.launch()
+        t = spend.totals(NOW)
+        self.assertEqual(t["month"], 0.0)
+        self.assertIs(t["unknown"], True)
+        self.listing.append({"id": SHORT, "sessionId": SID})
+        self.clock += 601
+        t = spend.totals(NOW)
+        self.assertAlmostEqual(t["month"], STREAMING_USD)
+        self.assertIs(t["unknown"], False)
+
+    def test_launch_time_resolution(self):
         self.put()
         self.launch()
+        cache = json.loads((self.data / "spend" / "cache.json").read_text())
+        self.assertEqual(cache["shorts"], {SHORT: SID})
+
+    def test_unresolved_retry_is_rate_limited_and_gives_up(self):
         self.listing.clear()
-        self.assertEqual(spend.totals(NOW)["month"], 0.0)
-        self.listing.append({"id": SHORT, "sessionId": SID})
-        self.assertAlmostEqual(spend.totals(NOW)["month"], STREAMING_USD)
+        self.launch()
+        with mock.patch("autopilot.sessions.list_all", return_value=[]) as la:
+            spend.totals(NOW)
+            self.clock += 300
+            spend.totals(NOW)
+            self.assertEqual(la.call_count, 0)  # tried at launch time, next try 10 minutes later
+            self.clock += 400
+            spend.totals(NOW)
+            self.assertEqual(la.call_count, 1)
+            self.clock += 3 * 86400
+            spend.totals(NOW)
+            spend.totals(NOW)
+            self.assertEqual(la.call_count, 1)  # the launch is older than 2 days: no more tries
+            self.assertIs(spend.totals(NOW)["unknown"], True)
+
+    def test_unresolved_launch_from_earlier_month_is_not_unknown(self):
+        self.listing.clear()
+        self.launch()
+        self.assertIs(spend.totals(datetime(2026, 12, 2, 9, 0, tzinfo=TZ))["unknown"], False)
+
+    def test_missing_transcript_without_settled_lines_is_unknown(self):
+        self.launch()
+        self.assertIs(spend.totals(NOW)["unknown"], True)
+
+    def test_cache_holds_per_day_aggregates_of_this_month_only(self):
+        self.put("days.jsonl")
+        self.launch()
+        spend.totals(NOW)
+        ent = list(json.loads((self.data / "spend" / "cache.json").read_text())["files"].values())[0]
+        self.assertEqual(sorted(ent["days"]), ["2026-11-10", "2026-11-11"])
+        self.assertEqual(sorted(ent["days"]["2026-11-10"]), ["unknown", "usd"])
+        spend.totals(datetime(2026, 11, 11, 12, 0, tzinfo=TZ))
+        # the same file read in December keeps no November day
+        self.clock += 20 * 86400
+        spend.totals(datetime(2026, 12, 1, 12, 0, tzinfo=TZ))
+        ent = list(json.loads((self.data / "spend" / "cache.json").read_text())["files"].values())[0]
+        self.assertEqual(ent["days"], {})
+
+    def test_synthetic_lines_are_ignored(self):
+        self.put("synthetic.jsonl")
+        self.launch()
+        self.assertEqual(spend.request_costs(self.transcript, tz=TZ)[0]["model"], "claude-haiku-4-5")
+        self.assertEqual(len(spend.request_costs(self.transcript, tz=TZ)), 1)
+        self.assertIs(spend.totals(NOW)["unknown"], False)
+
+    def test_incomplete_price_override_is_unknown(self):
+        self.put()
+        for bad in ({"claude-haiku-4-5": {"input": 1, "output": 1}}, {"claude-haiku-4-5": "free"}):
+            g = config.load_global()
+            g["prices"] = bad
+            config.save_global(g)
+            self.assertIsNone(spend.request_costs(self.transcript, tz=TZ)[0]["usd"])
+
+    def test_lines_without_request_id_dedupe_on_message_id(self):
+        d = self.transcript.parent
+        d.mkdir(parents=True)
+
+        def ln(out):
+            return json.dumps({"type": "assistant", "timestamp": "2026-11-10T15:00:00Z", "message": {
+                "id": "msg_1", "model": "claude-haiku-4-5", "usage": {"input_tokens": 10, "output_tokens": out}}})
+        self.transcript.write_text(ln(5) + "\n" + ln(50) + "\n")
+        items = spend.request_costs(self.transcript, tz=TZ)
+        self.assertEqual(len(items), 1)
+        self.assertAlmostEqual(items[0]["usd"], usd(input=10, output=50))
 
     def test_cache_rereads_only_changed_files(self):
         self.put()
@@ -183,10 +267,14 @@ class TotalsTest(SpendCase):
         self.transcript.unlink()
         self.assertIs(spend.totals(NOW)["unknown"], True)
 
-    def test_settle_without_transcript_writes_nothing(self):
+    def test_settle_without_transcript_records_unsettled_and_stays_unknown(self):
+        self.listing.clear()
         self.launch()
         spend.settle(SHORT)
-        self.assertFalse((self.data / "spend" / "settled.jsonl").exists())
+        line = json.loads((self.data / "spend" / "settled.jsonl").read_text().splitlines()[0])
+        self.assertIs(line["unsettled"], True)
+        self.assertEqual(line["short"], SHORT)
+        self.assertIs(spend.totals(NOW)["unknown"], True)
 
     def test_record_launch_line(self):
         self.launch()
