@@ -86,7 +86,7 @@ def fingerprint(ap: str, apcfg: dict, st: dict, all_sessions, now: datetime, gh_
     wk = []
     b = budget.read() if any(w.get("parked") for w in st["workers"]) else None
     for w in st["workers"]:
-        cls = sessions.classify(w, all_sessions, runs / w["task"])
+        cls = workers.worker_state(w, all_sessions, runs / w["task"])[0]
         if cls == "parked":
             # Looks like a running worker while it waits, so parking wakes no pass; the entry changes the
             # moment it can continue, which does.
@@ -206,6 +206,8 @@ def _load_all(gcfg: dict, now: datetime, hide_after: float = None) -> tuple:
             apcfg = config.load_ap(n)
             if not apcfg.get("repo"):
                 raise ValueError("config.json has no repo")
+            # A worker stopped at a usage limit is parked first, so the pass sees it parked, not blocked.
+            workers.note_api_stops(n, all_sessions, now)
             loaded[n] = (apcfg, state.load(n))
         except Exception as e:  # noqa: BLE001 - one bad autopilot must not stop the gate
             broken[n] = f"{type(e).__name__}: {e}"

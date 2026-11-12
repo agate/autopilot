@@ -6,9 +6,9 @@ import re
 import shutil
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from autopilot import budget, cli, config, events, paths, profile, sessions, shellenv, spend, state
+from autopilot import budget, cli, config, events, paths, profile, sessions, shellenv, spend, state, usage
 
 AGENTS = {"implement": "autopilot:implementer", "review": "autopilot:reviewer"}
 PROTECTED_ENV = ("AUTOPILOT_", "ANTHROPIC_", "CLAUDE")
@@ -175,6 +175,8 @@ def start(ap: str, task: str, role: str, cwd: str, prompt: str, needs: list = No
            "ports": port_range,
            "needs": list(needs or []), "started_at": events.now_iso(), "resumes": 0, "cwd": str(cwd),
            "profile": p["name"]}
+    if parked and parked.get("limit_parks"):
+        rec["limit_parks"] = parked["limit_parks"]   # cleared once this run gets a normal reply
     if sid and (found or {}).get("sessionId") and found["sessionId"] != sid:
         # The resumed copy has a new session id; the original stays on disk until the task is cleaned up.
         rec["replaced_sessions"] = list((old or {}).get("replaced_sessions") or []) + [sid]
@@ -302,11 +304,116 @@ def text_cap_parked() -> str:
     return "paused at the daily cap; resumes when you resume the autopilot"
 
 
+_RUN_SKEW = timedelta(minutes=2)          # an error this much before a run's start may still be the run's own
+_LIMIT_BACKOFF = timedelta(minutes=30)    # a limit with no readable reset: wait this long, doubling per park
+_LIMIT_BACKOFF_MAX = timedelta(hours=4)
+
+
+def _listed(w: dict, all_s):
+    return sessions.find_by_id(w.get("short_id"), all_s) or sessions.find(w["session_name"], all_s)
+
+
+def _since(w: dict) -> datetime:
+    try:
+        at = datetime.fromisoformat(str(w.get("started_at")).replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.max.replace(tzinfo=timezone.utc)   # no start time: nothing can be told apart from history
+    return (at if at.tzinfo else at.astimezone()) - _RUN_SKEW
+
+
+def _api_stop(w: dict, all_s, run_dir, tail=None):
+    """The API error this worker's current run stopped on (`sessions.api_stop`), or None. Only for a session
+    that is not working: a parked or finished worker, or an unreadable listing, is never read."""
+    if all_s is None or w.get("parked") or sessions.classify(w, all_s, run_dir) == "done":
+        return None
+    s = _listed(w, all_s)
+    if s and (s.get("state") == "working" or s.get("status") == "busy"):
+        return None
+    if tail is None:
+        tail = usage.transcript_tail((s or {}).get("sessionId") or w.get("session_id"))
+    return sessions.api_stop(tail, _since(w))
+
+
+def worker_state(w: dict, all_s, run_dir) -> tuple:
+    """(state, blocked_reason or None). A session a gateway refuses is `blocked` with the reason
+    `gateway_refused` however the listing labels its ended turn: resuming it on that gateway never helps."""
+    st = sessions.classify(w, all_s, run_dir)
+    if st in ("running", "blocked", "dead") and (_api_stop(w, all_s, run_dir) or {}).get("kind") == "gateway_refused":
+        return "blocked", "gateway_refused"
+    return st, None
+
+
+def _limit_park(w: dict, stop: dict, now: datetime, gcfg: dict) -> dict:
+    n = int(w.get("limit_parks") or 0) + 1
+    reset = sessions.reset_time(stop["text"], stop["at"] or now)
+    if reset is not None:
+        resume_at = reset + timedelta(minutes=gcfg["budget"]["resume_after_min"])
+    else:
+        resume_at = now + min(_LIMIT_BACKOFF * 2 ** (n - 1), _LIMIT_BACKOFF_MAX)
+    w["limit_parks"] = n
+    return {"kind": None, "model": None, "percent": None, "resets_at": reset.isoformat() if reset else None,
+            "resume_at": resume_at.isoformat(), "reason": "limit", "note": stop["text"], "parked_at": now.isoformat(),
+            "role": w["role"]}
+
+
+def note_api_stops(ap: str, all_s, now: datetime = None) -> None:
+    """Act on workers whose last turn ended on an API error. A usage or spend limit parks the worker like a quota
+    park (reason `limit`) until the reset the message names, plus `budget.resume_after_min`; with no readable
+    reset it waits 30 minutes, doubling with each limit park in a row, at most 4 hours. A normal reply in a run
+    clears that count. Runs under the state lock and changes nothing the second time; with nothing to change it
+    does not write the state at all. A gateway refusal changes no state: `worker_state` reports it."""
+    if all_s is None:
+        return
+    now = now or datetime.now(timezone.utc)
+    runs = paths.ap_dir(ap) / "runs"
+
+    def change(w: dict):
+        """("park", stop) or ("clear", None) for one worker, or None."""
+        s = _listed(w, all_s)
+        tail = usage.transcript_tail((s or {}).get("sessionId") or w.get("session_id"))
+        if w.get("limit_parks") and not w.get("parked") and tail and tail["reply_at"] and tail["reply_at"] >= _since(w):
+            if not tail["errors"]:
+                return "clear", None
+            w = dict(w, limit_parks=0)   # it replied in this run before this limit: the count starts again
+        stop = _api_stop(w, all_s, runs / w["task"], tail)
+        if stop and stop["kind"] == "limit":
+            return "park", dict(stop, reset_count=not w.get("limit_parks"))
+        return None
+
+    if not any(change(w) for w in state.load(ap)["workers"]):
+        return
+    parked = []
+    with state.mutate(ap) as st:
+        for w in st["workers"]:
+            what = change(w)
+            if what is None:
+                continue
+            if what[0] == "clear" or what[1]["reset_count"]:
+                w.pop("limit_parks", None)
+            if what[0] == "park":
+                sid = (_listed(w, all_s) or {}).get("sessionId")
+                if sid and not w.get("session_id"):
+                    w["session_id"] = sid
+                w["parked"] = _limit_park(w, what[1], now, config.load_global())
+                parked.append(w)
+    for w in parked:
+        run = runs / w["task"]
+        run.mkdir(parents=True, exist_ok=True)
+        (run / "parked.json").write_text(json.dumps(w["parked"], indent=1, ensure_ascii=False) + "\n")
+        events.append(ap, "worker_parked", {"task": w["task"], "role": w["role"], "window": None, "percent": None,
+                                            "resume_at": w["parked"]["resume_at"], "reason": "limit"})
+
+
 def listing(ap: str) -> list:
     gcfg = config.load_global()
     all_s = sessions.list_all(claude_bin(gcfg))
+    note_api_stops(ap, all_s)
     runs = paths.ap_dir(ap) / "runs"
-    return [dict(w, state=sessions.classify(w, all_s, runs / w["task"])) for w in state.load(ap)["workers"]]
+    rows = []
+    for w in state.load(ap)["workers"]:
+        st, why = worker_state(w, all_s, runs / w["task"])
+        rows.append(dict(w, state=st, **({"blocked_reason": why} if why else {})))
+    return rows
 
 
 def _opt(args: list, flag: str, default=None):
@@ -325,7 +432,7 @@ def _cmd(args: list) -> int:
             print(json.dumps(rows, indent=1, ensure_ascii=False))
         else:
             for w in rows:
-                tail = ""
+                tail = ", the gateway refuses its conversation" if w.get("blocked_reason") == "gateway_refused" else ""
                 if w["state"] == "parked":
                     tail = (f", {text_cap_parked()}" if w["parked"].get("kind") == "cap"
                             else f", resumes {w['parked']['resume_at']}")

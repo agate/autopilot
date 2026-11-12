@@ -61,7 +61,8 @@ def _parked(w: dict) -> str:
         return ""
     if pk.get("kind") == "cap":
         return " [paused at the daily cap; resumes when you resume the autopilot]"
-    return f" [parked for quota, resumes {pk.get('resume_at') or 'when usage drops'}]"
+    why = "at a usage limit" if pk.get("reason") == "limit" else "for quota"
+    return f" [parked {why}, resumes {pk.get('resume_at') or 'when usage drops'}]"
 
 
 def _self_line(st: dict) -> str:

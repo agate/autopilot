@@ -582,7 +582,6 @@ KEY_FAIL_TTL = timedelta(seconds=60)  # a failing key is checked again sooner: t
 KEY_FIX = "Run the key command in a terminal (sign in again if it asks), then the next gate tick starts work."
 _AUTH_TEXT = re.compile(r"\b40[13]\b|authentication[_ ]error|authentication[_ ]failed|invalid[ _-]*(x-)?api[ _-]*key",
                         re.IGNORECASE)
-_AUTH_FIELDS = ("authentication_failed", "authentication_error", "invalid_api_key")
 
 
 def _key_file() -> Path:
@@ -667,47 +666,17 @@ def rotate(name: str) -> None:
 
 
 def session_auth_failed(session_id: str, after=None) -> bool:
-    """True when the end of a session's transcript holds an API authentication failure (HTTP 401/403). Claude
-    Code writes an API error as an assistant line flagged isApiErrorMessage (model <synthetic>); the check is
-    tolerant: that flag, an auth `error` field, or a synthetic message, and the text must name the failure.
-    A failure counts only if its timestamp is newer than `after` (the last refresh) and no normal assistant
-    line follows it (the session recovered)."""
+    """True when the end of a session's transcript holds an API authentication failure (HTTP 401/403): an API
+    error line (`usage.transcript_tail`) whose text names the failure. A failure counts only if its timestamp is
+    newer than `after` (the last refresh) and no normal assistant line follows it (the session recovered)."""
     from autopilot import usage
-    f = usage.find_transcript(session_id)
-    if not f:
-        return False
-    try:
-        with open(f, "rb") as h:
-            h.seek(0, 2)
-            h.seek(max(0, h.tell() - 65536))
-            lines = h.read().decode("utf-8", "replace").splitlines()[-12:]
-    except OSError:
-        return False
-    found = False
-    for line in lines:
-        try:
-            e = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(e, dict) or e.get("type") not in ("assistant", "system"):
-            continue
-        msg = e.get("message") if isinstance(e.get("message"), dict) else {}
-        err = e.get("error")
-        flagged = (e.get("isApiErrorMessage") is True or msg.get("model") == "<synthetic>"
-                   or (isinstance(err, str) and err in _AUTH_FIELDS))
-        if not flagged:
-            if e.get("type") == "assistant":
-                found = False   # a normal reply after the error: the session recovered
-            continue
-        at = _parse_time(e.get("timestamp")) if e.get("timestamp") else None
-        if after is not None and at is not None and at <= after:
+    tail = usage.transcript_tail(session_id)
+    for e in (tail or {}).get("errors") or []:
+        if after is not None and e["at"] is not None and e["at"] <= after:
             continue   # an old error, from before the last refresh
-        content = msg.get("content")
-        parts = [c.get("text", "") for c in content if isinstance(c, dict)] if isinstance(content, list) else [str(content or "")]
-        text = " ".join(parts + [str(e.get("content") or ""), err if isinstance(err, str) else ""])
-        if _AUTH_TEXT.search(text):
-            found = True
-    return found
+        if _AUTH_TEXT.search(f"{e['text']} {e['error'] or ''}"):
+            return True
+    return False
 
 
 def note_session_end(session_id: str, profile_name: str, now: datetime) -> bool:
