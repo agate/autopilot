@@ -493,6 +493,17 @@ class ChoiceCardTest(unittest.TestCase):
         # The switch note gives way to the card once the card names the profile that was asked for.
         self.assertIn("(acc.profile_choice || {}).profile === pendingSwitch.name", js_fn("renderStatus"))
 
+    def test_a_re_render_keeps_the_user_s_pick(self):
+        # render() runs on every refresh: the selects must not jump back to the recommended entries.
+        body = js_fn("renderChoiceCard")
+        self.assertIn("let pendingSwitch = null, capSent = null, choiceSent = null, choicePick = null;", PAGE)
+        self.assertIn("choicePick.profile !== c.profile || choicePick.at !== c.at", body)
+        self.assertEqual(body.count("onchange:"), 2)
+        self.assertIn("choicePick.model = models.value", body)
+        self.assertIn("choicePick.effort = efforts.value", body)
+        self.assertIn("opt(v, choicePick.model, c.recommended_model)", body)
+        self.assertIn("opt(v, choicePick.effort, c.recommended_effort)", body)
+
     @unittest.skipUnless(shutil.which("node"), "needs node")
     def test_the_recommended_entries_are_preselected(self):
         dom = """
@@ -507,7 +518,7 @@ const box = new N("div"); const $ = () => box;
 const S = {meta: {labels: {}, reply_check: {every_s: 60}, access: {profile_choice: {profile: "u", label: "New gateway",
   models: ["claude-opus-5-5[1m]", "gpt-5", "default"], efforts: ["low", "high"], recommended_model: "claude-opus-5-5[1m]",
   recommended_effort: "high", at: "T"}}}};
-const LABELS_EN = %s; let lang = "en", canWrite = true, db = {}, choiceSent = null; const sendErrors = {};
+const LABELS_EN = %s; let lang = "en", canWrite = true, db = {}, choiceSent = null, choicePick = PICK; const sendErrors = {};
 """ % json.dumps(LABELS)
         js = dom + "".join(js_fn(n) for n in ("labelsFor", "L", "T", "el", "fill", "errNote", "switchNote",
                                               "renderChoiceCard")) + """
@@ -518,9 +529,14 @@ const picked = sel.map((s) => s.kids.filter((o) => "selected" in o.attrs).map((o
 const texts = all.filter((n) => n.tag === "#text").map((n) => n.text).join("|");
 console.log(JSON.stringify({picked, buttons: all.filter((n) => n.tag === "button").length, texts}));
 """
-        got = json.loads(node(js))
+        got = json.loads(node(js.replace("PICK", "null")))
         self.assertEqual(got["picked"], [["claude-opus-5-5[1m]"], ["high"]])
         self.assertEqual(got["buttons"], 1)
+        # A pick made before a re-render stays; one made on an older card does not.
+        kept = '{profile: "u", at: "T", model: "gpt-5", effort: "low"}'
+        self.assertEqual(json.loads(node(js.replace("PICK", kept)))["picked"], [["gpt-5"], ["low"]])
+        old = '{profile: "u", at: "OLD", model: "gpt-5", effort: "low"}'
+        self.assertEqual(json.loads(node(js.replace("PICK", old)))["picked"], [["claude-opus-5-5[1m]"], ["high"]])
         self.assertIn("New gateway", got["texts"])
         self.assertIn(LABELS["choice_default"], got["texts"])
 

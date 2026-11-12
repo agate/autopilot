@@ -381,7 +381,8 @@ let lang = "en", langPicked = false, filterAp = "", tab = "needs", ticketFilter 
 // canWrite: only the page's owner answers (the db rules let nobody else write replies). myId goes on each reply.
 let db = null, user = null, downloads = null, canWrite = null, myId = null, loaded = false, unreachable = false;
 const sendErrors = {};
-let pendingSwitch = null, capSent = null, choiceSent = null;   // pendingSwitch: {name, from, at}; choiceSent: {profile, at, model, effort}
+let pendingSwitch = null, capSent = null, choiceSent = null, choicePick = null;
+// pendingSwitch: {name, from, at}; choiceSent and choicePick (what the selects show): {profile, at, model, effort}
 const VIEWS = ["needs", "tasks", "status"];
 const $ = (id) => document.getElementById(id);
 
@@ -1052,11 +1053,15 @@ function renderChoiceCard() {
   const a = S.meta.access, c = a && a.profile_choice, off = canWrite === false || !db;
   // A refreshed card (a refused pick, or another switch) drops the note that an answer is on its way.
   if (c && choiceSent && (choiceSent.profile !== c.profile || choiceSent.at !== c.at)) choiceSent = null;
-  if (!c) { choiceSent = null; fill($("choicecard")); return; }
-  const opt = (v, rec) => el("option", { value: v, selected: v === rec },
+  if (!c) { choiceSent = null; choicePick = null; fill($("choicecard")); return; }
+  // render() runs on every refresh: the selects show the reader's pick for this card, the recommended ones at first.
+  if (!choicePick || choicePick.profile !== c.profile || choicePick.at !== c.at) choicePick = { profile: c.profile, at: c.at, model: c.recommended_model, effort: c.recommended_effort };
+  const opt = (v, picked, rec) => el("option", { value: v, selected: v === picked },
     (v === "default" ? L("choice_default") : v) + (v === rec ? " " + L("choice_recommended") : ""));
-  const models = el("select", { "aria-label": L("choice_model"), disabled: off }, (c.models || []).map((v) => opt(v, c.recommended_model)));
-  const efforts = el("select", { "aria-label": L("choice_effort"), disabled: off }, (c.efforts || []).map((v) => opt(v, c.recommended_effort)));
+  const models = el("select", { "aria-label": L("choice_model"), disabled: off, onchange: () => { choicePick.model = models.value; } },
+    (c.models || []).map((v) => opt(v, choicePick.model, c.recommended_model)));
+  const efforts = el("select", { "aria-label": L("choice_effort"), disabled: off, onchange: () => { choicePick.effort = efforts.value; } },
+    (c.efforts || []).map((v) => opt(v, choicePick.effort, c.recommended_effort)));
   fill($("choicecard"), el("div", { class: "card dec capcard", role: "group", "aria-label": L("choice_card_title", { label: c.label || c.profile }) },
     el("h2", {}, "▲ " + L("choice_card_title", { label: c.label || c.profile })),
     c.error ? [el("p", { class: "note crit", role: "alert" }, L("choice_error", { error: c.error })), el("p", { class: "meta" }, L("choice_error_fix"))] : [
