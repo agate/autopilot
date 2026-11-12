@@ -31,8 +31,8 @@ def build_command(gcfg: dict, repo: str, aps: list) -> tuple:
     argv = [workers.claude_bin(gcfg), "--bg", "-n", NAME, "--permission-mode", gcfg["permission_mode"],
             "--settings", str(settings)]
     s = profile.page_profile()
-    if s.get("dispatcher_model") or s.get("model"):
-        argv += ["--model", s.get("dispatcher_model") or s["model"]]
+    if s.get("dispatcher_model"):   # only its own model: the worker model (from models.worker) is not the pass's
+        argv += ["--model", s["dispatcher_model"]]
     argv.append(prompt)
     env = workers._env("dispatcher")
     return argv, env

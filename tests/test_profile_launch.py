@@ -112,6 +112,13 @@ class LaunchTest(LaunchBase):
                 dispatch.run(g, aps, poll_s=0)
         self.assertEqual([(r[0], r[1], r[3]["name"]) for r in rec], [("abcd1234", "dispatcher", "subscription")])
 
+    def test_dispatcher_ignores_the_worker_model(self):
+        sub = profile.load("subscription")
+        sub.update(model="w1", dispatcher_model=None)   # migrated from models.worker only
+        profile.save(sub)
+        argv, _ = dispatch.build_command(config.load_global(), str(self.data), ["a"])
+        self.assertNotIn("--model", argv)
+
     def test_blanks_api_key_in_dispatcher_settings(self):
         self.assertEqual(read(self.data / "settings-dispatcher.json")["env"]["ANTHROPIC_API_KEY"], "")
 
