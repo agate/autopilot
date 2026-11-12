@@ -8,6 +8,7 @@ import contextlib
 import hashlib
 import io
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -178,11 +179,17 @@ class RequestCostsTest(SpendCase):
         self.transcript.parent.mkdir(parents=True)
         line = json.dumps(dict(NEW, requestId="r_inf")).replace('"input_tokens": 1000000', '"input_tokens": 1e400')
         big = json.dumps(dict(NEW, requestId="r_big")).replace("1000000", "9" * 400)
-        self.transcript.write_text(line + "\n" + big + "\n")
+        # A count that is a finite number but whose price is too big for one: unknown, never an infinite total.
+        out = json.dumps(dict(NEW, requestId="r_out")).replace('"output_tokens": 0', '"output_tokens": 1e308')
+        digits = json.dumps(dict(NEW, requestId="r_309")).replace('"output_tokens": 0',
+                                                                  '"output_tokens": 1' + "0" * 308)
+        self.transcript.write_text("\n".join([line, big, out, digits, json.dumps(NEW)]) + "\n")
         self.launch()
         t = self.totals()
-        self.assertEqual(t["month"], 0.0)
+        self.assertAlmostEqual(t["month"], 1.0)  # the honest request only
         self.assertEqual((t["unknown"], t["unknown_today"]), (True, True))
+        for k in ("today", "week", "month"):
+            self.assertTrue(math.isfinite(t[k]), k)
 
     def test_a_negative_count_is_unknown_never_a_discount(self):
         self.transcript.parent.mkdir(parents=True)
@@ -601,6 +608,16 @@ class ResolveTest(SpendCase):
         t = self.totals()
         self.assertEqual((t["unknown"], t["unknown_today"], t["unknown_launches"]), (True, True, 2))
 
+    def test_a_subscription_launch_never_makes_gateway_spend_unknown(self):
+        self.listing.clear()
+        past_grace = NOW - timedelta(seconds=960)  # the grace is 900 s
+        self.launch(p=profile("sub", "subscription"), session="", at=past_grace)  # unresolved
+        self.launch("efgh5678", p=profile("sub", "subscription"), session=SID_B, at=past_grace)  # no transcript
+        t = self.totals(mode="gateway")
+        self.assertEqual((t["unknown"], t["unknown_today"], t["unknown_launches"]), (False, False, 0))
+        t = self.totals(mode="subscription")
+        self.assertEqual((t["unknown"], t["unknown_today"], t["unknown_launches"]), (True, True, 2))
+
     def test_young_launches_retry_resolution_every_minute(self):
         self.listing.clear()
         at = NOW - timedelta(minutes=1)
@@ -677,6 +694,19 @@ class SettleTest(SpendCase):
         self.settle(short=SHORT)
         self.transcript.unlink()
         self.assertIs(self.totals()["unknown"], True)
+
+    def test_an_undated_request_of_a_session_launched_last_month_is_not_this_months_unknown(self):
+        self.transcript.parent.mkdir(parents=True)
+        dated = dict(NEW, requestId="r_dated", timestamp="2026-10-06T17:00:00Z")  # noon here, $1.00
+        undated = dict(NEW, requestId="r_undated", timestamp="garbage")
+        self.transcript.write_text(json.dumps(dated) + "\n" + json.dumps(undated) + "\n")
+        self.launch(at=datetime(2026, 10, 5, 8, 0, tzinfo=TZ))
+        self.settle(short=SHORT, now=datetime(2026, 10, 6, 18, 0, tzinfo=TZ))
+        self.transcript.unlink()
+        t = self.totals()  # November: the October session's undated request is not this month's
+        self.assertEqual((t["month"], t["unknown"], t["unknown_today"]), (0.0, False, False))
+        t = self.totals(datetime(2026, 10, 7, 9, 0, tzinfo=TZ))  # its own month: still unknown
+        self.assertEqual((round(t["month"], 6), t["unknown"], t["unknown_today"]), (1.0, True, False))
 
     def test_settle_without_transcript_records_unsettled_and_stays_unknown(self):
         self.listing.clear()

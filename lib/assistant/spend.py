@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import stat
@@ -183,7 +184,8 @@ def _cost(table: dict, model, u: dict):
     if "over_100k" in p and (tok["input"] + tok["cache_read"] + tok["cache_write_5m"] + tok["cache_write_1h"]
                              > _LONG_PROMPT_TOKENS):
         p = p["over_100k"]
-    return sum(tok[k] * float(p[k]) for k in _PRICE_KEYS) / 1e6
+    usd = sum(tok[k] * float(p[k]) for k in _PRICE_KEYS) / 1e6
+    return usd if math.isfinite(usd) else None  # a price too big for a number: unknown
 
 
 # -- transcripts -----------------------------------------------------------------------------------------------------
@@ -565,7 +567,7 @@ def totals(data, projects, now: Optional[datetime] = None, mode: str = "gateway"
             if rid not in owner or key < owner[rid]:
                 owner[rid] = key
     for sid, reqs in per_session.items():
-        m, _, launched_today, _, _ = session_mode[sid]
+        m, recent, launched_today, _, _ = session_mode[sid]
         if m != mode:
             continue
         for rid, rec in reqs.items():
@@ -575,8 +577,8 @@ def totals(data, projects, now: Optional[datetime] = None, mode: str = "gateway"
             day = _day(rec[0], tz)
             if cost is None and (day == today or (day is None and launched_today)):
                 models.add(rec[2] if len(rec) > 2 and rec[2] else "an unnamed model")
-            if day is None:  # no usable time: unknown spend, on the day the session was launched
-                out["unknown"] = True
+            if day is None:  # no usable time: unknown spend, on the day (and in the month) the session was launched
+                out["unknown"] = out["unknown"] or recent
                 out["unknown_today"] = out["unknown_today"] or launched_today
                 continue
             add(day, cost, cost is None)
