@@ -136,19 +136,21 @@ class DecideTest(unittest.TestCase):
                     "cat <<EOF\nEOF); ap2 x '\nEOF\ncp a $AP2_DATA/c #'",
                     'x=$(cat <<EOF\nhi\nEOF)\ncp a $AP2_DATA/config.yaml',
                     'cat <<"a\\b"\nab\nap2 card note C1 \'\na\\b\ncp a $AP2_DATA/config.yaml # \'',
-                    # A `$"..."` or `$'...'` delimiter: bash ends the body at its decoded word (`EO`, `a'b`).
+                    # A `$'...'` delimiter: bash ends the body at its decoded word (`EO`, `a'b`).
                     'cat <<$"EO"\nbody\nEO\ntouch "\n" $AP2_DATA/x4\n',
                     "cat <<$'E\\x4f'\nbody\nEO\ntouch \"\n\" $AP2_DATA/x3\n",
                     "cat <<$'\\105O'\nbody\nEO\ntouch \"\n\" $AP2_DATA/x3\n",
                     "cat <<$'a\\'b'\nbody\na'b\ntouch \"\n\" $AP2_DATA/x6\n",
-                    # A delimiter it cannot decode (a NUL, `\\u`) opens no body: the next lines are code.
+                    # A delimiter it cannot decode (a NUL, `\\u`; `$"..."`, above, whose `$` zsh keeps) opens no
+                    # body: the next lines are code.
                     "cat <<$'E\\x00'\nE\ntouch \"\n\" $AP2_DATA/x3\n",
                     "cat <<$'\\u0045'\nE\ntouch \"\n\" $AP2_DATA/x3\n"],
                    deny=True)
-        for word, delim in (("$'E\\x4f'", "EO"), ('$"EO"', "EO"), ("$'\\105O'", "EO"), ("$'a\\'b'", "a'b"),
-                            ("$'\\x41BC'", "ABC"), ("$'\\1050'", "E0"), ("$'\\cA\\ca\\c1'", "\x01\x01\x11"),
+        for word, delim in (("$'E\\x4f'", "EO"), ('$"EO"', None), ("$'\\105O'", "EO"), ("$'a\\'b'", "a'b"),
+                            ("$'\\x41BC'", "ABC"), ("$'\\1050'", "E0"), ("$'\\cA\\ca\\c1'", None),
                             ("$'\\a\\b\\e\\E\\f\\n\\r\\t\\v\\\\\\\"\\?'", "\a\b\x1b\x1b\f\n\r\t\v\\\"?"),
-                            ("$'\\q\\8\\xg'", "\\q\\8\\xg"), ("$$'\\'", "$$\\"), ('$$"x"', "$$x"),
+                            ("$'\\q'", None), ("$'\\8'", None), ("$'\\xg'", None), ("$'\\C-a'", None),
+                            ("$'\\M-a'", None), ("$$'\\'", "$$\\"), ('$$"x"', "$$x"),
                             ("$'E\\x00'", None), ("$'\\u0045'", None), ("$'\\777'", None), ("$'\\c'", None),
                             ("$'\\c?'", None), ("$'\\cé'", None),
                             ("$'abc", None)):
@@ -1222,14 +1224,15 @@ class DecideTest(unittest.TestCase):
         self.assertIn('touch "\n" $AP2_DATA/x', guard._segments("cat <<E\nit's $(touch \"\n\" $AP2_DATA/x)\nE"))
 
     def test_a_locale_or_ansi_c_quote_in_a_word_reads_as_the_shell_passes_it(self):
-        """`$"..."` is `"..."` (the `$` goes), and `$'...'` is decoded (`$'\\x63p'` is `cp`); a `\\u` that zsh decodes
-        to an ASCII character is read as zsh reads it, and may rebind a name (bash 3.2 reads another one)."""
+        """`$"..."` is `"..."` (the `$` goes), and `$'...'` is decoded (`$'\\x63p'` is `cp`); a `\\u` that decodes
+        to an ASCII character is read as decoded, and may rebind a name (bash 3.2 may or may not decode `\\u`: it
+        depends on the locale)."""
         self.check(['c$"p" src $AP2_DATA/config.yaml', f'cp src {DATA[:-1]}$"{DATA[-1]}"/config.yaml',
                     "$'\\x63p' src $AP2_DATA/config.yaml", "$'\\143p' src $AP2_DATA/config.yaml",
                     "$'\\x68ash' -p /bin/cp $'\\x61p2'; ap2 src $AP2_DATA/config.yaml",
                     "cp src $AP2_RUN_DIR/$'\\x2e\\x2e'/config.yaml",
                     "cp src $AP2_RUN_DIR/$'settings-implement\\x2ejson'",
-                    # zsh decodes `\\u`: undecodable here, so a guarded path next to one is denied.
+                    # An ASCII `\\u` is read as decoded and flagged: a guarded path next to one is denied.
                     "$'\\u0063p' src $AP2_DATA/config.yaml", "cp src $AP2_RUN_DIR/$'\\u002e\\u002e'/config.yaml",
                     "$'\\u0068ash' -p /bin/cp $'\\u0061p2'; ap2 src $AP2_DATA/config.yaml"], deny=True)
         self.check(["printf $'a\\tb\\n' > \"$AP2_RUN_DIR/x.txt\"", "printf $'\\u2713 done\\n' >> \"$AP2_RUN_DIR/journal.md\"",
@@ -1380,9 +1383,10 @@ class DecideTest(unittest.TestCase):
                     "cat <<'EOF' | bash\nap2() { cp \"$@\"; }\nap2 src $AP2_DATA/config.yaml\nEOF"], deny=True)
 
     def test_an_ansi_c_nul_or_non_ascii_code_rebinds_nothing(self):
-        """bash ends a `$'...'` text at a NUL and passes a code past 0x7F as it is: neither can spell a name. bash 3.2
-        keeps `\\u` as text while zsh decodes it, so only a `\\u` or `\\U` that decodes to an ASCII character may
-        rebind a name."""
+        """A code past 0x7F is passed as it is and a `$'...'` word that is nothing but NULs is empty: neither can spell
+        a name. bash 3.2 may or may not decode `\\u` (it depends on the locale) while zsh decodes it, so only a `\\u`
+        or `\\U` that decodes to an ASCII character may rebind a name. A NUL inside a longer word is read otherwise
+        by each shell: that word keeps its `$`."""
         self.check([f"find {DATA}/items -name '*.yaml' -print0 | while IFS= read -r -d $'\\0' f; do wc -l \"$f\"; done",
                     f"grep -c $'\\0' {DATA}/index.sqlite", f"tr -d $'\\0' < {DATA}/x.log | head",
                     f"tr -d $'\\x00\\000' < {DATA}/x.log | head",
@@ -1403,7 +1407,7 @@ class DecideTest(unittest.TestCase):
                     "$x$'\\x74'ouch $AP2_DATA/c", "$1$'\\x63p' src $AP2_DATA/config.yaml",
                     "$x'c'p src $AP2_DATA/config.yaml", "c$x\"p\" src $AP2_DATA/config.yaml"], deny=True)
         self.assertEqual(guard._words("$'a\\0b' $'\\x00' $'c\\000\\'d' $'\\543p' $'\\u2014' $'\\xe2'"),
-                         ["a", "c", "cp", "\\u2014", "\xe2"])
+                         ["$a0b", "$c000'd", "cp", "\\u2014", "\xe2"])
         flags = set()
         guard._words("$'\\u2014 \\U0001F600'", flags=flags)
         self.assertNotIn("$'", flags)
@@ -1458,6 +1462,80 @@ class DecideTest(unittest.TestCase):
         self.check(["cp ./src $AP2_RUN_DIR/settings-implement.json\\"], deny=True)
         self.assertEqual(guard._words("a b\\"), ["a", "b"])
         self.assertEqual(guard._words("a b\\\\"), ["a", "b\\"])
+
+    def test_an_ansi_c_escape_bash_and_zsh_read_differently_is_undecodable(self):
+        """bash 3.2 and zsh decode only a shared set of `$'...'` escapes alike; zsh drops the backslash of any other
+        one (`\\d` is `d`), reads `\\C-X`, `\\CX` and `\\M-X`, reads `\\cX` as `c` and X, and makes a NUL of `\\x`,
+        `\\u` and `\\U` with no digit, `\\u0000` and `\\C-@` (an external command's path ends there). Any of those
+        keeps the word's `$`, may rebind a name, and denies a command that names a guarded path anywhere."""
+        esc = DATA.replace("Documents", "Docu\\ments")
+        floor = "cp /tmp/src $AP2_RUN_DIR/settings-implement.json"
+        self.check([f"echo x > $'{esc}/config.yaml'", f"cp /tmp/src $'{esc}/config.yaml'",
+                    "cp /tmp/src ~/Documents/$'\\A'ssistant/config.yaml",
+                    "cp /tmp/src $AP2_RUN_DIR/$'\\.\\.'/$'\\.\\.'/config.yaml",
+                    "cp /tmp/src $AP2_RUN_DIR/$'\\C-'../$'\\C-'../config.yaml",
+                    "cp /tmp/src $AP2_RUN_DIR/$'\\M-'../$'\\M-'../config.yaml",
+                    "cp /tmp/src $AP2_RUN_DIR/..$'\\C-'/..$'\\C-'/config.yaml",
+                    "echo hi > $AP2_RUN_DIR/settings-implement.json$'\\C-@'",
+                    floor + "$'\\C-@x'", floor + "$'\\u0000x'", floor + "$'\\U00000000x'", floor + "$'\\x'",
+                    floor + "$'\\u'", floor + "$'\\0'x", floor + "$'\\cA'", "cp /tmp/src $AP2_RUN_DIR/.$'.\\C-@x'",
+                    "$'c\\p' /tmp/src $AP2_DATA/config.yaml", "$'t\\ouch' $AP2_DATA/newfile",
+                    "$'eva\\l' $'a\\p2() { cp \"$@\"; }'; ap2 /tmp/src $AP2_DATA/config.yaml",
+                    "$'eva\\l' $'a\\p2() { cp \"$@\"; }'\nap2 /tmp/src $AP2_DATA/config.yaml",
+                    # Found by the shell differential: the text spells the data folder only as one shell decodes it
+                    # (bash ends the quote's text at a NUL, `\\c@` too; zsh reads `\\/` as `/` and `\\C` at the end
+                    # as nothing).
+                    "cp /tmp/src ~/Documents/Assis$'t\\x00'ant/config.yaml",
+                    "echo x > ~/Documents/Assista$'n\\c@'t/newfile", "cp /tmp/src ~/Documents/As$'s\\0'istant/c",
+                    "cp /tmp/src ~/Document$'s\\057\\/As'sistant/config.yaml",
+                    "cp /tmp/src ~/Documents/Assist$'\\u61n\\C't/config.yaml"], deny=True)
+        self.check(["printf $'a\\tb\\n' >> $AP2_RUN_DIR/x", f"IFS=$'\\n'; for f in $(ls {DATA}/items); do wc -l $f; done",
+                    f"find {DATA}/items -print0 | while IFS= read -r -d $'\\0' f; do echo \"$f\"; done",
+                    f"{PKG}/bin/ap2 card note C1 --text $'—\\nnext' --data $AP2_DATA",
+                    f"{PKG}/bin/ap2 card note C1 --text $'café' --data $AP2_DATA",
+                    f"tr -d $'\\0' < {DATA}/x.log | head", f"echo -e 'a\\tb' >> $AP2_RUN_DIR/x"], deny=False)
+        for word in ("$'\\d'", "$'\\C-a'", "$'\\Ca'", "$'\\M-a'", "$'\\ca'", "$'\\x'", "$'\\u'", "$'\\U'",
+                     "$'\\u0000'", "$'\\8'", "$'a\\0'", "x$'\\0'", "$'\\0'x"):
+            with self.subTest(word=word):
+                flags = set()
+                self.assertTrue(guard._words(word, flags=flags)[0].startswith(("$", "x$")))
+                self.assertIn("$'", flags)
+        self.assertEqual(guard._words("$'\\0' $'\\x00\\000' $'\\a\\e\\E\\?\\\"' $'\\x41\\101'"), ["\a\x1b\x1b?\"", "AA"])
+        self.assertEqual(guard._shell_readings("a$'t\\0x\\d'b $'s\\057\\/\\C-a\\M-\\C-bc'"),
+                         ["atb s/\\/\\C-a\\M-\\C-bc", "at\x00xdb s//\x01\x01c"])
+
+    def test_a_heredoc_delimiter_with_an_escape_zsh_reads_otherwise_opens_no_body(self):
+        """A `$'...'` delimiter with an escape outside the shared set, and a `$"..."` one (zsh keeps its `$`), open
+        no body: the lines are code, and a command that names a guarded path is denied."""
+        tail = "ap2() { cp \"$@\"; }\n"
+        self.check(["cat <<$'E\\OF'\nEOF\n" + tail + "E\\OF\nap2 /tmp/src $AP2_DATA/config.yaml\n",
+                    "cat <<$\"EOF\"\n$EOF\n" + tail + "EOF\nap2 /tmp/src $AP2_DATA/config.yaml\n",
+                    "cat <<$'E\\cAOF'\nEcAOF\n" + tail + "E\\x01OF\nap2 /tmp/src $AP2_DATA/config.yaml\n"], deny=True)
+        for cmd in ("cat <<$\"EOF\"\nb\nEOF\n", "cat <<$'E\\OF'\nb\n", "cat <<$'\\cA'\nb\n"):
+            with self.subTest(cmd=cmd):
+                seen = set()
+                guard._segments(cmd, seen=seen)
+                self.assertIn("<<", seen)
+
+    def test_finding_rows_of_the_thirteenth_round_pin_their_rules(self):
+        """Rows that fail when the rule they name is taken out."""
+        # `\\u` reads up to four digits (`\\u0074ee` is `tee`, not one code), `\\U` up to eight.
+        self.check(["$'\\u0074ee' $AP2_DATA/config.yaml < /dev/null",
+                    "$'\\u0064d' if=/dev/zero of=$AP2_DATA/index.sqlite count=1",
+                    # Another card's run directory by its full path: a digit or `_` goes on with the name.
+                    "python3 -c \"open('${AP2_RUN_DIR}2/notes.md', 'w').write('x')\"",
+                    'echo "in ${AP2_RUN_DIR}2" > $AP2_RUN_DIR/a.md', 'echo "in ${AP2_RUN_DIR}_old" > $AP2_RUN_DIR/a.md',
+                    # zsh's `^` flag before HOME, and `~` / `^` before a name `_verb` takes out.
+                    "cp src $^HOME/Documents/Assistant/config.yaml",
+                    "$~x'c'p src $AP2_DATA/config.yaml", "$^x'c'p src $AP2_DATA/config.yaml",
+                    # The run directory right after an `=` and then a non-name character: an accepted false deny
+                    # (a narrower rule lets `echo "x of=<run>'" | xargs dd` through).
+                    f"echo '{{\"cmd\": \"pytest --basetemp={RUN}\"}}' > {RUN}/c.json"], deny=True)
+        self.assertEqual(guard._words("$'\\u0074ee'"), ["tee"])
+        # A `\\u` past 0x7F spells no ASCII name: no rebinding, so `<pkg>/bin/ap2` stays no package mention.
+        self.check([f"{PKG}/bin/ap2 card note C1 --text $'caf\\u00e9 done' --file $AP2_RUN_DIR/n.md",
+                    'echo "Saved to..$AP2_RUN_DIR now" >> $AP2_RUN_DIR/journal.md', "echo $=AP2_DATA2 > /tmp/x"],
+                   deny=False)
 
     def test_each_run_directory_mention_in_a_word_is_judged_on_its_own(self):
         """A quoted journal line can name the run directory twice: each mention that stays inside it is fine, and a
@@ -1712,7 +1790,12 @@ class DecideTest(unittest.TestCase):
                   "$'\\0": fill("$'\\0a\\'b' "), "$'\\u": fill("$'\\u2014\\U0001F600' "),
                   "setter args": fill("set export path ", "git grep "),
                   "fed rebind": fill("source x; f() { :; }\n", "bash <<'E'\n"),
-                  "$x verb": fill("$x'c'p $=y$'\\x63' ")}
+                  "$x verb": fill("$x'c'p $=y$'\\x63' "),
+                  # `$'...'` escapes the two shells read differently, and a `$"..."` heredoc delimiter.
+                  "$' unshared": fill("$'a\\d' $'\\C-@x' x$'\\0' "), "$' alone NUL": fill("$'\\0' "),
+                  '<<$"': fill('cat <<$"E" x\n'),
+                  "$' zsh prefixes": "cp a $'" + "\\C-\\M-" * ((size - 20) // 6) + "'" + tail,
+                  "$' readings": fill("$'\\d' $'\\x41' ")}
         # The slowest shapes (a shell's script read again in both `$$(` readings, about 0.3 s here) get a bound a
         # few times their time (1 s), so a slowdown of that much is seen well before the 2 s deadline; the rest
         # keep 2 s.

@@ -1884,7 +1884,8 @@ Calls the author made without asking (check them):
     v1's `sed -x ... -i` widened to an in-place flag anywhere after the `sed` in its segment, `-i`, a cluster with an
     `i` or `I` such as `-ni` or `-i.bak`, or `--in-place`, so `sed -e 's/a/b/' -i '' <data>/x` is one too,
     fail-closed: a quoted word that only looks like such a flag counts). It is best effort: it reads the command text, so a path built at run time (a variable, `$(...)`, a
-    `cd` into the folder and a relative path after it) can get past it, and a write-shaped command that only reads
+    `cd` into the folder and a relative path after it, a path a language builds, as Python joining the adjacent
+    literals of `open('$AP2_RUN_DIR' '2/notes.md', 'w')`) can get past it, and a write-shaped command that only reads
     the folder (`cp <data>/config.yaml /tmp/`) is denied too; the floor's `Edit` deny rules stay the main guard.
     Choices the task left open:
     - The own run directory: a segment whose every data-folder mention is a path under `AP2_RUN_DIR` (in any of
@@ -1927,7 +1928,11 @@ Calls the author made without asking (check them):
       given, so `touch "$AP2_RUN_DIR'"` (a new file next to the run directory) stays denied, and so do `touch
       /"<run>'"` and `touch $e"<run>'"`; and so is one after an `=` with only `/` and `.` between (`dd
       of="$AP2_RUN_DIR'"`, `--out=/<run>.bak`: a value a command takes as a path) or after a `..` part
-      (`/usr/..<run>.bak` is `/<run>.bak`). Accepted false deny: `echo "dir=$AP2_RUN_DIR, ok" > <run>/x`.
+      (`/usr/..<run>.bak` is `/<run>.bak`). Accepted false deny: any run directory right after an `=` and then
+      followed by a character that is no name character and no `/` (`echo "dir=$AP2_RUN_DIR, ok" > <run>/x`, the
+      JSON `echo '{"cmd": "pytest --basetemp=<run>"}' > <run>/c.json`, the parens of `echo "(run_dir=$AP2_RUN_DIR)"
+      >> <run>/j.md`, `echo "[dir=<run>]"` and `echo '<div data-dir=<run>>x</div>'`): a narrower rule would let
+      `echo "x of=<run>'" | xargs dd` through. Write the run directory with a `/` after it there.
       The per-segment unquoted-`{` rule stays: without
       it a comma in a file name (`$AP2_RUN_DIR/a,b.txt`) would be refused. Still possible, and left as best effort: removing or copying into the run
       directory itself (`rm -rf $AP2_RUN_DIR`, `cp /tmp/settings-implement.json $AP2_RUN_DIR/`); ap2 writes the
@@ -1969,11 +1974,13 @@ Calls the author made without asking (check them):
       line `rm -rf \\` runs `rm -rf \<newline><data>/x` (fail-closed; a quoted delimiter's even run is a false
       join, harmless without a write). The delimiter is the
       word after `<<` with quote removal only (bash keeps the rest literal: ``<<a`b` `` ends at a line ``a`b` ``);
-      a `$"..."` in it reads as `"..."`, and a `$'...'` is decoded as bash 3.2 decodes ANSI-C quoting (`\a \b \e
-      \E \f \n \r \t \v \\ \' \" \?`, `\NNN` octal, `\xHH` hex, `\cX`; any other escape keeps its backslash), so
-      `<<$'E\x4f'` ends at a line `EO` and `<<$'a\'b'` at `a'b`. A delimiter it cannot decode the way every bash
-      would (a NUL or non-ASCII code, `\c` with no letter or digit after it, `\u`, which bash 4.2 decodes, an
-      unclosed `$'`) opens no heredoc: its lines are read as code. So does a delimiter word that holds a `$(`,
+      a `$'...'` in it is decoded with the escapes bash 3.2 and zsh decode alike (the shared set: `\a \b \e \E \f
+      \n \r \t \v \\ \' \" \?`, `\NNN` octal, `\xHH` hex), so `<<$'E\x4f'` ends at a line `EO` and `<<$'a\'b'` at
+      `a'b`. A delimiter it cannot decode the way both shells would (any escape outside that set: zsh drops the
+      backslash of an unknown one, `\O` is `O` there and `\O` in bash, reads `\C-X`, `\CX` and `\M-X` as control
+      and meta characters and `\cX` as `c` and X; a NUL or non-ASCII code; `\u`, which bash 4.2 and zsh decode; an
+      unclosed `$'`) opens no heredoc: its lines are read as code. So does a `$"..."` in it: bash reads it as
+      `"..."`, zsh keeps its `$` (`<<$"EOF"` ends at a line `$EOF` there). So does a delimiter word that holds a `$(`,
       `${`, `$[` or a backtick, or that a `(` follows: bash and zsh read such a construct whole, blanks and parens
       in it too, so their body can end at a line (`$(x)`, `${x:-a b}`) where the guard's reading would not, and
       the lines after it run while the guard read them as body (`cat <<$(x) >/dev/null`, `$(x)`, `f() { cp "$@";
@@ -2044,22 +2051,33 @@ Calls the author made without asking (check them):
       backtick is no plain path), not the closing one, so ``cp `ls $AP2_RUN_DIR/media/*.png` /tmp/`` and a
       journal heredoc line with a code span ``- `<run>/media/shot.png` -> attached`` are allowed;
       ``cp x `echo $AP2_RUN_DIR`/../../config.yaml`` is allowed too, an accepted miss (a path built at run time,
-      as above). In a word `$"..."` reads as `"..."` (`c$"p"` is `cp`), and a `$'...'` is decoded as bash 3.2
-      decodes it, as a delimiter is (`$'\x63p'` is `cp`, `$'\x2e\x2e'` is `..`, an octal value kept to a byte as
-      both shells keep it: `$'\543p'` is `cp`). A NUL (`\0`, `\x00`, `\000`) ends the text, as bash ends it
-      (zsh keeps the rest, but no name holds a NUL), a code past 0x7F is kept as it is, and a `\u` or `\U` past
-      0x7F stays text, as bash 3.2 keeps it (it does not decode them; zsh does);
-      none of these can spell a name, so `read -r
-      -d $'\0' f` over `<data>/items`, `tr -d $'\0' < <data>/x.log` and `ap2 card note C1 --text $'Done \u2014
-      tests pass' --file $AP2_RUN_DIR/n.md` are allowed (each counted as a possible rebinding before, which
-      denied them). A `\u` or `\U` whose code point is an ASCII character is read as zsh reads it
-      (`$'\u0063p'` is `cp`, `$'\u002e\u002e'` is `..`; bash 3.2's text, `\u0063p`, holds no name or path part a
-      write needs), and since the two shells read different names there, the command may rebind any name (the
-      rule and the `ap2` trust below); one with `\c` and no letter or digit after it keeps its `$`, so a
-      run-directory path with it is judged by its verb, and may rebind too. So `$'\u0063p' src <data>/x` and
+      as above). In a word `$"..."` reads as `"..."` (`c$"p"` is `cp`), and a `$'...'` is decoded with the shared
+      set, as a delimiter is (`$'\x63p'` is `cp`, `$'\x2e\x2e'` is `..`, an octal value kept to a byte as both
+      shells keep it: `$'\543p'` is `cp`). A code past 0x7F is kept as it is, and so is a `\u` or `\U` past 0x7F
+      (bash 3.2 may or may not decode `\u`: it depends on the locale; a code above 0x7F spells no ASCII name either
+      way), and a quote that is a whole word and holds nothing but `\0`-style octal or `\x0`-style hex NULs is an
+      empty word; none of these can spell a name, so `read -r -d $'\0' f` over `<data>/items`, `IFS=$'\n'`, `tr -d
+      $'\0' < <data>/x.log` and `ap2 card note C1 --text $'Done \u2014 tests pass' --file $AP2_RUN_DIR/n.md` are
+      allowed (each counted as a possible rebinding before, which denied them). A `\u` or `\U` whose code point is
+      an ASCII character is read as decoded (`$'\u0063p'` is `cp`, `$'\u002e\u002e'` is `..`), and since bash 3.2
+      may read another name there, the command may rebind any name (the rule and the `ap2` trust below). So
+      `$'\u0063p' src <data>/x` and
       `f src $AP2_RUN_DIR/$'\u002e\u002e'/x` after `f() { cp "$@"; }` (found by the shell differential: zsh
       writes `<data>/sessions/x`, which a verb-only judgement let through) are denied, while `printf $'\u2713
-      done\n' >> <run>/journal.md` is allowed.
+      done\n' >> <run>/journal.md` is allowed. A `$'...'` the guard cannot decode the way both shells would keeps
+      its `$`, may rebind any name, and
+      makes a command that names a guarded path anywhere a write, as with `extglob`: as written, with quotes and
+      backslashes taken out, or once each `$'...'` in it is read as bash 3.2 decodes it and as zsh does (a NUL ends
+      bash's text, so `~/Documents/Assis$'t\0'ant` is the data folder there; zsh reads `\/` as `/` and a `\C` at the
+      end as nothing, so `~/Document$'s\057\/As'sistant` and `Assist$'\u61n\C't` are it there; found by the shell
+      differential). Undecodable are: an escape outside the shared set (zsh reads `\m` as `m`, so the data folder's path
+      with one letter so escaped inside a `$'...'` is the data folder there, and so is `~/Documents/$'\A'ssistant`;
+      `$'\.\.'` and `$'\C-'..` are `..`, `$'c\p'` is `cp`, and `$'eva\l' $'a\p2() { cp "$@"; }'` defines `ap2`),
+      `\cX`, `\C`, `\M`, a NUL inside a longer word or quote (zsh makes one of `\x`, `\u` and `\U` with no digit,
+      of `\u0000` and `\C-@`, and of `\0` too, and an external command's path ends there: `cp src
+      <run>/settings-implement.json$'\0'x` writes the floor file in zsh, while bash ends only the quote's text and
+      goes on with the word), or no closing quote (found by review; all were allowed before, and zsh writes).
+      Accepted false deny: such an escape in a command that names a guarded path, `printf $'\d' >> <run>/x`.
       `$'...'` is an ANSI-C quote where `\'` stays inside, but only after an odd run of unescaped
       `$`: `$$` is the shell's PID, so in `$$'\'` the quote is a plain one (and `$${` and `$$[` open nothing). No
       separator splits inside an unquoted `${...}` (`${x:-;}` is one word), no newline, `|` or `&` splits inside

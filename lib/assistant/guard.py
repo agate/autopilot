@@ -8,7 +8,8 @@ data folder (`AP2_DATA`, its `~` or `$HOME` form, `$AP2_DATA`, `${AP2_DATA}`, `$
 `${AP2_DATA[0]}`-style expansions, zsh's `${=AP2_DATA}`, `${~...}` and `${^...}` and their brace-less `$=AP2_DATA`
 forms, a `${HOME:?}`-style one before its path under HOME, `$AP2_RUN_DIR`) or the package and looks like a write
 (v1's `_WRITE`, with the redirects that write nowhere removed first, in the text as written and in its words with
-quotes removed, so `c\\p` is `cp`, `c$"p"` and `$'\\x63p'` too; a `sed` with `-i` anywhere after it). The commands
+quotes removed, so `c\\p` is `cp`, `c$"p"` and `$'\\x63p'` too, a `$'...'` decoded only where bash 3.2 and zsh
+decode it alike; a `sed` with `-i` anywhere after it). The commands
 inside a `$(...)` or backticks are segments of their own, and the command around them is one segment with each such text
 replaced by `_`, so its verb keeps all its words. A segment that runs `ap2` (its first command after keywords such as
 `do` or `time`, `NAME=value` words and runners such as `env` or `nohup`, by name or by its full path) may name them
@@ -51,9 +52,12 @@ stay, judged with the script's verb too) nor the words of a piped plain `echo` o
 `always` or closer; its redirects still count). A shell's name, or its script, before a word-final `}` counts as
 well (zsh's `{ ... | sh}`). A zsh script with a `(` that names a guarded path is a write (a fresh zsh has bare glob
 qualifiers on). Heredoc body lines that end in a backslash are joined, as bash joins them (an
-even run of backslashes too, fail-closed); a `$'...'` or `$"..."` delimiter is decoded as bash decodes it, and one
-with a `$(`, `${`, `$[` or backtick in it, a `(` after it, or one it cannot decode opens no body (its lines are code)
-and makes a command that names a guarded path a write. A heredoc body a shell on its line reads (`bash <<'EOF'`,
+even run of backslashes too, fail-closed); a `$'...'` delimiter is decoded as bash 3.2 and zsh both decode it, and
+a `$"..."` one (zsh keeps its `$`), one with a `$(`, `${`, `$[` or backtick in it, a `(` after it, or one it cannot
+decode opens no body (its lines are code) and makes a command that names a guarded path a write. So does a `$'...'`
+word with an escape the two shells read differently (`\\d`, `\\cX`, `\\C-X`, `\\M-X`, a NUL in a longer word): it
+keeps its `$` and may rebind any name, and the guarded paths are also looked for with each `$'...'` read as each
+shell reads it (`_Marks.names_decoded`). A heredoc body a shell on its line reads (`bash <<'EOF'`,
 `bash -s <<'EOF'`, `cat <<'EOF' | sh`) is also read whole as that shell's script, one level deeper, where its own
 rebinding is judged (a child shell rebinds nothing in the outer command); an unquoted body with a
 `$(...)` or a backtick is also read as a `"..."` word, so a substitution across lines is a segment of its own. Whether
@@ -282,6 +286,16 @@ class _Marks:
         return bool(self.any.search(text) or self.any.search(stripped)
                     or ("\\" in text and self.any.search(_STRIP.sub("", _decoded(text)))))
 
+    def names_decoded(self, text: str) -> bool:
+        """Whether `text` names a guarded path once each `$'...'` in it is read as bash 3.2 reads it, or as zsh does
+        (`_shell_readings`), then searched with quotes, backslashes and line continuations taken out and `a//b` and
+        `a/./b` read as `a/b`: for a command with a `$'...'` the two shells read differently, where the word keeps
+        its `$` and its text may spell a guarded path only in one of them (`~/Documents/Assis$'t\\0'ant`)."""
+        for reading in _shell_readings(text):
+            if self.any.search(_norm(_STRIP.sub("", reading))):
+                return True
+        return False
+
     def is_ap2(self, word: str) -> bool:
         """Whether the shell word `word` is exactly a spelling of the package's `bin/ap2`."""
         return _norm(word) in self.ap2
@@ -438,35 +452,43 @@ def _opens(s: str, i: int, esc: int, quote, pid: bool) -> str:
     return "{" if quote == '"' and s.startswith("${", i) and _expands(s, i, esc) else ""
 
 
-# `$'...'` escapes bash 3.2 decodes to one character (`\NNN` octal, `\xHH` hex and `\cX` are read in `_ansi_c`).
+# `$'...'` escapes bash 3.2 and zsh decode alike, each to one character (`\\NNN` octal, `\\xHH` hex, `\\uHHHH` and
+# `\\UHHHHHHHH` are read in `_ansi_c`).
 _ANSI_C = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v",
            "\\": "\\", "'": "'", '"': '"', "?": "?"}
 _OCT, _HEX = frozenset("01234567"), frozenset("0123456789abcdefABCDEF")
 
 
-def _ansi_c(word: str, i: int, out: list, strict: bool = True, flags=None):
-    """Decodes the text of a `$'...'` from `i` (just past its opening quote) into `out`, as bash 3.2 does: the
-    `_ANSI_C` escapes, `\\NNN` (1-3 octal digits, the value kept to a byte, as bash and zsh keep it: `\\543` is
-    `c`), `\\xHH` (1-2 hex digits), `\\cX` (X's low five bits); any other escape keeps its backslash (`\\q`).
-    Returns the index of the closing quote, or None for what it cannot decode the way every shell would: `\\c` with
-    no letter or digit after it, or no closing quote, and when `strict` (a heredoc delimiter, which must match a
-    line exactly) also a NUL or a non-ASCII code, `\\u` and `\\U` (bash 4.2 and zsh decode them). Not `strict` (a
-    word), a NUL ends the text, as bash ends it (the rest up to the closing quote goes; zsh keeps it, but no name
-    holds a NUL), a code past 0x7F is kept as it is (no name, nor a path part the guard judges, holds one), and a
-    `\\u` or `\\U` past 0x7F stays text, as bash 3.2 keeps it; one whose code point is an ASCII character is read
-    as zsh reads it (`$'\\u0063p'` is `cp` there, `$'\\u002e\\u002e'` is `..`; bash 3.2 keeps a text no name or
-    path part holds) and adds `$'` to `flags`: the two shells read it as different names."""
-    n, cut = len(word), False  # cut: a NUL was read
+def _ansi_c(word: str, i: int, out: list, strict: bool = True, flags=None, alone: bool = False):
+    """Decodes the text of a `$'...'` from `i` (just past its opening quote) into `out`, as bash 3.2 and zsh both
+    decode it. Only the escapes the two shells read alike are decoded: the `_ANSI_C` ones, `\\NNN` (1-3 octal
+    digits, the value kept to a byte, as both keep it: `\\543` is `c`), `\\xHH` (1-2 hex digits), and a `\\u` (up to
+    4 hex digits) or `\\U` (up to 8) with at least one digit. Returns the index of the closing quote, or None for a
+    text it cannot decode the way both shells would: any other escape (zsh drops the backslash of an unknown one,
+    `\\d` is `d` there and `\\d` in bash; it reads `\\C-X`, `\\CX` and `\\M-X` as control and meta characters,
+    and `\\cX` as `c` and X, where bash reads a control character), a NUL (zsh makes one of `\\x`, `\\u` and `\\U`
+    with no digit and of `\\u0000` too, and an external command's path or a redirect's file ends there, while bash
+    ends the quote's text there and goes on with the word), or no closing quote. Only a quote that is a whole word
+    (`alone`: it starts its word and a blank or an operator follows it) and holds nothing but `\\0`-style octal and
+    `\\x0`-style hex NULs passes (`read -d $'\\0'`, `tr -d $'\\0'`: an empty word, which names nothing). When `strict`
+    (a heredoc delimiter, which must match a line exactly) a NUL, a non-ASCII code and any `\\u` or `\\U` are
+    undecodable too. Not `strict` (a word), a code past 0x7F is kept as it is (no name, nor a path part the guard
+    judges, holds one), and so is a `\\u` or `\\U` past 0x7F, as the text bash 3.2 keeps in some locales (bash 3.2 may
+    or may not decode `\\u`: it depends on the locale; a code above 0x7F spells no ASCII name either way); one whose
+    code point is an ASCII character is read as decoded (`$'\\u0063p'` is `cp`, `$'\\u002e\\u002e'` is `..`) and adds
+    `$'` to `flags`: bash 3.2 may read another name."""
+    n, cut, first = len(word), False, len(out)  # cut: a NUL was read
     while i < n and word[i] != "'":
         if word[i] != "\\" or i + 1 >= n:
-            if not cut:
-                out.append(word[i])
+            if cut:
+                return None  # a NUL with other text in the quote
+            out.append(word[i])
             i += 1
             continue
         e, i = word[i + 1], i + 2
-        if cut:
-            continue  # past a NUL: only the closing quote matters (`\\'` stays inside)
         if e in _ANSI_C:
+            if cut:
+                return None
             out.append(_ANSI_C[e])
             continue
         if e in _OCT or e == "x":
@@ -475,50 +497,53 @@ def _ansi_c(word: str, i: int, out: list, strict: bool = True, flags=None):
             j = k
             while j < min(n, stop) and word[j] in digits:
                 j += 1
-            if j == k:  # `\\x` with no hex digit: kept as it is
-                out.append("\\x")
-                continue
-            code, i = int(word[k:j], 8 if e in _OCT else 16) & 0xFF, j
-        elif e == "c":
-            if i >= n or not word[i].isascii() or not word[i].isalnum():
+            if j == k:  # `\\x` with no hex digit: zsh makes a NUL of it, bash keeps it as text
                 return None
-            code, i = ord(word[i]) & 0x1F, i + 1
+            code, i = int(word[k:j], 8 if e in _OCT else 16) & 0xFF, j
         elif e in "uU":
             j = i
             while j < min(n, i + (4 if e == "u" else 8)) and word[j] in _HEX:
                 j += 1
-            if strict:
-                return None
-            if j > i and 0 < int(word[i:j], 16) < 0x80:  # zsh's reading, which may spell a name
+            if strict or j == i or cut or not int(word[i:j], 16):
+                return None  # no digit or code 0: zsh's NUL
+            if int(word[i:j], 16) < 0x80:  # an ASCII character, which may spell a name
                 out.append(chr(int(word[i:j], 16)))
                 i = j
                 if flags is not None:
                     flags.add("$'")
                 continue
-            out.append("\\" + e)  # bash 3.2: text, its digits read on as plain characters
+            out.append("\\" + e)  # past 0x7F: kept as bash 3.2's text, its digits read on as plain characters
             continue
         else:
-            out.append("\\" + e)
-            continue
+            return None  # `\\c`, `\\C`, `\\M` or an escape outside the shared set
         if strict and not 0 < code < 0x80:
             return None
         if code:
+            if cut:
+                return None
             out.append(chr(code))
+        elif len(out) > first or not alone:
+            return None  # a NUL after other text, or in a quote that is not a whole word
         else:
             cut = True
-    return i if i < n else None
+    if i >= n or (cut and not (i + 1 >= n or word[i + 1] in _BREAK)):
+        return None  # no closing quote, or a NUL-only quote that the word goes on after
+    return i
 
 
 def _unquote(word: str):
     """`word` after quote removal only, as bash reads a heredoc delimiter: quotes and the backslashes that escape go,
-    every other character stays (``a\\`b`` is ``a`b``, `"a\\$b"` is `a$b`, `"a\\b"` is `a\\b`). `$"..."` reads as
-    `"..."`, and `$'...'` is decoded as bash decodes it (`_ansi_c`; `$'E\\x4f'` is `EO`); None when it cannot be
-    (`_segments` then opens no heredoc for it, so its lines are read as code)."""
+    every other character stays (``a\\`b`` is ``a`b``, `"a\\$b"` is `a$b`, `"a\\b"` is `a\\b`). `$'...'` is decoded as
+    bash 3.2 and zsh both decode it (`_ansi_c`; `$'E\\x4f'` is `EO`); None when it cannot be, and for a `$"..."` (bash
+    reads it as `"..."`, zsh keeps its `$`: `$"EOF"` is `$EOF` there), so `_segments` opens no heredoc for it and its
+    lines are read as code."""
     out, i, n, esc = [], 0, len(word), -1
     while i < n:
         c = word[i]
         if c in "'\"" and word[i - 1:i] == "$" and _expands(word, i - 1, esc):
             out.pop()  # the `$` of a `$'` or `$"`
+            if c == '"':
+                return None  # zsh keeps the `$` of a `$"..."` (`$"EOF"` is `$EOF` there), bash drops it
             if c == "'":
                 i = _ansi_c(word, i + 1, out)
                 if i is None:
@@ -877,10 +902,12 @@ def _words(seg: str, targets=None, events=None, pid: bool = True, flags=None, sq
     `$(`, a `$$(` or an opening backtick ends keeps that `$` or backtick (`$AP2_RUN_DIR$`), so no command's output
     passes for a plain path, and, when `events` is a list, a backtick that opens a word is a word of its own
     (`` ` ``), as `$(`'s `$` is; the closing `)` or backtick is no part of a word. A `$"..."` is `"..."` (its `$`
-    goes), and a `$'...'` is decoded as bash passes it (`_ansi_c`: `$'\\x63p'` is `cp`, a NUL ends it, `\\u2014` stays
-    text; a `\\u0063` is read as zsh reads it, `c`, and adds `$'` to `flags`: `_rebinds`, `_ap2_trusted`, it may spell
-    another name in each shell); one `_ansi_c` cannot decode (`\\c` with no letter after it) keeps its `$` (a value
-    filled in at run time), a backslash in it keeping the next character, and adds `$'` to `flags` too. `pid` is the
+    goes), and a `$'...'` is decoded as bash 3.2 and zsh both pass it (`_ansi_c`: `$'\\x63p'` is `cp`, a whole word
+    of NULs is no word, `\\u2014` stays text; a `\\u0063` is read as decoded, `c`, and adds `$'` to `flags`:
+    `_rebinds`, `_ap2_trusted`, bash 3.2 may read another name); one `_ansi_c` cannot decode (an escape the two shells
+    read differently, `\\d`, `\\cX`, `\\C-X`, `\\M-X`, a NUL in a longer word, no closing quote) keeps its `$` (a value
+    filled in at run time), a backslash in it keeping the next character, and adds `$'` and `$'?` to `flags`
+    (`_command_writes` then denies a command that names a guarded path anywhere). `pid` is the
     reading of `"$$(`, and `sq` that of a `'` inside `"${...}"`, as in `_segments`. Each word is a `_Word`: its `mask`
     hides each glob, bracket, brace, comma, paren, quote, `>` or `=` that a quote or a backslash made text (outside
     `"${...}"`, where bash 3.2 ends the quote at an inner `"`).
@@ -1021,7 +1048,7 @@ def _words(seg: str, targets=None, events=None, pid: bool = True, flags=None, sq
         elif c == "'":
             if seg[i - 1:i] == "$" and _expands(seg, i - 1, esc):  # `$'...'`: decoded, as the shell passes it
                 decoded = []
-                close = _ansi_c(seg, i + 1, decoded, False, flags)
+                close = _ansi_c(seg, i + 1, decoded, False, flags, len(text) == 1)
                 if close is not None:
                     text.pop()  # the `$` is not part of the word
                     for ch in decoded:
@@ -1030,11 +1057,11 @@ def _words(seg: str, targets=None, events=None, pid: bool = True, flags=None, sq
                         text.append(ch)
                     i = close + 1
                     continue
-                # One `_ansi_c` cannot decode as every shell would (`\c` with no letter, no closing quote): its
-                # `$` stays (a value filled in at run time), and the segment may run any name (`_rebinds`,
-                # `_ap2_trusted`).
+                # One `_ansi_c` cannot decode as both shells would (`\d`, `\C-@`, a NUL in a word, no closing
+                # quote): its `$` stays (a value filled in at run time), the segment may run any name (`_rebinds`,
+                # `_ap2_trusted`), and the command is denied when it names a guarded path anywhere (`$'?`).
                 if flags is not None:
-                    flags.add("$'")
+                    flags.update(("$'", "$'?"))
                 quote = "$'"
             elif kind == "{":
                 if sq:
@@ -1540,8 +1567,12 @@ def _command_writes(cmd: str, marks: _Marks, depth: int, budget: _Budget) -> boo
         if seen & {"@", "<<"} and marks.names(cmd):
             return True
         parsed = [_parse(seg, pid, sq, budget) for seg in segs]
-        # zsh's `${(` flag group (`"${(e)x:-\$(cmd)}"` runs `cmd`), which this reading does not follow.
+        # zsh's `${(` flag group (`"${(e)x:-\$(cmd)}"` runs `cmd`), which this reading does not follow; and a
+        # `$'...'` word bash 3.2 and zsh decode differently (`_ansi_c`: `~/<rel>/$'\A'ssistant` is the data folder in
+        # zsh), which this reading keeps with its `$`: its text is also searched as each shell decodes it.
         if any(_flag_group(p) for p in parsed) and marks.names(cmd):
+            return True
+        if any(not p.body and "$'?" in p.flags for p in parsed) and (marks.names(cmd) or marks.names_decoded(cmd)):
             return True
         done.append((pid, sq, segs, parsed))
     # Whether `ap2` keeps its exemption: judged once, on every reading, before any segment is.
@@ -1981,6 +2012,100 @@ def _decoded(text: str) -> str:
         code = int(m.group(2), 8) if m.group(2) else int(m.group(1) or m.group(3) or m.group(4), 16)
         return chr(code) if 0x20 <= code < 0x7F else m.group(0)
     return _ESCAPE.sub(one, text)
+
+
+# A `$'...'` quote anywhere in a text (fail-closed: also one a quote around it made text), its body in group 1.
+_ANSI_QUOTE = re.compile(r"\$'((?:[^'\\]|\\.)*)'", re.S)
+
+
+def _shell_readings(text: str) -> list:
+    """`text` twice, with each `$'...'` in it (`_ANSI_QUOTE`) replaced by its text as bash 3.2 decodes it and as zsh
+    decodes it (`_bash_ansi`, `_zsh_ansi`); a character no name holds stands for each non-ASCII or control result."""
+    return [_ANSI_QUOTE.sub(lambda m: decode(m.group(1)), text) for decode in (_bash_ansi, _zsh_ansi)]
+
+
+def _ansi_digits(body: str, i: int, digits, most: int) -> int:
+    """The index after the run of at most `most` characters of `digits` in `body` from `i`."""
+    j = i
+    while j < min(len(body), i + most) and body[j] in digits:
+        j += 1
+    return j
+
+
+def _bash_ansi(body: str) -> str:
+    """The text of a `$'...'` (`body`, between its quotes) as bash 3.2 decodes it: the `_ANSI_C` escapes, `\\NNN`,
+    `\\xHH` (`\\x` with no digit stays), `\\cX` (X's low five bits), `\\u` and `\\U` decoded (as some locales do;
+    as text they spell no name); any other escape keeps its backslash; a NUL ends the text."""
+    out, i, n = [], 0, len(body)
+    while i < n:
+        if body[i] != "\\" or i + 1 >= n:
+            out.append(body[i])
+            i += 1
+            continue
+        e, i = body[i + 1], i + 2
+        if e in _ANSI_C:
+            out.append(_ANSI_C[e])
+            continue
+        if e in _OCT:
+            j = _ansi_digits(body, i - 1, _OCT, 3)
+            code, i = int(body[i - 1:j], 8) & 0xFF, j
+        elif e in "xuU":
+            j = _ansi_digits(body, i, _HEX, {"x": 2, "u": 4, "U": 8}[e])
+            if j == i:
+                out.append("\\" + e)
+                continue
+            code, i = int(body[i:j], 16), j
+        elif e == "c" and i < n:
+            code, i = ord(body[i]) & 0x1F, i + 1
+        else:
+            out.append("\\" + e)
+            continue
+        if not code:
+            break
+        out.append(chr(code) if code < 0x80 else "\x01")
+    return "".join(out)
+
+
+def _zsh_ansi(body: str) -> str:
+    """The text of a `$'...'` (`body`) as zsh decodes it: the `_ANSI_C` escapes, `\\NNN`, `\\xHH`, `\\uHHHH` and
+    `\\UHHHHHHHH` (no digit is a NUL), `\\C-X`, `\\CX` and `\\M-X` (one control or meta character for the
+    character or escape after them, nothing at the text's end), and any other escape as the character after its
+    backslash (`\\c` is `c`). A NUL stays: an external command's path ends there."""
+    out, i, n = [], 0, len(body)
+    while i < n:
+        c, i = _zsh_unit(body, i)
+        out.append(c)
+    return "".join(out)
+
+
+def _zsh_unit(body: str, i: int):
+    """One character of `_zsh_ansi` from `i`, and the index after it."""
+    n = len(body)
+    if body[i] != "\\" or i + 1 >= n:
+        return body[i], i + 1
+    e, i = body[i + 1], i + 2
+    if e in _ANSI_C:
+        return _ANSI_C[e], i
+    if e in _OCT:
+        j = _ansi_digits(body, i - 1, _OCT, 3)
+        code = int(body[i - 1:j], 8) & 0xFF
+    elif e in "xuU":
+        j = _ansi_digits(body, i, _HEX, {"x": 2, "u": 4, "U": 8}[e])
+        code = int(body[i:j], 16) if j > i else 0
+    elif e in "CM":
+        # A control or meta character (no name holds one) for the next character or escape; a run of such prefixes
+        # (`\\C-\\M-x`) is read in a loop, not by recursion.
+        while True:
+            i += body[i:i + 1] == "-"
+            if i >= n:
+                return "", i
+            if body.startswith(("\\C", "\\M"), i):
+                i += 2
+                continue
+            return "\x01", _zsh_unit(body, i)[1]
+    else:
+        return e, i
+    return (chr(code) if code < 0x80 else "\x01"), j
 
 
 _JSON_ESC = re.compile(r"\\(?:u([0-9a-fA-F]{4})|(.))", re.S)
