@@ -86,26 +86,38 @@ def answer(option: str, now: datetime) -> None:
 
 def _pause_all(now: datetime) -> None:
     """`ap pause` for every autopilot not stopped (also one the user paused by hand), and stop and park its
-    running workers. Nothing resumes by itself; a worker resumed later continues its own conversation."""
+    running workers. Nothing resumes by itself; a worker resumed later continues its own conversation.
+    Every pause flag is written first, and a session that will not stop never blocks the rest."""
     from autopilot import state as ap_state, workers
     gcfg = config.load_global()
-    for ap in config.list_aps():
-        if config.status_of(ap) == "stopped":
-            continue
+    aps = [ap for ap in config.list_aps() if config.status_of(ap) != "stopped"]
+    for ap in aps:
         flag = paths.ap_dir(ap) / "paused"
         if not flag.exists():
             flag.write_text("")
             events.append(ap, "paused", {"reason": "cap"})
-        with ap_state.mutate(ap) as st:
-            running = [w for w in st["workers"] if not w.get("parked")]
-            for w in running:
+    for ap in aps:
+        try:
+            running = [w for w in ap_state.load(ap)["workers"] if not w.get("parked")]
+        except ap_state.StateError as e:
+            events.append(ap, "cap_stop_failed", {"error": str(e)})
+            continue
+        for w in running:   # outside the state lock: stopping a session can be slow
+            try:
                 workers._settle(w["short_id"])
                 subprocess.run([workers.claude_bin(gcfg), "stop", w["short_id"]], capture_output=True, timeout=60)
-                w["parked"] = {"kind": "cap", "model": None, "percent": None, "resets_at": None, "resume_at": None,
-                               "reason": "cap", "note": PAUSE_NOTE, "parked_at": now.isoformat(), "role": w["role"]}
+            except (OSError, subprocess.SubprocessError) as e:
+                events.append(ap, "cap_stop_failed", {"task": w["task"], "role": w["role"], "error": str(e)})
+        rec = {"kind": "cap", "model": None, "percent": None, "resets_at": None, "resume_at": None,
+               "reason": "cap", "note": PAUSE_NOTE, "parked_at": now.isoformat()}
+        keys = {(w["task"], w["role"]) for w in running}
+        with ap_state.mutate(ap) as st:
+            for w in st["workers"]:
+                if (w["task"], w["role"]) in keys and not w.get("parked"):
+                    w["parked"] = dict(rec, role=w["role"])
         for w in running:
             run = paths.ap_dir(ap) / "runs" / w["task"]
             run.mkdir(parents=True, exist_ok=True)
-            (run / "parked.json").write_text(json.dumps(w["parked"], indent=1) + "\n")
+            (run / "parked.json").write_text(json.dumps(dict(rec, role=w["role"]), indent=1) + "\n")
             events.append(ap, "worker_parked", {"task": w["task"], "role": w["role"], "window": "cap",
                                                 "percent": None, "resume_at": None})

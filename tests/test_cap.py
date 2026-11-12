@@ -186,6 +186,28 @@ class PauseTest(Base):
         self.assertIn("stop bbbb2222", self.log.read_text())
         self.assertEqual(state.load("beta")["workers"][0]["parked"]["kind"], "cap")
 
+    def test_a_stop_that_times_out_does_not_abort_the_pause(self):
+        import subprocess
+        for n, short in (("alpha", "aaaa1111"), ("beta", "bbbb2222")):
+            write_ap(self.data, n)
+            add_worker(n, short=short)
+        real = subprocess.run
+
+        def run(argv, *a, **kw):
+            if argv[1:] == ["stop", "aaaa1111"]:
+                raise subprocess.TimeoutExpired(argv, 60)
+            return real(argv, *a, **kw)
+
+        with mock.patch("autopilot.cap.subprocess.run", side_effect=run):
+            cap.answer("pause", DAY)
+        for n in ("alpha", "beta"):
+            self.assertTrue((paths.ap_dir(n) / "paused").exists())
+            self.assertEqual(state.load(n)["workers"][0]["parked"]["kind"], "cap")
+        self.assertIn("stop bbbb2222", self.log.read_text())
+        ev = (paths.ap_dir("alpha") / "events.jsonl").read_text()
+        self.assertIn("cap_stop_failed", ev)
+        self.assertIn("timed out", ev)
+
     def test_a_stopped_autopilot_is_left_alone(self):
         write_ap(self.data, "alpha", stopped=True)
         add_worker("alpha")
