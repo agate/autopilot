@@ -1,9 +1,13 @@
 {
   "merge_base": "d4e5f6a7d4e5f6a7d4e5f6a7d4e5f6a7d4e5f6a7\n",
-  "since_clean": "{\"status\": \"ahead\", \"merges\": []}\n",
-  "since_merge": "{\"status\": \"ahead\", \"merges\": [\"e5f6a7b8e5f6a7b8e5f6a7b8e5f6a7b8e5f6a7b8\"]}\n",
-  "since_diverged": "{\"status\": \"diverged\", \"merges\": []}\n",
-  "since_behind": "{\"status\": \"behind\", \"merges\": []}\n",
+  "since_clean": "{\"status\": \"ahead\", \"merges\": [], \"more\": false}\n",
+  "since_merge": "{\"status\": \"ahead\", \"merges\": [\"e5f6a7b8e5f6a7b8e5f6a7b8e5f6a7b8e5f6a7b8\"], \"more\": false}\n",
+  "since_diverged": "{\"status\": \"diverged\", \"merges\": [], \"more\": false}\n",
+  "since_behind": "{\"status\": \"behind\", \"merges\": [], \"more\": false}\n",
+  "since_more": "{\"status\": \"ahead\", \"merges\": [], \"more\": true}\n",
+  "since_merge_more": "{\"status\": \"ahead\", \"merges\": [\"e5f6a7b8e5f6a7b8e5f6a7b8e5f6a7b8e5f6a7b8\"], \"more\": true}\n",
+  "since_no_more": "{\"status\": \"ahead\", \"merges\": []}\n",
+  "since_more_text": "{\"status\": \"ahead\", \"merges\": [], \"more\": \"yes\"}\n",
   "since_missing": {
     "exit": 1,
     "stderr": "gh: Not Found (HTTP 404)\n"
