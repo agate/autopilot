@@ -78,6 +78,24 @@ class ChangeTest(Env):
         cur["autopilots"]["checkout"]["tokens"] = {"input": 999}
         self.assertFalse(refresh.meaningful_change(prev, cur))
 
+    def test_access_numbers_alone_are_not_a_change_but_a_switch_is(self):
+        prev = {c: {} for c in refresh.LIGHT}
+        prev["meta"] = {"access": {"profile": {"name": "gw", "mode": "gateway"}, "usage": {
+            "today": 1.0, "week": 2.0, "month": 3.0, "cap_today": 500.0, "unknown": False, "session_pct": 40},
+            "cap_card": {"day": "2026-01-02", "spent": 510.0, "limit": 500.0, "cause": "spent"}}}
+        cur = copy.deepcopy(prev)
+        cur["meta"]["access"]["usage"].update(today=1.5, week=2.5, month=3.5, session_pct=41)
+        cur["meta"]["access"]["cap_card"]["spent"] = 512.0
+        self.assertFalse(refresh.meaningful_change(prev, cur))
+        for change in (lambda a: a["profile"].update(name="subscription", mode="subscription"),
+                       lambda a: a.update(cap_card=None),
+                       lambda a: a.update(key_error={"error": "x"}),
+                       lambda a: a["usage"].update(unknown=True),
+                       lambda a: a["cap_card"].update(limit=750.0)):
+            moved = copy.deepcopy(prev)
+            change(moved["meta"]["access"])
+            self.assertTrue(refresh.meaningful_change(prev, moved))
+
     def test_a_decision_a_task_or_a_pause_is_a_change(self):
         self.publish_now()
         prev = publish._page()["published"]

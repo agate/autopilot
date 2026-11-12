@@ -41,7 +41,8 @@ DISALLOWED = ",".join(t for t in replies.DISALLOWED.split(",") if t != "Read")
 
 
 def _volatile_free(cur: dict) -> dict:
-    """The data without numbers that change on their own: usage and spend, the gate's check time, token totals."""
+    """The data without numbers that change on their own: usage and spend (also in meta.access), the gate's check
+    time, token totals."""
     out = copy.deepcopy({c: cur.get(c) or {} for c in LIGHT})
     meta = out["meta"]
     b = meta.get("budget")
@@ -51,6 +52,15 @@ def _volatile_free(cur: dict) -> dict:
         meta["budget"] = {"allowance": {"reason": a.get("reason"), "paused_until": a.get("paused_until"),
                                         "cause": a.get("cause")},
                           "passes": {"reason": pa.get("reason"), "paused_until": pa.get("paused_until")}}
+    acc = meta.get("access")
+    if isinstance(acc, dict):
+        # Spend and usage move every minute; the profile, the cap card opening or closing, its limit and cause,
+        # a key or profile error and whether some cost is unknown are what a refresh is for.
+        if isinstance(acc.get("usage"), dict):
+            for k in ("today", "week", "month", "session_pct", "credits_used_usd"):
+                acc["usage"].pop(k, None)
+        if isinstance(acc.get("cap_card"), dict):
+            acc["cap_card"].pop("spent", None)
     if isinstance(meta.get("health"), dict):
         meta["health"].pop("last_gate_at", None)
     for a in out["autopilots"].values():
