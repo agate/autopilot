@@ -227,14 +227,15 @@ def base_model(name: str) -> str:
 
 def _listed(cmd: str, timeout: int) -> list:
     """The JSON list of model names `cmd` prints. Raises ModelsUnavailable naming the exit code or the exception
-    only: an error never shows the command's output (it may hold more than model names) or its command line. The
-    list itself is only parsed here; `model_choices` shows only its entries shaped like a model name."""
+    only: an error never shows the command's output (it may hold more than model names) or its command line. A
+    command line Python cannot hand to the shell (a NUL byte, a lone surrogate: a ValueError) fails the same way.
+    The list itself is only parsed here; `model_choices` shows only its entries shaped like a model name."""
     try:
         r = subprocess.run(cmd, shell=True, stdin=subprocess.DEVNULL, capture_output=True, text=True,
                            errors="replace", timeout=timeout)
     except subprocess.TimeoutExpired:
         raise ModelsUnavailable(f"gateway.models_command: failed (no answer within {timeout} s)") from None
-    except (OSError, subprocess.SubprocessError) as e:
+    except (OSError, subprocess.SubprocessError, ValueError) as e:
         raise ModelsUnavailable(f"gateway.models_command: failed ({type(e).__name__})") from None
     if r.returncode != 0:
         raise ModelsUnavailable(f"gateway.models_command: failed (exit {r.returncode})")
