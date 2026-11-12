@@ -1542,8 +1542,9 @@ Calls the author made without asking (check them):
       after a space) stays allowed in v1, as it was: quoted it is plain text, and after a space bash starts a
       comment, which only shortens the note, so bash still runs the one park command. The tokenizer now keeps
       `#comment` as a token, which v1's tail rules accept. A word-start `#` comment that holds a punctuation
-      character (`;`, `&`, `|`, `<`, `>`, `(`, `)`) or an unbalanced quote, such as `--note x # ; later`, is now
-      refused, though it was allowed before and bash runs only the park command: after `shlex` a quoted `"#"`
+      character (`;`, `&`, `|`, `<`, `>`, `(`, `)`), an unbalanced quote or a trailing backslash, such as
+      `--note x # ; later`, is now refused, though it was allowed before and bash runs only the park command:
+      after `shlex` a quoted `"#"`
       and an unquoted word-start `#` give the same token, so dropping the comment could hide a real `; cmd`, and
       refusing fails closed (as v2's hook does). The other way round, a word-start comment now counts as words
       in a short line, so `<ap> worker park a T #x y` and `<ap> worker park #a b c`, refused before, are now

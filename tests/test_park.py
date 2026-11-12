@@ -323,7 +323,7 @@ class ParkCommandRulesTest(Base):
         # bash runs only the park command here, but after shlex a quoted "#" and a word-start # give the same
         # token, so the check cannot drop the comment without hiding a real `; cmd`: it fails closed, as v2's does.
         for cmd in (self.OWN + " --note x # ; later", self.OWN + " --note x #(see PR)",
-                    self.OWN + " --note \"done\" # can't finish"):
+                    self.OWN + " --note \"done\" # can't finish", self.OWN + " --note \"done\" # C:\\"):
             with self.subTest(cmd=cmd):
                 self.assertTrue(_before(cmd))
                 self.assertFalse(park.is_park_command(cmd))
