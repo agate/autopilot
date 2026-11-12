@@ -64,8 +64,11 @@ _SVG_UNSAFE = re.compile(r"<\s*script|<\s*foreignObject|\son[a-z]+\s*=|javascrip
 PR_FILES = """query($owner:String!, $name:String!, $n:Int!, $after:String){ repository(owner:$owner, name:$name){
  pullRequest(number:$n){ headRefOid baseRefOid additions deletions
   files(first:100, after:$after){ pageInfo{ hasNextPage endCursor } nodes{ path } } } } }"""
-# A delta's commits since the last review: how they relate to it, and which of them are merges.
-SINCE_JQ = "{status: .status, merges: [.commits[] | select(.parents | length > 1) | .sha]}"
+# A delta's commits since the last review: how they relate to it, which of them are merges, and whether there are
+# more than the reply lists (GitHub's compare lists at most 250 commits but counts them all in total_commits).
+SINCE_JQ = ("{status: .status, merges: [.commits[] | select(.parents | length > 1) | .sha], "
+            "more: (.total_commits > (.commits | length))}")
+COMPARE_LISTS = 250
 SYNC_FIELDS = "state,headRefOid,reviewRequests,latestReviews,author"
 
 _GIT_ENV = {"GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": "", "GIT_TERMINAL_PROMPT": "0"}
@@ -276,17 +279,22 @@ def merge_base(repo: str, base: str, head: str, run=None) -> str:
 def whole_pr_reason(repo: str, reviewed: str, head: str, run=None) -> Optional[str]:
     """Why the commits since the last review cannot be reviewed alone, or None. After a merge commit (an "update
     branch" merge) that diff holds the base branch's changes; after a rewrite it no longer starts at the review,
-    and once the reviewed commit is gone from GitHub (collected after a force-push) the compare is a 404."""
+    and once the reviewed commit is gone from GitHub (collected after a force-push) the compare is a 404. When more
+    commits came in than the compare reply lists, a merge commit past them cannot be ruled out, so that too is a
+    whole-PR review."""
     try:
         since = _json(gh_read(["api", compare_path(repo, reviewed, head), "--jq", SINCE_JQ], run), "compare")
     except NotFound:
         return f"the last reviewed commit ({reviewed[:7]}) is no longer on GitHub (history rewritten)"
-    if not isinstance(since, dict):
+    if not isinstance(since, dict) or not isinstance(since.get("more"), bool):
         raise ReviewError(f"compare {reviewed[:7]}...{head[:7]}: unexpected reply")
     merges = [m for m in since.get("merges") or [] if isinstance(m, str)]
     if merges:
         return (f"the new commits include a merge commit ({', '.join(m[:7] for m in merges)}), so the diff since "
                 f"the last review holds the base branch's changes")
+    if since["more"]:
+        return (f"more commits since the last review than GitHub's compare lists ({COMPARE_LISTS}), so a merge "
+                f"commit among them cannot be ruled out")
     if since.get("status") in ("diverged", "behind"):
         return f"the branch was rewritten since the last review (compare status {since['status']})"
     return None

@@ -534,8 +534,9 @@ to-do.
 4. **Plain words** (3.7): what this is, "<who> asked you to review PR #<n>: <title>"; where it stands, the TL;DR
    line; what you do, "Read the <n> findings, then approve or ask for changes on GitHub yourself."
 5. **New commits**: a delta review of only the commits since the reviewed one updates the same card; it reviews
-   the whole PR again when the new commits include a merge commit or the branch was rewritten. Each earlier finding
-   is marked fixed or still open.
+   the whole PR again when the new commits include a merge commit, the branch was rewritten, or there are more new
+   commits than GitHub's compare lists (250), so a merge among them cannot be ruled out. Each earlier finding is
+   marked fixed or still open.
 6. **Closes** when the user has reviewed, the request is removed, or the PR is closed or merged.
 7. **Never posts**: nothing is sent to GitHub or any chat in either mode. A later "post this review" button would be
    a `live`-mode write the user taps each time; it is not part of this design.
@@ -583,9 +584,11 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   "<path> does not have <sha7>"). Nothing is ever fetched. A delta, as in secretary: with no earlier review it is a
   full review; with the head equal to the reviewed commit it is refused ("nothing new since <sha7>"); else
   `compare` is `repos/<repo>/compare/<reviewed>...<head>` and `whole_pr` is null, or, after a merge commit, a
-  rewrite (status `diverged` or `behind`) or a 404 on the reviewed commit, `compare` starts at `base_sha` and
-  `whole_pr` gives the reason. A delta keeps the last review's angle names that the current table still has, in
-  their order, as the table has them now; when fewer than 2 remain it picks anew.
+  rewrite (status `diverged` or `behind`), a 404 on the reviewed commit, or more new commits than the compare reply
+  lists (its `total_commits` above the 250 it lists, so a merge past them cannot be ruled out), `compare` starts at
+  `base_sha` and `whole_pr` gives the reason. A compare reply without a boolean `more` is an error, not a delta. A
+  delta keeps the last review's angle names that the current table still has, in their order, as the table has
+  them now; when fewer than 2 remain it picks anew.
 - **[decided by the builder]** The findings and the verdict (`ap2 review verdict --file FILE|- [--data PATH]`,
   secretary's `review verdict`): four groups `confirmed`, `out_of_scope`, `rejected`, `questions`; each finding has
   `id` (lowercase words joined by `-`, unique across the groups), `severity` (`blocker`, `should-fix`, `nit`),

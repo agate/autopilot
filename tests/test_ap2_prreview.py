@@ -45,7 +45,8 @@ TITLE = "Retry failed card payments once, 2 seconds later"
 GH_PR_FILES = """query($owner:String!, $name:String!, $n:Int!, $after:String){ repository(owner:$owner, name:$name){
  pullRequest(number:$n){ headRefOid baseRefOid additions deletions
   files(first:100, after:$after){ pageInfo{ hasNextPage endCursor } nodes{ path } } } } }"""
-GH_SINCE_JQ = "{status: .status, merges: [.commits[] | select(.parents | length > 1) | .sha]}"
+GH_SINCE_JQ = ("{status: .status, merges: [.commits[] | select(.parents | length > 1) | .sha], "
+               "more: (.total_commits > (.commits | length))}")
 GH_SYNC_FIELDS = "state,headRefOid,reviewRequests,latestReviews,author"
 
 
@@ -579,11 +580,18 @@ class PlanTest(Case):
             self.assertIsNone(out["whole_pr"])
         for since, words in (("since_merge", "merge commit (e5f6a7b)"), ("since_diverged", "rewritten"),
                              ("since_behind", "rewritten since the last review (compare status behind)"),
-                             ("since_missing", "no longer on GitHub")):
+                             ("since_missing", "no longer on GitHub"),
+                             ("since_more", "more commits since the last review than GitHub's compare lists (250), "
+                                            "so a merge commit among them cannot be ruled out"),
+                             ("since_merge_more", "merge commit (e5f6a7b)")):
             with self.subTest(since):
                 out, _ = self.plan(cid, table(b_pages, head=B, since=since), stage="delta")
                 self.assertEqual(out["compare"], compare(BASE, B))
                 self.assertIn(words, out["whole_pr"])
+        for since in ("since_no_more", "since_more_text"):
+            with self.subTest(f"{since}: a reply without a boolean more is an error, not a silent delta"):
+                with self.assertRaisesRegex(prreview.ReviewError, "unexpected reply"):
+                    self.plan(cid, table(b_pages, head=B, since=since), stage="delta")
         with self.subTest("a compare that fails for another reason is an error, not a whole-PR review"):
             with self.assertRaisesRegex(prreview.ReviewError, "HTTP 502") as cm:
                 self.plan(cid, table(b_pages, head=B, since="since_error"), stage="delta")
@@ -1591,12 +1599,14 @@ class RecordedCallsTest(unittest.TestCase):
     @unittest.skipUnless(shutil.which("jq"), "jq is not on PATH")
     def test_the_since_filter_lists_only_merge_commits(self):
         merge, plain = "e5f6a7b8" * 5, "f6a7b8c9" * 5
-        reply = {"status": "ahead", "ahead_by": 2, "commits": [
-            {"sha": plain, "parents": [{"sha": A}]},
-            {"sha": merge, "parents": [{"sha": plain}, {"sha": BASE}]}]}
-        out = subprocess.run([shutil.which("jq"), "-c", GH_SINCE_JQ], input=json.dumps(reply), text=True,
-                             capture_output=True, timeout=30, check=True).stdout
-        self.assertEqual(json.loads(out), {"status": "ahead", "merges": [merge]})
+        commits = [{"sha": plain, "parents": [{"sha": A}]}, {"sha": merge, "parents": [{"sha": plain}, {"sha": BASE}]}]
+        for total, more in ((2, False), (300, True)):
+            with self.subTest(total_commits=total):
+                # GitHub's compare lists at most 250 commits but counts them all in total_commits.
+                reply = {"status": "ahead", "ahead_by": total, "total_commits": total, "commits": commits}
+                out = subprocess.run([shutil.which("jq"), "-c", GH_SINCE_JQ], input=json.dumps(reply), text=True,
+                                     capture_output=True, timeout=30, check=True).stdout
+                self.assertEqual(json.loads(out), {"status": "ahead", "merges": [merge], "more": more})
 
 
 # --- criterion 8: nothing is posted ------------------------------------------------------------------------------
