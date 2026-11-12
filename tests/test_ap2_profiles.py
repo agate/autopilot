@@ -304,6 +304,14 @@ class ProfileNameAndLongContextTest(WorkerCase):
         self.assertEqual(profiles.use(self.data, "team_project"), {"active": "team_project", "was": "subscription"})
         self.assertEqual(profiles.active_name(self.data), "team_project")
         self.assertEqual(profiles.active(self.data)["name"], "team_project")
+        long = "team_" + "x" * 35  # the longest name the rule allows, past the 31 project names may hold
+        self.assertEqual(len(long), 40)
+        profiles.save(self.data, dict(profiles.builtin(), name=long, label="Long"))
+        self.assertEqual(profiles.load(self.data, long)["label"], "Long")
+        self.assertIn(long, profiles.names(self.data))
+        self.assertEqual(profiles.use(self.data, long)["active"], long)
+        self.assertEqual(profiles.active_name(self.data), long)
+        profiles.use(self.data, "team_project")
         if temp_inside_the_accounts_claude():
             self.skipTest("the temp folder is inside the account's ~/.claude, so ap2 refuses every temp data folder")
         home = self.tmp / "cli-home"
