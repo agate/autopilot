@@ -38,6 +38,7 @@ MB = "d4e5f6a7" * 5
 REPO = "example/widgets"
 KEY = "example/widgets#42"
 LANGS = ("en", "zh")
+DIAGRAM = '<svg viewBox="0 0 10 10"><rect width="10" height="10"/></svg>'
 TITLE = "Retry failed card payments once, 2 seconds later"
 
 
@@ -452,9 +453,38 @@ class PlanTest(Case):
 
     def test_a_sha_that_is_not_40_hex_is_refused(self):
         cid = self.card()["id"]
-        pages = with_head(fixture("graphql-head-a.json"), "../../etc")
-        with self.assertRaisesRegex(prreview.ReviewError, "headRefOid: not a 40-character commit SHA"):
-            self.plan(cid, table(pages))
+        with self.subTest("a path for a head"):
+            pages = with_head(fixture("graphql-head-a.json"), "../../etc")
+            with self.assertRaisesRegex(prreview.ReviewError, "headRefOid: not a 40-character commit SHA"):
+                self.plan(cid, table(pages))
+        with self.subTest("40 hex and one more character"):
+            pages = with_head(fixture("graphql-head-a.json"), A + "x")
+            with self.assertRaisesRegex(prreview.ReviewError,
+                                        re.escape(f"headRefOid: not a 40-character commit SHA: {A + 'x'!r}")):
+                self.plan(cid, table(pages, head=A + "x"))
+        with self.subTest("a merge base of null"):
+            entries = table(fixture("graphql-head-a.json"))
+            for e in entries:
+                if e["argv"][-1] == ".merge_base_commit.sha":
+                    e["stdout"] = "null\n"
+            with self.assertRaisesRegex(prreview.ReviewError, re.escape(
+                    f"the merge base of {BASE[:7]}...{A[:7]}: not a 40-character commit SHA: 'null'")):
+                self.plan(cid, entries)
+        with self.subTest("a stored reviewed_sha that is a path"):
+            self.store().update(cid, {"pr": {"repo": REPO, "number": 42, "reviewed_sha": "../../etc"}}, by="test")
+            with self.assertRaisesRegex(prreview.ReviewError, re.escape(
+                    f"card {cid}: pr.reviewed_sha: not a 40-character commit SHA: '../../etc'")):
+                self.plan(cid, table(fixture("graphql-head-b.json"), head=B, since="since_clean"), stage="delta")
+        with self.subTest("sync: a pr view head that is a path"):
+            self.store().update(cid, {"pr": {"repo": REPO, "number": 42}}, by="test")
+            view = dict(fixture("pr-view.json")["open_head_a"], headRefOid="../../etc")
+            entries = [{"argv": ["pr", "view", "42", "--repo", REPO, "--json", prreview.SYNC_FIELDS], "stdout": view},
+                       {"argv": ["api", "user", "--jq", ".login"], "stdout": "octo-me\n"}]
+            before = self.store().get(cid)
+            with self.assertRaisesRegex(prreview.ReviewError,
+                                        re.escape("pr view headRefOid: not a 40-character commit SHA: '../../etc'")):
+                prreview.sync(self.data, cid, cfg=self.cfg, run=Replay(entries))
+            self.assertEqual(self.store().get(cid), before)
 
 
 # --- criterion 4: the verdict follows the findings ---------------------------------------------------------------
@@ -469,6 +499,17 @@ def buckets(**over):
     out = {"confirmed": [], "out_of_scope": [], "rejected": [], "questions": []}
     out.update(over)
     return out
+
+
+def en_only(obj):
+    """A copy of `obj` with every {en, zh} text reduced to its en text."""
+    if isinstance(obj, dict):
+        if "en" in obj and set(obj) <= {"en", "zh"}:
+            return {"en": obj["en"]}
+        return {k: en_only(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [en_only(v) for v in obj]
+    return obj
 
 
 class Ap2Case(Case):
@@ -634,6 +675,13 @@ class CheckTest(Case):
                 ("a <script> in the diagram", bad(diagram=script), "diagram: must be one inline <svg>"),
                 ("an onload in the diagram", bad(diagram='<svg onload="x()"></svg>'), "diagram: must be one"),
                 ("a diagram that is not an svg", bad(diagram="<div></div>"), "diagram: must be one inline <svg>"),
+                ("a javascript: link in the diagram",
+                 bad(diagram='<svg><a href="javascript:alert(1)"><text>x</text></a></svg>'),
+                 "diagram: must be one inline <svg>"),
+                ("a foreignObject in the diagram", bad(diagram="<svg><foreignObject><div>x</div></foreignObject></svg>"),
+                 "diagram: must be one inline <svg>"),
+                ("markup after the svg", bad(diagram='<svg></svg><iframe src="https://example.com/x"></iframe>'),
+                 "diagram: must be one inline <svg>"),
                 ("a missing block", bad(problem=None), "problem: missing"),
                 ("a text missing zh", bad(background={"en": "x"}), "background.zh: missing"),
                 ("a bad time", bad(reviewed_at="2026-11-11 09:30"), "reviewed_at: must be a UTC time"),
@@ -644,6 +692,29 @@ class CheckTest(Case):
             with self.subTest(name):
                 errors = self.errors(rep)
                 self.assertTrue(any(words in e for e in errors), errors)
+
+    def test_texts_that_are_not_text_objects(self):
+        good = self.report("report-review.json", self.cid)
+        q = {k: v for k, v in good_finding(id="q-1", severity="nit").items() if k != "checked"}
+        q["question"] = "Should a retry wait longer?"
+        r = {k: v for k, v in good_finding(id="r-1", severity="nit").items() if k != "checked"}
+        r["reason"] = {"en": "Not a bug.", "zh": "   "}
+        for name, path, value, want in (
+                ("a question that is a plain string", ("findings", "questions"), [q],
+                 "findings.questions[0].question: must be a text object with en, zh"),
+                ("a reason that is only spaces", ("findings", "rejected"), [r],
+                 "findings.rejected[0].reason.zh: must be non-empty text"),
+                ("an angle's why that is a plain string", ("angles", 0, "why"), "x",
+                 "angles[0].why: must be a text object with en, zh"),
+                ("notes that are a plain string", ("checks", "notes"), "x",
+                 "checks.notes: must be a text object with en, zh")):
+            with self.subTest(name):
+                rep = copy.deepcopy(good)
+                at = rep
+                for k in path[:-1]:
+                    at = at[k]
+                at[path[-1]] = value
+                self.assertIn(want, self.errors(rep))
 
     def test_files_that_cannot_be_read(self):
         path = prreview.run_dir(self.data, self.cid) / prreview.REPORT_FILE
@@ -708,6 +779,8 @@ class CheckTest(Case):
 
         for name, rep, words in (
                 ("no since_last", bad(drop=("since_last",)), "since_last: missing"),
+                ("a since_last that is a plain string", dict(copy.deepcopy(good), since_last="x"),
+                 "since_last: must be a text object with en, zh"),
                 ("no earlier", bad(drop=("earlier",)), "earlier: a delta must list"),
                 ("an earlier id left out", bad(earlier=[{"id": "correctness-1", "state": "fixed"}]),
                  "earlier: q-1 (questions) is left out"),
@@ -793,10 +866,38 @@ class ApplyTest(Case):
         self.put_report(cid, rep)
         return rep
 
+    def test_the_applied_verdict_block_and_review_entry(self):
+        cid = self.card()["id"]
+        self.plan(cid, table(fixture("graphql-head-a.json")))
+        rep = self.report("report-review.json", cid)
+        rep["diagram"] = DIAGRAM
+        self.put_report(cid, rep)
+        card = prreview.apply(self.data, cid, cfg=self.cfg)
+        self.assertEqual(card["verdict"], {
+            "verdict": "changes", "tldr": rep["tldr"], "background": rep["background"], "problem": rep["problem"],
+            "solution": rep["solution"], "diagram": DIAGRAM, "ci": "green", "notes": rep["checks"]["notes"],
+            "angles": rep["angles"], "stage": "review", "head_sha": A, "reviewed_at": "2026-11-11T09:30:00Z"})
+        self.assertEqual(set(card["reviews"][-1]), {"stage", "head_sha", "verdict", "at"})
+        self.assertEqual({k: card["reviews"][-1][k] for k in ("stage", "head_sha", "verdict")},
+                         {"stage": "review", "head_sha": A, "verdict": "changes"})
+        self.assertRegex(card["reviews"][-1]["at"], prreview.STAMP)
+
+        # A delta over docs only would pick Correctness and Accuracy anew; it keeps the applied angles instead.
+        fresh, _ = self.plan(cid, table(with_head(fixture("graphql-docs.json"), B), head=B), stage="review")
+        self.assertEqual([a["name"] for a in fresh["angles"]], ["Correctness", "Accuracy"])
+        out, _ = self.plan(cid, table(with_head(fixture("graphql-docs.json"), B), head=B, since="since_clean"),
+                           stage="delta")
+        self.assertEqual(out["stage"], "delta")
+        self.assertEqual([(a["name"], a["origin"]) for a in out["angles"]],
+                         [(a["name"], a["origin"]) for a in rep["angles"]])
+        self.assertEqual({a["why"] for a in out["angles"]}, {"same angle as the last review"})
+
     def test_fixed_and_answered_are_kept_across_deltas(self):
         cid = self.two_finding_card()
         self.delta(cid, [{"id": "correctness-1", "state": "fixed"}, {"id": "q-1", "state": "answered"}])
-        prreview.apply(self.data, cid, cfg=self.cfg)
+        card = prreview.apply(self.data, cid, cfg=self.cfg)
+        # An answered question is not counted as fixed.
+        self.assertEqual(card["audit"][-1]["did"], f"delta review {B[:7]}: approve, 1 fixed, 0 open")
         self.delta(cid, [], head=C, reviewed=B, at="2026-11-11T12:00:00Z")
         card = prreview.apply(self.data, cid, cfg=self.cfg)
         self.assertEqual([(f["id"], f["fixed_in"]) for f in card["findings"]["fixed"]], [("correctness-1", B)])
@@ -878,6 +979,46 @@ class ApplyTest(Case):
         card = self.store().get(cid)
         self.assertEqual(card["pr"]["reviewed_sha"], B)
         self.assertNotIn("reviews", card)
+
+
+# --- the configured languages, not a fixed pair ------------------------------------------------------------------
+
+def english_only(case):
+    """Give a Case the default config: English only, no secondary language."""
+    (case.data / "config.yaml").write_text("primary_language: en\n")
+    case.cfg = Config()
+
+
+class EnglishOnlyTest(Case):
+    def setUp(self):
+        super().setUp()
+        english_only(self)
+
+    def test_an_english_only_report_is_checked_and_applied(self):
+        cid = self.card()["id"]
+        out, _ = self.plan(cid, table(fixture("graphql-head-a.json")))
+        self.assertEqual(out["languages"], ["en"])
+        self.put_report(cid, en_only(self.report("report-review.json", cid)))
+        self.assertEqual(prreview.check(self.data, cid, cfg=self.cfg), {"ok": True, "errors": []})
+        card = prreview.apply(self.data, cid, cfg=self.cfg)
+        self.assertEqual(card["verdict"]["verdict"], "changes")
+        self.assertEqual({line: set(words) for line, words in card["plain"].items()},
+                         {"what": {"en"}, "where": {"en"}, "do": {"en"}})
+        self.assertEqual(card["plain"]["where"]["en"], fixture("report-review.json")["tldr"]["en"])
+
+
+class EnglishOnlyVerdictCliTest(Ap2Case):
+    def setUp(self):
+        super().setUp()
+        english_only(self)
+
+    def test_an_english_only_finding_gives_its_verdict(self):
+        path = self.tmp / "findings.json"
+        path.write_text(json.dumps(buckets(confirmed=[en_only(good_finding())])))
+        r = self.ap2("review", "verdict", "--file", str(path), "--data", str(self.data))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(json.loads(r.stdout)["verdict"], "changes")
+        self.assertEqual(json.loads(r.stdout)["errors"], [])
 
 
 # --- criteria 6 and 8: the whole flow through bin/ap2 and fake-gh-replay, in shadow and live mode ----------------
