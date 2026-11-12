@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import time
 import unittest
 from datetime import datetime, timedelta
@@ -256,18 +257,62 @@ class SwitchTest(Env):
         self.assertEqual(profile.active()["name"], "subscription")
 
     def test_step_applies_cap_reply(self):
+        profile.use("g")
         cap.open_card(self.NOON)
-        self.result = {"ok": True, "replies": [{"id": "r1", "ap": None, "kind": "cap", "option": "raise50"}]}
+        self.result = {"ok": True, "replies": [self.cap_reply("raise50")]}
         self.assertEqual(replies.step(config.load_global(), {}, self.NOON), set())
         self.assertEqual(cap.state(self.NOON)["raise_pct"], 50)
 
     def test_an_unknown_cap_option_is_logged_not_raised(self):
+        profile.use("g")
         cap.open_card(self.NOON)
         self.result = {"ok": True, "replies": [{"id": "r1", "ap": None, "kind": "cap", "option": "bogus"}]}
         self.assertEqual(replies.step(config.load_global(), {}, self.NOON), set())
         self.assertEqual(cap.state(self.NOON)["raise_pct"], 0)
 
+    def cap_reply(self, option="raise50", day=None, at="2026-01-02T12:00:00Z", rid="r1"):
+        return {"id": rid, "ap": None, "kind": "cap", "option": option, "day": day or cap.state(self.NOON)["day"], "at": at}
+
+    def test_parse_carries_day_and_at(self):
+        d = Path(tempfile.mkdtemp())
+        p = write_transcript(d / "t.jsonl", [{"id": "r1", "kind": "cap", "option": "pause", "day": "2026-01-02", "at": "T1"}])
+        self.assertEqual(replies.parse(p, URL), [{"id": "r1", "ap": None, "kind": "cap", "option": "pause", "day": "2026-01-02", "at": "T1"}])
+
+    def test_a_cap_reply_for_another_day_is_ignored(self):
+        profile.use("g")
+        cap.open_card(self.NOON)
+        self.result = {"ok": True, "replies": [self.cap_reply(day="2026-01-01")]}
+        replies.step(config.load_global(), {}, self.NOON)
+        self.assertEqual(cap.state(self.NOON)["raise_pct"], 0)
+        self.assertEqual(cap.state(self.NOON)["card"], "open")
+        self.assertIn("cap_reply_ignored", (self.data / "events-global.jsonl").read_text())
+
+    def test_a_second_cap_reply_for_an_answered_card_is_ignored(self):
+        profile.use("g")
+        cap.open_card(self.NOON)
+        self.result = {"ok": True, "replies": [self.cap_reply("raise50"), self.cap_reply("raise100", rid="r2", at="2026-01-02T12:01:00Z")]}
+        replies.step(config.load_global(), {}, self.NOON)
+        self.assertEqual(cap.state(self.NOON)["raise_pct"], 50)
+        self.assertIn("the card is not open", (self.data / "events-global.jsonl").read_text())
+
+    def test_replies_apply_oldest_first(self):
+        profile.save({"name": "h", "mode": "gateway", "model": "m", "small_model": "s", "daily_cap_usd": 1,
+                      "gateway": {"base_url": "https://llm-gateway.example.com/anthropic", "key_command": "echo k"}})
+        later = {"id": "r1", "ap": None, "kind": "profile", "option": "h", "at": "2026-01-02T12:05:00Z"}
+        earlier = {"id": "r2", "ap": None, "kind": "profile", "option": "g", "at": "2026-01-02T12:00:00Z"}
+        self.result = {"ok": True, "replies": [later, earlier]}
+        replies.step(config.load_global(), {}, self.NOON)
+        self.assertEqual(profile.active()["name"], "h")
+
+    def test_a_subscription_profile_closes_a_stale_open_card(self):
+        cap.open_card(self.NOON)
+        (self.data / "profiles" / "g.json").unlink()   # one profile left: only the card could keep the check going
+        replies.step(config.load_global(), {}, self.NOON)
+        self.assertEqual(cap.state(self.NOON)["card"], None)
+        self.assertEqual(self.calls, [])
+
     def test_an_open_cap_card_makes_the_check_run(self):
+        profile.use("g")   # the cap only exists on a gateway profile
         cap.open_card(self.NOON)
         replies.step(config.load_global(), {}, self.NOON)
         self.assertEqual(len(self.calls), 1)

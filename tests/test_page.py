@@ -352,7 +352,32 @@ class AccessTest(unittest.TestCase):
         t = {"today": 510.0, "week": 510.0, "month": 510.0, "unknown": False, "unknown_today": False}
         with mock.patch.object(spend, "totals", return_value=t):
             acc = publish.collect([])["meta"]["access"]
-        self.assertEqual(acc["cap_card"], {"day": cap.state(now)["day"], "spent": 510.0, "limit": 500.0})
+        self.assertEqual(acc["cap_card"], {"day": cap.state(now)["day"], "spent": 510.0, "limit": 500.0, "cause": "spent"})
+
+    def test_cap_card_cause(self):
+        self.gateway()
+        profile.use("gw")
+        for unknown, cause in ((False, "spent"), (True, "unknown")):
+            t = {"today": 10.0, "week": 10.0, "month": 10.0, "unknown": unknown, "unknown_today": unknown}
+            with mock.patch.object(spend, "totals", return_value=t):
+                if cause == "spent":
+                    t["today"] = 600.0
+                card = publish.collect([])["meta"]["access"]["cap_card"]
+            self.assertEqual(card["cause"], cause)
+            cap._save({"day": cap.state()["day"], "raise_pct": 0, "card": None})
+        self.assertIn("cap_card_body_unknown", LABELS)
+        self.assertIn('"cap_card_body_unknown"', PAGE)
+
+    def test_a_corrupt_profile_file_does_not_break_the_page_data(self):
+        self.gateway()
+        (self.data / "profiles" / "bad.json").write_text("{nope")
+        acc = publish.collect([])["meta"]["access"]
+        self.assertNotIn("bad", [p["name"] for p in acc["profiles"]])
+        self.assertEqual(acc["broken_profiles"], [{"name": "bad", "error": "unreadable"}])
+
+    def test_pending_switch_clears_on_any_change_or_after_35_minutes(self):
+        self.assertIn("SWITCH_PENDING_MS = 35 * 60 * 1000", PAGE)
+        self.assertIn("acc.profile.name !== pendingSwitch.from", PAGE)
 
     def test_page_has_no_key_text(self):
         self.gateway()

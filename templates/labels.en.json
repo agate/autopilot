@@ -197,5 +197,7 @@
   "usage_month": "This month",
   "usage_unknown": "Some cost could not be priced, so these numbers may be too low.",
   "usage_page_session": "5-hour window (page sessions)",
-  "worker_profile": "Profile: {profile}"
+  "worker_profile": "Profile: {profile}",
+  "cap_card_body_unknown": "Today's cost could not be priced, so no new workers start. Raise the limit or pause.",
+  "profile_broken": "Could not read profile: {names}."
 }

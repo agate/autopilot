@@ -114,15 +114,21 @@ def _access(cur: dict, now: datetime) -> dict:
     session_pct = None if session is None else int(round(session))
     acc = {"profile": {k: p.get(k) for k in ("name", "label", "mode", "model", "effort")},
            "page_sessions": "subscription",
-           "profiles": [{k: q.get(k) for k in ("name", "label", "mode")} for q in map(profile.load, profile.names())],
-           "cap_card": None, "switch_note": SWITCH_NOTE}
+           "profiles": [], "broken_profiles": [], "cap_card": None, "switch_note": SWITCH_NOTE}
+    for n in profile.names():   # one unreadable profile file must not break the whole page
+        try:
+            q = profile.load(n)
+            acc["profiles"].append({k: q.get(k) for k in ("name", "label", "mode")})
+        except Exception:
+            acc["broken_profiles"].append({"name": n, "error": "unreadable"})
     if p.get("mode") == "gateway":
         spent = spent or {}
         limit = cap.today_limit(p, now)
         acc["usage"] = {"today": spent.get("today", 0.0), "week": spent.get("week", 0.0), "month": spent.get("month", 0.0),
                         "cap_today": limit, "unknown": bool(spent.get("unknown")), "session_pct": session_pct}
         if cap.state(now)["card"] == "open":
-            acc["cap_card"] = {"day": cap.state(now)["day"], "spent": spent.get("today", 0.0), "limit": limit}
+            acc["cap_card"] = {"day": cap.state(now)["day"], "spent": spent.get("today", 0.0), "limit": limit,
+                               "cause": "unknown" if spent.get("unknown_today") else "spent"}
     else:
         acc["usage"] = {"session_pct": session_pct, "credits_used_usd": b.get("credits_used_usd", 0.0),
                         "credits_limit_usd": b.get("credits_limit_usd", 0.0)}

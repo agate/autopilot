@@ -103,7 +103,8 @@ def parse(path, url: str):
             dec = str(doc.get("decision") or (many[0] if many else ""))
             item = {"id": d.get("id"), "ap": dec.split(":", 1)[0] if ":" in dec else None}
             if doc.get("kind") is not None:   # an ask's option is the pass's business; only profile and cap replies carry it here
-                item["kind"], item["option"] = doc["kind"], doc.get("option")
+                item.update(kind=doc["kind"], option=doc.get("option"))
+                item.update({k: doc[k] for k in ("day", "at") if doc.get(k) is not None})
             out.append(item)
         return out
     return None
@@ -149,6 +150,10 @@ def check(gcfg: dict, url: str, poll_s: float = 2) -> dict:
         _cleanup(claude, short)
 
 
+def _ignore(r: dict, why: str) -> None:
+    events.append_global("cap_reply_ignored", {"reason": why, "option": r.get("option"), "day": r.get("day")})
+
+
 def _apply(r: dict, now: datetime) -> bool:
     """Apply a profile or cap reply directly; True when `r` was one (so it queues no pass). A bad option is logged."""
     kind, option = r.get("kind"), str(r.get("option") or "")
@@ -159,7 +164,13 @@ def _apply(r: dict, now: datetime) -> bool:
             else:
                 events.append_global("profile_unknown", {"option": option})
         elif kind == "cap":
-            cap.answer(option, now)
+            st = cap.state(now)
+            if r.get("day") != st["day"]:
+                _ignore(r, "not today's card")
+            elif st["card"] != "open":
+                _ignore(r, "the card is not open")
+            else:
+                cap.answer(option, now)
     except (ValueError, KeyError, OSError) as e:   # the gate must keep running whatever an answer holds
         events.append_global("reply_failed", {"kind": kind, "option": option, "error": str(e)})
     return kind in ("profile", "cap")
@@ -184,6 +195,8 @@ def step(gcfg: dict, gs: dict, now: datetime) -> set:
         return set()
     active = _active()
     aps = waiting(active)
+    if profile.active().get("mode") != "gateway":
+        cap.close_card(now)   # no daily cap here: an open card must not keep the one-minute check running
     if not aps and cap.state(now)["card"] != "open":
         # Nothing to answer: only a possible profile switch is worth a look, and a slower one.
         if len(profile.names()) < 2 or (last and now - datetime.fromisoformat(last) < timedelta(seconds=SWITCH_CHECK_S - 5)):
@@ -202,7 +215,11 @@ def step(gcfg: dict, gs: dict, now: datetime) -> set:
     seen = set(rs.get("ids") or [])
     rs["ids"] = [r["id"] for r in res["replies"]]
     new = [r for r in res["replies"] if r["id"] not in seen]
-    new = [r for r in new if not _apply(r, now)]   # a profile or cap answer is applied here, in code
+    # A profile or cap answer is applied here, in code, oldest first (the list order is not the click order).
+    acc = sorted((r for r in new if r.get("kind") in ("profile", "cap")), key=lambda r: str(r.get("at") or ""))
+    for r in acc:
+        _apply(r, now)
+    new = [r for r in new if r.get("kind") not in ("profile", "cap")]
     if not new:
         return set()
     named = {r["ap"] for r in new if r.get("ap") in set(active)}
