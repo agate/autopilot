@@ -1439,14 +1439,16 @@ class SpendCliTest(unittest.TestCase):
 
     def test_spend_text_prints_a_large_finite_total_in_full(self):
         self.session()
-        for cost, amount in ((1e20, "$100,000,000,000,000,000,000.00"), (1e300, f"${1e300:,.2f}")):
+        below = math.nextafter(sys.float_info.max, 0)  # the largest finite total below the clamp
+        for cost, amount in ((1e20, "$100,000,000,000,000,000,000.00"), (1e300, f"${1e300:,.2f}"),
+                             (below, f"${below:,.2f}")):
             with self.subTest(cost=cost):
                 spend.folder(self.data).joinpath(spend.CACHE).unlink(missing_ok=True)  # cost each request again
                 seen, keep = self.totals_seen()
                 with mock.patch.object(spend, "_cost", return_value=cost), keep:
                     code, out, err = self.main()
                 self.assertEqual((code, err), (0, ""))
-                # Local time: the request may fall on yesterday just after midnight, so find the key that holds it.
+                # The key that holds the request (all three do, in the fixed zone of main()).
                 k = next((k for k in ("today", "week", "month") if seen[k] == cost), None)
                 self.assertIsNotNone(k, seen)
                 self.assertIn(f"  {k:<6} {amount}", out.splitlines())
