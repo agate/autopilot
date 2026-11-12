@@ -3003,6 +3003,11 @@ class LimitParkFromTranscriptTest(ApiStopCase):
     def test_no_readable_reset_parks_30_minutes_then_60_on_the_next_limit_in_a_row(self):
         w = self.workers()
         a = self.start(w)
+        # A normal reply before the limit. The resume copies it, with its old time, into the next run's transcript,
+        # where it comes from before that run and so does not start the count again.
+        self.clock.advance(1)
+        say(self.fake_home, a["session_id"], reply(iso(self.clock())))
+        self.clock.advance(1)
         self.stopped_on(a, error_line(NO_RESET, iso(self.clock()), apiErrorStatus=429))
         self.assertEqual(w.check()[0]["did"], "parked")
         pk = self.rec()["parked"]
@@ -3057,6 +3062,9 @@ class LimitParkFromTranscriptTest(ApiStopCase):
     def test_start_resume_of_a_parked_record_carries_the_count(self):
         w = self.workers()
         a = self.start(w)
+        self.clock.advance(1)
+        say(self.fake_home, a["session_id"], reply(iso(self.clock())))  # a reply from before the resumed run
+        self.clock.advance(1)
         self.stopped_on(a, error_line(NO_RESET, iso(self.clock()), apiErrorStatus=429))
         w.check()
         self.clock.advance(10)
