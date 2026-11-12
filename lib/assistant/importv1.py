@@ -10,6 +10,8 @@
   `question` card under its task (else the project). Keys (`v1:<name>`, `v1:<name>:<id>`) make a re-run update the
   same cards; a card is never removed.
 - Plain words are made by code from fixed phrases (`PHRASES`, `en` and `zh`), in every configured language.
+- A card's title is one text per configured language, the same texts as its `plain.what` (the project card: its
+  name in each slot). A re-run moves a card the old import wrote with a one-text title to that shape once.
 """
 from __future__ import annotations
 
@@ -297,7 +299,7 @@ class _Maker:
     def card(self, kind: str, key: str, lane: str, what: dict, where: dict, do: dict, record: dict,
              parent_key: Optional[str], **more) -> dict:
         card = {"kind": kind, "lane": lane, "feed": FEED, "links": [], "pri": more.pop("pri", PRI),
-                "origin": more.pop("origin", "source"), "title": what[self.langs[0]], "key": key,
+                "origin": more.pop("origin", "source"), "title": dict(what), "key": key,
                 "project": self.name, "plain": {"what": what, "where": where, "do": do},
                 "source": {"name": FEED, "record": record}}
         card.update(more)
@@ -332,18 +334,39 @@ class _Maker:
                          self.texts(d.get("title"), d["id"]), where, self.say("do_question" if open_ else "do_closed"),
                          record, parent, ask={"type": ASK[d["kind"]], "from": "v1"} if open_ else None)
 
+    def kept(self, old, new: dict) -> dict:
+        """`new` with `old`'s non-blank texts in the languages that are not configured."""
+        extra = {k: v for k, v in old.items() if isinstance(k, str) and k not in self.langs
+                 and isinstance(v, str) and v.strip()} if isinstance(old, dict) else {}
+        return {**new, **extra}
+
     def closed(self, old: dict) -> dict:
         """The closed question card for `old`, a question card whose decision has left state.json: as `question`
-        makes it with `open_=False`, keeping the old card's title, `what`, `where`, source and parent."""
+        makes it with `open_=False`, keeping the old card's words, `where`, source and parent. Each language's
+        `what` (and title slot) is the old `plain.what` text, else the old title in that language (a one-text title
+        the old import wrote, or an object title), else the decision id. In a language no longer configured, the old
+        `what` and `where` words are kept, as v1 cannot make them again, and `do` is the closed phrase (none in a
+        language without phrases)."""
         plain = old.get("plain") if isinstance(old.get("plain"), dict) else {}
         what = plain.get("what") if isinstance(plain.get("what"), dict) else {}
         where = plain.get("where") if isinstance(plain.get("where"), dict) else {}
         fresh = self.say("question_where", project=self.name, about="")
         source = old.get("source") if isinstance(old.get("source"), dict) else {}
-        entry = self.card("question", old["key"], "done",
-                          {lang: what.get(lang) or old.get("title") for lang in self.langs},
-                          {lang: where.get(lang) or fresh[lang] for lang in self.langs}, self.say("do_closed"),
-                          source.get("record"), None, title=old.get("title"), ask=None)
+        decision = old["key"].rsplit(":", 1)[-1]
+        words = {}
+        for lang in self.langs:
+            if isinstance(what.get(lang), str) and what[lang].strip():
+                words[lang] = what[lang]
+                continue
+            text = cards.title_for(old, lang, self.langs[0])  # a one-text title is returned as it is, blank or not
+            words[lang] = text if isinstance(text, str) and text.strip() else decision
+        what = self.kept(what, words)
+        where = self.kept(where, {lang: where.get(lang) or fresh[lang] for lang in self.langs})
+        do = self.say("do_closed")
+        for lang in sorted({*what, *where, *self.kept(plain.get("do"), {})} - set(self.langs)):
+            if phrases(lang):  # the old `do` may still say to go answer it: write the closed phrase instead
+                do[lang] = phrases(lang)["do_closed"]
+        entry = self.card("question", old["key"], "done", what, where, do, source.get("record"), None, ask=None)
         if old.get("parent"):
             entry["card"]["parent"] = old["parent"]
         return entry
@@ -370,13 +393,13 @@ def plan(name: str, folder: Path, langs: tuple, labels: Labels, existing: dict, 
             continue
         out.append(make.question(d, task_ids, True))
     # v1 removes a decision from state.json only when it archives it, and it archives only settled ones: a question
-    # card still open whose decision is gone is closed too.
+    # card still open whose decision is gone is closed too, and so is a closed one whose title is still one text.
     ids = task_ids | {d["id"] for d in decisions}
     prefix = f"v1:{name}:"
     for key in sorted(own):
         old = existing[key]
         if (key.startswith(prefix) and key[len(prefix):] not in ids and old.get("kind") == "question"
-                and (old.get("lane") != "done" or old.get("ask") is not None)):
+                and (old.get("lane") != "done" or old.get("ask") is not None or isinstance(old.get("title"), str))):
             out.append(make.closed(old))
     for entry in out:
         try:

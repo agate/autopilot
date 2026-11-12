@@ -1917,8 +1917,9 @@ Calls the author made without asking (check them):
     `state.load` or `mutate` (they take a lock file inside v1's folder). Nothing is created or changed under
     `--from`.
   - Cards (feed `v1-import`, audit `by: v1-import`, each with `project: <name>`): a `project` card
-    (`key: v1:<name>`, title the name, `lane: done` when the project has tasks and every one is `done` or
-    `skipped`, else `running`; `source.record` keeps `repo`, `branch_pattern`, `branch_prefix` and the folder); a
+    (`key: v1:<name>`, title the name in each configured language, `lane: done` when the project has tasks and
+    every one is `done` or `skipped`, else `running`; `source.record` keeps `repo`, `branch_pattern`,
+    `branch_prefix` and the folder); a
     `code` card per task under it (`key: v1:<name>:<task id>`, `status` v1's, lanes `todo` -> planned,
     `in_progress`/`in_review` -> running, `blocked` -> needs, `done`/`skipped` -> done; `P1` when `critical`, else
     `P2`; `origin: found` when v1's is, else `source`; `source.record` keeps `pr`, `branch`, `depends_on`,
@@ -1933,10 +1934,30 @@ Calls the author made without asking (check them):
     (1,000) characters is shown as its key, before it is parsed; a template with a format spec, conversion, index
     or attribute, one that does not parse, or one that would fill past `MAX_LABEL` characters, is shown as
     written) from the package's `templates/labels.<lang>.json` with the v1 folder's `labels.<lang>.json` on top
-    (where v1 keeps its page translations), falling back to `en`, then to the key. `title` is the primary
-    language's text. Plain words come from fixed phrases (`importv1.PHRASES`, `en` and `zh`): `what` is the title,
-    `where` names the project (and task, with its v1 status), `do` says it is a read-only copy and to act on v1's
-    page. A configured language with no phrases is refused before anything is written.
+    (where v1 keeps its page translations), falling back to `en`, then to the key. `title` is one text per
+    configured language, each slot the same text as that language's `plain.what` (a v1 title empty or blank in one
+    language falls back as above, then to the task's or decision's id, so no slot is empty). Plain words come from
+    fixed phrases (`importv1.PHRASES`, `en` and `zh`): `what` is the title, `where` names the project (and task,
+    with its v1 status), `do` says it is a read-only copy and to act on v1's page. A configured language with no
+    phrases is refused before anything is written.
+  - **[decided by the builder]** The project card's title is the project name in every configured language's
+    slot (`{en: shop, zh: shop}`), the same words in each slot as code-made titles (not one text), so every card
+    the import writes has the same title shape.
+  - **[decided by the builder]** A closed question card's title is its old words, one slot per language: each slot is
+    the old card's `plain.what` text in that language, else its old title in that language, else in the primary
+    language (`cards.title_for`, so an old one-text title and an old object title both work), else the decision id. It
+    equals the closed card's `plain.what`. In a language no longer configured, a closed question card keeps the old
+    card's `what` (so its title) and `where` words (they cannot be made again from v1), so adding that language back
+    finds them; its `do` there is the closed phrase, not the old one.
+  - **[decided by the builder]** A card an older import wrote with a one-text title is moved to the per-language
+    title by the next run, when that run still makes or closes it (`title` is one of the fields a re-run updates:
+    `action: update`, its `id`, `parent` and audit history kept), and is `unchanged` on the run after that. A
+    question card that was already closed and whose decision has left state.json is closed again once for this: its
+    title changes, and so do its plain words in a language added since (filled in as for any closed card); the run
+    after that leaves it out of the report, as any such card. One whose settled decision is still in state.json is
+    made from it like any other card (`update` once, then `unchanged`). A task card whose task left v1, and the cards
+    of a project gone from v1, are not made by the run any more and keep the title they had (as a card never removed
+    keeps its other fields). No separate migration step.
   - Re-run: the same key (among this feed's cards) updates `title`, `plain`, `lane`, `status`, `ask` and
     `source` when they changed, and leaves the card alone when nothing did. A card is never removed (a task gone
     from v1 keeps its card). `--dry-run` writes nothing, not even the data folder's layout, and reports
