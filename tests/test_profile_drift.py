@@ -181,5 +181,35 @@ class BrokenActiveProfileTest(Base):
         launch.assert_not_called()
 
 
+class SnapshotUsesCachedStateTest(Base):
+    def test_hook_prompt_budget_line_runs_nothing_and_opens_no_card(self):
+        from autopilot import cap, snapshot
+        profile.use("g")
+        with mock.patch.object(spend, "totals", return_value={"today": 7.25, "week": 7.25, "month": 7.25,
+                                                             "unknown": False, "unknown_today": False}):
+            budget.current(config.load_global(), datetime.now(timezone.utc))   # the gate's minute: caches both
+        boom = AssertionError("the hook ran something")
+        with mock.patch.object(profile, "_run_silent", side_effect=boom), \
+                mock.patch.object(spend, "totals", side_effect=boom), mock.patch.object(spend, "_resolve", side_effect=boom), \
+                mock.patch.object(cap, "open_card", side_effect=boom), mock.patch.object(cap, "close_card", side_effect=boom), \
+                mock.patch.object(cap, "_save", side_effect=boom):
+            line = snapshot._budget_line()
+        self.assertIn("$7.25", line)
+        self.assertIn("gateway profile g", line)
+
+    def test_without_cached_spend_it_says_unknown(self):
+        from autopilot import snapshot
+        profile.use("g")
+        with mock.patch.object(spend, "totals", side_effect=AssertionError("ran")), \
+                mock.patch.object(profile, "_run_silent", side_effect=AssertionError("ran")):
+            line = snapshot._budget_line()
+        self.assertIn("not counted yet", line)
+
+    def test_a_broken_active_profile_is_one_line(self):
+        from autopilot import snapshot
+        config.set_setting("active_profile", "ghost")
+        self.assertIn("ghost", snapshot._budget_line())
+
+
 if __name__ == "__main__":
     unittest.main()

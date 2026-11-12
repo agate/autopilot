@@ -398,6 +398,15 @@ def check_key(p: dict, now: datetime):
     return err
 
 
+def cached_key_error(p: dict):
+    """The last key check's error for `p`, from its record only (no command runs); None when it worked or was
+    never checked."""
+    rec = _read(_key_file())
+    if p.get("mode") != "gateway" or rec.get("profile") != p.get("name") or rec.get("ok"):
+        return None
+    return rec.get("error") or "key command failed"
+
+
 def rotate(name: str) -> None:
     """Run the profile's rotate command (output thrown away), forget the cached key check, re-apply settings."""
     cmd = (load(name).get("gateway") or {}).get("rotate_command")

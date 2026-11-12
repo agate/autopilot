@@ -85,6 +85,33 @@ def record_session(session_id: str, kind: str, ap, p: dict) -> None:
     settle(session_id)
 
 
+def _last_file() -> Path:
+    return _dir() / "last-totals.json"
+
+
+def remember(now: datetime, t: dict) -> None:
+    """Keep the gateway totals the gate just computed, for readers that must not compute them (a prompt hook)."""
+    now = now.astimezone()
+    try:
+        _dir().mkdir(parents=True, exist_ok=True)
+        tmp = _last_file().with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps({"at": now.isoformat(), "day": now.strftime("%Y-%m-%d"), "totals": t}))
+        os.replace(tmp, _last_file())
+    except OSError:
+        pass
+
+
+def remembered(now: datetime):
+    """The totals `remember` kept today ({"at", "totals"}), or None."""
+    try:
+        d = json.loads(_last_file().read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(d, dict) or d.get("day") != now.astimezone().strftime("%Y-%m-%d"):
+        return None
+    return d if isinstance(d.get("totals"), dict) else None
+
+
 # --- prices ---
 
 def prices() -> dict:

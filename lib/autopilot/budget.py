@@ -129,6 +129,7 @@ def workers_allowance(b: dict, cfg: dict, now: datetime, p: dict = None) -> tupl
     if p.get("mode") != "gateway":
         return p, None, allowance(b, cfg, now)
     s = spend.totals(now.astimezone())
+    spend.remember(now, s)
     return p, s, allowance(b, cfg, now, p, s)
 
 
