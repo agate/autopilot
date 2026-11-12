@@ -452,6 +452,13 @@ class CheckOutcomeTest(unittest.TestCase):
                 self.assertIn("found 1 thing in", a["text"])
                 self.assertIsNone(workers.Workers._worker_ask_kind(a, "pr"))
 
+    def test_non_behavior_fix_found_by_the_check_asks(self):
+        results = {"Correctness": [], "Test value": [finding("check-1", "Test value", behavior=False)]}
+        new = prloop.record_check(at_limit(), results, "green")
+        d = prloop.decide(new)
+        self.assertEqual((d["next"], d["result"], d["ended_by"]), ("end", "stopped", "fix_check"))
+        self.assertEqual(prloop.ask(new)["type"], "approve")
+
 
 class StoreCase(unittest.TestCase):
     def setUp(self):
@@ -688,6 +695,7 @@ class ReadTest(unittest.TestCase):
             ("not an object", b"[]", "a JSON object"),
             ("rounds not a list", b'{"rounds": {}}', "rounds"),
             ("rounds 1, 3", change(lambda r: r["rounds"][1].update(n=3)), r"rounds\[1\]\.n"),
+            ("rounds 1, 1", change(lambda r: r["rounds"][1].update(n=1)), r"rounds\[1\]\.n"),
             ("rounds start at 2", change(lambda r: r["rounds"][0].update(n=2)), r"rounds\[0\]\.n"),
             ("unknown bucket", change(lambda r: r["rounds"][2]["findings"][1].update(bucket="maybe")),
              r"rounds\[2\]\.findings\[1\]\.bucket"),
