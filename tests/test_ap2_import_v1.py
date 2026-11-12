@@ -685,6 +685,8 @@ class ImportV1Test(unittest.TestCase):
         for title, want in (("Old words", {"en": "Old words", "zh": "Old words"}),
                             ({"en": "Old", "zh": "旧"}, {"en": "Old", "zh": "旧"}),
                             ({"en": "Old"}, {"en": "Old", "zh": "Old"}),
+                            # A slot that sorts before the primary ("de") must not fill the missing zh slot.
+                            ({"de": "Alt", "en": "Old"}, {"en": "Old", "zh": "Old"}),
                             (None, {"en": "D1", "zh": "D1"}),
                             ("  ", {"en": "D1", "zh": "D1"})):
             with self.subTest(title=title):

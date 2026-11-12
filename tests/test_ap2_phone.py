@@ -191,6 +191,15 @@ class WindowTest(PhoneCase):
         row = next(r for r in data["cards"] if r["id"] == both["id"])
         self.assertEqual(row["title"], {"en": "Move the shop", "zh": "搬店"})
 
+    def test_a_missing_title_slot_takes_the_primary_languages_words(self):
+        cfg = Config(secondary_language="zh")
+        # Stored while only English was configured: no zh slot, and a "de" slot that sorts before "en".
+        project = self.add(kind="project", lane="running", title={"en": "Move the shop", "de": "Laden umziehen"})
+        data = self.build(cfg=cfg)
+        want = {"en": "Move the shop", "zh": "Move the shop"}
+        self.assertEqual({p["id"]: p["title"] for p in data["projects"]}, {project["id"]: want})
+        self.assertEqual(next(r for r in data["cards"] if r["id"] == project["id"])["title"], want)
+
     def test_a_project_off_the_phone_is_not_in_the_projects_list(self):
         project = self.add(kind="project", lane="running", title="Move the shop")
         old = self.add(kind="project", lane="done", age=timedelta(days=10), title="old project")

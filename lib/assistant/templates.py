@@ -107,9 +107,10 @@ class Template:
     replaces_builtin: bool = False
 
     def runs(self, card: dict, *, primary: str = Config.primary_language) -> list:
-        """The template's roles for `card`, in order: each with its brief filled from the card (`{title}` in the
-        `primary` language), and the tools and floor the role ships with. Raises BriefError naming the template,
-        the role and every missing field."""
+        """The template's roles for `card`, in order: each with its brief filled from the card (`{title}` as
+        `cards.title_for` picks it for the `primary` language: the primary slot, else any other non-blank slot), and
+        the tools and floor the role ships with. Raises BriefError naming the template, the role and every missing
+        field."""
         out = []
         for i, entry in enumerate(self.data["roles"]):
             role = roles.ROLES[entry["role"]]
@@ -153,8 +154,9 @@ def _lookup(card, name: str):
 
 def fill_brief(brief: str, card: dict, *, primary: str = Config.primary_language) -> str:
     """Fill each `{field}` (or `{a.b}`, a field inside a field) from `card`; `{{` and `}}` are literal braces.
-    `{title}` is the title in the `primary` language (`cards.title_for`). A field the card lacks, or holds as
-    null or blank text, is an error naming it: never an empty fill. A value must be text or a number."""
+    `{title}` is the title as `cards.title_for` picks it for the `primary` language (the primary slot, else any
+    other non-blank slot). A field the card lacks, or holds as null or blank text, is an error naming it: never an
+    empty fill. A value must be text or a number."""
     try:
         names = placeholders(brief)
     except ValueError as e:

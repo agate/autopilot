@@ -433,7 +433,8 @@ class ProjectSetupTest(WorkerCase):
         self.assertEqual(self.bg_calls(), [])
 
     def test_an_object_title_gives_the_branch_its_primary_language_words(self):
-        title = {"zh": "重试 other words", "en": "Retry failed payments"}
+        # "de" sorts before "en": the branch takes the primary slot, not the first slot in key order.
+        title = {"de": "Andere Worte", "zh": "重试 other words", "en": "Retry failed payments"}
         cid = self.add_card(project="shop", key="widgets-key", title=title)
         rec = self.workers().start(cid, "implement", cwd=self.wt, prompt="Do the work.")
         self.assertEqual(rec["branch"], "me.widgets-key.retry-failed-payments")
