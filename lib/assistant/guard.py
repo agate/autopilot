@@ -20,7 +20,8 @@ it only to find the end), and zsh's reading, where such a `'` is a plain charact
 after `xargs`) is no package mention, unless a redirect writes it. A segment whose every data-folder mention (each
 one judged up to the next one in its word) is a path under the worker's own run directory (`AP2_RUN_DIR`) with no
 `..`, no `$`, no backtick, no `settings-*.json` (the floor itself, Edit-denied too; also in the part up to a quote,
-comma or paren a quote made text, as in `python3 -c "open('<run>/x', 'w')"`) and, unquoted (bash and zsh glob
+comma, paren, `}`, `]` or `>` a quote made text, as in `python3 -c "open('<run>/x', 'w')"` or Perl's
+`q{<run>/x}`) and, unquoted (bash and zsh glob
 and brace-expand no quoted character, so JSON or code in quotes is text), no `{`, `}` or `,` when the segment has an
 unquoted `{` (not that of `${`: bash brace-expands no other) or a `{` inside a `"${...}"`, no `(` when the segment
 has an unquoted `(` inside a word (an `@(`-style extglob, a zsh glob group), no dot glob, and at the top level no `[`
@@ -28,15 +29,21 @@ and no glob that matches a floor file (or longer than 64 characters) after it, a
 dropped (zsh closes a brace there), is allowed: the worker writes its results there. A command that may turn extglob
 on (it holds `extglob`), may change a zsh option (`setopt`, `unsetopt`, `emulate`, `options[...]`, a `set -o` other
 than `pipefail` and the like), holds zsh's `${(` (outside single quotes and quoted-delimiter heredoc bodies) or an
-unquoted extglob opener outside arithmetic, is denied when it names a guarded path anywhere. A command that may make
-a name run something else (a function definition, `alias`, `hash`, `source` or `autoload` as a command word, or as
-any word of a segment with an unquoted `)`, `]]` or `}`, `PATH=...`, `fpath=...`, zsh's `functions[...]`, ...)
-loses every `ap2` exemption, and a segment of it that names the data folder
-or the package outside the own run directory at all is denied (one whose run-directory paths only have a `$` after
-them is judged by its verb). The script a shell or `eval` runs (`bash -c '...'`), and the words piped into a shell
+unquoted extglob opener outside arithmetic, is denied when it names a guarded path anywhere. `ap2` keeps its
+exemption only when nothing in the command, in any position and in every reading, can make the name run something
+else (`_ap2_trusted`: a word `alias`, `hash`, `source`, `eval`, `function`, ..., a `.` that may run, `ap2` as a name
+outside an `ap2` call's own words, a name table or search-path word such as `${commands[ap2]::=...}` or `PATH=...`,
+a function definition); else an `ap2` segment that names a guarded path is denied. A command that may make any
+name run something else (a function definition, `alias`, `hash`, `source` or `autoload` where it may run as a
+command, after redirects, assignments, `command --`, a substitution that may expand to nothing or inside `<(...)`
+too, or as any word after an unquoted `)`, `]]` or `}` of its segment, `PATH=...`, `fpath=...`, zsh's
+`functions[...]`, ...) loses every `ap2` exemption, and a segment of it that names the data folder or the package
+outside the own run directory at all is denied (one whose run-directory paths only have a `$` after them is judged
+by its verb). The script a shell or `eval` runs (`bash -c '...'`), and the words piped into a shell
 with no `-c` (`echo '...' | sh`), are read as a command of their own; when that writes nothing, the outer segment no
 longer reads the `-c` script word (the words after it, the script's `$1`..., stay, judged with the script's verb too)
-nor the words of a piped `echo` or `printf` (its redirects still count). A shell's name, or its script, before a
+nor the words of a piped plain `echo` or `printf` (one command word, no `always` or closer; its redirects still
+count). A shell's name, or its script, before a
 word-final `}` counts as well (zsh's `{ ... | sh}`). A zsh script with a `(` that names a guarded path is a write (a
 fresh zsh has bare glob qualifiers on). Heredoc body lines that end in a backslash are joined, as bash joins them (an
 even run of backslashes too, fail-closed); a `$'...'` or `$"..."` delimiter is decoded as bash decodes it.
@@ -132,8 +139,9 @@ def _home_expansions(paths, home: str) -> list:
 
 
 def _text_end(rest: str, mask: str):
-    """The index of the first quote, comma or paren in `rest` that a quote made text (`_HIDE` in `mask`), or None:
-    in code inside quotes (`python3 -c "open('<run>/x', 'w')"`) a file name ends there."""
+    """The index of the first quote, comma, paren, `}`, `]` or `>` in `rest` that a quote made text (`_HIDE` in
+    `mask`), or None: in code inside quotes a file name ends there (`python3 -c "open('<run>/x', 'w')"`, Perl's
+    `q{<run>/x}` and `q[...]`, Ruby's `%q{...}`)."""
     k = mask.find(_HIDE)
     while k >= 0:
         if rest[k] in _TEXT_END:
@@ -142,7 +150,7 @@ def _text_end(rest: str, mask: str):
     return None
 
 
-_TEXT_END = frozenset("'\",()")
+_TEXT_END = frozenset("'\",()}]>")
 
 
 def _bad_part(part: str, top: bool, mask=None) -> bool:
@@ -199,10 +207,10 @@ class _Marks:
 
     def _level(self, w: str, braces: bool = True, eglob: bool = True, mask=None, forms=None) -> int:
         """How far the case-folded text `w` (one mention, up to the next one in its word; `mask` the same text with
-        each quoted glob, bracket, brace, comma or paren character as `_HIDE`, `_Word`) is from a path under the own
-        run directory that stays inside it: 0 when it is one; 1 when it is one but for a `$` or backtick after it (a
-        value bash fills in at run time); 2 when it is no such path. After the run directory it refuses, unquoted,
-        a `{`, `}` or `,` when its segment has an unquoted `{` (`braces`: a brace expansion, also one that opens
+        each quoted glob, bracket, brace, comma, paren, quote or `>` character as `_HIDE`, `_Word`) is from a path
+        under the own run directory that stays inside it: 0 when it is one; 1 when it is one but for a `$` or
+        backtick after it (a value bash fills in at run time); 2 when it is no such path. After the run directory
+        it refuses, unquoted, a `{`, `}` or `,` when its segment has an unquoted `{` (`braces`: a brace expansion, also one that opens
         before the mention, as in `{$AP2_RUN_DIR/..,x}`), a `(` when its segment has an unquoted `(` inside a word
         (`eglob`: an extglob such as `@(`, or a zsh glob group; one can match `..` or a floor file), and a bad part
         (`_bad_part`), also once any unquoted `}` at its end is dropped (zsh reads a `}` that ends a word as a
@@ -704,7 +712,7 @@ def _in_redirect(cmd: str, i: int, esc: int) -> bool:
     return c in "|&" and (after or zsh or (c == "&" and cmd[i + 1:i + 2] == ">"))
 
 
-def _words(seg: str, targets=None, events=None, pid: bool = True, flags=None, sq: bool = True) -> list:
+def _words(seg: str, targets=None, events=None, pid: bool = True, flags=None, sq: bool = True, extra=None) -> list:
     """The shell words of `seg` as bash reads quotes and backslashes, with the quotes removed: `"$AP2_RUN_DIR"/../x`
     is one word, `$AP2_RUN_DIR/../x`, and `"$AP2_"DATA` is `$AP2_DATA`; a backslash-newline outside single quotes is
     no character at all, and a lone backslash at the very end is none either (bash drops it). Inside `$(...)`, even
@@ -712,14 +720,16 @@ def _words(seg: str, targets=None, events=None, pid: bool = True, flags=None, sq
     backtick runs up to the next unescaped backtick (whatever quotes lie between), read as words of its own. Inside
     `"..."` a `${...}` and the `(...)` of a `$$(` read quotes afresh too, and stay part of the word. A word that a
     `$(`, a `$$(` or an opening backtick ends keeps that `$` or backtick (`$AP2_RUN_DIR$`), so no command's output
-    passes for a plain path; the closing `)` or backtick is no part of a word. In `$'...'` a backslash keeps the
+    passes for a plain path, and a backtick that opens a word is a word of its own (`` ` ``), as `$(`'s `$` is; the
+    closing `)` or backtick is no part of a word. In `$'...'` a backslash keeps the
     next character as it is. `pid` is the reading of `"$$(`, and `sq` that of a `'` inside `"${...}"`, as in
-    `_segments`. Each word is a `_Word`: its `mask` hides each glob, bracket, brace, comma or paren character that
+    `_segments`. Each word is a `_Word`: its `mask` hides each glob, bracket, brace, comma, paren, quote or `>` that
     a quote or a backslash made text (outside `"${...}"`, where bash 3.2 ends the quote at an inner `"`).
     When `targets` is a list, the word after each unquoted `>` (in `>`, `>>`, `>|`, `>&`, `&>`, `<>`, and zsh's
     `>!`, `>>!`, `>&|`, `>&!`, `>>&|` and `>>&!`) is added to it too: the file that redirect writes. When `events`
-    is a list, each `$(` or opening backtick adds `(index, True)` to it and each `)` or backtick that closes one
-    `(index, False)`, `index` being that of the next word: where a command starts and where it ends, for `_commands`.
+    is a list, each `$(` or opening backtick, and each `<(`, `>(` and zsh's `=(` (a `=(` that starts a word), adds
+    `(index, True)` to it and each `)` or backtick that closes one `(index, False)`, `index` being that of the next
+    word: where a command starts and where it ends, for `_commands`.
     An unquoted `@(`, `+(`, `!(`, `?(` or `*(` (the `(` right after one of those characters, unescaped, in a word)
     is an extglob, as bash reads it with `shopt -s extglob` (and as a syntax error without it): its `(...)` stays in
     the word, with no word break inside (`$X/.@(. |x)/c` is one word). Any other unquoted `(` inside a word (zsh
@@ -729,15 +739,32 @@ def _words(seg: str, targets=None, events=None, pid: bool = True, flags=None, sq
     inner `"`, so `x=; echo "${x:-"{a,b}"}"` prints `a b`), `(` for a `(` inside a word (what `_level` refuses
     after the run directory), and `()` for an unquoted `(` with only blanks before its `)` (a function
     definition, `ap2() {`), and `)`, `]]` and `}` for an unquoted one (a `)` that closes no substitution, a `}` not
-    that of a `${`: `_rebinds`)."""
+    that of a `${`: `_rebinds`). When `extra` is a dict of lists, `extra["ops"]` gets the index of each word that
+    is part of a redirect (the word after an unquoted `<` or `>` operator, and a digit run right before one, as
+    the `2` of `2>&1`), `extra["glued"]` that of each word that goes on, with no blank, after a substitution closed
+    (the `/x` of `f=$(pwd)/x`: one shell word with the word before the `$(`), and `extra["loose"]` the index of the
+    first word after each unquoted closer (`)`, `]]`, or a `}` that is no `${`'s and does not close an empty `{}`
+    pair, as in `-exec ... {} +` or `xargs -I{}`)."""
     words, text, hid, i, n = [], [], [], 0, len(seg)  # hid: the indexes in `text` of the characters quoted text
     esc = -1  # the last escaped index
     # The quote state, as in `_segments` (`s`: a `'` inside `"${...}"`, which hides no `$(` or backtick): quote,
     # open `(`, open `${`, the context's kind, and the open `(` of an extglob (`eglob`); `stack` holds the outer
     # contexts' states.
     stack, quote, paren, brace, kind, eglob = [], None, 0, 0, None, 0
-    redir = False  # whether the next word is a redirect's target
+    redir = 0  # whether the next word is a redirect's target (1) or operand (2)
+    glue = False  # whether a substitution just closed, with no blank after it yet
     dq = 0  # how many `"${` contexts are open
+    ops, glued, loose = (extra["ops"], extra["glued"], extra["loose"]) if extra is not None else ([], [], [])
+
+    def flush(r):
+        """`_flush`, noting the word's index in `ops` (it is part of a redirect, `r` & 2) and `glued`."""
+        if text:
+            if r & 2:
+                ops.append(len(words))
+            if glue:
+                glued.append(len(words))
+        return _flush(words, text, hid, targets, r)
+
     while i < n:
         c = seg[i]
         if dq and c == "{" and flags is not None:
@@ -781,23 +808,28 @@ def _words(seg: str, targets=None, events=None, pid: bool = True, flags=None, sq
                 text.append("${")  # still the `"..."` word
             else:  # a `$(` or `$$(` ends the word, keeping its `$`
                 text.append(c)
-                redir = _flush(words, text, hid, targets, redir)
+                redir = flush(redir)
+                glue = False
                 if new == "(" and events is not None:
                     events.append((len(words), True))
             i += 2
             continue
         elif c == "`":
             end = _tick_end(seg, i + 1)
-            if text:
-                text.append(c)
-            redir = _flush(words, text, hid, targets, redir)
-            inner = []
-            sub = _words(seg[i + 1:end], targets, inner, pid, flags, sq)
+            text.append(c)  # the word it ends keeps it; at a word's start it is a word of its own
+            redir = flush(redir)
+            glue = False
+            inner, more = [], {"ops": [], "glued": [], "loose": []}
+            sub = _words(seg[i + 1:end], targets, inner, pid, flags, sq, more)
+            base = len(words)
             if events is not None:
-                events.append((len(words), True))
-                events.extend((len(words) + k, opens) for k, opens in inner)
-                events.append((len(words) + len(sub), False))
+                events.append((base, True))
+                events.extend((base + k, opens) for k, opens in inner)
+                events.append((base + len(sub), False))
+            for name, out in (("ops", ops), ("glued", glued), ("loose", loose)):
+                out.extend(base + k for k in more[name])
             words += sub
+            glue = True
             i = end + 1
             continue
         elif quote == '"':
@@ -851,27 +883,41 @@ def _words(seg: str, targets=None, events=None, pid: bool = True, flags=None, sq
             if flags is not None:
                 flags.add("(")
         elif c in _BREAK:
+            opener = False  # a `<(`, `>(` or zsh's `=(`: a command runs in there
             if c == "(":
+                opener = (not text and i and seg[i - 1] in "<>" and esc != i - 1) or text == ["="]
                 if text:  # `x(`: a zsh glob group (`$AP2_RUN_DIR/(a)`), a `=(`, a function name; bash: an error
                     text.append(c)  # the `(` stays in the word it ends
                     if flags is not None:
                         flags.add("(")
                 if flags is not None and _EMPTY_PARENS.match(seg, i):
                     flags.add("()")  # `name()`, `name ()`: a function definition
-            redir = _flush(words, text, hid, targets, redir)
-            if c == "(":
+            elif c in "<>" and text and "".join(text).isdigit():
+                redir |= 2  # the `2` of `2>&1`: part of the redirect
+            redir = flush(redir)
+            glue = False
+            if opener:
+                stack.append((quote, paren, brace, kind, eglob))
+                quote, paren, brace, kind, eglob, redir = None, 0, 0, "(", 0, 0
+                if events is not None:
+                    events.append((len(words), True))
+            elif c == "(":
                 paren += 1
             elif c == ")":
                 if paren or not stack:
                     paren -= bool(paren)
                     if flags is not None:
                         flags.add(")")  # no `)` that closes a substitution
+                    loose.append(len(words))
                 else:
                     if events is not None:
                         events.append((len(words), False))
                     quote, paren, brace, kind, eglob = stack.pop()
+                    glue = True
+            elif c == "<":
+                redir |= 2
             elif c == ">":
-                redir = True
+                redir = 3
                 if seg.startswith("!", i + 1):
                     i += 1  # zsh's `>!` (noclobber override, as `>|`): the `!` is part of the operator
                 elif seg.startswith(("&!", "&|"), i + 1):
@@ -879,15 +925,18 @@ def _words(seg: str, targets=None, events=None, pid: bool = True, flags=None, sq
         else:
             if flags is not None and (c in "{}" or seg.startswith("]]", i)):
                 flags.add("]]" if c == "]" else c)
+            if seg.startswith("]]", i) or (c == "}" and not (
+                    text and text[-1] == "{" and not (hid and hid[-1] == len(text) - 1))):
+                loose.append(len(words) + 1)  # a closer inside the word being read: the words after it
             text.append(c)
         i += 1
-    _flush(words, text, hid, targets, redir)
+    flush(redir)
     return words
 
 
 # The characters a quote or a backslash makes text for globbing and brace expansion (`_Word.mask` hides them), and
-# the quotes, which then end a file name in code inside quotes (`_text_end`).
-_GLOBS = frozenset("*?[]{},()'\"")
+# the quotes and `>`, which then end a file name in code inside quotes (`_text_end`).
+_GLOBS = frozenset("*?[]{},()'\">")
 _HIDE = "\x00"  # what `_Word.mask` puts for such a quoted character: it matches no glob, part or name
 
 
@@ -898,10 +947,10 @@ class _Word(str):
     mask = None
 
 
-def _flush(words: list, text: list, hid: list, targets, redir: bool) -> bool:
+def _flush(words: list, text: list, hid: list, targets, redir: int) -> int:
     """Ends the word in `text` (`hid`: the indexes of its quoted `_GLOBS` characters), if any, adding it to
-    `targets` too when it is a redirect's target, and empties `text` and `hid`; returns whether the next word
-    still is one."""
+    `targets` too when it is a redirect's target (`redir` & 1), and empties `text` and `hid`; returns `redir` for
+    the next word: unchanged when there was no word, else 0."""
     if not text:
         return redir
     word = _Word("".join(text))
@@ -911,9 +960,9 @@ def _flush(words: list, text: list, hid: list, targets, redir: bool) -> bool:
     text.clear()
     hid.clear()
     words.append(word)
-    if redir and targets is not None:
+    if redir & 1 and targets is not None:
         targets.append(word)
-    return False
+    return 0
 
 
 _NEVER = re.compile(r"(?!)")  # matches no word
@@ -923,14 +972,15 @@ _XARGS_VALUE = frozenset(("-E", "-I", "-J", "-L", "-P", "-R", "-S", "-a", "-d", 
 # name -> (the flags that take no value, as a regex; the flags that take the next word). Any other flag (`env -S`,
 # `command -v`) leaves the next word an argument.
 _RUNNERS = {"xargs": (re.compile(r"-.*", re.S), _XARGS_VALUE), "env": (re.compile(r"-[iv]*"), frozenset(("-u",))),
-            "nohup": (re.compile(r"--"), frozenset()), "command": (re.compile(r"-p"), frozenset()),
+            "nohup": (re.compile(r"--"), frozenset()), "command": (re.compile(r"-p|--"), frozenset()),
             "nice": (re.compile(r"-\d+"), frozenset(("-n",))),
             # zsh's precommand modifiers, and `repeat N` (a count, then the command; any other count word leaves
             # the next word an argument, fail-closed: an `ap2` there is no ap2 call).
             "noglob": (_NEVER, frozenset()), "nocorrect": (_NEVER, frozenset()), "-": (_NEVER, frozenset()),
             "repeat": (re.compile(r"\d+"), frozenset())}
-# A `NAME=value` word: before a command name, or after `env`, it sets a variable.
-_ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+# A `NAME=value` word (also `NAME+=value` and `NAME[i]=value`): before a command name, or after `env`, it sets a
+# variable.
+_ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=")
 # `time -p` (POSIX output) still runs the next word. A module constant, not a literal in `_commands`: a function
 # holding the "-p" literal reads as a session launch to tests/test_ap2_profile_launch.py.
 _TIME_POSIX = "-p"
@@ -960,18 +1010,34 @@ def _unbrace(word: str) -> str:
 _ALWAYS = re.compile(r"always(?![^\s;&|(){}<>])")
 
 
-def _commands(words: list, events: list):
-    """The indexes of the words bash runs as a command name: the first word after the keywords and `NAME=value`
-    words (and a `-p` after `time`) from the segment's start and from each `$(...)` or backticks that opens
-    (`events`, from `_words`; one that closes first, as in `$(time)`, names none), and the word a runner
-    (`_RUNNERS`: `xargs`, `env`, `nohup`, `command`, `nice`, zsh's `noglob`, `nocorrect`, `-` and `repeat N`) runs
-    after its flags. Also the segment's own command
-    (`lead`): the last of that chain from the segment's start (`nohup env A=1 <cmd>` is `<cmd>`), or None."""
+def _commands(words: list, events: list, ops=frozenset(), glued=frozenset()):
+    """The indexes of the words bash runs as a command name: the first word after the keywords, the words of a
+    redirect (`ops`, from `_words`: `>/dev/null hash ...`, `2>&1 hash ...`) and `NAME=value` words (`x+=1`,
+    `a[1]=1`, `x=$(...)`; and a `-p` after `time`) from the segment's start and from each `$(...)`, backticks,
+    `<(...)`, `>(...)` or `=(...)` that opens (`events`, from `_words`; one that closes first, as in `$(time)`,
+    names none), and the word a runner (`_RUNNERS`: `xargs`, `env`, `nohup`, `command` (also `command --`), `nice`,
+    zsh's `noglob`, `nocorrect`, `-` and `repeat N`) runs after its flags. When a substitution closes, the reading
+    goes on as it was where it opened, and a word glued to it (`glued`: the `/x` of `f=$(pwd)/x`) is part of the
+    word before it. Also the segment's own command (`lead`): the last of that chain from the segment's start
+    (`nohup env A=1 <cmd>` is `<cmd>`), or None; and the words that may run as a command after all (`maybe`): after
+    a command word that holds a `$` or a backtick (`$e hash ...`, `$(true) hash ...`: it may expand to nothing) or
+    that is the count of zsh's `repeat` and no plain number (`repeat 1+1 hash ...`), the reading goes on as if that
+    word were not there, its command words going to `maybe` (and on again after such a word: `$(true) $(true) .
+    f`, `` `true` command -- . f ``)."""
     out, lead, want, top, run, value, e = [], None, True, True, None, False, 0
+    maybe, soft, stack, chosen = set(), False, [], None  # soft: a command word found now only may run (`maybe`)
     for k, w in enumerate(words):
         while e < len(events) and events[e][0] <= k:
-            want, top, run, value = events[e][1], False, None, False
+            if events[e][1]:
+                stack.append((want, top, run, value, soft))
+                want, top, run, value, soft = True, False, None, False, False
+            elif stack:
+                want, top, run, value, soft = stack.pop()
+            else:
+                want, top, run, value, soft = False, False, None, False, False
             e += 1
+        if k in glued or k in ops:
+            continue
         if run is not None:
             plain, values = _RUNNERS[run]
             if value:
@@ -982,15 +1048,21 @@ def _commands(words: list, events: list):
                 continue
             if plain.fullmatch(w) or (run == "env" and _ASSIGN.match(w)):
                 continue
-            want, run = not w.startswith("-"), None  # an unknown flag: no command after it
+            # An unknown flag: no command after it; zsh's `-` modifier is a command word (`nocorrect - cmd`).
+            want, run = not w.startswith("-") or w == "-", None
         if want and w not in _KEYWORDS and not _ASSIGN.match(w) and not (
                 w == _TIME_POSIX and k and words[k - 1] == "time"):
-            out.append(k)
-            if top:
-                lead = k
+            if soft:
+                maybe.add(k)
+            else:
+                out.append(k)
+                if top:
+                    lead = k
             name = w.rsplit("/", 1)[-1]
-            want, run = False, name if name in _RUNNERS else None
-    return out, lead
+            empty = "$" in w or "`" in w or (k > 0 and words[k - 1] == "repeat" and chosen == k - 1)
+            chosen = k
+            want, run, soft = empty, name if name in _RUNNERS else None, empty
+    return out, lead, maybe
 
 
 def _runs_ap2(words: list, lead) -> bool:
@@ -1239,6 +1311,7 @@ def _command_writes(cmd: str, marks: _Marks, depth: int, budget: _Budget) -> boo
     # a `'` inside `"${...}"` as a plain character: a command with a `$$(`, or with a `'` and a `${`, is judged in
     # each of those readings, and denied when one of them writes.
     readings = [(True, True)] + [(False, True)] * ("$$(" in cmd) + [(False, False)] * ("'" in cmd and "${" in cmd)
+    done = []  # each reading: (pid, sq, segments, `_Parsed` segments)
     for k, (pid, sq) in enumerate(readings):
         if k:
             budget.spend(len(cmd))
@@ -1252,6 +1325,10 @@ def _command_writes(cmd: str, marks: _Marks, depth: int, budget: _Budget) -> boo
         # zsh's `${(` flag group (`"${(e)x:-\$(cmd)}"` runs `cmd`), which this reading does not follow.
         if any(_flag_group(p) for p in parsed) and marks.names(cmd):
             return True
+        done.append((pid, sq, segs, parsed))
+    # Whether `ap2` keeps its exemption: judged once, on every reading, before any segment is.
+    trusted = _ap2_trusted(done)
+    for pid, sq, segs, parsed in done:
         rebound = _rebinds(parsed)
         # A shell that reads its script from its input (`... | sh`, no `-c`): the words of each segment piped
         # before it are read as a script too (`echo 'tee <run>/settings-implement.json < f' | sh`), and those
@@ -1266,10 +1343,10 @@ def _command_writes(cmd: str, marks: _Marks, depth: int, budget: _Budget) -> boo
                         return True
                     fed.add(j)
         for j, (seg, p) in enumerate(zip(segs, parsed)):
-            key = _alike(seg) and (seg, p.body, p.quoted, rebound, depth, j in fed)
+            key = _alike(seg) and (seg, p.body, p.quoted, rebound, trusted, depth, j in fed)
             if key in budget.clean:
                 continue  # judged in an earlier reading, which read it alike
-            if _writes_guarded(seg, marks, pid, rebound, depth, budget, sq, p, j in fed):
+            if _writes_guarded(seg, marks, pid, rebound, depth, budget, sq, p, j in fed, trusted):
                 return True
             if key:
                 budget.clean.add(key)
@@ -1313,14 +1390,20 @@ def _flag_group(p) -> bool:
 
 class _Parsed:
     """One segment read as words (`_words`, with `pid` and `sq`): its `words`, redirect `targets`, substitution
-    `events`, `flags`, the indexes of its command words and its own command (`commands`, `lead`, from
-    `_commands`), whether it is a heredoc body line (`body`) and one of a heredoc with a quoted delimiter (`quoted`)."""
+    `events`, `flags`, the index of the first word after an unquoted closer (`loose`, len(words) for none), the
+    indexes of its command words, its own command and the words that may run after all (`commands`, `lead`,
+    `maybe`, from `_commands`), whether it is a heredoc body line (`body`) and one of a heredoc with a quoted
+    delimiter (`quoted`)."""
 
     def __init__(self, seg: str, pid: bool, sq: bool):
         self.targets, self.events, self.flags, self.body = [], [], set(), isinstance(seg, _Body)
         self.quoted = self.body and seg.quoted
-        self.words = _words(seg, self.targets, self.events, pid, self.flags, sq)
-        self.commands, self.lead = _commands(self.words, self.events)
+        extra = {"ops": [], "glued": [], "loose": []}
+        self.words = _words(seg, self.targets, self.events, pid, self.flags, sq, extra)
+        self.loose = min(extra["loose"], default=len(self.words))
+        self.commands, self.lead, self.maybe = _commands(self.words, self.events, set(extra["ops"]),
+                                                         set(extra["glued"]))
+        self.commands_set = set(self.commands)
 
 
 def _stdin_shell(words: list):
@@ -1390,40 +1473,79 @@ def _rebinds(parsed: list) -> bool:
     """Whether a segment of the command (not a heredoc body line) may make a name run something else: it defines a
     function (`name()`, `name ()`, `function name`; bash's `command_not_found_handle` and zsh's
     `command_not_found_handler`, which run for a name that is not found, are functions too), holds one of `_REBIND`
-    as a command word (`alias ap2=cp`, `hash -p /bin/cp ap2`, zsh's `hash ap2=/bin/cp`, also after a runner, an
-    assignment or a zsh precommand modifier: `command hash ...`, `x=1 hash ...`, `noglob hash ...`, `\\hash`), after
-    a command word that may expand to nothing or after `repeat N` (`_runs_next`), or as any word of a segment with
-    an unquoted `)`, `]]` or `}` (`_LOOSE`: `case x in x) hash ...`, `for x (1) hash ...`, `if [[ -n x ]] hash
-    ...`; fail-closed there, `grep -c 'x' f) hash` counts too), runs `.` as a command (`find .` is no rebinding), or
-    holds a word that sets the search path, zsh's function path or a zsh name table (`_TABLES`: `PATH=/tmp:$PATH`,
-    `fpath=(/tmp/fn)`, `functions[ap2]=...`). A rebinding name as an argument (`<pkg>/bin/ap2 source list`, `grep
-    -i hash <data>/items/C1.yaml`) rebinds nothing."""
+    or `.` where it may run as a command (`_command_like`: a command word to `_commands`, so also after redirects,
+    assignments, a runner, a zsh precommand modifier or a backslash, `command --`, inside `<(...)`, `>(...)` or
+    `=(...)`; or a word `_commands` finds may run after all, after a command word with a `$` or backtick or after
+    `repeat N`), or as any word after an unquoted `)`, `]]` or `}` of its segment (`_Parsed.loose`: `case x in x)
+    hash ...`, `for x (1) hash ...`, `if [[ -n x ]] hash ...`; fail-closed there, `grep -c 'x' f) hash` counts
+    too, while the `}` of an empty `{}`, as in `-exec grep -l hash {} +`, is none), or holds a word that sets the
+    search path, zsh's function path or a zsh name table (`_TABLE_ANY`: `PATH=/tmp:$PATH`, `fpath=(/tmp/fn)`,
+    `functions[ap2]=...`, `: ${commands[ap2]::=/bin/cp}`). A rebinding name as an argument (`<pkg>/bin/ap2 source
+    list`, `grep -i hash <data>/items/C1.yaml`, `find . -name x`) rebinds nothing."""
     for p in parsed:  # `_Parsed` segments
         if p.body:
             continue
-        loose = bool(p.flags & _LOOSE)  # a case pattern, a zsh short loop or condition: any word may run
-        commands = set(p.commands)
-        if "()" in p.flags or any(p.words[k] == "." for k in commands) or any(_TABLES.match(w) for w in p.words):
+        if "()" in p.flags or any(_TABLE_ANY.search(w) for w in p.words):
             return True
-        if any(w in _REBIND and (loose or k in commands or _runs_next(p.words, commands, k))
-               for k, w in enumerate(p.words)):
+        if any((w in _REBIND or w == ".") and (k >= p.loose or _command_like(p, k)) for k, w in enumerate(p.words)):
             return True
     return False
 
 
+def _command_like(p, k: int) -> bool:
+    """Whether the word at `k` of the `_Parsed` segment `p` may run as a command: a command word (`commands`), or a
+    word that may run after all (`maybe`)."""
+    return k in p.commands_set or k in p.maybe
+
+
 # The `_words` flags of an unquoted `)` (not one that closes a substitution), `]]` and `}` (not that of a `${`):
-# after a case pattern (`x) hash ...`), a zsh short loop (`for x (1) hash ...`, `while { a } { hash ...}`) or a zsh
-# condition (`if [[ -n x ]] hash ...`) a word that is no command word to `_commands` can run.
+# after one of them (a case pattern, `x) cmd`, a zsh short loop, `for x (1) cmd` and `while { a } { cmd }`, or a zsh
+# condition, `if [[ -n x ]] cmd`) a word that is no command word to `_commands` can run (`_printer`; `_rebinds`
+# reads where the first one is, `_Parsed.loose`).
 _LOOSE = frozenset((")", "]]", "}"))
+# The names `_TABLES` sets, read anywhere in a word (not after a name character, `-` or `.`: `PYTHONPATH=src`,
+# `--path=x` and `sys.path=` are none), and zsh's `${PATH::=...}`, which sets the search path in an expansion.
+_TABLE_NAMES = r"(?:PATH|path|FPATH|fpath|functions|aliases|galiases|saliases|commands)"
+_TABLE_ANY = re.compile(r"(?<![A-Za-z0-9_.-])" + _TABLE_NAMES + r"(?:\[|\+?=)|\$\{(?:PATH|path|FPATH|fpath)::?=")
+# The search path's names as a plain word: `for PATH in ./b`, `read PATH`, `printf -v PATH ...` set it.
+_PATH_WORDS = frozenset(("PATH", "path", "FPATH", "fpath"))
+# `ap2` as a name in a word: `hash ap2=/bin/cp`, `commands[ap2]`, `alias ap2=cp`, `/tmp/b/ap2` (not `AP2_DATA`,
+# `test_ap2_x` or `ap2x`).
+_AP2_NAME = re.compile(r"(?<![A-Za-z0-9_])ap2(?![A-Za-z0-9_])")
 
 
-def _runs_next(words: list, commands: set, k: int) -> bool:
-    """Whether the word at `k` may run as a command after all: the command word before it holds a `$` or a backtick
-    (`$e hash ...`, `$e` may be empty), or is the count of zsh's `repeat` (`repeat $n hash ...`)."""
-    before = k - 1
-    if before in commands and ("$" in words[before] or "`" in words[before]):
-        return True
-    return before - 1 in commands and words[before - 1] == "repeat"
+def _ap2_trusted(readings) -> bool:
+    """Whether `ap2` in the command is the package's `ap2` for sure, so an `ap2` segment keeps its exemption:
+    nothing in any reading (`readings`: (pid, sq, segments, `_Parsed` segments) of every reading of the command;
+    each `$(...)`, backtick and process substitution's text is in there, and a shell's script is judged as a command
+    of its own) can make the name run something else, whatever its position (fail-closed: as an argument too). It
+    is not when any word is one of `_REBIND`, a `.` that may run (`_dot_runs`), `ap2` as a name (`_AP2_NAME`: `hash
+    ap2=...`, `commands[ap2]`, `autoload -U ap2`; not the command word of an `ap2` segment that runs nothing else,
+    nor its arguments after it: `ap2 card note C1 --text "ap2 is great"`), a name table or search-path word
+    (`_TABLE_ANY`, `_PATH_WORDS`), or when a segment defines a function (a `()`). A heredoc body line is data: only
+    a name table there counts (an unquoted body expands `${commands[ap2]::=...}`)."""
+    for pid, sq, segs, parsed in readings:
+        for seg, p in zip(segs, parsed):
+            if p.body:
+                if not p.quoted and any(_TABLE_ANY.search(w) for w in p.words):
+                    return False
+                continue
+            if "()" in p.flags:
+                return False
+            lead = p.lead if _runs_ap2(p.words, p.lead) else None  # its arguments too, when it runs nothing else
+            args = lead is not None and not _runs_more(seg, pid, sq)
+            for k, w in enumerate(p.words):
+                if w in _REBIND or w in _PATH_WORDS or _TABLE_ANY.search(w) or (w == "." and _dot_runs(p, k)):
+                    return False
+                if k != lead and not (args and k > lead) and _AP2_NAME.search(w):
+                    return False
+    return True
+
+
+def _dot_runs(p, k: int) -> bool:
+    """Whether the `.` at `k` of the `_Parsed` segment `p` may run a file: it is the segment's first word, may run
+    as a command (`_command_like`), comes after an unquoted closer (`loose`) or after a keyword."""
+    return k == 0 or _command_like(p, k) or k >= p.loose or p.words[k - 1] in _KEYWORDS
 
 
 def _extglob(cmd: str) -> bool:
@@ -1478,7 +1600,7 @@ def _options(cmd: str) -> bool:
 
 
 def _writes_guarded(seg: str, marks: _Marks, pid: bool, rebound: bool = False, depth: int = 0, budget=None,
-                    sq: bool = True, parsed=None, fed: bool = False) -> bool:
+                    sq: bool = True, parsed=None, fed: bool = False, trusted: bool = True) -> bool:
     """Whether the segment `seg` (read with `pid` and `sq`, as in `_segments`; `parsed` its `_Parsed`, when the caller
     has it) writes into a guarded path. With
     `rebound` (`_rebinds`: a name may run anything) no segment keeps the `ap2` exemption, and one that names the data
@@ -1510,13 +1632,13 @@ def _writes_guarded(seg: str, marks: _Marks, pid: bool, rebound: bool = False, d
         script = _script_word(words, shell) if depth == 0 and shell in p.commands else None
         if script is not None:
             out.add(script)
-    if fed and (depth == 0 or len(words) < 2) and p.lead is not None and words[p.lead] in _PRINTERS:
+    if fed and (depth == 0 or len(words) < 2) and _printer(p):
         out.update(range(len(words)))
-    if rebound:
-        level = marks.level(words, braces, eglob)
-        return level == 2 or (level == 1 and _verb(seg, words))
     commands, lead = p.commands, p.lead
     ap2 = not p.body and _runs_ap2(words, lead)
+    if rebound:
+        level = marks.level(words, braces, eglob)
+        return level == 2 or (level == 1 and (ap2 or _verb(seg, words)))
     # `<pkg>/bin/ap2` where bash runs it as a command is no write into the package (unless a redirect names it).
     written = set(targets)
     run = {k for k in commands if words[k] not in written and marks.is_ap2(words[k])}
@@ -1524,6 +1646,8 @@ def _writes_guarded(seg: str, marks: _Marks, pid: bool, rebound: bool = False, d
     if not marks.unsafe((w for k, w in enumerate(words) if k not in run and (k not in out or id(w) in kept)),
                         braces, eglob):
         return False
+    if ap2 and not trusted:
+        return True  # `ap2` may run anything here (`_ap2_trusted`): a guarded path it names is a write
     if ap2 and not _runs_more(seg, pid, sq):
         return marks.unsafe(targets, braces, eglob)  # a redirect's file is the shell writing, not ap2
     if script is not None:  # the script's own verb, with its quotes removed, acts on the arguments after it
@@ -1536,6 +1660,14 @@ def _writes_guarded(seg: str, marks: _Marks, pid: bool, rebound: bool = False, d
 # The commands that print their words and write nothing (their redirects aside): piped into a shell, their words are
 # that shell's script, and nothing else (`_writes_guarded`).
 _PRINTERS = frozenset(("echo", "printf"))
+
+
+def _printer(p) -> bool:
+    """Whether the `_Parsed` segment `p` is a plain printer command: its own command is one of `_PRINTERS`, it is its
+    only command word (no substitution runs one), and it has no unquoted `)`, `]]` or `}` (`_LOOSE`) and no
+    `always` word, after which zsh runs another command (`{ echo x } always { cmd }`)."""
+    return (p.lead is not None and p.words[p.lead] in _PRINTERS and len(p.commands) == 1
+            and not p.flags & _LOOSE and "always" not in p.words)
 
 
 def _verb(seg: str, words: list) -> bool:

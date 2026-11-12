@@ -1910,9 +1910,10 @@ Calls the author made without asking (check them):
       its quoted ones (inside a `"${...}"` nothing is hidden, below). A `..` part, a `$` or backtick and a
       `settings-*.json` name count however they are quoted (`cp x "$AP2_RUN_DIR/../c"` and
       `cp x "$AP2_RUN_DIR/settings-implement.json"` are denied). In code inside quotes a file name ends at the
-      first quote, comma or paren a quote made text, so the part up to there is judged too (`python3 -c
-      "open('<run>/settings-implement.json', 'w').write('NEW')"` writes the floor file: its part runs on into
-      `', 'w').write(...)` and was no `settings-*.json` name). The per-segment unquoted-`{` rule stays: without
+      first quote, comma, paren, `}`, `]` or `>` a quote made text, so the part up to there is judged too
+      (`python3 -c "open('<run>/settings-implement.json', 'w').write('NEW')"` writes the floor file: its part
+      runs on into `', 'w').write(...)` and was no `settings-*.json` name; likewise Perl's `q{>...}`, `q[>...]`
+      and `q(>...)` and Ruby's `%q{...}`). The per-segment unquoted-`{` rule stays: without
       it a comma in a file name (`$AP2_RUN_DIR/a,b.txt`) would be refused. Still possible, and left as best effort: removing or copying into the run
       directory itself (`rm -rf $AP2_RUN_DIR`, `cp /tmp/settings-implement.json $AP2_RUN_DIR/`); ap2 writes the
       settings file again before every launch. And a symlink made inside the run directory that points out of it
@@ -2057,17 +2058,25 @@ Calls the author made without asking (check them):
       the next `{ ... }` as a short loop's body (`while { ap2 card list } { cp src <data>/c; break }`): an unquoted
       top-level `}` that ends a word (not that of a `${`) with a command after it, past any redirects, ends an
       `ap2` segment's exemption, as a case pattern's `)` does. zsh's precommand modifiers `noglob`, `nocorrect` and
-      `-`, and `repeat N` (a number), run the next word, as the runners do (`noglob ap2 card list ...` is an `ap2`
-      call; `repeat $n ap2 ...` is none, fail-closed). zsh syntax beyond these is best effort (for one,
+      `-`, and `repeat N` (a number), run the next word, as the runners do, also one after another (`nocorrect -
+      cmd`; `noglob ap2 card list ...` is an `ap2` call; `repeat $n ap2 ...` is none, fail-closed). zsh syntax beyond these is best effort (for one,
       `cp x =ap2` copies over the `ap2` that `PATH` finds).
     - A name rebound in the same command: a function definition (`name()`, `name ()`, `function name`, which
       covers bash's `command_not_found_handle` and zsh's `command_not_found_handler`), a word `alias`, `unalias`,
       `hash`, `enable`, `builtin`, `function`, `functions`, `eval`, `source` or zsh's `autoload` as a command word
       (after a runner, an assignment, a zsh precommand modifier or a backslash too: `command hash ...`, `x=1 hash
-      ...`, `noglob hash ...`, `\hash`), after a command word with a `$` or backtick (`$e hash ...`, `$e` may be
-      empty) or after `repeat N`, or as any word of a segment with an unquoted `)`, `]]` or `}` (after a case
-      pattern, `case x in x) hash ap2=/bin/cp;; esac`, a zsh short loop, `for x (1) hash ...` and `while { true } {
-      hash ...; break }`, or a zsh condition, `if [[ -n x ]] hash ...`; fail-closed there). As an argument such a
+      ...`, `noglob hash ...`, `\hash`; after redirects, `>/dev/null hash ...`, `2>&1 hash ...`, `<<<x hash ...`;
+      after `x+=1`, `a[1]=1`, `x=$(true)` and `f=$(pwd)/x`, where the word glued after a `)` is still the
+      assignment; after `command --`; as the first word inside `<(...)`, `>(...)` and zsh's `=(...)`), after a
+      command word with a `$` or backtick (`$e hash ...`, `$(true) hash ...`, `` `printf ''` hash ...``: it may
+      expand to nothing, and the reading goes on past it, so `$(true) $(true) hash ...` and `` `true` command --
+      hash ...`` count too) or after `repeat N` (also `repeat 1+1`), or as any word after an unquoted `)`, `]]`
+      or `}` of its segment (after a case pattern, `case x in x) hash ap2=/bin/cp;; esac`, a zsh short loop, `for
+      x (1) hash ...` and `while { true } { hash ...; break }`, or a zsh condition, `if [[ -n x ]] hash ...`;
+      fail-closed there). Only a closer before the word counts, and the `}` of an empty `{}` is none, so `find
+      <data>/items -exec grep -l hash {} +`, `xargs -I{} grep -l source <data>/items/{}`, `(rg -n source
+      <data>/items)`, `rg -n source <data>/{items,routines}` and `cat <(grep -l hash <data>/items)` are allowed
+      (a closer anywhere in the segment counted before, which denied them). As an argument such a
       name rebinds nothing: `<pkg>/bin/ap2 source list`, `ap2 search hash` and `grep -rw hash <data>/items` are
       allowed (any word was counted before, which denied them). A command word `.` (only there: `find .` is
       common), or a word
@@ -2087,6 +2096,28 @@ Calls the author made without asking (check them):
       line `"source of truth: $AP2_RUN_DIR/x"` name only the run directory and stay allowed). zsh's
       `functions -c f ap2`, `path=(...)`, `commands+=(...)`, `functions+=(...)` and `fpath=(/tmp/fn); autoload -U
       ap2` (a function file found on `fpath`) rebind too.
+    - **[decided by the loop]** Whether `ap2` is trusted, by class rather than by position: rounds of review kept
+      finding a position where a rebinding word was not read as a command word (after a redirect, `x+=1`,
+      `$(true)`, `command --`, inside `<(...)`, zsh's `${commands[ap2]::=/bin/cp}`, `repeat 1+1`), so `ap2 src
+      <data>/config.yaml` kept the `ap2` exemption while `ap2` ran `cp`. Once per command, over every segment of
+      every reading (the texts of `$(...)`, backticks and process substitutions are segments too; a shell's
+      script is judged as a command of its own, with its own check), `ap2` is not trusted when any word, quoted
+      or not, in any position, is one of the rebinding words above, a `.` that is a segment's first word, a
+      command word or follows a keyword or a closer, `ap2` as a name (`hash ap2=...`, `alias ap2=cp`,
+      `commands[ap2]`, `functions[ap2]`, `autoload -U ap2`, `/tmp/b/ap2`; not the command word of an `ap2`
+      segment, nor its arguments after it when the segment runs nothing else: `ap2 card note C1 --text "ap2 is
+      great"` stays trusted), a name table or search-path word found anywhere in a word (`functions[`,
+      `commands[`, `PATH=`, `fpath=`, ..., not after a name character, `-` or `.`, so `PYTHONPATH=src`, `--path=x`
+      and `sys.path=` are none; and zsh's `${PATH::=...}`), the search path's name as a plain word (`for PATH in
+      ./b`, `read PATH <<< ./b`), or a function definition. A heredoc body line is data, but in an unquoted body
+      a name table counts (the shell expands `${commands[ap2]::=...}` there). When `ap2` is not trusted, an `ap2`
+      segment gets no exemption: it is denied when it names a guarded path (any mention not under the own run
+      directory or with a `$` after it; the `ap2` command word itself aside), and otherwise judged like any
+      segment. An `ap2` segment that names nothing guarded is unaffected: `<pkg>/bin/ap2 source list`, `ap2
+      search hash` and `<pkg>/bin/ap2 card list | grep -c eval` stay allowed. Accepted false deny: `ap2 card list
+      --data $AP2_DATA | grep source` (a rebinding word as an argument elsewhere in the command). Other renamed
+      names (`alias ls=cp; ls a <data>/x`) keep the rule above, with its wider command positions. Still a gap: a
+      search path set through a name built at run time (`v=PATH; declare $v=./b`).
     - A script a shell runs: in a segment with a word that is `sh`, `bash`, `zsh`, `ksh`, `dash` or `eval` (by
       name, by path, or after a character no name holds: zsh's `=sh`, `$@eval`), each later word that names a
       guarded path, and all of them joined by blanks (as `eval` joins them), is read again as a command of its own
@@ -2110,7 +2141,9 @@ Calls the author made without asking (check them):
       denied (the script reading joins the words with blanks, where a quoted `#`, `;` or blank hid the write),
       while `sh -c 'cp "$1" "$2" && echo ok' _ a "$AP2_RUN_DIR/media/a.png"` is allowed. A shell with no `-c`
       (`bash run.sh <args>`) leaves nothing out. A segment piped into a shell leaves its words out only when its
-      own command is `echo` or `printf`, which print their words and write nothing; any other command runs before
+      own command is `echo` or `printf`, which print their words and write nothing, and it is a plain one: its
+      only command word, with no unquoted `)`, `]]` or `}` and no `always` word (zsh's `{ echo '#' } always { cp
+      src <data>/config.yaml } | sh` runs the `cp`); any other command runs before
       the shell reads its output (`touch a '#' <data>/x | sh` touches the file), so it keeps its own reading, and
       only a segment a `|` or `|&` ends is fed (`cp ... ; echo ls | sh` is not). zsh closes a brace list at a
       word-final `}`, so a shell's name or a `-c` script word is also read with an unquoted `}` at its end dropped

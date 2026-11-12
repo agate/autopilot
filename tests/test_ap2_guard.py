@@ -1078,6 +1078,107 @@ class DecideTest(unittest.TestCase):
                     f"rg -n alias {PKG}/lib", "grep -rw hash $AP2_DATA/items"],
                    deny=False)
 
+    def test_ap2_keeps_its_exemption_only_when_nothing_in_the_command_can_rebind_it(self):
+        """Whatever the position: a word that can rebind a name anywhere in the command (a `_REBIND` word, `ap2` as
+        a name, a `.` that runs, a name table or a search-path word, a function definition) ends every `ap2`
+        exemption, and an `ap2` segment that then names a guarded path is denied."""
+        tail = "; ap2 src $AP2_DATA/config.yaml"
+        self.check([# A redirect first.
+                    ">/dev/null hash ap2=/bin/cp" + tail, "2>&1 hash ap2=/bin/cp" + tail,
+                    "</dev/null hash ap2=/bin/cp" + tail, "<<<x hash ap2=/bin/cp" + tail,
+                    ">/dev/null builtin hash ap2=/bin/cp" + tail, "2>/dev/null hash -p /bin/cp ap2" + tail,
+                    "2>/dev/null eval 'hash ap2=/bin/cp'" + tail,
+                    # Assignments, also with a subscript, `+=` or a substitution in them.
+                    "x+=1 hash ap2=/bin/cp" + tail, "a[1]=1 hash ap2=/bin/cp" + tail,
+                    "a[0]=1 hash -p /bin/cp ap2" + tail,
+                    "x=$(true) hash -p /bin/cp ap2" + tail, "f=$(pwd)/x hash -p /bin/cp ap2" + tail,
+                    # A substitution first (it may expand to nothing).
+                    "$(true) hash -p /bin/cp ap2" + tail, "`printf ''` hash -p /bin/cp ap2" + tail,
+                    "$(true) source ./evil.sh" + tail,
+                    # `command --`.
+                    "command -- hash -p /bin/cp ap2" + tail, "command -p -- hash -p /bin/cp ap2" + tail,
+                    "command -- eval 'hash -p /bin/cp ap2'" + tail,
+                    # zsh's name tables and the search path in an expansion, and the search path as a plain word.
+                    ": ${commands[ap2]::=/bin/cp}" + tail, ": ${functions[ap2]::=/bin/cp \\$@}" + tail,
+                    ": ${PATH::=./b:$PATH}" + tail, "for PATH in ./b; do ap2 src $AP2_DATA/config.yaml; done",
+                    "read PATH <<< ./b" + tail,
+                    # Inside a process substitution (zsh's `=(` too).
+                    f"cat <(hash -p /bin/cp ap2; ap2 /tmp/x {DATA}/config.yaml)",
+                    f"echo >(hash -p /bin/cp ap2; ap2 /tmp/x {DATA}/c)",
+                    f"cat =(hash ap2=/bin/cp; ap2 /tmp/x {DATA}/c)",
+                    f"cat <(builtin hash -p /bin/cp ap2; ap2 /tmp/x {DATA}/c)",
+                    f"cat <(source ./e.sh; ap2 /tmp/x {DATA}/c)", f"cat <(. ./e.sh; ap2 /tmp/x {DATA}/c)",
+                    f'cat <(function ap2 {{ cp "$@"; }}; ap2 /tmp/x {DATA}/c)', f"cat <(eval 'x'; ap2 /tmp/x {DATA}/c)",
+                    f"cat <(hash -p /bin/cp ap2; {PKG}/bin/ap2 card list) ; true",
+                    # zsh's `repeat` with a count that is no plain number.
+                    "repeat 1+1 hash ap2=/bin/cp" + tail, "repeat 0x1 hash ap2=/bin/cp" + tail,
+                    # Found by the shell differential: a `.` after two modifiers, or after two empty expansions.
+                    "echo >(x=$(true) nocorrect - . ./f.sh; ap2 src $AP2_DATA/config.yaml)",
+                    "$(true) $(true) . ./f.sh" + tail, "`printf ''` command -- . ./f.sh" + tail,
+                    # Accepted false deny: a rebinding word anywhere, as an argument too.
+                    "ap2 card list --data $AP2_DATA | grep source"], deny=True)
+        self.check([f"{PKG}/bin/ap2 source list", "ap2 search hash", f"{PKG}/bin/ap2 card list | grep -c eval",
+                    # An ap2 argument that holds `ap2` keeps the exemption.
+                    'ap2 card note C1 --text "ap2 is great" --data $AP2_DATA',
+                    "ap2 card list --data $AP2_DATA > /tmp/x; ap2 card show C1 --data $AP2_DATA"], deny=False)
+
+    def test_a_renamed_command_is_seen_at_every_command_position(self):
+        """For another name than `ap2` (`alias ls=cp; ls a <data>/x`) a rebinding word counts where the shell runs
+        it: after redirects, assignments (`x+=1`, `a[1]=1`, `x=$(...)`), a substitution that may expand to nothing,
+        `command --`, a process substitution's opener and zsh's `repeat N`."""
+        tail = "; ls a $AP2_DATA/x"
+        self.check([">/dev/null alias ls=cp" + tail, "2>&1 alias ls=cp" + tail, "</dev/null alias ls=cp" + tail,
+                    "<<<x alias ls=cp" + tail, "x+=1 alias ls=cp" + tail, "a[1]=1 alias ls=cp" + tail,
+                    "x=$(true) alias ls=cp" + tail, "f=$(pwd)/x alias ls=cp" + tail, "$(true) alias ls=cp" + tail,
+                    "`true` alias ls=cp" + tail, "command -- alias ls=cp" + tail, "command -p -- alias ls=cp" + tail,
+                    "repeat 1+1 alias ls=cp" + tail, ": ${commands[ls]::=/bin/cp}" + tail,
+                    # One modifier after another, and a substitution that may be empty after another.
+                    "nocorrect - alias ls=cp" + tail, "$(true) $(true) alias ls=cp" + tail,
+                    "`true` command -- alias ls=cp" + tail], deny=True)
+        for seg in ("repeat 1+1 alias ls=cp", "repeat 0x1 alias ls=cp", "$e alias ls=cp", ">x alias ls=cp",
+                    "x+=1 alias ls=cp", "cat <(alias ls=cp)", "cat =(alias ls=cp)", "echo >(alias ls=cp)",
+                    "command -- alias ls=cp", "nocorrect - alias ls=cp", "$(true) $(true) . f",
+                    "`true` command -- . f"):
+            with self.subTest(seg=seg):
+                self.assertTrue(guard._rebinds([guard._Parsed(seg, True, True)]))
+        for seg in ("cat <(grep -l hash x)", "ls $(pwd) .", "echo x=1 hash", "find . -exec grep -l eval {} +",
+                    "xargs -I{} grep -l source x/{}", "rg -n source x/{a,b}", "(rg -n source x)"):
+            with self.subTest(seg=seg):
+                self.assertFalse(guard._rebinds([guard._Parsed(seg, True, True)]))
+
+    def test_a_closer_counts_only_before_the_rebinding_word(self):
+        """A rebinding word is loose (may run) only after an unquoted `)`, `]]` or `}` of its segment, and the `}`
+        of an empty `{}` is none: `find ... -exec grep -l hash {} +` names `hash` as an argument."""
+        self.check(["find $AP2_DATA/items -name '*.yaml' -exec grep -l hash {} +",
+                    f"find {PKG}/lib -name '*.py' -exec grep -n eval {{}} +",
+                    f"ls {DATA}/items | xargs -I{{}} grep -l source {DATA}/items/{{}}",
+                    f"(cd {PKG} && rg -n eval lib)", f"(rg -n source {DATA}/items)", f"({PKG}/bin/ap2 source list)",
+                    f"cat <(grep -l hash {DATA}/items)", f"rg -n source {DATA}/{{items,routines}}",
+                    f"find . -name '*.ts' -exec grep -l function {{}} + ; {PKG}/bin/ap2 card list"], deny=False)
+        self.check(["case x in x) hash ap2=/bin/cp;; esac; ls $AP2_DATA/x",
+                    "for x (1) hash ls=/bin/cp; ls a $AP2_DATA/x", "if [[ -n x ]] hash ls=/bin/cp; ls a $AP2_DATA/x",
+                    "while { true } { hash ls=/bin/cp; break }; ls a $AP2_DATA/x"], deny=True)
+
+    def test_only_a_plain_printer_piped_into_a_shell_leaves_the_outer_reading(self):
+        """A fed segment leaves its words out only when it is one `echo` or `printf` command and nothing else: zsh's
+        `always` block (or a short loop after a `}`) runs a command of its own."""
+        self.check(["{ echo '#' } always { cp src $AP2_DATA/config.yaml } | sh",
+                    "echo x | tee sh -c \"$AP2_DATA/config.yaml\""], deny=True)
+        self.check(["bash -O nullglob -c 'cp a.png \"$AP2_RUN_DIR/media/\"; echo $?'",
+                    "bash --norc -c 'make > \"$AP2_RUN_DIR/m.log\"; echo \"exit $?\"'",
+                    "bash -c -- 'make > \"$AP2_RUN_DIR/m.log\"; echo \"exit $?\"'",
+                    "printf '%s\\n' 'make > \"$AP2_RUN_DIR/m.log\"; echo \"exit $?\"' | sh"], deny=False)
+
+    def test_a_quoted_brace_bracket_or_angle_ends_a_file_name_in_code(self):
+        """In Perl's `q{...}`, `q[...]`, `q(...)` and Ruby's `%q{...}` a quoted `}`, `]`, `)` ends the file name."""
+        self.check(['perl -e "open(F, q{>$AP2_RUN_DIR/settings-implement.json}); print F 1"',
+                    'perl -e "open(F, q[>$AP2_RUN_DIR/settings-implement.json]); print F 1"',
+                    'perl -e "open(F, q(>$AP2_RUN_DIR/settings-implement.json)); print F 1"',
+                    'ruby -e "File.write(%q{$AP2_RUN_DIR/settings-implement.json}, 1)"',
+                    'ruby -e "File.write(%q($AP2_RUN_DIR/settings-implement.json), 1)"'], deny=True)
+        self.check(['perl -e "open(F, q{>$AP2_RUN_DIR/out.txt}); print F 1"',
+                    'ruby -e "File.write(%q{$AP2_RUN_DIR/out.json}, 1)"'], deny=False)
+
     def test_a_final_lone_backslash_adds_nothing(self):
         self.check(["cp ./src $AP2_RUN_DIR/settings-implement.json\\"], deny=True)
         self.assertEqual(guard._words("a b\\"), ["a", "b"])
@@ -1284,7 +1385,19 @@ class DecideTest(unittest.TestCase):
                   "sh -c flags": fill("-o x ", "bash -e ") + " -c 'cp a b'",
                   "| sh fed": fill("x ", "touch a ';' ") + " | sh", "sh}": fill("a | sh} "),
                   "open( quoted": fill("$AP2_RUN_DIR/a', 'w'),(", "python3 -c \"open('") + '"',
-                  "rebind loose": fill("x) hash ", "case x in "), "rebind $": fill("$e hash ")}
+                  "rebind loose": fill("x) hash ", "case x in "), "rebind $": fill("$e hash "),
+                  # Process substitutions, redirect words, assignments, glued words, `{}` pairs, `maybe` words.
+                  "<(": fill("<(a "), ">(": fill(">(a "), "=( word": fill("=(a "), "<( ap2": fill("<(ap2 x ", "cat "),
+                  "ops": fill(">a 2>&1 <b <<<c "), "ops hash": fill(">a hash "), "assign+": fill("x+=1 a[1]=1 "),
+                  "glued": fill("x=$(a)/b "), "glued tick": fill("x=`a`/b "), "{}": fill("{} -I{} a/{} "),
+                  "maybe": fill("$(a) b "), "repeat": fill("repeat 1+1 "), "command --": fill("command -- "),
+                  # The ap2 trust check: many ap2 segments, `ap2` names, name tables, rebinding words.
+                  "ap2 segs": fill("ap2 x --data $AP2_DATA; "), "ap2 names": fill("ap2 x ap2 ap2=x "),
+                  "ap2 hash": fill("ap2 x; hash "), "tables": fill(": ${commands[a]::=b} ${PATH::=c} "),
+                  "ap2 dot": fill("x=1 . a; ap2 "), "ap2 heredoc": fill("${commands[a]}\n", "ap2 x <<E\n"),
+                  # A fed printer, and quoted closers ending a file name in code.
+                  "fed printer": fill("echo a } always | ") + "| sh",
+                  "perl q{": fill("q{$AP2_RUN_DIR/a} ", 'perl -e "') + '"'}
         for name, cmd in shapes.items():
             with self.subTest(name):
                 self.assertLessEqual(len(cmd), guard.MAX_COMMAND)
