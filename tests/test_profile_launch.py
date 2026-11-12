@@ -191,9 +191,28 @@ class LaunchTest(LaunchBase):
             perms.write_for("a")
         self.assertEqual(probes, ["settings-discover.json", "settings-discover-page.json"])
         self.assertIn(connector, read(self.data / "settings-dispatcher.json")["permissions"]["deny"])
-        self.assertNotIn(connector, read(self.data / "projects" / "a" / "settings.json")["permissions"]["deny"])
+        # The worker floor holds the page probe's outward tools too: a switch back to the subscription re-merges
+        # this same deny list, and a subscription worker has the claude.ai connectors.
+        self.assertIn(connector, read(self.data / "projects" / "a" / "settings.json")["permissions"]["deny"])
         self.assertEqual(read(self.data / "projects" / "a" / "settings-discover-page.json")["env"]["ANTHROPIC_BASE_URL"], "")
         self.assertEqual(rs.call_args[0][0], "a")
+
+    def test_switch_back_to_subscription_keeps_connector_denied(self):
+        connector = "mcp__claude_ai_Slack__slack_send_message"
+
+        def disc(claude, cwd, settings, ap=None, profile=None):
+            if settings.name == "settings-discover-page.json":
+                return ["Bash", connector], ["claude_ai_Slack"]
+            return ["Bash"], []
+
+        with mock.patch.object(perms, "discover", disc), mock.patch("autopilot.access.record_servers"):
+            perms.write_for("a")
+        oneoff = perms.one_off_settings("a", "mcp__other__post_message")
+        profile.use("subscription")
+        for f in (self.data / "projects" / "a" / "settings.json", oneoff):
+            body = read(f)
+            self.assertEqual(body["env"]["ANTHROPIC_BASE_URL"], "", f.name)
+            self.assertIn(connector, body["permissions"]["deny"], f.name)
 
     def test_one_probe_when_active_is_the_page_profile(self):
         profile.use("subscription")

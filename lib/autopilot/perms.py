@@ -194,7 +194,10 @@ def write_for(ap: str) -> list:
         pprobe = paths.ap_dir(ap) / "settings-discover-page.json"
         _write(pprobe, profiles.overlay(page))
         ptools, pfound = discover(workers.claude_bin(gcfg), apcfg["repo"], pprobe, ap, page)
-    _write(paths.ap_dir(ap) / "settings.json", generate(tools, role="worker", profile=profiles.active()))
+    # The worker floor denies what either probe found: a switch re-merges this deny list without a new probe, and
+    # a worker on the subscription has the claude.ai connector tools a gateway probe never sees.
+    _write(paths.ap_dir(ap) / "settings.json",
+           generate(sorted(set(tools) | set(ptools)), role="worker", profile=profiles.active()))
     disp = paths.data_root() / "settings-dispatcher.json"
     known = set()
     if disp.exists():
