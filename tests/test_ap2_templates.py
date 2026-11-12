@@ -572,14 +572,18 @@ class TitleBriefTest(TempFolder):
         self.assertEqual(templates.fill_brief("In {title}.", {"title": "T"}), "In T.")
         self.assertEqual(templates.fill_brief("In {title}.", {"title": "T"}, primary="zh"), "In T.")
 
-    def test_an_object_title_without_the_primary_slot_is_missing(self):
-        with self.assertRaises(BriefError) as e:
-            templates.fill_brief("In {title}.", {"title": {"zh": "Z"}})
-        self.assertEqual(e.exception.missing, ["title"])
-        self.assertIn("the card has no {title}", str(e.exception))
-        with self.assertRaises(BriefError) as e:
-            templates.fill_brief("In {title}.", {"title": {"en": "E"}}, primary="zh")
-        self.assertEqual(e.exception.missing, ["title"])
+    def test_an_object_title_without_the_primary_slot_fills_any_other_slot(self):
+        # cards.title_for's third step: the words a title has beat no words.
+        self.assertEqual(templates.fill_brief("In {title}.", {"title": {"zh": "Z"}}), "In Z.")
+        self.assertEqual(templates.fill_brief("In {title}.", {"title": {"en": "E"}}, primary="zh"), "In E.")
+
+    def test_an_object_title_with_no_non_blank_slot_is_missing(self):
+        for title in ({}, {"zh": " "}, {"en": "", "ja": None}):
+            with self.subTest(title=title):
+                with self.assertRaises(BriefError) as e:
+                    templates.fill_brief("In {title}.", {"title": title})
+                self.assertEqual(e.exception.missing, ["title"])
+                self.assertIn("the card has no {title}", str(e.exception))
 
     def test_a_dotted_title_slot_still_reads_the_field(self):
         self.assertEqual(templates.fill_brief("{title.zh}", {"title": {"en": "E", "zh": "Z"}}), "Z")

@@ -213,13 +213,15 @@ def title_problems(title, languages: tuple) -> list:
 
 
 def title_for(card, lang: str, primary: str):
-    """The card's title in `lang`: an object title's `lang` slot, else its `primary` slot, else None. A text title
-    is the same words in every language, so it is returned as it is; null and anything else give None."""
+    """The card's title in `lang`: an object title's `lang` slot, else its `primary` slot, else its first non-blank
+    slot in sorted key order (a stored title's words beat "Untitled", say after the primary language changed),
+    else None. A text title is the same words in every language, so it is returned as it is; null and anything
+    else give None."""
     title = card.get("title") if isinstance(card, dict) else None
     if isinstance(title, str):
         return title
     if isinstance(title, dict):
-        for key in (lang, primary):
+        for key in (lang, primary, *sorted(k for k in title if isinstance(k, str))):
             if isinstance(title.get(key), str) and title[key].strip():
                 return title[key]
     return None

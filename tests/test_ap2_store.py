@@ -410,10 +410,22 @@ class TitleForTest(unittest.TestCase):
             with self.subTest(title=title):
                 self.assertEqual(cards.title_for({"title": title}, "zh", "en"), "Retry")
 
-    def test_no_slot_and_no_primary_gives_null(self):
-        for title in ({"ja": "再試行"}, {"en": "", "zh": " "}, {}):
+    def test_no_non_blank_slot_gives_null(self):
+        for title in ({"en": "", "zh": " "}, {}, {"ja": 3}, {"ja": None}, {"ja": "  ", "ko": ""}):
             with self.subTest(title=title):
                 self.assertIsNone(cards.title_for({"title": title}, "zh", "en"))
+
+    def test_no_slot_and_no_primary_gives_any_non_blank_slot(self):
+        self.assertEqual(cards.title_for({"title": {"ja": "再試行"}}, "zh", "en"), "再試行")
+        self.assertEqual(cards.title_for({"title": {"ko": "b", "ja": "a"}}, "zh", "en"), "a")  # sorted key order
+        self.assertEqual(cards.title_for({"title": {"ko": "a", "ja": "b"}}, "zh", "en"), "b")  # by key, not by text
+        self.assertEqual(cards.title_for({"title": {"fr": " ", "ko": "b", "ja": None}}, "zh", "en"), "b")
+
+    def test_the_viewers_and_the_primary_slot_still_come_first(self):
+        self.assertEqual(cards.title_for({"title": {"en": "Retry", "ja": "x"}}, "zh", "en"), "Retry")
+        self.assertEqual(cards.title_for({"title": {"en": "Retry", "de": "x"}}, "zh", "en"), "Retry")
+        self.assertEqual(cards.title_for({"title": {"zh": "重试", "en": "Retry"}}, "zh", "en"), "重试")
+        self.assertEqual(cards.title_for({"title": {"zh": "重试", "ja": "a"}}, "zh", "en"), "重试")
 
     def test_a_text_is_returned_as_it_is(self):
         self.assertEqual(cards.title_for({"title": "Same words"}, "zh", "en"), "Same words")

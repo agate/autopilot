@@ -73,7 +73,9 @@ Anti-goals (failure even if it "works"):
   source engine, routine runs) write the object with the same words in each slot, because they quote a record or
   the user's routine title and nothing in the code can translate. A writer that can write both languages (a scan
   session, a worker, `ap2 card add`) gives the object with real words per language. A reader picks a language's
-  slot, else the primary's (`cards.title_for`); the local page shows only the page language's title. Translating
+  slot, else the primary's, else **[decided by the builder]** any other non-blank slot, the first in sorted
+  key order (`cards.title_for`, and the page's `titleIn`): a stored title's words beat "Untitled" after the
+  primary language changes. The local page shows only one title, never two languages side by side. Translating
   quotes is the proposed line below (open question 4), not part of this rule.
 - **[proposed]** A reply drafted for someone else stays in the language that person wrote in. On the
   other-language page its meaning is shown separately, and Copy leaves the meaning out. A quote shows the
@@ -1393,7 +1395,8 @@ Calls the author made without asking (check them):
     card lacks, or holds as null or blank text, is an error (`BriefError`) naming every such field; a value must
     be text or a number. A filled value is not read again. Built-in briefs use only `{id}`, a field every
     stored card has, because `title` is optional. `{title}` fills the primary language's title
-    (`cards.title_for`), so a brief names the same words for a text or a per-language title.
+    (`cards.title_for`, so a per-language title without a primary slot fills its first non-blank slot), so a
+    brief names the same words for a text or a per-language title.
   - No added tools or permissions: a key that would widen a role is refused anywhere in the file (top level,
     a `roles` entry, a button), before any other check, with one error class `TemplateWidenError` naming the
     file, line and key. The keys, compared without letter case, `-`, `_` or spaces: `tools`, `tool`,
@@ -1459,9 +1462,9 @@ Calls the author made without asking (check them):
   - Routes, JSON in and out: `GET /` (the page), `GET /api/state` (mode, languages, lane counts, `running`, the
     projects with `done`/`total` from their children, the heartbeat, `usage: null` and the page's `url`),
     `GET /api/cards?lane=&kind=&parent=&q=&limit=` (`{total, cards}`, each a row: `id`, `title`
-    (`{<lang>: text}` for each configured language, a gap
-    filled from the primary language, or null when the card has none; the projects in `/api/state` too), `kind`,
-    `lane`,
+    (`{<lang>: text}` for each configured language, a gap filled as `cards.title_for` picks it (the primary language's
+    slot, else any other non-blank slot, the first in sorted key order), or null when no slot has words; the projects in
+    `/api/state` too), `kind`, `lane`,
     `pri`, `feed`, `parent`, `origin`, `ask_type`, `plain_where` per language, `updated_at`; lane order, then by
     `pri` and the newest change in Needs you, Running and Planned, History newest first; `q` goes through the
     store's search and the other filters apply to its result; a `q` over 500 characters or 50 words is 400, so a
@@ -1673,7 +1676,8 @@ Calls the author made without asking (check them):
     start or timed out), nothing starts: the `WorkerError` says to list them in `projects/<name>.yaml` `tools`. On a dead
     worker's resume that counts as its one resume; a parked worker is stopped as when its resume cannot start. An in-place resume first
     checks that the worker's folder is still there, so a gone worktree says "cannot start the session". The branch is the card's `branch`, else the pattern with the card's `key` (else its id) and the first
-    three words of its title in the primary language. The session gets them the way v1 passes setup:
+    three words of its title as `cards.title_for` picks it for the primary language (that slot, else any other
+    non-blank slot). The session gets them the way v1 passes setup:
     `--settings <run dir>/settings-<role>.json`
     (the permission floor: v1's outward-tool and Bash denials, plus `Edit` denials on the data folder's own files
     (including the user's `templates/**` and `sources/**`, the rules the worker floor in `roles.py` promises; every
@@ -1961,7 +1965,8 @@ Calls the author made without asking (check them):
     the import writes has the same title shape.
   - **[decided by the builder]** A closed question card's title is its old words, one slot per language: each slot is
     the old card's `plain.what` text in that language, else its old title in that language, else in the primary
-    language (`cards.title_for`, so an old one-text title and an old object title both work), else the decision id. It
+    language, else any other non-blank slot (`cards.title_for`, so an old one-text title and an old object title
+    both work), else the decision id. It
     equals the closed card's `plain.what`. In a language no longer configured, a closed question card keeps the old
     card's `what` (so its title) and `where` words (they cannot be made again from v1), so adding that language back
     finds them; its `do` there is the closed phrase, not the old one.
