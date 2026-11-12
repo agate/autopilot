@@ -21,6 +21,7 @@ import math
 import os
 import re
 import stat
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional
@@ -44,6 +45,11 @@ COPY_SLACK_S = 300  # a request older than its session's first launch minus this
 # A request time outside these cannot be shown as a date in every zone (datetime ends at year 9999): unknown spend.
 _MIN_TS = 86400.0
 _MAX_TS = datetime(9998, 12, 31, tzinfo=timezone.utc).timestamp()
+# A worker writes its own transcript, so a read of one is bounded: a line longer than MAX_LINE_BYTES (its newline
+# counted) is skipped in chunks of that size and is one unknown request; a file larger than MAX_FILE_BYTES is not
+# read at all and is one unknown request. Never $0, never dropped.
+MAX_LINE_BYTES = 16 * 1024 * 1024
+MAX_FILE_BYTES = 1024 * 1024 * 1024
 
 Listing = Optional[Callable[[], Optional[list]]]
 
@@ -203,7 +209,9 @@ def _parse_file(path: Path, table: dict) -> list:
     growing counts, so only the last usage seen for each counts. `id` is the requestId (or message id) that a
     resumed copy repeats, or a "~<line>" key local to this file. A line without a usable timestamp keeps ts None and
     usd None: unknown spend, never dropped. Only a regular file is read (checked on the open file, so a FIFO or a
-    device swapped in after a check never blocks the read)."""
+    device swapped in after a check never blocks the read). The file is read one line (split at b"\n") at a time,
+    each read asking for at most MAX_LINE_BYTES: a longer line is one unknown request ("~<line>"), and a file larger
+    than MAX_FILE_BYTES is not read at all and is one unknown request ("~file")."""
     per_req = {}
     try:
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
@@ -211,48 +219,111 @@ def _parse_file(path: Path, table: dict) -> list:
         return []
     try:
         with os.fdopen(fd, "rb") as f:
-            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+            st = os.fstat(f.fileno())
+            if not stat.S_ISREG(st.st_mode):
                 return []
-            lines = f.read().decode("utf-8", errors="replace").splitlines()
+            if st.st_size > MAX_FILE_BYTES:
+                return [_unknown("~file")]
+            for n, raw in _lines(f, MAX_LINE_BYTES, MAX_FILE_BYTES):
+                if raw is None:  # over a cap: unknown, never $0
+                    key = "~file" if n is None else f"~{n}"
+                    per_req[key] = _unknown(key)
+                    continue
+                _parse_line(per_req, n, raw.decode("utf-8", errors="replace"), table)
     except OSError:
         return []
-    for n, raw in enumerate(lines):
-        try:
-            d = json.loads(raw)
-        except (ValueError, RecursionError):  # a line nested too deep for the parser is broken, not fatal
-            continue
-        msg = d.get("message") if isinstance(d, dict) else None
-        u = msg.get("usage") if isinstance(msg, dict) else None
-        if not isinstance(u, dict) or not u or d.get("type") != "assistant" or not _has_tokens(u):
-            continue  # e.g. "<synthetic>" lines Claude Code writes for API errors: all counts 0
-        try:
-            ts = datetime.fromisoformat(str(d.get("timestamp")).replace("Z", "+00:00")).timestamp()
-        except (ValueError, OverflowError):
-            ts = None
-        if not _usable_ts(ts):
-            ts = None
-        model = msg.get("model")
-        rid = str(d.get("requestId") or msg.get("id") or f"~{n}")
-        try:
-            cost = _cost(table, model, u) if ts is not None else None
-        except (TypeError, ValueError, OverflowError):  # a count that is not a number: unknown, never $0
-            cost = None
-        # Never printed raw: a name that is not printable ASCII is an unnamed model (stdout may not be UTF-8).
-        name = model if isinstance(model, str) and model.isascii() and model.isprintable() else ""
-        per_req[rid] = {"id": rid, "ts": ts, "model": _model_key(name), "usd": cost}
     return list(per_req.values())
+
+
+def _unknown(key: str) -> dict:
+    return {"id": key, "ts": None, "model": "", "usd": None}
+
+
+def _lines(f, cap: int, limit: int):
+    """(line number, bytes) for each b"\n" line of the binary file `f`, each read asking for at most `cap` bytes.
+    A line longer than `cap` (its newline counted) is skipped to its end in chunks and gives (n, None); once more
+    than `limit` bytes are read (a file that grew after its size was checked) it gives (None, None) and stops."""
+    n, total = 0, 0
+    while True:
+        chunk = f.readline(cap)
+        if not chunk:
+            return
+        total += len(chunk)
+        if len(chunk) == cap and not chunk.endswith(b"\n"):
+            more = f.readline(cap)
+            if more:  # longer than the cap: skip the rest of the line, never hold it
+                total += len(more)
+                while more and not more.endswith(b"\n") and total <= limit:
+                    more = f.readline(cap)
+                    total += len(more)
+                chunk = None
+        if total > limit:
+            yield None, None
+            return
+        yield n, chunk
+        n += 1
+
+
+def _parse_line(per_req: dict, n: int, raw: str, table: dict) -> None:
+    """Add line `n` of a transcript to `per_req` when it is a priced request (the last usage per id wins)."""
+    try:
+        d = json.loads(raw)
+    except (ValueError, RecursionError):  # a line nested too deep for the parser is broken, not fatal
+        return
+    msg = d.get("message") if isinstance(d, dict) else None
+    u = msg.get("usage") if isinstance(msg, dict) else None
+    if not isinstance(u, dict) or not u or d.get("type") != "assistant" or not _has_tokens(u):
+        return  # e.g. "<synthetic>" lines Claude Code writes for API errors: all counts 0
+    try:
+        ts = datetime.fromisoformat(str(d.get("timestamp")).replace("Z", "+00:00")).timestamp()
+    except (ValueError, OverflowError):
+        ts = None
+    if not _usable_ts(ts):
+        ts = None
+    model = msg.get("model")
+    rid = str(d.get("requestId") or msg.get("id") or f"~{n}")
+    try:
+        cost = _cost(table, model, u) if ts is not None else None
+    except (TypeError, ValueError, OverflowError):  # a count that is not a number: unknown, never $0
+        cost = None
+    # Never printed raw: a name that is not printable ASCII is an unnamed model (stdout may not be UTF-8).
+    name = model if isinstance(model, str) and model.isascii() and model.isprintable() else ""
+    per_req[rid] = {"id": rid, "ts": ts, "model": _model_key(name), "usd": cost}
 
 
 def _files(main: Path) -> list:
     """A session's transcript and its subagents' (`<dir>/<session id>/subagents/agent-*.jsonl`), only the ones that
-    are regular files (a link is followed: one to a FIFO or a device is left out)."""
-    return [main] + sorted(p for p in (main.parent / main.stem / "subagents").glob("agent-*.jsonl") if p.is_file())
+    are regular files (a link is followed: one to a FIFO or a device is left out). A subagent file that cannot be
+    checked (a folder made unenterable) is left out, never an error."""
+    try:
+        subs = sorted((main.parent / main.stem / "subagents").glob("agent-*.jsonl"))
+    except OSError:
+        return [main]
+    return [main] + [p for p in subs if _is_file(p)]
+
+
+def _is_file(p: Path) -> bool:
+    try:
+        return p.is_file()
+    except OSError:
+        return False
 
 
 def _find(projects, sid) -> Optional[Path]:
     if not (isinstance(sid, str) and transcripts.SESSION_ID.match(sid)):
         return None
-    return transcripts.find(projects, sid)
+    try:
+        return transcripts.find(projects, sid)
+    except OSError:  # a transcript folder that cannot be checked (made unenterable): no transcript, never an error
+        return None
+
+
+def _gone(f: str) -> bool:
+    """A cached file that is no longer there, or cannot be checked (counted as missing, as `_find` does)."""
+    try:
+        return not Path(f).exists()
+    except OSError:
+        return True
 
 
 def _usable_ts(ts) -> bool:
@@ -583,10 +654,17 @@ def totals(data, projects, now: Optional[datetime] = None, mode: str = "gateway"
                 out["unknown_today"] = out["unknown_today"] or launched_today
                 continue
             add(day, cost, cost is None)
-    for k in [k for k in c["files"] if k not in seen and not Path(k).exists()]:
+    for k in [k for k in c["files"] if k not in seen and _gone(k)]:
         del c["files"][k]
         c["dirty"] = True
     if c.pop("dirty", False):
         _save_cache(data, c)
+    # About a million forged requests can sum past what a number holds: the largest finite one (over any cap) and
+    # unknown, so the totals stay valid JSON.
+    for k in ("today", "week", "month"):
+        if not math.isfinite(out[k]):
+            out[k] = sys.float_info.max
+            out["unknown"] = True
+            out["unknown_today"] = out["unknown_today"] or k == "today"
     out["unknown_models"], out["unknown_launches"] = sorted(models), launches
     return out

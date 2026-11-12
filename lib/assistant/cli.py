@@ -399,8 +399,15 @@ def cmd_spend(args) -> int:
     listing = (lambda: v1_sessions.list_all(claude)) if claude else None
     try:
         t = spend.totals(data, projects, mode=args.mode, listing=listing)
-    except OSError as e:
-        raise spend.SpendError(f"cannot read or update the spend ledger in {data / spend.FOLDER}: {e}") from e
+    except OSError as e:  # say which side failed when the error names its file, else name both folders
+        ledger = f"read or update the spend ledger in {data / spend.FOLDER}"
+        where = f"read the transcripts in {projects}, or {ledger}"
+        name = e.filename if isinstance(e.filename, (str, os.PathLike)) else None
+        if name is not None and Path(name).is_relative_to(projects):
+            where = f"read the transcripts in {projects}"
+        elif name is not None and Path(name).is_relative_to(data):
+            where = ledger
+        raise spend.SpendError(f"cannot {where}: {e}") from e
     if args.json:
         _print_json(t)
         return 0
