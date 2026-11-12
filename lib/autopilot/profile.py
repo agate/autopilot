@@ -40,11 +40,14 @@ def path(name: str) -> Path:
     return paths.data_root() / "profiles" / f"{name}.json"
 
 
-def _command_output(cmd: str):
+def _command_output(cmd: str, timeout: int = 30):
     try:
-        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
+        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout,
+                           stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return None, f"timed out after {timeout} s"
     except (OSError, subprocess.SubprocessError) as e:
-        return None, str(e)
+        return None, type(e).__name__   # never the command line: the page shows this text
     if r.returncode != 0:
         return None, f"exit {r.returncode}"
     return r.stdout, ""
@@ -109,27 +112,50 @@ def _owned_env(env) -> list:
     return out
 
 
-def _model_errors(p: dict) -> list:
+LONG_CONTEXT = "[1m]"   # Claude Code's marker for the 1M context window; it strips it before sending
+
+
+def _base_model(name: str) -> str:
+    return name[:-len(LONG_CONTEXT)] if name.endswith(LONG_CONTEXT) else name
+
+
+class ModelsUnavailable(RuntimeError):
+    """The model list could not be fetched: the models command failed or printed no JSON list."""
+
+
+def _listed(cmd: str, timeout: int = 30) -> list:
+    out, why = _command_output(cmd, timeout)
+    if out is None:
+        raise ModelsUnavailable(f"gateway.models_command: failed ({why})")
+    try:
+        known = json.loads(out)
+        if not isinstance(known, list) or not all(isinstance(m, str) for m in known):
+            raise ValueError
+    except ValueError:
+        raise ModelsUnavailable("gateway.models_command: must print a JSON list of model names") from None
+    return known
+
+
+def _model_errors(p: dict, known: list = None) -> list:
+    """The model fields the gateway does not offer. `known`: a list fetched for this same check just before, so
+    the models command is not run again."""
     cmd = (p.get("gateway") or {}).get("models_command")
     if not cmd:
         return []
-    out, why = _command_output(cmd)
-    if out is None:
-        return [f"gateway.models_command: failed ({why})"]
-    try:
-        known = json.loads(out)
-        if not isinstance(known, list):
-            raise ValueError
-    except ValueError:
-        return ["gateway.models_command: must print a JSON list of model names"]
+    if known is None:
+        try:
+            known = _listed(cmd)
+        except ModelsUnavailable as e:
+            return [str(e)]
     return [f"{f}: {p[f]} is not offered by the gateway" for f in ("model", "dispatcher_model", "small_model")
-            if p.get(f) and p[f] not in known]
+            if p.get(f) and p[f] not in known and _base_model(p[f]) not in known]
 
 
-def save(p: dict) -> None:
+def save(p: dict, known: list = None) -> None:
+    """Validate and write a profile. `known`: the model list fetched just before (see _model_errors)."""
     errs = validate(p)
     if not errs:
-        errs = _model_errors(p)
+        errs = _model_errors(p, known)
     if errs:
         raise ValueError("; ".join(errs))
     target = path(p["name"])
@@ -336,9 +362,11 @@ def migrate_from_config() -> bool:
     for it, so an upgraded install gets the subscription blanks at once. True when it did. The files are
     rewritten first: if that fails nothing is saved, and the next run tries again."""
     if path(SUBSCRIPTION).exists():
+        _mark_subscription_chosen()
         return False
     cfg = config.load_global()
     p = _blank(SUBSCRIPTION)
+    p["chosen_at"] = _now()
     for key, field in _MOVED:
         p[field] = config.lookup(cfg, key)
     errs = validate(p)
@@ -357,6 +385,187 @@ def migrate_from_config() -> bool:
     for key, _ in _MOVED:
         config.reset_setting(key)
     return True
+
+
+def _mark_subscription_chosen() -> None:
+    """An install migrated before profiles had a choice keeps running unprompted: its subscription profile counts
+    as chosen."""
+    try:
+        raw = json.loads(path(SUBSCRIPTION).read_text())
+    except (OSError, ValueError):
+        return   # unreadable: left for `ap profile show` to report, never overwritten here
+    if isinstance(raw, dict) and not raw.get("chosen_at"):
+        raw["chosen_at"] = _now()
+        config._write(path(SUBSCRIPTION), raw)
+
+
+# ---- choosing the model and effort ----
+# The first time a profile is set up or used, its model and effort are picked from a list fetched just then.
+
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+RECOMMENDED_MODEL = "claude-opus-5-5[1m]"
+RECOMMENDED_EFFORT = "high"
+DEFAULT_MODEL = "default"   # Claude Code's own default model, stored as null
+MODELS_TIMEOUT_S = 20
+NEEDS_CHOICE = 3            # the exit code when a choice is needed and no terminal can ask for it
+
+
+def _now() -> str:
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _with_long(names) -> list:
+    """Every claude-* model but haiku gets its 1M context variant first, then the plain name; others as they are."""
+    out = []
+    for m in names:
+        base = _base_model(m)
+        pair = [base + LONG_CONTEXT, base] if base.startswith("claude-") and not base.startswith("claude-haiku-") else [m]
+        out += [x for x in pair if x not in out]
+    return out
+
+
+def model_choices(p: dict) -> list:
+    """The models `p` may run, fetched fresh on every call (never cached). A gateway with a models command: that
+    list. Otherwise no list can be fetched, so the priced claude-* models and `default` (Claude Code's default).
+    Raises ModelsUnavailable when the models command fails."""
+    cmd = (p.get("gateway") or {}).get("models_command") if p.get("mode") == "gateway" else None
+    if cmd:
+        return _with_long(_listed(cmd, MODELS_TIMEOUT_S))
+    from autopilot import spend
+    return _with_long(m for m in spend.prices() if m.startswith("claude-")) + [DEFAULT_MODEL]
+
+
+def recommended_model(models: list):
+    return RECOMMENDED_MODEL if RECOMMENDED_MODEL in models else (models[0] if models else None)
+
+
+def needs_choice(p: dict) -> bool:
+    if p.get("name") == SUBSCRIPTION and not path(SUBSCRIPTION).exists():
+        return False   # the built-in subscription before migration wrote its file: Claude Code's defaults
+    return not p.get("chosen_at")
+
+
+def is_chosen_as(p: dict, model: str, effort: str) -> bool:
+    """True when `p` is chosen and holds exactly this model (`default` = null) and effort."""
+    return (not needs_choice(p) and p.get("effort") == effort
+            and p.get("model") == (None if model == DEFAULT_MODEL else model))
+
+
+def choices(p: dict) -> dict:
+    """What `p` can choose from, fetched now. Raises ModelsUnavailable."""
+    models = model_choices(p)
+    return {"profile": p["name"], "models": models, "efforts": list(EFFORTS),
+            "recommended_model": recommended_model(models), "recommended_effort": RECOMMENDED_EFFORT}
+
+
+def choices_or_error(p: dict) -> dict:
+    try:
+        return choices(p)
+    except ModelsUnavailable as e:
+        return {"profile": p["name"], "error": str(e)}
+
+
+def choose(name: str, model: str, effort: str, models: list = None) -> dict:
+    """Save `name`'s model and effort, checked against a list fetched now (or `models`, fetched by the caller just
+    before), and mark it chosen. Re-applies the settings when it is the active profile. ValueError for a value
+    not offered; ModelsUnavailable when the list cannot be fetched. The page's choice card is the caller's to
+    close (the page path closes it only once the switch worked)."""
+    p = load(name)
+    models = model_choices(p) if models is None else models
+    if model not in models:
+        raise ValueError(f"model {model!r} is not offered; choose one of: {', '.join(models)}")
+    if effort not in EFFORTS:
+        raise ValueError(f"effort {effort!r}: choose one of {', '.join(EFFORTS)}")
+    p.update(model=None if model == DEFAULT_MODEL else model, effort=effort, chosen_at=_now())
+    save(p, models)
+    if config.load_global().get("active_profile") == name:
+        apply(p)
+    events.append_global("profile_chosen", {"profile": name, "model": p["model"], "effort": effort})
+    return p
+
+
+def _ask(title: str, options: list, recommended) -> str:
+    """A numbered prompt; Enter takes the recommended entry. EOFError when the input ends."""
+    print(title)
+    for i, o in enumerate(options, 1):
+        print(f"  {i}) {o}" + (" (recommended)" if o == recommended else ""))
+    default = options.index(recommended) + 1 if recommended in options else None
+    while True:
+        got = input(f"Number{f' [{default}]' if default else ''}: ").strip()
+        if not got and default:
+            return options[default - 1]
+        if got.isdigit() and 1 <= int(got) <= len(options):
+            return options[int(got) - 1]
+        if got in options:
+            return got
+        print(f"Type a number from 1 to {len(options)}.")
+
+
+def _tty() -> bool:
+    try:
+        return sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def _prompt_choose(name: str, model=None, effort=None) -> int:
+    """Ask in the terminal for what is missing, then save the choice. 0, or 1 with the reason printed."""
+    try:
+        c = choices(load(name))
+        if model is None:
+            model = _ask(f"Model for {name}:", c["models"], c["recommended_model"])
+        if effort is None:
+            effort = _ask(f"Effort for {name}:", c["efforts"], c["recommended_effort"])
+        choose(name, model, effort, c["models"])
+        close_choice(name)
+    except EOFError:
+        return _fail("no choice made; nothing changed")
+    except (ValueError, ModelsUnavailable, OSError) as e:
+        return _fail(str(e))
+    return 0
+
+
+def _print_choices(p: dict, hint: str) -> None:
+    print(json.dumps(choices_or_error(p), indent=2, ensure_ascii=False))
+    print(f"ap profile: {hint}", file=sys.stderr)
+
+
+# The choice card on the page: written when a switch from the page names a profile that needs a choice.
+
+def _choice_file() -> Path:
+    return paths.data_root() / "profile-choice.json"
+
+
+CHOICE_TTL = timedelta(hours=6)   # an abandoned card must not keep the one-minute answer check running
+
+
+def choice_card():
+    """The open choice card, or None. A card older than CHOICE_TTL is closed here."""
+    d = _read(_choice_file())
+    if not d.get("profile"):
+        return None
+    at = _parse_time(d.get("at"))
+    if at is None or datetime.now().astimezone() - at > CHOICE_TTL:
+        _choice_file().unlink(missing_ok=True)
+        return None
+    return d
+
+
+def open_choice(name: str, refused: str = None) -> dict:
+    """Fetch the list once and open (or refresh) the page's choice card for `name`. A fetch failure is shown on
+    the card instead of a list."""
+    c = choices_or_error(load(name))
+    c["at"] = _now()
+    if refused:
+        c["refused"] = refused
+    config._write(_choice_file(), c)
+    return c
+
+
+def close_choice(name: str = None) -> None:
+    """Close the choice card (only when it is for `name`, if given)."""
+    if name is None or (choice_card() or {}).get("profile") == name:
+        _choice_file().unlink(missing_ok=True)
 
 
 # ---- key health, refresh and rotation ----
@@ -557,6 +766,13 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("list")
     for c in ("show", "use", "rotate", "remove"):
         sub.add_parser(c).add_argument("name")
+    ch = sub.add_parser("choices")
+    ch.add_argument("name")
+    ch.add_argument("--json", action="store_true")
+    cs = sub.add_parser("choose")
+    cs.add_argument("name")
+    cs.add_argument("--model")
+    cs.add_argument("--effort")
     add = sub.add_parser("add")
     add.add_argument("name")
     mode = add.add_mutually_exclusive_group(required=True)
@@ -585,9 +801,37 @@ def main(argv: list) -> int:
         if path(a.name).exists() or a.name == SUBSCRIPTION:
             return _fail(f"{a.name} already exists")
         try:
-            save(_from_args(a))
+            p = _from_args(a)
         except (ValueError, OSError) as e:
             return _fail(str(e))
+        if a.effort is not None and a.effort not in EFFORTS:
+            return _fail(f"--effort {a.effort!r}: choose one of {', '.join(EFFORTS)}")
+        known = None
+        if a.model and a.effort:   # both given: chosen at creation, the model checked like `choose` does
+            errs = validate(p)   # a broken profile is refused before its models command runs
+            if errs:
+                return _fail("; ".join(errs))
+            try:
+                known = model_choices(p)
+            except ModelsUnavailable as e:
+                return _fail(str(e))
+            if a.model not in known:
+                return _fail(f"model {a.model!r} is not offered; choose one of: {', '.join(known)}")
+            p.update(model=None if a.model == DEFAULT_MODEL else a.model, chosen_at=_now())
+        try:
+            save(p, known)
+        except (ValueError, OSError) as e:
+            return _fail(str(e))
+        if p.get("chosen_at"):
+            return 0
+        if _tty():
+            code = _prompt_choose(a.name, a.model, a.effort)
+            if code:
+                print(f"ap profile: {a.name} is saved without a chosen model and effort; run "
+                      f"`ap profile choose {a.name}` to choose them", file=sys.stderr)
+            return code
+        _print_choices(p, f"{a.name} is saved, but its model and effort are not chosen yet: run "
+                          f"`ap profile choose {a.name} --model <model> --effort <effort>` with values from the list above")
         return 0
     try:
         p = load(a.name)
@@ -595,8 +839,43 @@ def main(argv: list) -> int:
         return _fail(e.args[0])
     if a.cmd == "show":
         print(json.dumps(p, indent=2, ensure_ascii=False))
+    elif a.cmd == "choices":
+        try:
+            c = choices(p)
+        except ModelsUnavailable as e:
+            return _fail(str(e))
+        if a.json:
+            print(json.dumps(c, indent=2, ensure_ascii=False))
+        else:
+            mark = lambda v, rec: v + (" (recommended)" if v == rec else "")
+            print("models:  " + ", ".join(mark(m, c["recommended_model"]) for m in c["models"]))
+            print("efforts: " + ", ".join(mark(e, c["recommended_effort"]) for e in c["efforts"]))
+    elif a.cmd == "choose":
+        if a.model is not None and a.effort is not None:
+            try:
+                choose(a.name, a.model, a.effort)
+            except (ValueError, ModelsUnavailable, OSError) as e:
+                return _fail(str(e))
+            close_choice(a.name)
+            return 0
+        if _tty():
+            return _prompt_choose(a.name, a.model, a.effort)
+        missing = " and ".join(f for f, v in (("--model", a.model), ("--effort", a.effort)) if v is None)
+        _print_choices(p, f"no terminal to ask in: give {missing} with values from the list above")
+        return NEEDS_CHOICE
     elif a.cmd == "use":
+        # Re-applying the active profile never asks: it is already what workers run on.
+        if needs_choice(p) and a.name != config.load_global().get("active_profile"):
+            if not _tty():
+                _print_choices(p, f"{a.name} has no model and effort chosen yet, so nothing switched: run "
+                                  f"`ap profile choose {a.name} --model <model> --effort <effort>`, then "
+                                  f"`ap profile use {a.name}`")
+                return NEEDS_CHOICE
+            code = _prompt_choose(a.name)
+            if code:
+                return code
         use(a.name)
+        close_choice()   # a card left on the page for any switch is given up
     elif a.cmd == "rotate":
         try:
             rotate(a.name)
@@ -609,4 +888,5 @@ def main(argv: list) -> int:
         if a.name == config.load_global()["active_profile"]:
             return _fail(f"{a.name} is the active profile; use another first")
         path(a.name).unlink(missing_ok=True)
+        close_choice(a.name)
     return 0

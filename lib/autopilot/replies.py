@@ -103,9 +103,9 @@ def parse(path, url: str):
             many = doc.get("decisions") if isinstance(doc.get("decisions"), list) else []
             dec = str(doc.get("decision") or (many[0] if many else ""))
             item = {"id": d.get("id"), "ap": dec.split(":", 1)[0] if ":" in dec else None}
-            if doc.get("kind") is not None:   # an ask's option is the pass's business; only profile and cap replies carry it here
+            if doc.get("kind") is not None:   # an ask's option is the pass's business; only kind replies carry it here
                 item.update(kind=doc["kind"], option=doc.get("option"))
-                item.update({k: doc[k] for k in ("day", "at") if doc.get(k) is not None})
+                item.update({k: doc[k] for k in ("day", "at", "profile", "model", "effort") if doc.get(k) is not None})
             out.append(item)
         return out
     return None
@@ -151,8 +151,9 @@ def check(gcfg: dict, url: str, poll_s: float = 2) -> dict:
         _cleanup(claude, short)
 
 
-KINDS = ("profile", "cap")
-APPLIED_KEPT = 500   # profile and cap reply ids already applied, newest last
+KINDS = ("profile", "profile_choice", "cap")
+KINDS_TEXT = "kind: profile, kind: profile_choice or kind: cap"
+APPLIED_KEPT = 500   # kind reply ids already applied, newest last
 
 
 def _applied_file():
@@ -182,16 +183,61 @@ def _refused(kind: str, option: str, why: str) -> str:
     return f"refused: {why}"
 
 
+def _apply_choice(r: dict) -> str:
+    """The choice card's answer: check it against a list fetched now, save it, then switch. A pick not offered (or
+    a list that cannot be fetched) is refused and the card shows the fresh list (or the error)."""
+    name, model, effort = str(r.get("profile") or ""), str(r.get("model") or ""), str(r.get("effort") or "")
+    if (profile.choice_card() or {}).get("profile") != name:
+        # A retry after the switch failed: the choice is saved, so only the switch is left to do.
+        if name in profile.names() and profile.is_chosen_as(profile.load(name), model, effort):
+            profile.use(name)
+            return f"applied: profile_choice {name} {model} {effort} (saved before; switched now)"
+        events.append_global("profile_choice_ignored", {"profile": name})
+        return f"ignored: no choice card open for {name!r}"
+    if name not in profile.names():
+        profile.close_choice(name)
+        events.append_global("profile_unknown", {"option": name})
+        return f"ignored: no profile named {name!r}"
+    try:
+        models = profile.model_choices(profile.load(name))
+    except profile.ModelsUnavailable as e:
+        profile.open_choice(name)   # the card shows the error instead of a list
+        return _refused("profile_choice", name, str(e))
+    if model not in models or effort not in profile.EFFORTS:
+        why = f"{model!r} / {effort!r} is not offered"
+        c = profile.open_choice(name, refused=why)
+        if c.get("error"):
+            return _refused("profile_choice", name, c["error"])
+        return _refused("profile_choice", name, why)
+    try:
+        profile.choose(name, model, effort, models)
+    except ValueError as e:   # the profile itself no longer saves (e.g. its small model left the gateway)
+        profile.open_choice(name, refused=str(e))
+        return _refused("profile_choice", name, str(e))
+    profile.use(name)
+    profile.close_choice()   # only once the switch worked: a failed switch keeps the card for the retry
+    return f"applied: profile_choice {name} {model} {effort}"
+
+
 def _apply(r: dict, now: datetime) -> str:
-    """Apply one profile or cap reply and say what happened. A reply that is wrong in itself (unknown profile,
-    bad option, wrong day, card not open) is logged and reported, never raised. A failure while applying it
-    (use, apply, answer) raises, so apply_kind leaves the reply unmarked and the next check tries again."""
+    """Apply one kind reply and say what happened. A reply that is wrong in itself (unknown profile, bad option,
+    wrong day, card not open) is logged and reported, never raised. A failure while applying it (use, apply,
+    answer) raises, so apply_kind leaves the reply unmarked and the next check tries again."""
     kind, option = r.get("kind"), str(r.get("option") or "")
+    if kind == "profile_choice":
+        return _apply_choice(r)
     if kind == "profile":
         if option not in profile.names():
             events.append_global("profile_unknown", {"option": option})
             return f"ignored: no profile named {option!r}"
+        active = config.load_global().get("active_profile")
+        if profile.needs_choice(profile.load(option)) and option != active:
+            # Nothing switches before a model and effort are chosen: the page shows the choice card instead.
+            c = profile.open_choice(option)
+            events.append_global("profile_choice_needed", {"profile": option, "error": c.get("error")})
+            return f"choice needed: {option} has no model and effort chosen yet; the page shows the choice card"
         profile.use(option)
+        profile.close_choice()   # a card left for another profile: that switch was given up
         return f"applied: profile {option}"
     if option not in cap.OPTIONS and option not in ("pause", cap.ACCEPT_UNKNOWN):
         return _refused(kind, option, f"unknown option {option!r}: use raise50, raise100, accept_unknown or pause")
@@ -205,10 +251,10 @@ def _apply(r: dict, now: datetime) -> str:
 
 
 def apply_kind(r: dict, now: datetime) -> str:
-    """The one path a profile or cap reply takes, from the minute check and from `ap reply-kind` in a pass: each
-    reply id is applied once, whoever reads it first."""
+    """The one path a kind reply takes, from the minute check and from `ap reply-kind` in a pass: each reply id is
+    applied once, whoever reads it first."""
     if r.get("kind") not in KINDS:
-        raise ValueError("not a profile or cap reply (it has no kind: profile or kind: cap)")
+        raise ValueError(f"not a kind reply (it has no {KINDS_TEXT})")
     rid = str(r.get("id") or "")
     if rid and rid in _applied():
         return "already applied"
@@ -262,7 +308,7 @@ def step(gcfg: dict, gs: dict, now: datetime) -> set:
         gateway, several = False, True
     if not gateway:
         cap.close_card(now)   # no daily cap here: an open card must not keep the one-minute check running
-    if not aps and cap.state(now)["card"] != "open":
+    if not aps and cap.state(now)["card"] != "open" and not profile.choice_card():
         # Nothing to answer: only a possible profile switch is worth a look, and a slower one.
         if not several or (last and now - datetime.fromisoformat(last) < timedelta(seconds=SWITCH_CHECK_S - 5)):
             return set()
@@ -313,7 +359,7 @@ def _doc(raw: str) -> dict:
 
 @cli.command("reply-kind")
 def _reply_kind(args: list) -> int:
-    """`ap reply-kind '<reply doc json>'`: apply one profile or cap reply in a pass, the way the minute check
+    """`ap reply-kind '<reply doc json>'`: apply one profile, profile choice or cap reply in a pass, the way the minute check
     does. Exit 0 when the reply is done with (applied, ignored, refused or applied before): delete it then."""
     if len(args) != 1:
         print("usage: ap reply-kind '<reply document JSON>'", file=sys.stderr)
@@ -321,7 +367,7 @@ def _reply_kind(args: list) -> int:
     try:
         r = _doc(args[0])
         if r.get("kind") not in KINDS:
-            raise ValueError("not a profile or cap reply (it has no kind: profile or kind: cap)")
+            raise ValueError(f"not a kind reply (it has no {KINDS_TEXT})")
     except ValueError as e:
         print(f"ap reply-kind: {e}", file=sys.stderr)
         return 2

@@ -12,8 +12,11 @@ URL = "https://llm-gateway.example.com/anthropic"
 
 
 def run(*argv):
+    from unittest import mock
     out, err = io.StringIO(), io.StringIO()
-    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+    # No terminal: a profile without a chosen model and effort never waits on a prompt here.
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+            mock.patch("sys.stdin.isatty", return_value=False):
         code = cli.main(list(argv))
     return code, out.getvalue(), err.getvalue()
 
@@ -119,7 +122,7 @@ class ProfileTest(unittest.TestCase):
         with TempData() as d:
             code, _, err = run("profile", "add", "g", "--gateway", "--base-url", URL, "--key-command", "echo k",
                                "--small-model", "claude-haiku-4-5", "--model", "claude-opus-5-5",
-                               "--daily-cap", "500", "--env", "A=b")
+                               "--effort", "high", "--daily-cap", "500", "--env", "A=b")
             self.assertEqual(code, 0, err)
             self.assertEqual(run("profile", "use", "g")[0], 0)
             p = profile.active()

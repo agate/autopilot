@@ -81,6 +81,22 @@ class DocsTest(unittest.TestCase):
         for doc in ("README.md", "SKILL.md"):
             self.assertNotIn("up to 30 minutes", (ROOT / doc).read_text(), doc)
 
+    def test_a_model_and_effort_choice_is_the_user_s(self):
+        skill = (ROOT / "SKILL.md").read_text()
+        for s in ("`ap profile choices <name> --json`", "`ap profile choose <name> --model", "(Recommended)",
+                  "Never pick for the user"):
+            self.assertIn(s, skill, s)
+        # The question tool takes 2-4 options: the recommended entry and up to 3 others, every name in the
+        # question text, and a typed answer only when it is exactly in the fetched list.
+        flow = skill[skill.index("Choose model and effort"):skill.index("Only workers and one-off")]
+        for s in ("up to 3 others", "every name", "Other", "exactly", "ask again", "error", "stop"):
+            self.assertIn(s, flow, s)
+        rb = (ROOT / "RUNBOOK.md").read_text()
+        self.assertIn("`profile_choice`", rb[rb.index("**Replies.**"):rb.index("7. **Sync the source.**")])
+        readme = (ROOT / "README.md").read_text()
+        self.assertIn("`ap profile choose <name> --model M --effort E`", readme)
+        self.assertIn("[1m]", readme)
+
     def test_a_task_without_a_pr_gets_evidence(self):
         # Only the PR worker wrote evidence.json, so a research task closed with nothing on the page.
         rb = (ROOT / "RUNBOOK.md").read_text()

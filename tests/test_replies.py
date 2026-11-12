@@ -13,6 +13,7 @@ from tests.helpers import ROOT, TempData, write_ap
 from autopilot import cap, config, gate, install, ops, profile, publish, replies, state, workers
 
 URL = "https://claude.ai/artifact/PAGE"
+CHOSEN = "2026-01-01T00:00:00+00:00"   # a profile whose model and effort were chosen: a switch needs no choice card
 
 
 def write_transcript(path: Path, docs, url=URL, call=True, collection="replies", answer="1"):
@@ -232,6 +233,7 @@ class SwitchBase(Env):
     def setUp(self):
         super().setUp()
         profile.save({"name": "g", "mode": "gateway", "model": "m", "small_model": "s", "daily_cap_usd": 100,
+                      "chosen_at": CHOSEN,
                       "gateway": {"base_url": "https://llm-gateway.example.com/anthropic", "key_command": "echo k"}})
         for f in (self.data / "projects").glob("*/settings.json"):   # a real settings file always has permissions
             f.write_text(json.dumps({"permissions": {"allow": [], "deny": []}}))
@@ -304,7 +306,7 @@ class SwitchTest(SwitchBase):
 
     def test_replies_apply_oldest_first(self):
         profile.save({"name": "h", "mode": "gateway", "model": "m", "small_model": "s", "daily_cap_usd": 1,
-                      "gateway": {"base_url": "https://llm-gateway.example.com/anthropic", "key_command": "echo k"}})
+                      "chosen_at": CHOSEN, "gateway": {"base_url": "https://llm-gateway.example.com/anthropic", "key_command": "echo k"}})
         later = {"id": "r1", "ap": None, "kind": "profile", "option": "h", "at": "2026-01-02T12:05:00Z"}
         earlier = {"id": "r2", "ap": None, "kind": "profile", "option": "g", "at": "2026-01-02T12:00:00Z"}
         self.result = {"ok": True, "replies": [later, earlier]}
@@ -426,6 +428,188 @@ class ReplyKindTest(SwitchBase):
     def test_refuses_a_doc_that_is_not_a_profile_or_cap_reply(self):
         self.assertEqual(self.run_cli(json.dumps({"id": "r1", "decision": "checkout:D-1", "option": "a"}))[0], 2)
         self.assertEqual(self.run_cli("{nope")[0], 2)
+
+
+class ChoiceTest(SwitchBase):
+    """A switch from the page to a profile that needs a choice opens the choice card; the card's answer saves the
+    choice and then switches."""
+    LIST = '["claude-opus-5-5","gpt-5"]'
+
+    def setUp(self):
+        super().setUp()
+        self.cmd = self.data / "models.sh"
+        self.models(self.LIST)
+        profile.save({"name": "u", "mode": "gateway", "label": "New gateway", "small_model": "claude-opus-5-5",
+                      "daily_cap_usd": 10, "gateway": {"base_url": "https://llm-gateway.example.com/anthropic",
+                                                       "key_command": "echo k", "models_command": f"sh {self.cmd}"}})
+
+    def models(self, listed=None, fail=False):
+        self.cmd.write_text("exit 9\n" if fail else f"printf '%s' '{listed}'\n")
+
+    def switch(self, rid="r1"):
+        return {"id": rid, "ap": None, "kind": "profile", "option": "u", "at": "2026-01-02T12:00:00Z"}
+
+    def pick(self, model="claude-opus-5-5[1m]", effort="high", rid="r2", name="u"):
+        return {"id": rid, "ap": None, "kind": "profile_choice", "option": None, "profile": name, "model": model,
+                "effort": effort, "at": "2026-01-02T12:01:00Z"}
+
+    def test_a_switch_to_an_unchosen_profile_opens_the_card_and_does_not_switch(self):
+        out = replies.apply_kind(self.switch(), self.NOON)
+        self.assertIn("choice", out)
+        self.assertEqual(profile.active()["name"], "subscription")
+        card = profile.choice_card()
+        self.assertEqual(card["profile"], "u")
+        self.assertEqual(card["models"], ["claude-opus-5-5[1m]", "claude-opus-5-5", "gpt-5"])
+        self.assertEqual((card["recommended_model"], card["recommended_effort"]), ("claude-opus-5-5[1m]", "high"))
+        self.assertEqual(card["efforts"], list(profile.EFFORTS))
+        self.assertTrue(card["at"])
+        self.assertIn("r1", replies._applied())
+
+    def test_a_fetch_failure_is_shown_on_the_card(self):
+        self.models(fail=True)
+        replies.apply_kind(self.switch(), self.NOON)
+        card = profile.choice_card()
+        self.assertIn("exit 9", card["error"])
+        self.assertNotIn("models", card)
+        self.assertEqual(profile.active()["name"], "subscription")
+
+    def test_the_card_answer_is_checked_against_a_fresh_list_saved_then_switched(self):
+        replies.apply_kind(self.switch(), self.NOON)
+        self.models('["claude-opus-5-5"]')   # gpt-5 went away after the card was written
+        out = replies.apply_kind(self.pick(model="gpt-5", rid="r2"), self.NOON)
+        self.assertIn("refused", out)
+        self.assertEqual(profile.active()["name"], "subscription")
+        self.assertTrue(profile.needs_choice(profile.load("u")))
+        card = profile.choice_card()
+        self.assertEqual(card["models"], ["claude-opus-5-5[1m]", "claude-opus-5-5"])   # the card shows the fresh list
+        self.assertIn("gpt-5", card["refused"])
+        out = replies.apply_kind(self.pick(rid="r3"), self.NOON)
+        self.assertIn("applied", out)
+        p = profile.active()
+        self.assertEqual((p["name"], p["model"], p["effort"]), ("u", "claude-opus-5-5[1m]", "high"))
+        self.assertFalse(profile.needs_choice(p))
+        self.assertIsNone(profile.choice_card())
+
+    def test_a_card_answer_is_applied_once(self):
+        replies.apply_kind(self.switch(), self.NOON)
+        replies.apply_kind(self.pick(), self.NOON)
+        profile.use("subscription")
+        self.assertEqual(replies.apply_kind(self.pick(), self.NOON), "already applied")
+        self.assertEqual(profile.active()["name"], "subscription")
+
+    def test_an_answer_with_no_open_card_is_ignored(self):
+        out = replies.apply_kind(self.pick(), self.NOON)
+        self.assertIn("ignored", out)
+        self.assertTrue(profile.needs_choice(profile.load("u")))
+        self.assertIn("r2", replies._applied())
+
+    def test_a_fetch_failure_on_the_answer_refuses_it_and_shows_the_error(self):
+        replies.apply_kind(self.switch(), self.NOON)
+        self.models(fail=True)
+        self.assertIn("refused", replies.apply_kind(self.pick(), self.NOON))
+        self.assertIn("exit 9", profile.choice_card()["error"])
+        self.assertEqual(profile.active()["name"], "subscription")
+
+    def test_a_choice_the_profile_cannot_save_is_refused_not_retried(self):
+        replies.apply_kind(self.switch(), self.NOON)
+        self.models('["gpt-5"]')   # the profile's small model left the gateway: it no longer saves
+        out = replies.apply_kind(self.pick(model="gpt-5"), self.NOON)
+        self.assertIn("refused", out)
+        self.assertIn("claude-opus-5-5", profile.choice_card()["refused"])
+        self.assertIn("r2", replies._applied())
+        self.assertEqual(profile.active()["name"], "subscription")
+
+    def test_a_choice_whose_switch_fails_is_kept_and_retried(self):
+        replies.apply_kind(self.switch(), self.NOON)
+        real = profile.use
+        calls = []
+
+        def flaky(name):
+            calls.append(name)
+            if len(calls) == 1:
+                raise OSError("settings.json is read-only")
+            return real(name)
+
+        with mock.patch.object(profile, "use", flaky):
+            with self.assertRaises(OSError):
+                replies.apply_kind(self.pick(), self.NOON)
+            self.assertNotIn("r2", replies._applied())
+            self.assertEqual(profile.choice_card()["profile"], "u")   # still open for the retry
+            self.assertIn("applied", replies.apply_kind(self.pick(), self.NOON))
+        self.assertEqual(profile.active()["name"], "u")
+        self.assertIsNone(profile.choice_card())
+
+    def test_a_retry_with_the_card_gone_still_switches_when_the_choice_was_saved(self):
+        replies.apply_kind(self.switch(), self.NOON)
+        with mock.patch.object(profile, "use", side_effect=OSError("read-only")):
+            with self.assertRaises(OSError):
+                replies.apply_kind(self.pick(), self.NOON)
+        profile.close_choice()   # e.g. the card expired before the retry
+        self.assertIn("applied", replies.apply_kind(self.pick(), self.NOON))
+        self.assertEqual(profile.active()["name"], "u")
+        # A different pick with no card open is still ignored.
+        profile.use("subscription")
+        self.assertIn("ignored", replies.apply_kind(self.pick(effort="low", rid="r9"), self.NOON))
+        self.assertEqual(profile.active()["name"], "subscription")
+
+    def test_one_page_choice_runs_the_models_command_once(self):
+        replies.apply_kind(self.switch(), self.NOON)
+        self.cmd.write_text(f"echo run >> {self.data}/runs\nprintf '%s' '{self.LIST}'\n")
+        replies.apply_kind(self.pick(), self.NOON)
+        self.assertEqual(len((self.data / "runs").read_text().splitlines()), 1)
+
+    def test_a_page_switch_to_the_active_profile_re_applies_without_a_card(self):
+        profile.use("u")   # active before it had a choice
+        out = replies.apply_kind(self.switch(), self.NOON)
+        self.assertIn("applied", out)
+        self.assertIsNone(profile.choice_card())
+
+    def test_an_expired_card_stops_the_minute_check(self):
+        gs = {}
+        self.result = {"ok": True, "replies": [self.switch()]}
+        replies.step(config.load_global(), gs, self.NOON)
+        f = self.data / "profile-choice.json"
+        c = json.loads(f.read_text())
+        c["at"] = "2000-01-01T00:00:00+00:00"
+        f.write_text(json.dumps(c))
+        replies.step(config.load_global(), gs, self.NOON + timedelta(seconds=61))
+        self.assertEqual(len(self.calls), 1)
+
+    def test_switching_to_another_profile_closes_the_card(self):
+        replies.apply_kind(self.switch(), self.NOON)
+        replies.apply_kind({"id": "r5", "kind": "profile", "option": "g"}, self.NOON)
+        self.assertEqual(profile.active()["name"], "g")
+        self.assertIsNone(profile.choice_card())
+
+    def test_the_minute_check_applies_both_steps(self):
+        gs = {}
+        self.result = {"ok": True, "replies": [self.switch()]}
+        replies.step(config.load_global(), gs, self.NOON)
+        self.assertEqual(profile.choice_card()["profile"], "u")
+        # An open choice card makes the check run every minute, like a waiting card.
+        self.result = {"ok": True, "replies": [self.switch(), self.pick()]}
+        replies.step(config.load_global(), gs, self.NOON + timedelta(seconds=61))
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(profile.active()["name"], "u")
+
+    def test_parse_carries_the_choice(self):
+        p = write_transcript(self.data / "t.jsonl", [{"id": "r1", "kind": "profile_choice", "profile": "u",
+                                                      "model": "gpt-5", "effort": "low", "at": "T1"}])
+        self.assertEqual(replies.parse(p, URL), [{"id": "r1", "ap": None, "kind": "profile_choice", "option": "a",
+                                                  "profile": "u", "model": "gpt-5", "effort": "low", "at": "T1"}])
+
+    def test_reply_kind_handles_a_card_answer(self):
+        import contextlib
+        import io
+        from autopilot import cli
+        replies.apply_kind(self.switch(), self.NOON)
+        doc = {"id": "r2", "data": {"kind": "profile_choice", "profile": "u", "model": "gpt-5", "effort": "max"}}
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            code = cli.main(["reply-kind", json.dumps(doc)])
+        self.assertEqual(code, 0, out.getvalue())
+        self.assertIn("applied", out.getvalue())
+        self.assertEqual((profile.active()["name"], profile.active()["effort"]), ("u", "max"))
 
 
 class FakeClaudeTest(Env):
