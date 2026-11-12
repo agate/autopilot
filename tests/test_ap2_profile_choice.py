@@ -401,6 +401,15 @@ class ChooseCliTest(CliCase):
         p = profiles.load(self.data, "g")
         self.assertEqual((p["model"], p["effort"]), ("claude-opus-5-5", "xhigh"))
 
+    def test_zero_is_not_on_the_list_and_asks_again(self):
+        # "0" is outside 1..N: it must ask again, never wrap around to the last entry.
+        self.gateway()
+        code, out, err = self.run_cli("choose", "g", tty=True, answers=["0", "1", "1"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(err.count("Type a number from 1 to"), 1)
+        p = profiles.load(self.data, "g")
+        self.assertEqual((p["model"], p["effort"]), ("claude-opus-5-5[1m]", "low"))
+
     def test_a_digit_int_cannot_read_asks_again(self):
         self.gateway()
         code, out, err = self.run_cli("choose", "g", tty=True, answers=["\u00b2", "9" * 5000, "1", "1"])
@@ -578,6 +587,22 @@ class AddCliTest(CliCase):
         self.assertIn("`ap2 profile choose g` finishes it", last)
         self.assertTrue(err.endswith(last + "\n") and err.count("ap2: ") == 1, err)
         self.assertTrue(profiles.needs_choice(self.data, profiles.load(self.data, "g")))
+
+    def test_in_a_terminal_a_list_with_no_model_name_says_it_is_saved(self):
+        # The command lists only a small model of another shape: the save takes it, but nothing can be shown.
+        small = "anthropic/claude-haiku+latest"
+        before = runs(self.tmp)
+        code, out, err = self.run_cli("add", "h", "--gateway", "--base-url", URL, "--key-command", "echo k",
+                                      "--small-model", small, "--daily-cap", "5",
+                                      "--models-command", counting(self.tmp, f'["{small}"]'),
+                                      tty=True, answers=["1"])
+        self.assertEqual((code, out), (1, ""), err)
+        self.assertEqual(runs(self.tmp) - before, 1)
+        self.assertNotIn("Model for", err)
+        last = err.splitlines()[-1]
+        self.assertIn("listed no models", last)
+        self.assertIn("`ap2 profile choose h` finishes it", last)
+        self.assertTrue(profiles.needs_choice(self.data, profiles.load(self.data, "h")))
 
     def test_a_listed_small_model_of_another_shape_still_saves_and_is_never_shown(self):
         listed = '["claude-opus-5-5", "anthropic/claude-haiku+latest"]'
