@@ -231,10 +231,10 @@ class WorkerProfileLaunchTest(WorkerCase):
         self.assertFalse((transcripts.run_dir(self.data, cid) / "settings-implement.json").exists())
 
     def test_the_profile_is_read_once_per_start(self):
-        """A `use` while the tools are listed changes nothing in this start: the probes, the floor, the record and
-        the card all take the profile read before the discovery."""
-        self.use_gateway("g2", url=OTHER_URL)
-        self.use_gateway("g1")
+        """A `use` while the tools are listed changes nothing in this start: the probes, the floor, the argv, the
+        process env, the record and the card all take the profile read before the discovery."""
+        self.use_gateway("g2", url=OTHER_URL, model="m2", effort="low")
+        self.use_gateway("g1", model="m1", effort="high")
         real = Workers._discover
         switched = []
 
@@ -248,6 +248,9 @@ class WorkerProfileLaunchTest(WorkerCase):
         self.assertEqual(switched, [{"active": "g2", "was": "g1"}])
         env = self.settings_of(self.bg_calls()[-1])["env"]
         self.assertEqual((env["ANTHROPIC_BASE_URL"], env["AP2_PROFILE"]), (URL, "g1"))
+        argv = self.bg_calls()[-1]["argv"]
+        self.assertEqual((opt(argv, "--model"), opt(argv, "--effort")), ("m1", "high"))
+        self.assertEqual(self.bg_calls()[-1]["env"]["AP2_PROFILE"], "g1")  # the process env, as the settings env
         self.assertEqual(a["profile"], "g1")
         self.assertEqual(resources.Registry(self.data).read()[0]["profile"], "g1")
         self.assertEqual(self.get(a["card"])["sessions"]["implement"]["profile"], "g1")

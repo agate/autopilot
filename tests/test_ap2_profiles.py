@@ -374,13 +374,25 @@ class ProfileCliTest(unittest.TestCase):
         folder = self.data / "profiles"
         folder.chmod(0o555)
         self.addCleanup(folder.chmod, 0o755)
-        r = self.run_ap2("remove", "s2")
+        for args, text in ((("remove", "s2"), "s2"), (("add", "s3", "--subscription"), "s3.json")):
+            r = self.run_ap2(*args)
+            self.assertEqual(r.returncode, 1, r.stdout)
+            self.assertEqual(len(r.stderr.splitlines()), 1, r.stderr)
+            self.assertTrue(r.stderr.startswith("ap2: "), r.stderr)
+            self.assertNotIn("Traceback", r.stderr)
+            self.assertIn(text, r.stderr)
+        self.assertTrue((folder / "s2.json").exists())
+        self.assertFalse((folder / "s3.json").exists())
+        # active-profile.json sits in the data folder itself, so `use` fails only when that folder is read-only.
+        self.data.chmod(0o555)
+        self.addCleanup(self.data.chmod, 0o755)  # runs before the folder chmod above and the rmtree
+        r = self.run_ap2("use", "s2")
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertEqual(len(r.stderr.splitlines()), 1, r.stderr)
         self.assertTrue(r.stderr.startswith("ap2: "), r.stderr)
         self.assertNotIn("Traceback", r.stderr)
-        self.assertIn("s2", r.stderr)
-        self.assertTrue((folder / "s2.json").exists())
+        self.assertIn("active-profile.json", r.stderr)
+        self.assertFalse((self.data / "active-profile.json").exists())
 
     def test_list_and_show_create_nothing(self):
         self.ok("list")
