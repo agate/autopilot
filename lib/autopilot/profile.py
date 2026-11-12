@@ -307,13 +307,20 @@ def apply(act: dict = None) -> list:
 
 
 def migrate_from_config() -> bool:
-    """Copy the model settings that moved into the subscription profile, once. True when it did."""
+    """Copy the model settings that moved into the subscription profile, once, and rewrite the settings files
+    for it, so an upgraded install gets the subscription blanks at once. True when it did. The files are
+    rewritten first: if that fails nothing is saved, and the next run tries again."""
     if path(SUBSCRIPTION).exists():
         return False
     cfg = config.load_global()
     p = _blank(SUBSCRIPTION)
     for key, field in _MOVED:
         p[field] = config.lookup(cfg, key)
+    errs = validate(p)
+    if errs:
+        raise ValueError("; ".join(errs))
+    if cfg.get("active_profile") in (None, SUBSCRIPTION):
+        apply(p)
     save(p)
     for key, _ in _MOVED:
         config.reset_setting(key)

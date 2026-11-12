@@ -280,7 +280,10 @@ def _epoch(iso: str):
 
 
 def run(now: datetime = None, dispatch_fn=None) -> int:
-    profile.migrate_from_config()
+    try:
+        profile.migrate_from_config()
+    except Exception as e:  # noqa: BLE001 - a failed migration must not stop the gate; the next run retries
+        print(f"ap gate: could not migrate settings to the subscription profile: {e}", file=sys.stderr)
     gcfg = config.load_global()
     if lock.held(paths.data_root() / "lock"):
         return 0

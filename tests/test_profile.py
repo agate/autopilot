@@ -83,6 +83,32 @@ class ProfileTest(unittest.TestCase):
             self.assertNotIn("worker", raw.get("models", {}))
             self.assertFalse(profile.migrate_from_config())
 
+    def test_migration_applies_the_blanks_to_existing_settings(self):
+        with TempData() as d:
+            f = d / "projects" / "a" / "settings.json"
+            f.parent.mkdir(parents=True)
+            f.write_text(json.dumps({"permissions": {"deny": ["x"]}, "env": {"AUTOPILOT_ROLE": "worker"}}))
+            (d / "settings-dispatcher.json").write_text(json.dumps({"permissions": {"deny": []}, "env": {}}))
+            self.assertTrue(profile.migrate_from_config())
+            for g in (f, d / "settings-dispatcher.json", d / "settings-light.json"):
+                body = json.loads(g.read_text())
+                self.assertEqual(body["env"]["ANTHROPIC_BASE_URL"], "", g.name)
+                self.assertEqual(body["env"]["AUTOPILOT_PROFILE"], "subscription", g.name)
+            self.assertEqual(json.loads(f.read_text())["permissions"], {"deny": ["x"]})
+
+    def test_a_failed_migration_does_not_stop_the_gate(self):
+        import contextlib
+        import io
+        from unittest import mock
+        from autopilot import gate
+        with TempData():
+            err = io.StringIO()
+            with mock.patch.object(profile, "migrate_from_config", side_effect=OSError("read-only")), \
+                    mock.patch.object(gate, "_sessions", lambda g: []), mock.patch.object(gate, "notify", lambda m: None), \
+                    contextlib.redirect_stderr(err):
+                self.assertEqual(gate.run(dispatch_fn=lambda g, aps: []), 0)
+            self.assertIn("read-only", err.getvalue())
+
     def test_use_unknown_fails(self):
         with TempData():
             with self.assertRaises(KeyError):
