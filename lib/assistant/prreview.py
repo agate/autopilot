@@ -467,6 +467,8 @@ def read_plan(data, card_id: str) -> dict:
         raise ReviewError(f"card {card_id}: no review plan at {path}; run ap2 review plan first") from None
     except (OSError, ValueError) as e:  # a SourceError is a ConfigError, raised as it is
         raise ReviewError(f"{path}: not a review plan: {e}") from None
+    except RecursionError:
+        raise ReviewError(f"{path}: not a review plan: nested too deeply") from None
     if not (isinstance(obj, dict) and obj.get("card") == card_id and obj.get("stage") in STAGES
             and isinstance(obj.get("head_sha"), str) and SHA.match(obj["head_sha"])
             and isinstance(obj.get("angles"), list)):
@@ -683,7 +685,8 @@ def plain_for(record, card, langs) -> dict:
         p = phrases(lang)
         if p is None:
             raise ReviewError(f"no plain words for PR review cards in {lang} yet (built in: {', '.join(PHRASES)})")
-        title = _first_line(record.get("text")) or _first_line(cards.title_for(card, lang, langs[0]))
+        title = (_first_line(record.get("text")) or _first_line(cards.title_for(card, lang, langs[0]))
+                 or (card.get("key") if isinstance(card.get("key"), str) else ""))
         out["what"][lang] = p["what"].format(author=author or p["someone"], id=number, title=title)
         said = tldr.get(lang) if tldr else None
         if tldr and not (isinstance(said, str) and said.strip()):
@@ -722,9 +725,12 @@ def apply(data, card_id: str, by: str = "ap2 review", cfg=None) -> dict:
     findings = {b: rep["findings"][b] for b in BUCKETS}
     fixed, answered, n_fixed, n_open = [], [], 0, 0
     if stage == "delta":
-        fixed = [f for f in old.get("fixed") or [] if isinstance(f, dict)]
-        answered = [f for f in old.get("answered") or [] if isinstance(f, dict)]
-        by_id = {f["id"]: f for b in ("confirmed", "questions") for f in old.get(b) or []
+        def stored(b):  # a bucket the card holds, or [] when it is not a list
+            return old.get(b) if isinstance(old.get(b), list) else []
+
+        fixed = [f for f in stored("fixed") if isinstance(f, dict)]
+        answered = [f for f in stored("answered") if isinstance(f, dict)]
+        by_id = {f["id"]: f for b in ("confirmed", "questions") for f in stored(b)
                  if isinstance(f, dict) and isinstance(f.get("id"), str)}
         for e in rep["earlier"]:
             if e["state"] == "fixed":

@@ -279,6 +279,13 @@ class PlainWordsTest(Case):
                 self.assertEqual(words["what"], {"en": "Someone asked you to review PR #5: Fix it",
                                                  "zh": f"有人 请你审查 PR #5：{zh}"})
 
+    def test_with_no_title_at_all_the_what_line_names_the_card_key(self):
+        for title in (None, "", "  "):
+            with self.subTest(title=title):
+                what = prreview.plain_for({}, {"key": "example/widgets#42", "title": title}, ("en",))["what"]["en"]
+                self.assertFalse(what.rstrip().endswith(":"), what)
+                self.assertIn("example/widgets#42", what)
+
     def test_a_long_title_is_cut_at_120_characters(self):
         words = prreview.plain_for({"id": "7", "author": "octo-dev", "text": "x" * 300 + "\nsecond line"}, {},
                                    ("en",))
@@ -612,6 +619,13 @@ class CheckTest(Case):
             with self.assertRaisesRegex(prreview.ReviewError, "no review plan"):
                 prreview.check(self.data, self.cid, cfg=self.cfg)
 
+    def test_a_plan_nested_too_deeply(self):
+        path = prreview.run_dir(self.data, self.cid) / prreview.PLAN_FILE
+        path.write_text(DEEP_TEXT)
+        with too_deep_to_read("prreview"), \
+                self.assertRaisesRegex(prreview.ReviewError, "not a review plan: nested too deeply"):
+            prreview.check(self.data, self.cid, cfg=self.cfg)
+
     def test_bad_delta_reports(self):
         q = {k: v for k, v in good_finding(id="q-1", severity="nit").items() if k != "checked"}
         q["question"] = {"en": "Should a retry wait longer?", "zh": "重试要不要等更久？"}
@@ -625,6 +639,8 @@ class CheckTest(Case):
         self.assertEqual(self.errors(good), [])
         still = good_finding()
         new_reusing = good_finding(id="q-1", severity="nit")
+        moved = {k: v for k, v in good_finding().items() if k != "checked"}
+        moved["reason"] = {"en": "Not a bug after all.", "zh": "其实不是问题。"}
 
         def bad(earlier=None, findings=None, drop=()):
             r = copy.deepcopy(good)
@@ -647,6 +663,10 @@ class CheckTest(Case):
                 ("open on an id gone from its bucket",
                  bad(earlier=[{"id": "correctness-1", "state": "open"}, {"id": "q-1", "state": "answered"}]),
                  "correctness-1 is open but is not in findings.confirmed"),
+                ("open on an id moved to another bucket",
+                 bad(earlier=[{"id": "correctness-1", "state": "open"}, {"id": "q-1", "state": "answered"}],
+                     findings={"rejected": [moved]}),
+                 "(it is in rejected)"),
                 ("fixed on an id still listed", bad(findings={"confirmed": [still]}),
                  "correctness-1 is fixed but is still listed in findings.confirmed"),
                 ("answered on a confirmed id",
@@ -749,6 +769,25 @@ class ApplyTest(Case):
         card = prreview.apply(self.data, cid, cfg=self.cfg)
         self.assertEqual(card["audit"][-1]["did"], f"delta review {B[:7]}: question, 1 fixed, 1 open")
         self.assertEqual(card["verdict"]["since_last"], rep["since_last"])
+
+    def test_stored_buckets_that_are_not_lists_do_not_break_a_delta(self):
+        cid = self.two_finding_card()
+        found = dict(self.store().get(cid)["findings"], fixed=True, answered=True)
+        Store(self.data, cfg=self.cfg).update(cid, {"findings": found}, by="test")
+        self.delta(cid, [{"id": "correctness-1", "state": "fixed"}, {"id": "q-1", "state": "answered"}])
+        card = prreview.apply(self.data, cid, cfg=self.cfg)
+        self.assertEqual([(f["id"], f["fixed_in"]) for f in card["findings"]["fixed"]], [("correctness-1", B)])
+        self.assertEqual([(f["id"], f["fixed_in"]) for f in card["findings"]["answered"]], [("q-1", B)])
+
+    def test_the_same_head_reviewed_again_at_another_time_is_applied(self):
+        cid = self.reviewed_card()
+        self.plan(cid, table(fixture("graphql-head-a.json")))
+        rep = self.report("report-review.json", cid)
+        rep["reviewed_at"] = "2026-11-11T12:00:00Z"
+        self.put_report(cid, rep)
+        card = prreview.apply(self.data, cid, cfg=self.cfg)
+        self.assertEqual(len(card["reviews"]), 2)
+        self.assertEqual(card["verdict"]["reviewed_at"], "2026-11-11T12:00:00Z")
 
     def test_the_same_report_twice_is_refused(self):
         cid = self.reviewed_card()
@@ -1000,6 +1039,12 @@ class NothingPostedTest(unittest.TestCase):
         ["api", "repos/o/r/issues/1/comments", "--field=body=x"],
         ["api", "graphql", "-f", "query=query { a }", "--raw-field=query=mutation { x }"],
         ["api", "graphql", "--field", "query=@q.graphql"],
+        ["api", "graphql", "--field", 'query={branch}{addStar(input:{starrableId:"R_x"}){clientMutationId}}'],
+        # A short value flag with its value attached takes no next argument, and a long one with `=` neither.
+        ["api", "-HAccept: x", "-XPOST", "repos/o/r/issues/1/comments"],
+        ["api", "--jq=.id", "-XPOST", "repos/o/r/issues/1/comments"],
+        # --include takes no value, so the next argument is still checked.
+        ["api", "--include", "-XPOST", "repos/o/r/issues/1/comments"],
         ["--repo", "o/r", "pr", "merge", "1"],
         [],
     )
