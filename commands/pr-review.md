@@ -50,7 +50,9 @@ command prints JSON and takes the data folder from `AP2_DATA`, which your sessio
    - `reviewed_sha`, `compare` and `whole_pr` (delta only): the commit of the last review, the read path
      of the diff to review, and why that diff is the whole PR (`null` when it holds only the commits since
      the last review). `whole_pr` is set when the new commits include a merge commit (an "update branch"
-     merge, whose diff would be the base branch's changes, not the author's) or the branch was rewritten;
+     merge, whose diff would be the base branch's changes, not the author's), when more commits came in
+     than GitHub's compare lists (250), so a merge commit among them cannot be ruled out, or when the
+     branch was rewritten (the last reviewed commit may even be gone from GitHub);
    - `angles`: the 2 or 3 review angles to run, Correctness first, each with its `question`, `brief`,
      `origin` (built in, the user's, or the repo's own) and `why`; `repo_layer` says whether the repo's
      `.autopilot/review.yaml` was read, and if not, why;
@@ -64,8 +66,8 @@ command prints JSON and takes the data folder from `AP2_DATA`, which your sessio
    `gh api -H "Accept: application/vnd.github.diff" "repos/<owner>/<repo>/compare/<merge_base>...<head_sha>"`.
    A delta reads the diff of `compare` instead:
    `gh api -H "Accept: application/vnd.github.diff" "<compare>"`. When `whole_pr` is set, `compare` is
-   the whole PR (a merge commit or a rewrite since the last review): review all of it with the same
-   angles, still mark each earlier finding fixed or open, and say why in `since_last`.
+   the whole PR (for one of the reasons in step 2): review all of it with the same angles, still mark
+   each earlier finding fixed or open, and say why in `since_last`.
 4. The requirement: the ticket, when the title, branch or body names one and a ticket tool is available
    (read it with read-only calls only); else the PR body; else the ask. When a named ticket could not be
    read, say "ticket not read" in `background`. The review checks the code against the requirement: the
