@@ -135,5 +135,17 @@ class ProfileTest(unittest.TestCase):
             self.assertEqual(profile.names(), ["subscription"])
 
 
+class ProfileNameTest(unittest.TestCase):
+    def test_project_style_names_with_underscores_are_valid(self):
+        for name in ("team_project", "team_a-2", "a"):
+            errs = profile.validate({"name": name, "mode": "subscription"})
+            self.assertFalse([e for e in errs if e.startswith("name:")], name)
+
+    def test_bad_profile_names_are_refused(self):
+        for name in ("", "Team", "_x", "1x", "a/b", "a.b", "a b", "x" * 41):
+            errs = profile.validate({"name": name, "mode": "subscription"})
+            self.assertTrue([e for e in errs if e.startswith("name:")], name)
+
+
 if __name__ == "__main__":
     unittest.main()

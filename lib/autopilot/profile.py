@@ -36,6 +36,10 @@ def _blank(name: str, mode: str = "subscription") -> dict:
             "small_model": None, "effort": None, "daily_cap_usd": None, "gateway": None, "env": {}, "settings": {}}
 
 
+# A profile is often named after a gateway project, so underscores are allowed (unlike autopilot names).
+_PROFILE_NAME = re.compile(r"^[a-z][a-z0-9_-]{0,39}$")
+
+
 def path(name: str) -> Path:
     return paths.data_root() / "profiles" / f"{name}.json"
 
@@ -56,8 +60,8 @@ def _command_output(cmd: str, timeout: int = 30):
 def validate(p: dict) -> list:
     errs = []
     name = p.get("name")
-    if not paths.valid_name(name if isinstance(name, str) else ""):
-        errs.append("name: lowercase letters, digits and dashes, starting with a letter")
+    if not _PROFILE_NAME.match(name if isinstance(name, str) else ""):
+        errs.append("name: lowercase letters, digits, dashes and underscores, starting with a letter (40 at most)")
     mode = p.get("mode")
     if mode not in ("subscription", "gateway"):
         errs.append("mode: must be subscription or gateway")
