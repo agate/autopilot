@@ -1042,6 +1042,55 @@ class HardeningTest(SpendCase):
         self.assertEqual((t["month"], t["unknown"]), (0.0, True))
         self.assertNotIn(str(self.transcript), self.cache()["files"])
 
+    def test_a_cache_written_before_the_unreadable_rule_is_priced_again(self):
+        # A run before the rule cached a chmod 000 file as no requests, under the key of that time: not kept.
+        self.put()
+        self.launch()
+        self.unreadable(self.transcript)
+        st = self.transcript.stat()
+        table = spend.prices(self.data)
+        old_key = hashlib.sha1((json.dumps(table, sort_keys=True) + NOW.strftime("%z")).encode()).hexdigest()
+        old = {"key": old_key, "shorts": {}, "tries": {},
+               "files": {str(self.transcript): {"stamp": [st.st_mtime_ns, st.st_size], "reqs": {}}}}
+        (self.data / "spend").mkdir(parents=True, exist_ok=True)
+        (self.data / "spend" / "cache.json").write_text(json.dumps(old))
+        t = self.totals()
+        self.assertEqual((t["month"], t["unknown"]), (0.0, True))
+
+    def test_a_file_that_cannot_be_checked_for_the_cache_is_unknown_and_not_cached(self):
+        self.put()
+        table = spend.prices(self.data)
+        real = Path.stat
+
+        def stat_(p, *a, **kw):  # only the transcript cannot be checked; every other path is stat'ed as usual
+            if p == self.transcript:
+                raise PermissionError(13, "Permission denied", str(p))
+            return real(p, *a, **kw)
+        unknown = {spend.UNREADABLE: [None, None, ""]}
+        with mock.patch.object(Path, "stat", stat_):
+            c, seen = {"files": {}}, set()
+            self.assertEqual(spend._cached_reqs(c, self.transcript, table, 0.0, seen), unknown)
+            self.assertNotIn(str(self.transcript), c["files"])
+            self.assertNotIn(str(self.transcript), seen)
+            st = real(self.transcript)
+            held = {"req_1": [1.0, 2.0]}  # an entry from before, its stamp still the file's
+            c = {"files": {str(self.transcript): {"stamp": [st.st_mtime_ns, st.st_size], "reqs": held}}}
+            seen = set()
+            self.assertEqual(spend._cached_reqs(c, self.transcript, table, 0.0, seen), unknown)
+            self.assertNotIn(str(self.transcript), seen)  # not seen: the save drops it
+
+    def test_a_transcript_file_whose_open_fails_with_another_error_is_one_unknown_request(self):
+        self.put()
+        real = os.open
+
+        def open_(p, *a, **kw):  # only the transcript's open fails; every other path opens as usual
+            if os.fspath(p) == str(self.transcript):
+                raise OSError(5, "Input/output error", str(p))
+            return real(p, *a, **kw)
+        with mock.patch.object(spend.os, "open", open_):
+            items = spend._parse_file(self.transcript, spend.prices(self.data))
+        self.assertEqual(items, [{"id": spend.UNREADABLE, "ts": None, "model": "", "usd": None}])
+
     def test_a_subagents_folder_that_cannot_be_entered_is_unknown_spend(self):
         self.put(sub="subagent.jsonl")
         folder = self.transcript.parent / SID / "subagents"

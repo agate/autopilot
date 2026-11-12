@@ -2254,7 +2254,8 @@ Calls the author made without asking (check them):
         `Path.stat`, which raise on every Python, where `Path.glob` skips the folder silently on 3.12 and
         `Path.is_file` says False on 3.14) each give one unknown request (key `~unreadable`), and `settle` writes it
         into the settled row like any other unknown request. That result is never cached, so the next read tries the
-        file again (a `chmod` back keeps the file's mtime and size). A request id the file gives that starts with `~`
+        file again (a `chmod` back keeps the file's mtime and size). The cache's key changes once, so a cache
+        written before this rule (which holds such a file as no requests) is priced again. A request id the file gives that starts with `~`
         gets one more `~`, so a forged `~unreadable` (or `~<line>`) never reads as a key the parser makes. A file
         that is gone (`FileNotFoundError`, a race with a deletion), no subagents folder, and a link to a FIFO or a
         device are still nothing.

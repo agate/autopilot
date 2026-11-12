@@ -383,10 +383,15 @@ def request_costs(data, path, tz=None) -> list:
 
 # -- cache -----------------------------------------------------------------------------------------------------------
 
+# Mixed into the cache's key; bumped when a cached result's meaning changes, so a cache written before is priced
+# again. "2": an unreadable file is unknown spend, where a cache written before holds it as no requests ($0).
+_CACHE_FORMAT = "2"
+
+
 def _price_key(table: dict, zone: str) -> str:
-    """The cache's key: the prices and how the month is cut (`zone`: a fixed offset, or "local" and the offset this
-    month starts at)."""
-    return hashlib.sha1((json.dumps(table, sort_keys=True) + zone).encode()).hexdigest()
+    """The cache's key: the prices, how the month is cut (`zone`: a fixed offset, or "local" and the offset this
+    month starts at) and `_CACHE_FORMAT`."""
+    return hashlib.sha1((json.dumps(table, sort_keys=True) + zone + "|" + _CACHE_FORMAT).encode()).hexdigest()
 
 
 def _load_cache(data, key: Optional[str]) -> dict:
