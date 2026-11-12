@@ -623,8 +623,11 @@ def check_report(rep: dict, plan_: dict, card: dict, langs) -> list:
 
 
 def check(data, card_id: str, cfg=None) -> dict:
-    """`ap2 review check`: {ok, errors} for `<data>/sessions/<card>/prreview.json`."""
+    """`ap2 review check`: {ok, errors} for `<data>/sessions/<card>/prreview.json`. It only reads, so a missing data
+    folder is refused, not created."""
     data = Path(data)
+    if not data.is_dir():
+        raise ReviewError(f"no data folder at {data}")
     cfg = cfg if cfg is not None else config.load(data)
     card = Store(data, cfg=cfg).get(card_id)
     pr_of(card)

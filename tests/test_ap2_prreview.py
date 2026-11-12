@@ -217,7 +217,8 @@ class RoleTest(Case):
 
         rules = re.search(r"^## Rules\n(.*?)^## ", text, re.S | re.M).group(1)
         outside = text.replace(rules, "")
-        for banned in ("gh pr review", "gh pr comment", "-X", "--method"):
+        for banned in ("gh pr review", "gh pr comment", "gh pr merge", "gh issue comment", "-X", "--method",
+                       "--input", "mutation"):
             with self.subTest(banned=banned):
                 self.assertIn(banned, rules)
                 self.assertNotIn(banned, outside)
@@ -270,6 +271,22 @@ class PlainWordsTest(Case):
                 words = prreview.plain_for({"id": "42", "text": TITLE}, card, LANGS)
                 self.assertTrue(words["do"]["en"].startswith(want), words["do"]["en"])
                 self.assertEqual(words["what"]["en"], f"Someone asked you to review PR #42: {TITLE}")
+        with self.subTest("rejected, out of scope and fixed are not open"):
+            card = dict(base, findings={"confirmed": [f], "rejected": [f], "out_of_scope": [f], "fixed": [f]})
+            words = prreview.plain_for({"id": "42", "text": TITLE}, card, LANGS)
+            self.assertTrue(words["do"]["en"].startswith("Read the 1 finding, then"), words["do"]["en"])
+
+    def test_a_regional_language_uses_its_base_language_words(self):
+        words = prreview.plain_for({"id": "42", "text": TITLE}, {}, ("en", "zh-TW"))
+        self.assertEqual(words["what"]["zh-TW"], f"有人 请你审查 PR #42：{TITLE}")
+        self.assertEqual(words["where"]["zh-TW"], "还没有审查。")
+
+    def test_a_tldr_missing_a_language_falls_back_to_another(self):
+        card = {"verdict": {"tldr": {"en": "Changes: x."}}}
+        words = prreview.plain_for({"id": "42", "text": TITLE}, card, LANGS)
+        self.assertEqual(words["where"]["zh"], "Changes: x.")
+        self.assertNotEqual(words["do"]["zh"], prreview.PHRASES["zh"]["do_none"])
+        self.assertEqual(words["do"]["zh"], prreview.PHRASES["zh"]["do_zero"])
 
     def test_with_no_source_record_the_title_is_the_cards(self):
         for title, zh in (("Fix it", "Fix it"), ({"en": "Fix it", "zh": "修好它"}, "修好它")):
@@ -339,11 +356,19 @@ class PlanTest(Case):
         git(repo, "add", ".")
         git(repo, "commit", "-q", "-m", "init")
         head = git(repo, "rev-parse", "HEAD")
+        # A later commit renames the angle, so the checkout's HEAD is not the PR head: the plan reads the PR head.
+        (repo / ".autopilot" / "review.yaml").write_text(
+            '- name: Billing safety\n  question: "Can this change charge a customer twice?"\n'
+            '  when: { paths: ["billing/**"] }\n  brief: "Read every caller of the charge functions."\n')
+        git(repo, "commit", "-q", "-am", "rename the angle")
+        self.assertNotEqual(git(repo, "rev-parse", "HEAD"), head)
         real = subprocess.run
-        calls = []
+        calls, envs = [], []
 
         def spy(argv, *a, **kw):
             calls.append(list(argv))
+            if "cat-file" in argv:
+                envs.append(kw.get("env"))
             return real(argv, *a, **kw)
 
         with self.subTest("the checkout has the head"), mock.patch("subprocess.run", spy):
@@ -352,7 +377,11 @@ class PlanTest(Case):
             self.assertEqual([(a["name"], a["origin"]) for a in out["angles"]][:2],
                              [("Correctness", "built-in"), ("Payments safety", "repo")])
             self.assertEqual(len(out["angles"]), 3)
+            self.assertNotIn("Billing safety", [a["name"] for a in out["angles"]])
             self.assertEqual(out["repo_layer"], f"{repo} at {head[:7]}")
+            self.assertTrue(envs)
+            for env in envs:
+                self.assertEqual((env["GIT_NO_LAZY_FETCH"], env["GIT_TERMINAL_PROMPT"]), ("1", "0"))
         with self.subTest("the checkout lacks the head"), mock.patch("subprocess.run", spy):
             out, _ = self.plan(cid, table(fixture("graphql-head-a.json")), checkout=str(repo))
             self.assertEqual(out["repo_layer"], f"{repo} does not have {A[:7]}")
@@ -400,6 +429,13 @@ class PlanTest(Case):
             self.set_reviewed(cid, names=("Correctness", "Gone angle"))
             out, _ = self.plan(cid, table(b_pages, head=B, since="since_clean"), stage="delta")
             self.assertEqual([a["name"] for a in out["angles"]], ["Correctness", "Test value", "Flakiness & isolation"])
+
+    def test_a_full_review_picks_its_angles_anew(self):
+        cid = self.card()["id"]
+        self.set_reviewed(cid, names=("Correctness", "Accuracy"))
+        out, _ = self.plan(cid, table(fixture("graphql-head-a.json")), stage="review")
+        self.assertEqual(out["stage"], "review")
+        self.assertEqual([a["name"] for a in out["angles"]], ["Correctness", "Test value", "Flakiness & isolation"])
 
     def test_cards_that_are_not_a_pr_review_are_refused(self):
         base = {"lane": "needs", "feed": "test", "links": [], "pri": "P2", "origin": "source",
@@ -450,6 +486,15 @@ class Ap2Case(Case):
     def ap2(self, *args, stdin=None):
         return subprocess.run([sys.executable, str(AP2), *args], capture_output=True, text=True, env=self.env,
                               encoding="utf-8", input=stdin, timeout=60)
+
+
+class CheckCliTest(Ap2Case):
+    def test_check_leaves_a_missing_data_folder_alone(self):
+        missing = self.tmp / "nope"
+        r = self.ap2("review", "check", "c-20261111-000000-abcdef", "--data", str(missing))
+        self.assertEqual((r.returncode, r.stdout), (1, ""))
+        self.assertEqual(r.stderr, f"ap2: no data folder at {missing}\n")
+        self.assertFalse(missing.exists())
 
 
 class VerdictTest(Ap2Case):
@@ -537,6 +582,12 @@ class CheckTest(Case):
 
     def test_a_good_report_passes(self):
         self.assertEqual(self.errors(self.report("report-review.json", self.cid)), [])
+
+    def test_a_missing_data_folder_is_refused_not_created(self):
+        missing = self.tmp / "nope"
+        with self.assertRaisesRegex(prreview.ReviewError, re.escape(f"no data folder at {missing}")):
+            prreview.check(missing, self.cid, cfg=self.cfg)
+        self.assertFalse(missing.exists())
 
     def test_a_tldr_of_200_characters_passes(self):
         rep = self.report("report-review.json", self.cid)
