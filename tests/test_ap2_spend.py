@@ -992,7 +992,9 @@ class HardeningTest(SpendCase):
                 if i == 1:
                     raise OSError(5, "Input/output error")
                 yield got
-        self.patch(spend, "_lines", lines)
+        p = mock.patch.object(spend, "_lines", lines)
+        p.start()
+        self.addCleanup(p.stop)  # a second stop is a no-op
         items = spend._parse_file(self.transcript, spend.prices(self.data))
         self.assertEqual([i["id"] for i in items], ["req_a", spend.UNREADABLE])
         self.assertEqual(round(items[0]["usd"], 6), 1.0)
@@ -1001,6 +1003,11 @@ class HardeningTest(SpendCase):
         t = self.totals()
         self.assertAlmostEqual(t["month"], 1.0)
         self.assertEqual((t["unknown"], t["unknown_today"]), (True, True))
+        self.assertNotIn(str(self.transcript), self.cached_files())
+        p.stop()  # the disk recovers; the file's stamp is unchanged
+        t = self.totals()
+        self.assertAlmostEqual(t["month"], 2.0)
+        self.assertIs(t["unknown"], False)
 
     def test_an_unreadable_result_is_never_cached(self):
         self.put()
