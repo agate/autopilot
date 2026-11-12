@@ -134,7 +134,27 @@ class DecideTest(unittest.TestCase):
                     # `EOF)` ends a body only inside `$(...)`.
                     "cat <<EOF\nEOF); ap2 x '\nEOF\ncp a $AP2_DATA/c #'",
                     'x=$(cat <<EOF\nhi\nEOF)\ncp a $AP2_DATA/config.yaml',
-                    'cat <<"a\\b"\nab\nap2 card note C1 \'\na\\b\ncp a $AP2_DATA/config.yaml # \''], deny=True)
+                    'cat <<"a\\b"\nab\nap2 card note C1 \'\na\\b\ncp a $AP2_DATA/config.yaml # \'',
+                    # A `$"..."` or `$'...'` delimiter: bash ends the body at its decoded word (`EO`, `a'b`).
+                    'cat <<$"EO"\nbody\nEO\ntouch "\n" $AP2_DATA/x4\n',
+                    "cat <<$'E\\x4f'\nbody\nEO\ntouch \"\n\" $AP2_DATA/x3\n",
+                    "cat <<$'\\105O'\nbody\nEO\ntouch \"\n\" $AP2_DATA/x3\n",
+                    "cat <<$'a\\'b'\nbody\na'b\ntouch \"\n\" $AP2_DATA/x6\n",
+                    # A delimiter it cannot decode (a NUL, `\\u`) opens no body: the next lines are code.
+                    "cat <<$'E\\x00'\nE\ntouch \"\n\" $AP2_DATA/x3\n",
+                    "cat <<$'\\u0045'\nE\ntouch \"\n\" $AP2_DATA/x3\n"],
+                   deny=True)
+        for word, delim in (("$'E\\x4f'", "EO"), ('$"EO"', "EO"), ("$'\\105O'", "EO"), ("$'a\\'b'", "a'b"),
+                            ("$'\\x41BC'", "ABC"), ("$'\\1050'", "E0"), ("$'\\cA\\ca\\c1'", "\x01\x01\x11"),
+                            ("$'\\a\\b\\e\\E\\f\\n\\r\\t\\v\\\\\\\"\\?'", "\a\b\x1b\x1b\f\n\r\t\v\\\"?"),
+                            ("$'\\q\\8\\xg'", "\\q\\8\\xg"), ("$$'\\'", "$$\\"), ('$$"x"', "$$x"),
+                            ("$'E\\x00'", None), ("$'\\u0045'", None), ("$'\\777'", None), ("$'\\c'", None),
+                            ("$'\\c?'", None), ("$'\\cé'", None),
+                            ("$'abc", None)):
+            with self.subTest(word=word):
+                self.assertEqual(guard._unquote(word), delim)
+        self.assertEqual(guard._segments("cat <<$'a\\'b'\nx\na'b\nz"), ["cat <<$'a\\'b'", "x", "a'b", "z"])
+        self.assertIs(type(guard._segments("cat <<$'\\u0045'\nE\nz")[-1]), str)
         # Joined (`ls \$AP2_DATA/x`, a fail-closed read of the even run), but `ls` writes nothing.
         self.check(['cat <<EOF\nls \\\\\n$AP2_DATA/x\nEOF', "cat <<'EOF'\nls \\\\\n$AP2_DATA/x\nEOF",
                     'x=$(cat <<EOF\nhi\nEOF)\nls $AP2_DATA; echo "$x" > /tmp/y',
@@ -223,8 +243,12 @@ class DecideTest(unittest.TestCase):
         first. One opened inside a `$(` that closes on its line has no body (bash runs the next lines)."""
         self.check(['cat <<EOF $(\ntouch x "\nEOF\n" $AP2_DATA/c)\nEOF',
                     'cat <<EOF >/dev/null $(\ntouch x "\nEOF\n" $AP2_DATA/c)\nbody\nEOF',
-                    "echo $(cat <<EOF)\ncp a $AP2_DATA/c\nEOF"], deny=True)
+                    "echo $(cat <<EOF)\ncp a $AP2_DATA/c\nEOF",
+                    "x=$(cat <<EOF)\nx'\nEOF\nap2 card note C1 y'; cp a $AP2_DATA/c\n'\n'"], deny=True)
         self.assertEqual(guard._segments("a <<E $(b\nc)\nl\nE\nz"), ["b", "c", "a <<E $(_)", "l", "E", "z"])
+        segs = guard._segments("x=$(cat <<E)\nl\nE\nz")
+        self.assertEqual(segs, ["cat <<E", "x=$(_)", "l", "E", "z"])
+        self.assertIs(type(segs[2]), str)  # the heredoc closed with its `$(`: its next line is code
 
     def test_ap2_by_its_full_path_in_command_position_is_no_package_mention(self):
         """After a keyword, inside `$(...)` or after `xargs`, `<pkg>/bin/ap2` is run, not written."""
@@ -244,7 +268,11 @@ class DecideTest(unittest.TestCase):
                     f"do ap2(){{ cp a {DATA}/config.yaml; }}; ap2", f"then {{ ap2 () {{ rm -rf {DATA}/items; }}; }}",
                     # An assignment or a runner before a command that is not ap2 leaves the path an argument.
                     f"FOO=1 cp x {PKG}/bin/ap2", f"env cp x {PKG}/bin/ap2", f"nohup cp x {PKG}/bin/ap2",
-                    f"env -S 'cp x' {PKG}/bin/ap2", f"command -v {PKG}/bin/ap2 > {PKG}/bin/ap2"],
+                    f"env -S 'cp x' {PKG}/bin/ap2", f"command -v {PKG}/bin/ap2 > {PKG}/bin/ap2",
+                    # A runner flag's value (`xargs -I ap2`) or an unknown flag (`env -P`) is no command name.
+                    "ls | xargs -I ap2 cp a $AP2_DATA/c", "ls | xargs -E ap2 cp a $AP2_DATA/c",
+                    "ls | xargs -J ap2 cp a $AP2_DATA/c", "env -P ap2 /bin/cp a $AP2_DATA/c",
+                    "env -S ap2 cp a $AP2_DATA/c"],
                    deny=True)
 
     def test_ap2_after_an_assignment_or_a_runner_is_still_run(self):
@@ -256,7 +284,12 @@ class DecideTest(unittest.TestCase):
                     f"nice -n 5 {PKG}/bin/ap2 card list > /tmp/x", f"nohup nice {PKG}/bin/ap2 card list > /tmp/x",
                     f"time -p {PKG}/bin/ap2 card list > /tmp/x", "A=1 B=2 ap2 card list --data $AP2_DATA > /tmp/x",
                     "if ap2 card list --data $AP2_DATA > /tmp/x; then :; fi", "! ap2 card list --data $AP2_DATA > /tmp/x",
-                    f"{{ {PKG}/bin/ap2 card list > /tmp/x; }}", f"ls | /usr/bin/xargs {PKG}/bin/ap2 card show > /tmp/x"],
+                    f"{{ {PKG}/bin/ap2 card list > /tmp/x; }}", f"ls | /usr/bin/xargs {PKG}/bin/ap2 card show > /tmp/x",
+                    "if false; then :; else ap2 card list --data $AP2_DATA > /tmp/x; fi",
+                    "if false; then :; elif ap2 card list --data $AP2_DATA > /tmp/x; then :; fi",
+                    "while ap2 card list --data $AP2_DATA > /tmp/x; do break; done",
+                    "until ap2 card list --data $AP2_DATA > /tmp/x; do break; done",
+                    "nohup ap2 card list --data $AP2_DATA > /tmp/x", "env A=1 ap2 card list --data $AP2_DATA > /tmp/x"],
                    deny=False)
 
     def test_a_function_named_ap2_after_any_keyword_is_no_ap2_call(self):
@@ -266,7 +299,9 @@ class DecideTest(unittest.TestCase):
                     "if false; then :; else ap2(){ cp a $AP2_DATA/config.yaml; }; ap2; fi",
                     "if false; then :; elif ap2(){ cp a $AP2_DATA/config.yaml; }; ap2; then :; fi",
                     "! ap2(){ cp a $AP2_DATA/config.yaml; }; ap2", "time ap2(){ cp a $AP2_DATA/config.yaml; }; ap2",
-                    "time -p ap2(){ cp a $AP2_DATA/config.yaml; }; ap2"],
+                    "time -p ap2(){ cp a $AP2_DATA/config.yaml; }; ap2",
+                    # `function` is no keyword before a command: the segment's command is `function`, not ap2.
+                    "function ap2 { cp a $AP2_DATA/c; }; ap2", "function ap2 () { cp a $AP2_DATA/c; }; ap2"],
                    deny=True)
         for word in guard._KEYWORDS:
             with self.subTest(word):
@@ -279,7 +314,11 @@ class DecideTest(unittest.TestCase):
                     # A redirect before the pattern's command still leaves a command after the `)`.
                     "case ap2 in x) ;; ap2) 2>/dev/null cp a $AP2_DATA/c;; esac",
                     "case ap2 in x) ;; ap2) </dev/null cp a $AP2_DATA/c;; esac",
-                    "case ap2 in x) ;; ap2) &>/dev/null cp a $AP2_DATA/c;; esac"],
+                    "case ap2 in x) ;; ap2) &>/dev/null cp a $AP2_DATA/c;; esac",
+                    # A redirect operator of several characters (`>&`, `>|`) is read whole before its target.
+                    "case x in x) ;; ap2) 2>&1 cp a $AP2_DATA/c;; esac",
+                    "case x in x) ;; ap2) >&2 cp a $AP2_DATA/c;; esac",
+                    "case x in x) ;; ap2) >|/tmp/x cp a $AP2_DATA/c;; esac"],
                    deny=True)
         self.check(["(cd /tmp; ap2 card list --data $AP2_DATA > /tmp/x)",
                     "(ap2 card list --data $AP2_DATA) 2> /tmp/err"], deny=False)
@@ -485,7 +524,22 @@ class DecideTest(unittest.TestCase):
                     f"mkdir -p {RUN}/media && cp a.png {RUN}/media/",
                     "echo x > $AP2_DATA/sessions/C1/journal.md",
                     "echo x > ~/Documents/Assistant/sessions/C1/journal.md",
-                    f"echo x > {RUN}"], deny=False)
+                    f"echo x > {RUN}",
+                    # A quoted `{`, `}` or `,` is text: only an unquoted `{` (not that of `${`) brace-expands.
+                    'echo \'{"text": "Is $AP2_RUN_DIR/media/a.png right?"}\' > "$AP2_RUN_DIR/question.json"',
+                    f'echo \'{{"status": "done", "evidence": ["{RUN}/media/shot.png"]}}\' '
+                    '> "$AP2_RUN_DIR/handback.json"',
+                    f'jq -n \'{{evidence: ["{RUN}/media/a.png"]}}\' > "{RUN}/handback.json"',
+                    f"python3 - <<'PY'\nwith open(\"{RUN}/handback.json\", \"w\") as f:\n"
+                    "    json.dump({\"status\": \"done\"}, f)\nPY",
+                    f"python3 -c 'import json; json.dump({{}}, open(\"{RUN}/handback.json\", \"w\"))'",
+                    'echo "- screenshot: $AP2_RUN_DIR/media/a.png, attached" >> "$AP2_RUN_DIR/journal.md"',
+                    "touch $AP2_RUN_DIR/a,b.txt", 'echo "${x:-a,b}" > $AP2_RUN_DIR/x',
+                    "touch \\{$AP2_RUN_DIR/a,b}"], deny=False)
+        # Accepted false denies: the unquoted `{` is looked for per segment (`{}` here), and a heredoc body line is
+        # read as shell code, so an unquoted `{` there is one too (fail-closed, whatever the delimiter).
+        self.check(["echo {} > $AP2_RUN_DIR/a,b", f"python3 - <<'PY'\njson.dump({{}}, open(\"{RUN}/x\", \"w\"))\nPY"],
+                   deny=True)
 
     def test_outside_the_own_run_directory_is_still_denied(self):
         self.check(["cp x $AP2_RUN_DIR/../other/",
@@ -515,11 +569,36 @@ class DecideTest(unittest.TestCase):
         `$NAME` at the first character that is not a name character: `$AP2_RUN_DIR.bak` is another folder."""
         self.check(["touch {$AP2_RUN_DIR/..,x}/c", "touch {x,$AP2_RUN_DIR/..}/c", 'touch {"$AP2_RUN_DIR"/..,x}/c',
                     f"touch {{{RUN}/..,x}}/c", "touch {$AP2_RUN_DIR/settings-implement.json,x}",
+                    "touch $AP2_RUN_DIR/{a,..}/x",
                     "touch $AP2_RUN_DIR.bak", "cp -r $AP2_RUN_DIR $AP2_RUN_DIR.old", "touch $AP2_RUN_DIR-old",
                     "touch ${AP2_RUN_DIR}x", "echo x > ${AP2_RUN_DIR}0/handback.json",
                     # Accepted false deny: `$AP2_DATA.bak` is another folder, but a `.` after the name is a mention.
                     "touch $AP2_DATA.bak"], deny=True)
         self.check(["touch $AP2_RUN_DIRX/x", "touch $AP2_DATA_OLD/x", "touch ${AP2_RUN_DIR}/x.bak"], deny=False)
+
+    def test_extglob_turned_on_with_a_guarded_path_is_denied(self):
+        """With extglob on, `@(...)` and the like are one word that bash globs (it can match `..` or a floor file),
+        with no comment, split or word break inside: a command that turns it on and names a guarded path is denied,
+        and a run-directory path never holds an unquoted extglob."""
+        on = "shopt -s extglob\n"
+        self.check([on + "cp a $AP2_RUN_DIR/.@(.)/../config.yaml", on + "cp a $AP2_RUN_DIR/.+(.)/../config.yaml",
+                    on + "cp a $AP2_RUN_DIR/.!(x)/../config.yaml", on + 'cp a "$AP2_RUN_DIR"/.@(.)/../config.yaml',
+                    on + f"cp a {RUN}/.@(.)/../config.yaml", on + "echo hi > $AP2_RUN_DIR/.@(.)/../config.yaml",
+                    on + "cp a $AP2_RUN_DIR/settings-implement.js@(on)",
+                    on + "cp a $AP2_RUN_DIR/@(settings-implement.json)", on + "echo @(#) > $AP2_DATA/config.yaml",
+                    on + "touch @(#) $AP2_DATA/x2", on + "cp @(a|zz) $AP2_DATA/config.yaml",
+                    "bash -O extglob -c 'cp a $AP2_RUN_DIR/.@(.)/../config.yaml'",
+                    "shopt -s ext\\glob\ncp a $AP2_RUN_DIR/.@(.)/../config.yaml",
+                    "shopt -s ext'gl'ob\ncp a $AP2_RUN_DIR/.@(.)/../config.yaml",
+                    # The option name built at run time: the run-directory rule still refuses an unquoted extglob.
+                    "o=ext; shopt -s ${o}glob\ncp a $AP2_RUN_DIR/.@(.)/../config.yaml",
+                    "o=ext; shopt -s ${o}glob\ncp a $AP2_RUN_DIR/*(settings-implement.json)",
+                    "o=ext; shopt -s ${o}glob\ncp a $AP2_RUN_DIR/x/?(.)./../../config.yaml"], deny=True)
+        self.check([on + "ls /tmp/@(a|b) > /tmp/x", "echo $((2*(3))) > $AP2_RUN_DIR/n.txt",
+                    "python3 -c 'print(2*(3)+(1))' > $AP2_RUN_DIR/n.txt",
+                    f"python3 -c 'open(\"{RUN}/n.txt\", \"w\").write(str(2*(3)+(1)))'"], deny=False)
+        self.assertEqual(guard._words("cp a $X/.@(. |x)/../c b"), ["cp", "a", "$X/.@(. |x)/../c", "b"])
+        self.assertEqual(guard._words("a@(b(c)d)e f"), ["a@(b(c)d)e", "f"])
 
     def test_a_variable_after_the_run_directory_is_not_trusted(self):
         self.check(["cp a.png $AP2_RUN_DIR/$f", "cp a.png ${AP2_RUN_DIR}/media/${f}",
@@ -655,6 +734,12 @@ class DecideTest(unittest.TestCase):
                   "case )": fill("(a) ", "ap2 "), ")": fill(") ", "ap2 "), ") >": fill(") 2>a <b ", "ap2 "),
                   ") >>": "ap2 ) " + "2>a " * ((size - 10) // 4) + tail, "run dir.": fill("$AP2_RUN_DIR."),
                   "{run dir": fill("{$AP2_RUN_DIR/,"), "` open": fill("`", "cat "),
+                  "{ quoted run dir": fill("'{' $AP2_RUN_DIR/a,b}"), "{ run dir,": fill("{a $AP2_RUN_DIR/a,b "),
+                  "extglob": fill("a@(b "), "extglob )": fill("a@(b)"), "extglob run dir": fill("$AP2_RUN_DIR/@(a)"),
+                  "extglob on": fill("$AP2_RUN_DIR/a ", "shopt -s ext\\glob\n"),
+                  "heredoc $'": fill("cat <<$'\\x4f\\105\\cA' x\n"), 'heredoc $"': fill('cat <<$"E" x\n'),
+                  "heredoc $' open": fill("\\'", "cat <<$'"), "func $'": fill("$'a'$$'b'", "ap2 "),
+                  "extglob nested": fill("@("), "extglob $(": fill("@($(a) "),
                   "(( deep": ("(( " * (size // 9) + "x" + " )" * (2 * (size // 9)))[:size] + tail}
         for name, cmd in shapes.items():
             with self.subTest(name):

@@ -14,11 +14,13 @@ redirect into one of them counts as a write, unless it also runs other shell cod
 `<(...)`, `((`, `"$((cmd) )"`, a function named `ap2`, a case pattern `ap2) <cmd>`). The package's `bin/ap2`
 where bash runs it as a command (after keywords, assignments and runners, inside `$(...)` or backticks, after
 `xargs`) is no package mention, unless a redirect writes it. A segment whose every data-folder mention is a path
-under the worker's own run directory (`AP2_RUN_DIR`) with no `..`, no `$`, no backtick, no `{`, `}` or `,`, no
-dot glob, no `settings-*.json` (the floor itself, Edit-denied too) and at the top level no glob that matches a
-floor file (or longer than 64 characters) after it is allowed: the worker writes its results there. Heredoc
-body lines that end in a backslash are joined, as bash joins them (an even run of backslashes too,
-fail-closed).
+under the worker's own run directory (`AP2_RUN_DIR`) with no `..`, no `$`, no backtick, no `{`, `}` or `,` when
+the segment has an unquoted `{` (not that of `${`: bash brace-expands no other), no `@(`-style extglob when the
+segment has an unquoted one, no dot glob, no `settings-*.json` (the floor itself, Edit-denied too) and at the top
+level no glob that matches a floor file (or longer than 64 characters) after it is allowed: the worker writes its
+results there. A command that may turn extglob on (it holds `extglob`) is denied when it names a guarded path
+anywhere. Heredoc body lines that end in a backslash are joined, as bash joins them (an even run of backslashes
+too, fail-closed); a `$'...'` or `$"..."` delimiter is decoded as bash decodes it.
 
 Best effort: it reads the command text, so a path built at run time (a variable, `$(...)`, a `cd` first and a
 relative path after, a symlink) can get past it. The `Edit` deny rules of the floor stay the main guard.
@@ -127,22 +129,25 @@ class _Marks:
         self.any = re.compile("|".join([re.escape(n) + ends.get(n, _END) for n in names] + [_EXPANSION]),
                               re.IGNORECASE)
 
-    def _own_run(self, w: str) -> bool:
+    def _own_run(self, w: str, braces: bool = True, eglob: bool = True) -> bool:
         """Whether the case-folded word `w` is a path under the own run directory that stays inside it: no `$` or
-        backtick after it (a value bash fills in at run time), no `{`, `}` or `,` (a brace expansion, also one
-        that opens before the mention, as in `{$AP2_RUN_DIR/..,x}`), and no bad part (`_bad_part`)."""
+        backtick after it (a value bash fills in at run time), when its segment has an unquoted `{` (`braces`) no
+        `{`, `}` or `,` (a brace expansion, also one that opens before the mention, as in `{$AP2_RUN_DIR/..,x}`),
+        when its segment has an unquoted extglob (`eglob`) no `@(`, `+(`, `!(`, `?(` or `*(` (one can match `..`
+        or a floor file), and no bad part (`_bad_part`)."""
         for form in self.run:
             if w == form or w.startswith(form + "/"):
                 rest = w[len(form):]
                 parts = rest.split("/")[1:]  # rest is empty or starts with `/`
-                return not any(c in rest for c in "${},`") and not any(
-                    _bad_part(p, k == 0) for k, p in enumerate(parts))
+                if any(c in rest for c in ("${},`" if braces else "$`")) or (eglob and _EXTGLOB.search(rest)):
+                    return False
+                return not any(_bad_part(p, k == 0) for k, p in enumerate(parts))
         return False
 
     def _own_run_at(self, w: str, at: int) -> bool:
         """`_own_run(w[at:])` for a mention after one that passed it: that one checked the whole rest of `w` (no
-        `$`, brace or comma, no bad part below the top level), so only the form and the one part right after it
-        are new."""
+        `$`, no brace, comma or extglob its segment could expand, no bad part below the top level), so only the
+        form and the one part right after it are new."""
         for form in self.run:
             end = at + len(form)
             if w.startswith(form, at) and (end == len(w) or w[end] == "/"):
@@ -160,19 +165,24 @@ class _Marks:
         """Whether the shell word `word` is exactly a spelling of the package's `bin/ap2`."""
         return _norm(word) in self.ap2
 
-    def unsafe(self, words) -> bool:
+    def unsafe(self, words, braces: bool = True, eglob: bool = True) -> bool:
         """Whether one of the shell words `words` names the data folder or the package anywhere but under the
-        worker's own run directory."""
+        worker's own run directory (`braces` and `eglob` as in `_own_run`: whether the segment has an unquoted `{`
+        or extglob)."""
         for word in words:
             w = _norm(word)
             checked = False  # whether a mention in `w` passed `_own_run` (each later one is then checked cheaply)
             for m in self.any.finditer(w):
                 if m.group(0).casefold() in self.package:
                     return True
-                if not (self._own_run_at(w, m.start()) if checked else self._own_run(w[m.start():])):
+                if not (self._own_run_at(w, m.start()) if checked else self._own_run(w[m.start():], braces, eglob)):
                     return True
                 checked = True
         return False
+
+
+# An extglob's opening (`@(`, `+(`, `!(`, `?(`, `*(`): with `shopt -s extglob` bash globs it, and it can match `..`.
+_EXTGLOB = re.compile(r"[@+!?*]\(")
 
 
 def _norm(word: str) -> str:
@@ -189,8 +199,11 @@ class _Deep(Exception):
     that each turned out to be two subshells): `decide` then judges the command as one too long to check."""
 
 
-# The delimiter word after `<<`: unquoted characters that do not end a word, escapes, and quoted runs.
-_DELIM = re.compile(r"""(?:[^\s;|&<>()'"\\]|\\.|'[^']*'|"(?:[^"\\]|\\.)*")+""", re.S)
+# The delimiter word after `<<`: unquoted characters that do not end a word, escapes, and quoted runs, an ANSI-C
+# `$'...'` (where `\'` stays inside) among them. A `$` before `'` starts one: the alternatives never overlap, so
+# `_FUNC`, which backtracks over this pattern, stays linear.
+_DELIM = re.compile(r"""(?:\$'(?:[^'\\]|\\.)*'|\$(?!')|[^\s;|&<>()'"\\$]|\\.|'[^']*'|"(?:[^"\\]|\\.)*")+""",
+                    re.S)
 
 
 # Outside quotes, the characters `_segments` acts on; any other one it steps over.
@@ -226,26 +239,77 @@ def _opens(s: str, i: int, esc: int, quote, pid: bool) -> str:
     return "{" if quote == '"' and s.startswith("${", i) and _expands(s, i, esc) else ""
 
 
-def _unquote(word: str) -> str:
+# `$'...'` escapes bash 3.2 decodes to one character (`\NNN` octal, `\xHH` hex and `\cX` are read in `_ansi_c`).
+_ANSI_C = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v",
+           "\\": "\\", "'": "'", '"': '"', "?": "?"}
+_OCT, _HEX = frozenset("01234567"), frozenset("0123456789abcdefABCDEF")
+
+
+def _ansi_c(word: str, i: int, out: list):
+    """Decodes the text of a `$'...'` from `i` (just past its opening quote) into `out`, as bash 3.2 does: the
+    `_ANSI_C` escapes, `\\NNN` (1-3 octal digits), `\\xHH` (1-2 hex digits), `\\cX` (X's low five bits); any other
+    escape keeps its backslash (`\\q`). Returns the index of the closing quote, or None for what it cannot decode
+    the way every bash would: a NUL or a non-ASCII code, `\\c` with no letter or digit after it, `\\u` and `\\U`
+    (bash 4.2 decodes them), or no closing quote."""
+    n = len(word)
+    while i < n and word[i] != "'":
+        if word[i] != "\\" or i + 1 >= n:
+            out.append(word[i])
+            i += 1
+            continue
+        e, i = word[i + 1], i + 2
+        if e in _ANSI_C:
+            out.append(_ANSI_C[e])
+            continue
+        if e in _OCT or e == "x":
+            digits, k = (_OCT, i - 1) if e in _OCT else (_HEX, i)
+            stop = k + (3 if e in _OCT else 2)
+            j = k
+            while j < min(n, stop) and word[j] in digits:
+                j += 1
+            if j == k:  # `\\x` with no hex digit: kept as it is
+                out.append("\\x")
+                continue
+            code, i = int(word[k:j], 8 if e in _OCT else 16), j
+        elif e == "c":
+            if i >= n or not word[i].isascii() or not word[i].isalnum():
+                return None
+            code, i = ord(word[i]) & 0x1F, i + 1
+        elif e in "uU":
+            return None
+        else:
+            out.append("\\" + e)
+            continue
+        if not 0 < code < 0x80:
+            return None
+        out.append(chr(code))
+    return i if i < n else None
+
+
+def _unquote(word: str):
     """`word` after quote removal only, as bash reads a heredoc delimiter: quotes and the backslashes that escape go,
-    every other character stays (``a\\`b`` is ``a`b``, `"a\\$b"` is `a$b`, `"a\\b"` is `a\\b`). `$'...'` reads as in
-    `_words`."""
+    every other character stays (``a\\`b`` is ``a`b``, `"a\\$b"` is `a$b`, `"a\\b"` is `a\\b`). `$"..."` reads as
+    `"..."`, and `$'...'` is decoded as bash decodes it (`_ansi_c`; `$'E\\x4f'` is `EO`); None when it cannot be
+    (`_segments` then opens no heredoc for it, so its lines are read as code)."""
     out, i, n, esc = [], 0, len(word), -1
     while i < n:
         c = word[i]
+        if c in "'\"" and word[i - 1:i] == "$" and _expands(word, i - 1, esc):
+            out.pop()  # the `$` of a `$'` or `$"`
+            if c == "'":
+                i = _ansi_c(word, i + 1, out)
+                if i is None:
+                    return None
+                i += 1
+                continue
         if c == "\\" and i + 1 < n:
             i += 1
             esc = i
             if word[i] != "\n":  # a line continuation: both characters go
                 out.append(word[i])
         elif c == "'":
-            ansi = word[i - 1:i] == "$" and _expands(word, i - 1, esc)
-            if ansi:
-                out.pop()
             i += 1
             while i < n and word[i] != "'":
-                if ansi and word[i] == "\\" and i + 1 < n:
-                    i += 1
                 out.append(word[i])
                 i += 1
         elif c == '"':
@@ -297,10 +361,10 @@ def _segments(cmd: str, pid: bool = True, budget=None) -> list:
     word (not after an escaped blank, not inside `${...}` or arithmetic) drops the rest of its line, and after an
     unquoted `<<` or `<<-` (not inside `${...}` or arithmetic) the lines from the next newline at the same depth
     on (a `$(` opened after the `<<` is read whole first), up to and including the delimiter line (its word after
-    quote removal only; leading tabs stripped for `<<-`), are each one segment (`_Body`), with no scan. Inside
-    `$(...)` a line of the delimiter and then `)` ends the body too (bash 3.2), and the scan goes on at that `)`; a
-    heredoc whose `$(...)` closes on its own line has no body (bash runs the next lines). A here-string `<<<` opens
-    no heredoc."""
+    quote removal only, `_unquote`; leading tabs stripped for `<<-`), are each one segment (`_Body`), with no scan;
+    a delimiter `_unquote` cannot decode opens no heredoc. Inside `$(...)` a line of the delimiter and then `)` ends
+    the body too (bash 3.2), and the scan goes on at that `)`; a heredoc whose `$(...)` closes on its own line has
+    no body (bash runs the next lines). A here-string `<<<` opens no heredoc."""
     budget = [4 * len(cmd)] if budget is None else budget
     segs, n, subs = [], len(cmd), set()  # subs: the `((` found to be two subshells
     quote, i, esc = None, 0, -1  # esc: the index of the last character a backslash escaped
@@ -440,7 +504,9 @@ def _segments(cmd: str, pid: bool = True, budget=None) -> list:
                 j += 1
             m = _DELIM.match(cmd, j)
             if m:
-                pending.append((_unquote(m.group(0)), strip))
+                delim = _unquote(m.group(0))
+                if delim is not None:  # one it cannot decode opens no heredoc: its lines are read as code
+                    pending.append((delim, strip))
                 i = m.end()
             else:
                 i = j
@@ -494,7 +560,7 @@ def _in_redirect(cmd: str, i: int, esc: int) -> bool:
     return c in "|&" and (after or (c == "&" and cmd[i + 1:i + 2] == ">"))
 
 
-def _words(seg: str, targets=None, events=None, pid: bool = True) -> list:
+def _words(seg: str, targets=None, events=None, pid: bool = True, flags=None) -> list:
     """The shell words of `seg` as bash reads quotes and backslashes, with the quotes removed: `"$AP2_RUN_DIR"/../x`
     is one word, `$AP2_RUN_DIR/../x`, and `"$AP2_"DATA` is `$AP2_DATA`; a backslash-newline outside single quotes is
     no character at all. Inside `$(...)`, even within `"..."`, quoting starts afresh, as in `_segments`, and a
@@ -506,12 +572,17 @@ def _words(seg: str, targets=None, events=None, pid: bool = True) -> list:
     When `targets` is a list, the word after each unquoted `>` (in `>`, `>>`, `>|`, `>&`, `&>`, `<>`) is added to it
     too: the file that redirect writes. When `events` is a list, each `$(` or opening backtick adds `(index, True)`
     to it and each `)` or backtick that closes one `(index, False)`, `index` being that of the next word: where a
-    command starts and where it ends, for `_commands`."""
+    command starts and where it ends, for `_commands`.
+    An unquoted `@(`, `+(`, `!(`, `?(` or `*(` (the `(` right after one of those characters in a word) is an extglob,
+    as bash reads it with `shopt -s extglob` (and as a syntax error without it): its `(...)` stays in the word, with
+    no word break inside (`$X/.@(. |x)/c` is one word). When `flags` is a set, `{` is added to it for an unquoted
+    `{` that is not the `{` of `${` (bash brace-expands only such a `{`: `echo "{"a,b}` prints `{a,b}`), and `(`
+    for an extglob: what `_own_run` refuses after the run directory."""
     words, text, i, n = [], [], 0, len(seg)
     esc = -1  # the last escaped index
-    # The quote state, as in `_segments`: quote, open `(`, open `${`, and the context's kind; `stack` holds the
-    # outer contexts' states.
-    stack, quote, paren, brace, kind = [], None, 0, 0, None
+    # The quote state, as in `_segments`: quote, open `(`, open `${`, the context's kind, and the open `(` of an
+    # extglob (`eglob`); `stack` holds the outer contexts' states.
+    stack, quote, paren, brace, kind, eglob = [], None, 0, 0, None, 0
     redir = False  # whether the next word is a redirect's target
     while i < n:
         c = seg[i]
@@ -535,8 +606,8 @@ def _words(seg: str, targets=None, events=None, pid: bool = True) -> list:
                 text.append(seg[i])
         elif c == "$" and _opens(seg, i, esc, quote, pid):
             new = _opens(seg, i, esc, quote, pid)
-            stack.append((quote, paren, brace, kind))
-            quote, paren, brace, kind = None, 0, int(new == "{"), new
+            stack.append((quote, paren, brace, kind, eglob))
+            quote, paren, brace, kind, eglob = None, 0, int(new == "{"), new, 0
             if new == "{":
                 text.append("${")  # still the `"..."` word
             else:  # a `$(` or `$$(` ends the word, keeping its `$`
@@ -554,7 +625,7 @@ def _words(seg: str, targets=None, events=None, pid: bool = True) -> list:
             redir = _flush(words, text, targets, redir)
             text = []
             inner = []
-            sub = _words(seg[i + 1:end], targets, inner, pid)
+            sub = _words(seg[i + 1:end], targets, inner, pid, flags)
             if events is not None:
                 events.append((len(words), True))
                 events.extend((len(words) + k, opens) for k, opens in inner)
@@ -584,7 +655,7 @@ def _words(seg: str, targets=None, events=None, pid: bool = True) -> list:
             brace -= 1
             text.append(c)
             if not brace and kind == "{":
-                quote, paren, brace, kind = stack.pop()
+                quote, paren, brace, kind, eglob = stack.pop()
         elif kind in ("{", "$"):  # inside `"${...}"` or `"$$(...)"`: still the `"..."` word, no break here
             if c == "(" and kind == "$":
                 paren += 1
@@ -592,8 +663,16 @@ def _words(seg: str, targets=None, events=None, pid: bool = True) -> list:
                 if paren:
                     paren -= 1
                 else:
-                    quote, paren, brace, kind = stack.pop()
+                    quote, paren, brace, kind, eglob = stack.pop()
             text.append(c)
+        elif eglob and c in _BREAK:  # inside an extglob's `(...)`: no word break
+            eglob += (c == "(") - (c == ")")
+            text.append(c)
+        elif c == "(" and text and text[-1] in "@+!?*":  # an extglob opens: its pattern stays in the word
+            eglob = 1
+            text.append(c)
+            if flags is not None:
+                flags.add("(")
         elif c in _BREAK:
             redir = _flush(words, text, targets, redir)
             text = []
@@ -605,10 +684,12 @@ def _words(seg: str, targets=None, events=None, pid: bool = True) -> list:
                 elif stack:
                     if events is not None:
                         events.append((len(words), False))
-                    quote, paren, brace, kind = stack.pop()
+                    quote, paren, brace, kind, eglob = stack.pop()
             elif c == ">":
                 redir = True
         else:
+            if c == "{" and flags is not None:
+                flags.add("{")
             text.append(c)
         i += 1
     _flush(words, text, targets, redir)
@@ -862,6 +943,8 @@ def decide(payload: dict, env):
     marks = _Marks(env)
     if len(cmd) > MAX_COMMAND:
         return _deny() if marks.names(cmd) else None
+    if _extglob(cmd) and marks.names(cmd):
+        return _deny()
     # bash 3.2 reads `"$$(...)"` with its own quotes, bash 5.3 at times as plain text: a command with a `$$(` is
     # judged both ways, and denied when either reading writes.
     try:
@@ -873,21 +956,30 @@ def decide(payload: dict, env):
     return None
 
 
+def _extglob(cmd: str) -> bool:
+    """Whether `cmd` may turn extglob on (`shopt -s extglob`, `bash -O extglob`): it holds `extglob` once line
+    continuations, backslashes, quotes and `$` are taken out (`ext\\glob`, `ext'gl'ob`, `ext$'g'lob`). Extglob is
+    off in a non-interactive bash; with it on, `@(...)` and the like are words `_segments` does not read as bash
+    does (no comment, split or word break inside, `cp @(a|b) <data>/c` is one command)."""
+    return "extglob" in re.sub(r"\\\n|[\\'\"$]", "", cmd)
+
+
 def _writes_guarded(seg: str, marks: _Marks, pid: bool) -> bool:
     """Whether the segment `seg` (read with `pid`, as in `_segments`) writes into a guarded path."""
     if not seg.strip():
         return False
-    targets, events = [], []
-    words = _words(seg, targets, events, pid)
+    targets, events, flags = [], [], set()
+    words = _words(seg, targets, events, pid, flags)
+    braces, eglob = "{" in flags, "(" in flags  # an unquoted `{` or extglob in the segment (`_own_run`)
     commands, lead = _commands(words, events)
     ap2 = not isinstance(seg, _Body) and _runs_ap2(words, lead)
     # `<pkg>/bin/ap2` where bash runs it as a command is no write into the package (unless a redirect names it).
     written = set(targets)
     run = {k for k in commands if words[k] not in written and marks.is_ap2(words[k])}
-    if not marks.unsafe(w for k, w in enumerate(words) if k not in run):
+    if not marks.unsafe((w for k, w in enumerate(words) if k not in run), braces, eglob):
         return False
     if ap2 and not _runs_more(seg, pid):
-        return marks.unsafe(targets)  # a redirect's file is the shell writing, not ap2
+        return marks.unsafe(targets, braces, eglob)  # a redirect's file is the shell writing, not ap2
     return _writes(_harmless(seg))
 
 

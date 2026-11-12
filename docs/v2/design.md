@@ -1885,8 +1885,14 @@ Calls the author made without asking (check them):
       the spellings above, or `$AP2_RUN_DIR` / `${AP2_RUN_DIR}`) with no `..` component and no `$` after the run
       directory is allowed; `$AP2_RUN_DIR/$f` is denied, since `$f` could hold `..`, and so is a backtick
       (``$AP2_RUN_DIR`echo /../..`/x`` can print `..`, as `$(...)` can), a `{`, `}` or `,` after the run directory
-      (brace expansion can make `..`, also from a brace that opens before it: `{$AP2_RUN_DIR/..,x}/c`; a comma in a
-      file name there, `$AP2_RUN_DIR/a,b.txt`, is an accepted false deny), a
+      when the segment has an unquoted `{` that is not the `{` of `${` (brace expansion can make `..`, also from a
+      brace that opens before it: `{$AP2_RUN_DIR/..,x}/c`; bash expands only an unquoted `{`, it prints `{a,b}` for
+      `echo "{"a,b}` and `echo {a,b"}"`, so a quoted JSON text or Python code that names the run directory and holds
+      a `}` or a comma, `echo '{"evidence": ["<run>/media/a.png"]}' > "$AP2_RUN_DIR/handback.json"`, and a comma in
+      a file name, `$AP2_RUN_DIR/a,b.txt`, are allowed; the check is per segment, so `echo {} > $AP2_RUN_DIR/a,b`
+      is an accepted false deny, and so is a heredoc body line such as `json.dump({}, open("<run>/x", "w"))`: a
+      body line is read as shell code, whatever the delimiter), when the segment has an unquoted extglob (below) an
+      `@(`, `+(`, `!(`, `?(` or `*(` after the run directory (a run-directory path never needs one), a
       part that is `..` or a dot glob such as `.*` (bash 3.2 matches it to `..`), and a
       part named `settings-*.json` at any depth, and at the run directory's top level only (where the floor's own
       `settings-<role>.json` files live, which `Edit` cannot change either) a glob that matches one (`settings*`,
@@ -1923,7 +1929,12 @@ Calls the author made without asking (check them):
       joined too, for every delimiter kind: an unquoted heredoc turns `\\` into `\`, so `bash <<EOF` with a body
       line `rm -rf \\` runs `rm -rf \<newline><data>/x` (fail-closed; a quoted delimiter's even run is a false
       join, harmless without a write). The delimiter is the
-      word after `<<` with quote removal only (bash keeps the rest literal: ``<<a`b` `` ends at a line ``a`b` ``).
+      word after `<<` with quote removal only (bash keeps the rest literal: ``<<a`b` `` ends at a line ``a`b` ``);
+      a `$"..."` in it reads as `"..."`, and a `$'...'` is decoded as bash 3.2 decodes ANSI-C quoting (`\a \b \e
+      \E \f \n \r \t \v \\ \' \" \?`, `\NNN` octal, `\xHH` hex, `\cX`; any other escape keeps its backslash), so
+      `<<$'E\x4f'` ends at a line `EO` and `<<$'a\'b'` at `a'b`. A delimiter it cannot decode the way every bash
+      would (a NUL or non-ASCII code, `\c` with no letter or digit after it, `\u`, which bash 4.2 decodes, an
+      unclosed `$'`) opens no heredoc: its lines are read as code (fail-closed).
       Inside `$(...)` a body also ends at a line that is the delimiter followed by `)` (bash 3.2 reads
       `x=$(cat <<EOF`, body, `EOF)` so), and the scan goes on at that `)`. A here-string (`<<<`), a shift inside
       arithmetic (`((...))`, `$((...))`, or the old `$[...]`) and a `<<` inside `${...}` (`${x/<</y}`) open no
@@ -1970,6 +1981,17 @@ Calls the author made without asking (check them):
       after `((#));`). A background `&` ends a segment (`ap2 card list & cp y <data>/config.yaml` is two), but
       the `&` of `2>&1`, `>&2`, `<&3`, `&>` and `&>>` does not, and `|&` is a pipe. The `|` of `>|` (the
       noclobber override) is a redirect, not a pipe.
+    - Extglob: bash turns it off in a non-interactive shell, and with it on (`shopt -s extglob`, `bash -O
+      extglob`) `@(...)`, `+(...)`, `!(...)`, `?(...)` and `*(...)` are one word that bash globs, with no comment,
+      split or word break inside (`cp @(a|b) <data>/c` is one `cp`, `echo @(#) > <data>/c` holds no comment), and
+      the pattern can match `..` or a floor file (`$AP2_RUN_DIR/.@(.)/../config.yaml`). The guard does not read
+      those words as bash does; instead a command whose text holds `extglob` (once line continuations,
+      backslashes, quotes and `$` are taken out, so `ext\glob` and `ext'gl'ob` count) is denied when it names a
+      guarded path anywhere. A worker that turns extglob on and names the data folder or its run directory is
+      denied, and it does not need extglob to write its results. For an option name built at run time
+      (`shopt -s ${o}glob`), an unquoted `(` right after `@`, `+`, `!`, `?` or `*` in a word keeps its `(...)` in
+      that word (bash without extglob reads it as a syntax error), and such an extglob after the run directory is
+      never the own run directory (above).
     - A segment that runs `ap2` (its own command, after any of `do`, `then`, `else`, `elif`, `if`, `while`,
       `until`, `!`, `{`, `time` (and `time -p`), after `NAME=value` words, and after a runner and its flags
       (`env` with `-i`, `-v`, `-u NAME` and `NAME=value` words, `nohup`, `command -p`, `nice` with `-n N` or
