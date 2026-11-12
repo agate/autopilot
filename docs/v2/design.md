@@ -1878,7 +1878,9 @@ Calls the author made without asking (check them):
     expansion such as `${AP2_DATA:?}`) or the package, and writes (v1's `_WRITE` forms, after v1's `_HARMLESS`
     redirects `2>&1` and `>/dev/null` are
     removed; looked for in the segment as written and in its words with quotes and backslashes removed, as the shell
-    removes them before it runs a word, so `c\p`, `c''p`, `c\<newline>p` and `sed '-i'` are `cp` and `sed -i`; and
+    removes them before it runs a word, so `c\p`, `c''p`, `c\<newline>p` and `sed '-i'` are `cp` and `sed -i`, and
+    again with each `$NAME` taken out first: it may expand to nothing, and its name runs on into the next quoted
+    text, so `$x'c'p` and `$x$'\x63p'` (words `$xcp`) are `cp` too, found by the shell differential; and
     v1's `sed -x ... -i` widened to an in-place flag anywhere after the `sed` in its segment, `-i`, a cluster with an
     `i` or `I` such as `-ni` or `-i.bak`, or `--in-place`, so `sed -e 's/a/b/' -i '' <data>/x` is one too,
     fail-closed: a quoted word that only looks like such a flag counts). It is best effort: it reads the command text, so a path built at run time (a variable, `$(...)`, a
@@ -1913,13 +1915,20 @@ Calls the author made without asking (check them):
       first quote, comma, paren, `}`, `]` or `>` a quote made text, so the part up to there is judged too
       (`python3 -c "open('<run>/settings-implement.json', 'w').write('NEW')"` writes the floor file: its part
       runs on into `', 'w').write(...)` and was no `settings-*.json` name; likewise Perl's `q{>...}`, `q[>...]`
-      and `q(>...)` and Ruby's `%q{...}` and `%q<...>`). The run directory itself may end at such a quoted
-      character too, when its mention is inside a word of JSON or code (after text that cannot expand to nothing
-      and is not only `/` and `.`): `echo '{"run_dir": "<run>"}' > <run>/meta.json`, `Path('<run>')`,
-      `os.listdir('$AP2_RUN_DIR')`, `'[<run>]'` and `'files in <run>, see'` are allowed, and a path after the
-      quote is still judged (`open('<run>' + '/../config.yaml','w')` is denied). A mention that starts its word is
-      a path a command is given, so `touch "$AP2_RUN_DIR'"` (a new file next to the run directory) stays denied,
-      and so do `touch /"<run>'"` and `touch $e"<run>'"`. The per-segment unquoted-`{` rule stays: without
+      and `q(>...)` and Ruby's `%q{...}` and `%q<...>`). When its mention is inside a word of prose, JSON
+      or code (after text that cannot expand to nothing and is not only `/` and `.`), the run directory itself may
+      be followed by any character that does not go on with its name (no letter, digit, `_` or `-`; a `/` starts
+      parts that are judged as above): `echo '{"run_dir": "<run>"}' > <run>/meta.json`, `Path('<run>')`,
+      `os.listdir('$AP2_RUN_DIR')`, `'[<run>]'`, `'files in <run>, see'`, and journal lines such as `"Results are
+      in $AP2_RUN_DIR now"`, `"journal in $AP2_RUN_DIR."`, `'- run dir is <run> (own)'` and `"cd $AP2_RUN_DIR &&
+      ls"` are allowed (only a quoted quote, comma, paren, `}`, `]` or `>` was taken there before, which denied
+      those lines), while `"in $AP2_RUN_DIR-old"` names another folder, and a path after it is still judged
+      (`open('<run>' + '/../config.yaml','w')` is denied). A mention that starts its word is a path a command is
+      given, so `touch "$AP2_RUN_DIR'"` (a new file next to the run directory) stays denied, and so do `touch
+      /"<run>'"` and `touch $e"<run>'"`; and so is one after an `=` with only `/` and `.` between (`dd
+      of="$AP2_RUN_DIR'"`, `--out=/<run>.bak`: a value a command takes as a path) or after a `..` part
+      (`/usr/..<run>.bak` is `/<run>.bak`). Accepted false deny: `echo "dir=$AP2_RUN_DIR, ok" > <run>/x`.
+      The per-segment unquoted-`{` rule stays: without
       it a comma in a file name (`$AP2_RUN_DIR/a,b.txt`) would be refused. Still possible, and left as best effort: removing or copying into the run
       directory itself (`rm -rf $AP2_RUN_DIR`, `cp /tmp/settings-implement.json $AP2_RUN_DIR/`); ap2 writes the
       settings file again before every launch. And a symlink made inside the run directory that points out of it
@@ -1932,7 +1941,8 @@ Calls the author made without asking (check them):
       `${AP2_RUN_DIR[0]}/x` are denied too, accepted false denies (a brace is never trusted in the run directory
       exemption); write `$AP2_RUN_DIR/x`. zsh's flags before the name (`${=AP2_DATA}` splits, `${~AP2_DATA}` globs,
       `${^AP2_DATA}` rc-expands, in any mix), then the `}` or an operator, are such a mention too, and so is
-      `${=HOME}/<rel>`. Not read: the brace-less `$=AP2_DATA` (best effort). Likewise `${HOME` with an operator (`${HOME:?}`, `${HOME%/}`,
+      `${=HOME}/<rel>`; and so are zsh's brace-less forms of those flags (`$=AP2_DATA`, `$~AP2_RUN_DIR`, `$^...`,
+      ending where bash ends a name, and `$=HOME/<rel>`). Likewise `${HOME` with an operator (`${HOME:?}`, `${HOME%/}`,
       `${HOME:-/x}`, up to its `}`, past no other `{` or `}`) and then `/<the data folder's or package's path under
       HOME>` is a mention of that folder that is never the own run directory (`cp src ${HOME:?}/<rel>/config.yaml`
       is denied; a run-directory write so spelled is an accepted false deny).
@@ -1963,15 +1973,29 @@ Calls the author made without asking (check them):
       \E \f \n \r \t \v \\ \' \" \?`, `\NNN` octal, `\xHH` hex, `\cX`; any other escape keeps its backslash), so
       `<<$'E\x4f'` ends at a line `EO` and `<<$'a\'b'` at `a'b`. A delimiter it cannot decode the way every bash
       would (a NUL or non-ASCII code, `\c` with no letter or digit after it, `\u`, which bash 4.2 decodes, an
-      unclosed `$'`) opens no heredoc: its lines are read as code (fail-closed). A body a shell reads is code, not
+      unclosed `$'`) opens no heredoc: its lines are read as code. So does a delimiter word that holds a `$(`,
+      `${`, `$[` or a backtick, or that a `(` follows: bash and zsh read such a construct whole, blanks and parens
+      in it too, so their body can end at a line (`$(x)`, `${x:-a b}`) where the guard's reading would not, and
+      the lines after it run while the guard read them as body (`cat <<$(x) >/dev/null`, `$(x)`, `f() { cp "$@";
+      }`, `f /tmp/src <data>/config.yaml` writes). Lines read as code where the shell reads a body can hide a
+      command behind a quote the body held (`it's`, then `hash -p /bin/cp ap2 #'` after the body), so a command
+      with a heredoc it opens no body for is denied when it names a guarded path anywhere, as with `extglob`
+      (fail-closed; no common delimiter holds one). A body a shell reads is code, not
       data: when a segment on the heredoc's line runs a shell that reads its script from its input (`bash
       <<'EOF'`, `bash -s <<'EOF'`, `sh <<EOF`, `cat <<'EOF' | bash`; fail-closed, any such shell on that line,
       also `ssh host bash <<'EOF'`), the whole body (its lines joined with newlines, leading tabs stripped for
       `<<-`; an unquoted body as written, before the outer shell expands it) is also read as that shell's script,
       one level deeper, sharing the budget, so a helper function (`save() { cp "$1" "$2"; }` then `save src
       <data>/config.yaml`), a rebinding (`hash -p /bin/cp ap2`) and a quoted word across lines (`touch "<newline>"
-      <data>/x`) count; its lines also count for the rebinding and `ap2` trust checks below. A `bash <<'EOF'`
-      script that writes only the run directory stays allowed. An unquoted body runs its `$(...)` and backticks:
+      <data>/x`) count. The script's own rebinding
+      is judged there: a child shell rebinds nothing in the outer command, so its body lines stay data for the
+      rebinding and `ap2` trust checks below (`bash <<'EOF'` with `source .venv/bin/activate`, `export
+      PATH=...` or a helper function, then `<pkg>/bin/ap2 card note C1 --file $AP2_RUN_DIR/pytest.log`, is
+      allowed; counting them denied it). A `bash <<'EOF'` script that writes only the run directory stays
+      allowed. A shell reads its script from its input unless a `-c` is among its options, the words right after
+      it up to the first `--`, `-` or other word (an `-o` or `-O` value skipped): `bash -s -- -c <<'EOF'` passes
+      `-c` as `$1` and reads the body, and a cluster with an `s` reads the input whatever else it holds.
+      An unquoted body runs its `$(...)` and backticks:
       when it holds one, the whole body is also read as a `"..."` word is (a `'` or `"` outside a substitution is a
       plain character), so a substitution across lines (`$(touch "<newline>" <data>/x)`, `$(cp src
       ${x+<newline>}<data>/c)`, `` `touch "<newline>" <data>/x` ``, after `it's`) is a segment of its own.
@@ -2021,10 +2045,21 @@ Calls the author made without asking (check them):
       journal heredoc line with a code span ``- `<run>/media/shot.png` -> attached`` are allowed;
       ``cp x `echo $AP2_RUN_DIR`/../../config.yaml`` is allowed too, an accepted miss (a path built at run time,
       as above). In a word `$"..."` reads as `"..."` (`c$"p"` is `cp`), and a `$'...'` is decoded as bash 3.2
-      decodes it, as a delimiter is (`$'\x63p'` is `cp`, `$'\x2e\x2e'` is `..`); one that bash 3.2 and zsh may
-      decode apart (`\u`, which zsh decodes, a NUL, `\c` with no letter) keeps its `$`, so a run-directory path
-      with it is judged by its verb, and the command may rebind any name (the rule and the `ap2` trust below), so
-      `$'\u0063p' src <data>/x` is denied while `printf $'\u2713 done\n' >> <run>/journal.md` is allowed.
+      decodes it, as a delimiter is (`$'\x63p'` is `cp`, `$'\x2e\x2e'` is `..`, an octal value kept to a byte as
+      both shells keep it: `$'\543p'` is `cp`). A NUL (`\0`, `\x00`, `\000`) ends the text, as bash ends it
+      (zsh keeps the rest, but no name holds a NUL), a code past 0x7F is kept as it is, and a `\u` or `\U` past
+      0x7F stays text, as bash 3.2 keeps it (it does not decode them; zsh does);
+      none of these can spell a name, so `read -r
+      -d $'\0' f` over `<data>/items`, `tr -d $'\0' < <data>/x.log` and `ap2 card note C1 --text $'Done \u2014
+      tests pass' --file $AP2_RUN_DIR/n.md` are allowed (each counted as a possible rebinding before, which
+      denied them). A `\u` or `\U` whose code point is an ASCII character is read as zsh reads it
+      (`$'\u0063p'` is `cp`, `$'\u002e\u002e'` is `..`; bash 3.2's text, `\u0063p`, holds no name or path part a
+      write needs), and since the two shells read different names there, the command may rebind any name (the
+      rule and the `ap2` trust below); one with `\c` and no letter or digit after it keeps its `$`, so a
+      run-directory path with it is judged by its verb, and may rebind too. So `$'\u0063p' src <data>/x` and
+      `f src $AP2_RUN_DIR/$'\u002e\u002e'/x` after `f() { cp "$@"; }` (found by the shell differential: zsh
+      writes `<data>/sessions/x`, which a verb-only judgement let through) are denied, while `printf $'\u2713
+      done\n' >> <run>/journal.md` is allowed.
       `$'...'` is an ANSI-C quote where `\'` stays inside, but only after an odd run of unescaped
       `$`: `$$` is the shell's PID, so in `$$'\'` the quote is a plain one (and `$${` and `$$[` open nothing). No
       separator splits inside an unquoted `${...}` (`${x:-;}` is one word), no newline, `|` or `&` splits inside
@@ -2106,10 +2141,11 @@ Calls the author made without asking (check them):
       common), or a word
       that sets the search path, zsh's function path or one of zsh's name tables (`PATH=...`, `path=...`,
       `FPATH=...`, `fpath=(...)`, `functions[...]`, `aliases[...]`, `commands[...]`; a search-path assignment
-      only when its `=` or `[` is unquoted, or in a segment with a command that sets a variable a word names,
-      `export`, `declare`, `typeset`, `local`, `read`, `for`, `printf -v`, `env`, zsh's `set -A`, `trap`, ...,
-      where a quoted one or the plain name counts too: `rg "path=" lib` and `git log -- path` are none, `export
-      "PATH=/tmp/b"` and `exec env PATH=/tmp/b ls ...` are) can make `ap2`, `<pkg>/bin/ap2` (bash allows `function <pkg>/bin/ap2 { ... }`) or any
+      only when its `=` or `[` is unquoted, or in a segment where a command that sets a variable a word names
+      runs, `export`, `declare`, `typeset`, `local`, `read`, `for`, `printf -v`, `env`, zsh's `set -A`, `trap`,
+      ... (as a command word or after an unquoted closer; as an argument, in `git grep -n set -- path` or `rg -e
+      for -e path`, it sets nothing), where a quoted one or the plain name counts too: `rg "path=" lib` and `git
+      log -- path` are none, `export "PATH=/tmp/b"` and `exec env PATH=/tmp/b ls ...` are) can make `ap2`, `<pkg>/bin/ap2` (bash allows `function <pkg>/bin/ap2 { ... }`) or any
       other name run a write (`ap2() { cp "$@"; }; ap2 src <data>/config.yaml`, `hash -p /bin/cp ap2`). In a
       command that holds one (heredoc body lines aside: they are data), no segment keeps the `ap2` exemption and
       every segment that names the data folder or the package outside the own run directory is denied, whatever
@@ -2142,7 +2178,7 @@ Calls the author made without asking (check them):
       zsh's `${PATH::=...}`, also inside `"..."`); a search-path setting (an unquoted `PATH=`, `path+=(`,
       `path[1]=`, `FPATH=`, `fpath=`, ..., not after a name character, `-` or `.`, so `PYTHONPATH=src`, `--path=x`
       and `sys.path=` are none; or the search path's name, plain or in an assignment quoted or not, in a segment
-      with one of the setter commands above: `for PATH in ./b`, `read PATH <<< ./b`, `export "PATH=..."`; a plain
+      where one of the setter commands above runs: `for PATH in ./b`, `read PATH <<< ./b`, `export "PATH=..."`; a plain
       `path` argument, as in `git log -- path`, and a quoted pattern, `rg -n "path=" <pkg>/lib`, are none); a
       `$'...'` it cannot decode; or a function definition. A heredoc body line is data, but in an unquoted body
       a name table counts (the shell expands `${commands[ap2]::=...}` there). When `ap2` is not trusted, an `ap2`
@@ -2159,8 +2195,8 @@ Calls the author made without asking (check them):
       (its quotes hid its words, braces and line continuations: `bash -c 'tee $AP2_RUN_DIR/settings-implement.json
       < f'`, `bash -c 'touch {$AP2_RUN_DIR/..,x}/c'`, `sh -c 'cp a $AP2_\<newline>DATA/c'`), two levels deep;
       a third level that names a guarded path is a write. Below the top level only the joined text is read (it
-      holds each word). `ssh host '...'` and `run.sh` are no shell here. A shell with no `-c` (no flag word with a
-      `c`) reads its script from its input, so when a segment holds one, the words of every segment piped (`|` or
+      holds each word). `ssh host '...'` and `run.sh` are no shell here. A shell with no `-c` among its options (above)
+      reads its script from its input, so when a segment holds one, the words of every segment piped (`|` or
       `|&`) before it in the command are read as a script the same way (`echo 'tee
       $AP2_RUN_DIR/settings-implement.json < f' | sh` is denied; `cat $AP2_RUN_DIR/x | sh -c 'wc -l'` and
       `echo hi | bash` are allowed). A file a shell reads (`sh run.sh`, `cat f | sh`) is best effort. When the shell

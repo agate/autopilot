@@ -160,7 +160,9 @@ class DecideTest(unittest.TestCase):
         self.check(['cat <<EOF\nls \\\\\n$AP2_DATA/x\nEOF', "cat <<'EOF'\nls \\\\\n$AP2_DATA/x\nEOF",
                     'x=$(cat <<EOF\nhi\nEOF)\nls $AP2_DATA; echo "$x" > /tmp/y',
                     'x=$(cat <<-EOF\nhi\n\tEOF)\nls $AP2_DATA; echo "$x" > /tmp/y'], deny=False)
-        self.assertEqual(guard._segments("cat <<a`b`\nhi\na`b`\nz"), ["cat <<a`b`", "hi", "a`b`", "z"])
+        # A delimiter with a backtick opens no body (bash reads a blank inside it as part of the word): the lines
+        # are code, and the command is marked (`<<`) so it is denied when it names a guarded path.
+        self.assertEqual(guard._segments("cat <<a`b`\nhi\na`b`\nz"), ["cat <<a`b`", "hi", "b", "a`_`", "z"])
         self.assertEqual(guard._segments('cat <<"a\\$b"\nhi\na$b\nz'), ['cat <<"a\\$b"', "hi", "a$b", "z"])
         # Inside `"..."` a backslash before `b` is kept: the delimiter is `a\b`, so `ab` does not end the body.
         segs = guard._segments('cat <<"a\\b"\nab\na\\b\nz')
@@ -1201,7 +1203,9 @@ class DecideTest(unittest.TestCase):
                     "cat > \"$AP2_RUN_DIR/notes.md\" <<'EOF'\nsave() { cp \"$1\" \"$2\"; }\nEOF\nls $AP2_DATA"], deny=False)
         segs = guard._segments("bash <<'E'\na\nb\nE\nz")
         self.assertEqual([s for s in segs if isinstance(s, guard._Script)], ["a\nb\n"])
-        self.assertTrue(all(s.fed for s in segs if isinstance(s, guard._Body)))
+        # The body lines stay data lines of the outer command (a child shell rebinds nothing in it); the script is
+        # judged as one of its own.
+        self.assertEqual([type(s) for s in segs], [str, guard._Body, guard._Body, guard._Body, guard._Script, str])
         self.assertFalse([s for s in guard._segments("cat <<'E'\na\nE\nz") if isinstance(s, guard._Script)])
 
     def test_an_unquoted_heredoc_body_runs_its_substitutions_across_lines(self):
@@ -1218,8 +1222,8 @@ class DecideTest(unittest.TestCase):
         self.assertIn('touch "\n" $AP2_DATA/x', guard._segments("cat <<E\nit's $(touch \"\n\" $AP2_DATA/x)\nE"))
 
     def test_a_locale_or_ansi_c_quote_in_a_word_reads_as_the_shell_passes_it(self):
-        """`$"..."` is `"..."` (the `$` goes), and `$'...'` is decoded (`$'\\x63p'` is `cp`); one this reading cannot
-        decode as every shell would (`\\u`, a NUL) is a value filled in at run time that may rebind a name."""
+        """`$"..."` is `"..."` (the `$` goes), and `$'...'` is decoded (`$'\\x63p'` is `cp`); a `\\u` that zsh decodes
+        to an ASCII character is read as zsh reads it, and may rebind a name (bash 3.2 reads another one)."""
         self.check(['c$"p" src $AP2_DATA/config.yaml', f'cp src {DATA[:-1]}$"{DATA[-1]}"/config.yaml',
                     "$'\\x63p' src $AP2_DATA/config.yaml", "$'\\143p' src $AP2_DATA/config.yaml",
                     "$'\\x68ash' -p /bin/cp $'\\x61p2'; ap2 src $AP2_DATA/config.yaml",
@@ -1231,7 +1235,7 @@ class DecideTest(unittest.TestCase):
         self.check(["printf $'a\\tb\\n' > \"$AP2_RUN_DIR/x.txt\"", "printf $'\\u2713 done\\n' >> \"$AP2_RUN_DIR/journal.md\"",
                     'echo $"done" > "$AP2_RUN_DIR/x.txt"; ls $AP2_DATA'], deny=False)
         self.assertEqual(guard._words('c$"p" $$"x" \\$"y"'), ["cp", "$$x", "$y"])
-        self.assertEqual(guard._words("$'\\x63p' $'a\\'b' $'\\u0041'"), ["cp", "a'b", "$u0041"])
+        self.assertEqual(guard._words("$'\\x63p' $'a\\'b' $'\\u0041'"), ["cp", "a'b", "A"])
 
     def test_zsh_flags_before_the_name_are_a_mention(self):
         """zsh's `${=X}`, `${~X}` and `${^X}` (split, glob, rc-expand) expand `X`: a mention that is never the own run
@@ -1294,6 +1298,161 @@ class DecideTest(unittest.TestCase):
                     # A `.` before a subshell's `)` is an argument, not a command after a closer.
                     f"(cd {DATA}/items && ls .)", f"(cd {DATA} && grep -rn TODO .)"], deny=False)
         self.assertTrue(guard._rebinds([guard._Parsed("x=`true`/b alias ls=cp", True, True)]))
+
+    def test_a_heredoc_delimiter_the_reader_may_end_elsewhere_opens_no_body_and_denies_a_guarded_path(self):
+        """A delimiter word that holds `$(`, `${`, `$[` or a backtick, or that a `(` follows, can end where the shell
+        ends it and `_DELIM` does not (`<<$(x)`, `<<${x:-a b}`): no body is opened, and a command with one that names
+        a guarded path is denied (lines read as code can hide a write behind a quote the body held)."""
+        f = 'f() { cp "$@"; }\nf /tmp/src $AP2_DATA/config.yaml\n'
+        self.check(["cat <<$(x) >/dev/null\n$(x)\n" + f, "cat <<${x:-a b} >/dev/null\n${x:-a b}\n" + f,
+                    'cat <<$(x) >/dev/null\n$(x)\nap2() { cp "$@"; }\nap2 /tmp/src $AP2_DATA/config.yaml\n',
+                    "cat <<`x` >/dev/null\n`x`\n" + f, "cat <<$[1] >/dev/null\n$[1]\n" + f,
+                    "cat <<\"$(x)\" >/dev/null\n$(x)\n" + f, "cat <<a$(x) >/dev/null\na$(x)\n" + f,
+                    "cat <<$(x)\nit's\n$(x)\ncp a $AP2_DATA/c # '\n",
+                    # Read as code, the body's `'` would hide the rebinding from the `ap2` trust check.
+                    "cat <<$(x)\nit's\n$(x)\nhash -p /bin/cp ap2 #'\nap2 src $AP2_DATA/config.yaml",
+                    # An undecodable `$'...'` delimiter opens no body either, and is marked the same way.
+                    "cat <<$'\\u0045'\nit's\nE\nhash -p /bin/cp ap2 #'\nap2 src $AP2_DATA/config.yaml"], deny=True)
+        self.check(["cat <<$(x) >/dev/null\n$(x)\nls /tmp\n", "cat <<'EOF' > $AP2_RUN_DIR/a.md\nit's\nEOF"],
+                   deny=False)
+        for cmd in ("cat <<$(x)\nb\n$(x)\n", "cat <<${x}\nb\n", "cat <<`x`\nb\n", "cat <<$[1]\nb\n", "cat <<x(y)\n",
+                    "cat <<$'\\u0045'\nb\n"):
+            with self.subTest(cmd=cmd):
+                seen = set()
+                guard._segments(cmd, seen=seen)
+                self.assertIn("<<", seen)
+                self.assertFalse(any(isinstance(s, guard._Body) for s in guard._segments(cmd)))
+        seen = set()
+        guard._segments("cat <<'E'\nb\nE\n", seen=seen)
+        self.assertNotIn("<<", seen)
+
+    def test_a_shell_reads_its_input_unless_a_c_comes_among_its_options(self):
+        """Only the option words before the first `--`, `-` or other word (an option's value aside) can be a `-c`:
+        a `-c` after them is a positional argument, and a `-s` cluster reads the script from the input."""
+        f = 'f() { cp "$@"; }\nf /tmp/src $AP2_DATA/config.yaml\n'
+        self.check(["bash -s -- -c <<'EOF'\n" + f + "EOF\n", "cat <<'EOF' | bash -s -- -c\n" + f + "EOF\n",
+                    "zsh -s -- -c <<'EOF'\n" + f + "EOF\n", "bash -s -- -recursive <<'EOF'\n" + f + "EOF\n",
+                    "bash -s x -c <<'EOF'\n" + f + "EOF\n", "bash -o posix -s -- -c <<'EOF'\n" + f + "EOF\n",
+                    "bash -sc <<'EOF'\n" + f + "EOF\n"], deny=True)
+        for words, shell in ((["bash", "-s", "--", "-c"], "bash"), (["bash", "-s", "x", "-c"], "bash"),
+                             (["bash", "--", "-c"], "bash"), (["bash", "-", "-c"], "bash"),
+                             (["bash", "-o", "c", "-x"], "bash"), (["bash", "-sc", "x"], "bash"),
+                             (["bash", "-c", "x"], None), (["bash", "-ec", "x"], None),
+                             (["bash", "-o", "pipefail", "-c", "x"], None), (["bash", "+O", "x", "-c", "y"], None)):
+            with self.subTest(words=words):
+                self.assertEqual(guard._stdin_shell(words), shell)
+
+    def test_a_path_given_after_an_equals_sign_or_climbing_to_the_root_is_no_text(self):
+        """`of=`, `x=` or `--flag=` before the run directory gives a command a real path, and so does text that ends
+        in `..` (`/usr/..` is `/`): the run directory there must be followed by `/` or nothing."""
+        self.check(["dd if=/dev/zero of=\"$AP2_RUN_DIR'\" count=1", "cp src --target-directory=\"$AP2_RUN_DIR'\"",
+                    f"dd if=/dev/zero of='{RUN}\"' count=1", "touch \"/usr/..$AP2_RUN_DIR'\"",
+                    "touch /usr/..$AP2_RUN_DIR.bak", "touch x/../..$AP2_RUN_DIR.bak", "touch /usr/../$AP2_RUN_DIR.bak",
+                    "touch /usr/../.$AP2_RUN_DIR.bak"], deny=True)
+        self.check(["dd if=/dev/zero of=$AP2_RUN_DIR/x.bin count=1", "dd if=/dev/zero of=\"$AP2_RUN_DIR/x\" count=1"],
+                   deny=False)
+
+    def test_zsh_flags_without_braces_are_a_mention(self):
+        """zsh's `$=X`, `$~X` and `$^X` expand `X` as `${=X}` does: a mention that is never the own run directory."""
+        self.check(["cp src $=AP2_DATA/config.yaml", "cp src $~AP2_DATA/config.yaml", "cp src $^AP2_DATA/config.yaml",
+                    "cp src $^~AP2_DATA/config.yaml", "cp src $=AP2_RUN_DIR/../x", "echo x > $=AP2_RUN_DIR/x",
+                    'cp src "$~AP2_DATA"/config.yaml', "cp src $=HOME/Documents/Assistant/config.yaml",
+                    "cp src $~HOME/Documents/Assistant/config.yaml"], deny=True)
+        self.check(["echo $=AP2_DATA_OLD > /tmp/x", "cp src $=HOME/Documents/Assistant2/x", "echo $=x > /tmp/y"],
+                   deny=False)
+
+    def test_a_shell_fed_a_heredoc_rebinds_nothing_in_the_outer_command(self):
+        """A child shell fed a heredoc cannot rebind the outer shell's names, search path or functions: its own
+        rebinding is judged by the script reading one level deeper, and the outer `ap2` keeps its exemption."""
+        venv = "source .venv/bin/activate\npytest -q > $AP2_RUN_DIR/pytest.log 2>&1\n"
+        npm = 'export PATH="$PWD/node_modules/.bin:$PATH"\nnpm test > $AP2_RUN_DIR/t.log 2>&1\n'
+        log = 'log() { echo "$*" >> "$AP2_RUN_DIR/log.txt"; }\nlog started\n'
+        note = f"{PKG}/bin/ap2 card note C1 --file $AP2_RUN_DIR/pytest.log"
+        park = f"{PKG}/bin/ap2 worker park C1 implement --note 'tests pass'"
+        self.check([f"bash <<'EOF'\n{venv}EOF\n{note}", f"bash <<'EOF'\n{npm}EOF\n{note}",
+                    f"bash <<'EOF'\n{log}EOF\n{note}", f"bash <<'EOF'\n{venv}EOF\ncat {DATA}/items/C1.yaml",
+                    f"bash <<'EOF'\n{venv}EOF\n{park}", f"bash <<'EOF' && {note}\n{venv}EOF",
+                    f"cat <<'EOF' | bash\n{venv}EOF\n{note}", f"bash -s <<'EOF'\n{npm}EOF\n{park}",
+                    f"bash <<EOF\n{log}EOF\n{note}"], deny=False)
+        # The script's own rebinding still counts inside it.
+        self.check(["bash <<'EOF'\nhash -p /bin/cp ap2\nap2 src $AP2_DATA/config.yaml\nEOF",
+                    "bash <<'EOF'\nexport PATH=/tmp/b:$PATH\nap2 src $AP2_DATA/config.yaml\nEOF",
+                    "cat <<'EOF' | bash\nap2() { cp \"$@\"; }\nap2 src $AP2_DATA/config.yaml\nEOF"], deny=True)
+
+    def test_an_ansi_c_nul_or_non_ascii_code_rebinds_nothing(self):
+        """bash ends a `$'...'` text at a NUL and passes a code past 0x7F as it is: neither can spell a name. bash 3.2
+        keeps `\\u` as text while zsh decodes it, so only a `\\u` or `\\U` that decodes to an ASCII character may
+        rebind a name."""
+        self.check([f"find {DATA}/items -name '*.yaml' -print0 | while IFS= read -r -d $'\\0' f; do wc -l \"$f\"; done",
+                    f"grep -c $'\\0' {DATA}/index.sqlite", f"tr -d $'\\0' < {DATA}/x.log | head",
+                    f"tr -d $'\\x00\\000' < {DATA}/x.log | head",
+                    f"{PKG}/bin/ap2 card note C1 --text $'Done \\u2014 tests pass' --file $AP2_RUN_DIR/n.md",
+                    f"{PKG}/bin/ap2 card note C1 --text $'Done — tests pass' --file $AP2_RUN_DIR/n.md",
+                    f"{PKG}/bin/ap2 worker park C1 implement --note $'tests pass ✅\\nnext: review' --data $AP2_DATA",
+                    f"echo $'\\xe2\\x9c\\x93 ok' >> $AP2_RUN_DIR/journal.md; ls {DATA}/items",
+                    f"echo $'✓ ok' >> $AP2_RUN_DIR/journal.md; ls {DATA}/items",
+                    f"{PKG}/bin/ap2 card note C1 --text $'\\U0001F600 done' --file $AP2_RUN_DIR/n.md"], deny=False)
+        self.check(["$'cp' src $AP2_DATA/config.yaml", "$'\\543p' src $AP2_DATA/config.yaml",
+                    "$'\\U00000063p' src $AP2_DATA/config.yaml", "cp src $AP2_RUN_DIR/$'\\U0000002e.'/config.yaml",
+                    "$'\\x63p\\0x' src $AP2_DATA/config.yaml",
+                    # Found by the shell differential: zsh's `..`, which a verb-only judgement let through.
+                    "$'\\u0063p' src $AP2_RUN_DIR/$'\\u002e\\u002e'/x",
+                    "f() { cp \"$@\"; }\nf src $AP2_RUN_DIR/$'\\u002e\\u002e'/x",
+                    # A `$x` that may expand to nothing before a decoded verb (bash and zsh run `cp`).
+                    "$x$'\\x63p' src $AP2_DATA/config.yaml", "$=x$'\\543p' src $AP2_DATA/config.yaml",
+                    "$x$'\\x74'ouch $AP2_DATA/c", "$1$'\\x63p' src $AP2_DATA/config.yaml",
+                    "$x'c'p src $AP2_DATA/config.yaml", "c$x\"p\" src $AP2_DATA/config.yaml"], deny=True)
+        self.assertEqual(guard._words("$'a\\0b' $'\\x00' $'c\\000\\'d' $'\\543p' $'\\u2014' $'\\xe2'"),
+                         ["a", "c", "cp", "\\u2014", "\xe2"])
+        flags = set()
+        guard._words("$'\\u2014 \\U0001F600'", flags=flags)
+        self.assertNotIn("$'", flags)
+        guard._words("$'\\u0063'", flags=flags)
+        self.assertIn("$'", flags)
+
+    def test_prose_naming_the_run_directory_mid_sentence_is_text(self):
+        """Inside a word of prose, JSON or code the run directory may be followed by any character that is no name
+        character and no `/`; a path after a later `/` is still judged."""
+        self.check(['echo "Results are in $AP2_RUN_DIR now" >> $AP2_RUN_DIR/journal.md',
+                    'echo "- screenshots in $AP2_RUN_DIR/media; journal in $AP2_RUN_DIR." >> $AP2_RUN_DIR/journal.md',
+                    f'echo "Run dir: {RUN}." >> {RUN}/journal.md',
+                    f"echo '- run dir is {RUN} (own)' >> {RUN}/journal.md",
+                    'echo "cd $AP2_RUN_DIR && ls" >> $AP2_RUN_DIR/journal.md',
+                    'echo "notes (in $AP2_RUN_DIR)" >> $AP2_RUN_DIR/journal.md',
+                    'echo "<$AP2_RUN_DIR>" > $AP2_RUN_DIR/a.md', 'echo "{dir: $AP2_RUN_DIR}" > $AP2_RUN_DIR/a.md'],
+                   deny=False)
+        self.check(['echo "Results are in $AP2_RUN_DIR /../../config.yaml" > $AP2_RUN_DIR/a.md',
+                    'echo "in $AP2_RUN_DIR-old" > $AP2_RUN_DIR/a.md', 'echo "in ${AP2_RUN_DIR}x" > $AP2_RUN_DIR/a.md',
+                    "touch \"$AP2_RUN_DIR now\"", "touch $AP2_RUN_DIR.bak", 'echo "in $AP2_RUN_DIR/../x" > /tmp/a'],
+                   deny=True)
+
+    def test_a_setter_name_counts_only_where_it_runs(self):
+        """A word such as `set`, `export` or `read` makes a plain `path` word a search-path setting only where it runs
+        as a command (or after an unquoted closer): as an argument (`git grep -n set -- path`) it sets nothing."""
+        note = f"; {PKG}/bin/ap2 card note C1 --file $AP2_RUN_DIR/n.md"
+        self.check(["git grep -n set -- path" + note, "git log -S export -- path" + note, "rg -w env path" + note,
+                    "grep -rn trap path" + note, "pytest -k 'read' path" + note,
+                    "rg -n --type py -e for -e path lib" + note], deny=False)
+        tail = "; ap2 src $AP2_DATA/config.yaml"
+        self.check(["case x in x) read PATH <<< ./b;; esac" + tail, "x=1 export \"PATH=/tmp/b\"" + tail,
+                    "command export \"PATH=/tmp/b\"" + tail,
+                    "do for PATH in ./b; do ap2 src $AP2_DATA/config.yaml; done",
+                    "$e export \"PATH=/tmp/b\"" + tail], deny=True)
+
+    def test_more_finding_rows_pin_their_rules(self):
+        """Rows that fail when the rule they name is taken out: empty backticks read as one only when empty, a path
+        to a file named `ap2`, an unquoted search-path assignment whose value holds quoted text, a `$` before a
+        quote taken out for the text search, and a `$` that ends a run of ordinary word characters."""
+        self.check(["echo ```cp a $AP2_DATA/x`", "x=```touch $AP2_DATA/x`",
+                    "ln -s /bin/cp ~/bin/ap2; ap2 src $AP2_DATA/config.yaml",
+                    "cp /bin/cp /usr/local/bin/ap2; ap2 src $AP2_DATA/config.yaml",
+                    'PATH="/opt/tools (arm)/bin:$PATH"; ap2 src $AP2_DATA/config.yaml',
+                    "PATH='/tmp/b,c'; ap2 src $AP2_DATA/config.yaml"], deny=True)
+        self.check(["source .venv/bin/activate && playwright screenshot http://localhost:3000 "
+                    "$AP2_RUN_DIR/media/home-$(date +%s).png",
+                    "export PATH=$PWD/node_modules/.bin:$PATH; playwright screenshot http://localhost:3000/a "
+                    "$AP2_RUN_DIR/media/a-$(git rev-parse --short HEAD).png"], deny=False)
+        self.assertTrue(guard._Marks(WORKER).in_text(f'cp a {DATA[:-1]}$"{DATA[-1]}"/c'))
 
     def test_a_final_lone_backslash_adds_nothing(self):
         self.check(["cp ./src $AP2_RUN_DIR/settings-implement.json\\"], deny=True)
@@ -1432,8 +1591,9 @@ class DecideTest(unittest.TestCase):
         for unit in ("`}` ", "`x` ", "`` ", "`}`", "``"):
             cmd = unit * ((guard.MAX_STDIN - 200) // len(unit)) + '> "$AP2_"DATA/items/C1.yaml'
             with self.subTest(unit=unit):
-                self.assertTrue(self.fast(guard._Marks(WORKER).names, cmd, limit=1.0))
-                self.assertFalse(self.fast(guard._Marks(WORKER).names, cmd.replace("$AP2_", "$NOPE_"), limit=1.0))
+                # 1.5 s: measured 0.22-0.52 s CPU on a loaded machine, so a slowdown of about three times is seen.
+                self.assertTrue(self.fast(guard._Marks(WORKER).names, cmd, limit=1.5))
+                self.assertFalse(self.fast(guard._Marks(WORKER).names, cmd.replace("$AP2_", "$NOPE_"), limit=1.5))
                 raw = json.dumps(bash(cmd)).encode()
                 self.assertTrue(denied(self.fast(guard._fallback, raw, WORKER, limit=0.2)))
                 self.assertIsNone(self.fast(guard._fallback, raw.replace(b"$AP2_", b"$NOPE_"), WORKER, limit=0.2))
@@ -1541,7 +1701,18 @@ class DecideTest(unittest.TestCase):
                   # Decoded quotes, zsh flags, a quoted end after the run directory, search-path words.
                   "$' decoded": fill("$'\\x63p' "), "$' raw": fill("$'\\u0063' "), '$"': fill('c$"p" '),
                   "${=": fill("${=AP2_DATA} "), "run dir '": fill("'$AP2_RUN_DIR' "),
-                  "path=": fill('"path=" path ', "rg "), "path setter": fill("path PATH= ", "read ")}
+                  "path=": fill('"path=" path ', "rg "), "path setter": fill("path PATH= ", "read "),
+                  # Unsure heredoc delimiters, a shell's options, brace-less zsh flags, text before the run
+                  # directory, NUL and `\\u` quotes, setters as arguments, a fed body that rebinds.
+                  "<<$(": fill("cat <<$(x) a\n"), "<<${": fill("<<${x:-a b} "), "<<`": fill("<<`a b` "),
+                  "sh options": fill("-o x -e ", "bash ") + " <<E\nx\nE", "sh -s --": fill("-c ", "bash -s -- "),
+                  "$=": fill("$=AP2_DATA $~HOME/x "), "prose run dir": fill('"in $AP2_RUN_DIR now, ', "echo "),
+                  "/.. run dir": fill("/..$AP2_RUN_DIR. x=$AP2_RUN_DIR' "),
+                  "/./ run": "echo x" + "/." * ((size - 40) // 2) + "$AP2_RUN_DIR' " + tail,
+                  "$'\\0": fill("$'\\0a\\'b' "), "$'\\u": fill("$'\\u2014\\U0001F600' "),
+                  "setter args": fill("set export path ", "git grep "),
+                  "fed rebind": fill("source x; f() { :; }\n", "bash <<'E'\n"),
+                  "$x verb": fill("$x'c'p $=y$'\\x63' ")}
         # The slowest shapes (a shell's script read again in both `$$(` readings, about 0.3 s here) get a bound a
         # few times their time (1 s), so a slowdown of that much is seen well before the 2 s deadline; the rest
         # keep 2 s.
@@ -1671,6 +1842,14 @@ class CommandTest(unittest.TestCase):
         self.assertTrue(denied(json.loads(r.stdout)))
         r = self.run_hook(deep.replace(str(self.data).encode(), b"/tmp/elsewhere"))
         self.assertEqual((r.returncode, r.stdout), (0, b""))
+        # A data folder spelled with a `$"..."` around its last letter: found once the `$` before a quote is taken out.
+        data = str(self.data)
+        cmd = json.dumps(f'echo x > {data[:-1]}$"{data[-1]}"/config.yaml')
+        split = ('{"tool_name": "Bash", "tool_input": {"command": ' + cmd + ', "pad": ' + "[" * 100000
+                 + "]" * 100000 + "}}").encode()
+        r = self.run_hook(split)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(denied(json.loads(r.stdout)))
 
     def test_a_bash_payload_past_the_read_cap_is_denied(self):
         """The write sits past the bytes `main` reads, so it is never seen: the length alone denies the call."""
@@ -1683,8 +1862,9 @@ class CommandTest(unittest.TestCase):
 
     def test_a_mebibyte_of_backticks_answers_well_inside_the_timeout(self):
         """The real hook on a 1 MiB payload of backticks with a quote-split data-folder spelling at its end (denied),
-        or with a spelling of nothing guarded (allowed, after reading all of it as words): each in under a second of
-        CPU (best of three), well inside the 5 s timeout."""
+        or with a spelling of nothing guarded (allowed, after reading all of it as words): each in under 2.5 s of CPU
+        (best of three; measured 0.49-0.56 s, interpreter start included, on a loaded machine), inside the 5 s
+        timeout."""
         for unit in ("`}` ", "`x` ", "`` ", "`}`"):
             for name, deny in ((f'"{str(self.data)[:-1]}"{str(self.data)[-1]}', True), ('"/tmp/no"where', False)):
                 cmd = unit * ((guard.MAX_STDIN - 400) // len(unit)) + f"> {name}/x"
@@ -1699,7 +1879,7 @@ class CommandTest(unittest.TestCase):
                     best = cpu if best is None else min(best, cpu)
                 with self.subTest(unit=unit, deny=deny):
                     self.assertEqual(denied(json.loads(r.stdout)) if r.stdout else False, deny, r.stderr)
-                    self.assertLess(best, 1.0)
+                    self.assertLess(best, 2.5)
 
     def test_a_closed_stdout_still_exits_0(self):
         read_end, write_end = os.pipe()
