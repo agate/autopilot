@@ -439,9 +439,11 @@ class ProjectSetupTest(WorkerCase):
         rec = self.workers().start(cid, "implement", cwd=self.wt, prompt="Do the work.")
         self.assertEqual(rec["branch"], "me.widgets-key.retry-failed-payments")
         # A primary that is not English: the branch takes that slot, not the English one.
+        # A secondary language (zh) is set too and must not be used.
         de = self.add_card(project="shop", key="de-key", title=title,
-                           plain={line: {"en": "x", "de": "x"} for line in ("what", "where", "do")})
-        rec = self.workers(cfg=Config(mode="live", primary_language="de")).start(de, "implement", cwd=self.wt)
+                           plain={line: {"en": "x", "de": "x", "zh": "x"} for line in ("what", "where", "do")})
+        cfg = Config(mode="live", primary_language="de", secondary_language="zh")
+        rec = self.workers(cfg=cfg).start(de, "implement", cwd=self.wt)
         self.assertEqual(rec["branch"], "me.de-key.andere-worte")
         text = self.add_card(project="shop", key="other-key", title="Retry failed payments")
         self.assertEqual(self.workers().start(text, "review", cwd=self.wt)["branch"],
