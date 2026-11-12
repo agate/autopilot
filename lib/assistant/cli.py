@@ -294,10 +294,12 @@ def cmd_restore(args) -> int:
 # <data>/active-profile.json, so it works in shadow mode; `list` and `show` create nothing.
 
 def _profile_parser(sub) -> None:
-    pr = sub.add_parser("profile", help="list, show, add, use or remove access profiles",
+    pr = sub.add_parser("profile", help="list, show, add, choose, use or remove access profiles",
                         description="Access profiles: how workers reach Claude (the subscription, or a gateway "
                                     "reached with a key command). Every worker start or resume runs on the active "
-                                    "one; a running worker keeps its own.")
+                                    "one; a running worker keeps its own. A profile whose model and effort "
+                                    "were never chosen asks for them: in a terminal, a numbered prompt; with no "
+                                    "terminal, the choices as JSON and exit 3.")
     ps = pr.add_subparsers(dest="profile_command", metavar="<profile command>", title="profile commands")
     ps.required = True
     li = ps.add_parser("list", help="print every profile and which one is active",
@@ -309,11 +311,26 @@ def _profile_parser(sub) -> None:
         c = ps.add_parser(name, help=help_, description=help_[0].upper() + help_[1:] + ".")
         c.add_argument("name", metavar="NAME")
         c.add_argument("--data", metavar="PATH", help=DATA_HELP)
+    ch = ps.add_parser("choices", help="print the models and efforts NAME can choose from, fetched now",
+                       description="Print {profile, models, efforts, recommended_model, recommended_effort} as "
+                                   "JSON. The models are fetched now (a gateway's --models-command runs every "
+                                   "time; otherwise the priced claude-* models and `default`).")
+    ch.add_argument("name", metavar="NAME")
+    ch.add_argument("--data", metavar="PATH", help=DATA_HELP)
+    co = ps.add_parser("choose", help="choose NAME's model and effort from the list fetched now",
+                       description="Save NAME's model and effort, checked against the list fetched now, and print "
+                                   "the profile. A missing flag is asked for in a terminal; with no terminal the "
+                                   "choices are printed as JSON and ap2 exits 3.")
+    co.add_argument("name", metavar="NAME")
+    co.add_argument("--model", metavar="MODEL", help="one of the models `ap2 profile choices NAME` lists")
+    co.add_argument("--effort", metavar="EFFORT", help="one of the efforts `ap2 profile choices NAME` lists")
+    co.add_argument("--data", metavar="PATH", help=DATA_HELP)
     add = ps.add_parser("add", help="save a new profile and print it",
                         description="Save a new profile NAME and print it. A gateway profile needs --base-url, "
                                     "--key-command (a command that prints the key; the key is never stored), "
                                     "--small-model and --daily-cap. With --models-command, the models are checked "
-                                    "against the JSON list it prints.")
+                                    "against the JSON list it prints. Without both --model and --effort, the "
+                                    "profile is saved unchosen, then they are asked for (see `choose`).")
     add.add_argument("name", metavar="NAME")
     mode = add.add_mutually_exclusive_group(required=True)
     mode.add_argument("--subscription", action="store_true", help="the Claude subscription")
@@ -358,18 +375,161 @@ def cmd_profile(args) -> int:
         out = {"active": current, "active_error": error, "profiles": rows}
     elif sub == "show":
         out = profiles.load(data, args.name)
+    elif sub == "choices":
+        out = profiles.choices(data, profiles.load(data, args.name))
     else:
         datadir.ensure(data)
         if sub == "add":
-            if args.name == profiles.SUBSCRIPTION or profiles.path(data, args.name).exists():
-                raise profiles.ProfileError(f"{args.name} already exists")
-            out = profiles.save(data, profiles.from_args(args))
-        elif sub == "use":
-            out = profiles.use(data, args.name)
-        else:
-            out = profiles.remove(data, args.name)
+            return _profile_add(data, args)
+        if sub == "choose":
+            return _profile_choose(data, args)
+        if sub == "use":
+            return _profile_use(data, args.name)
+        out = profiles.remove(data, args.name)
     _print_json(out)
     return 0
+
+
+def _profile_add(data, args) -> int:
+    """Save the profile; when its model and effort are not both given, ask for them once (lesson: `add` and `use`
+    ask once). One fetch serves the check, the save and the prompt."""
+    from assistant import profiles
+
+    name = args.name
+    if name == profiles.SUBSCRIPTION or profiles.path(data, name).exists():
+        raise profiles.ProfileError(f"{name} already exists")
+    p = profiles.from_args(args)
+    if args.effort is not None:
+        profiles.check_effort(args.effort)
+    errs = profiles.validate(p)  # a broken profile is refused before its models command runs
+    if errs:
+        raise profiles.ProfileError("; ".join(errs))
+    models = profiles.model_choices(data, p)
+    if p["chosen_at"]:
+        profiles.check_model(args.model, models)
+    saved = profiles.save(data, p, models)
+    if not profiles.needs_choice(data, saved):
+        _print_json(saved)
+        return 0
+    c = profiles.choices(data, saved, models)
+    if not _stdin_is_terminal():
+        return _print_choices(c, f"{name} is saved, but its model and effort are not chosen yet: run "
+                                 f"`ap2 profile choose {name} --model M --effort E` with values from the list above")
+    try:
+        out = _prompt_choose(data, name, c, args.model, args.effort)
+    except (EOFError, profiles.ProfileError) as e:
+        why = "no choice made" if isinstance(e, EOFError) else str(e)
+        raise profiles.ProfileError(f"{why}; {name} is saved without a chosen model and effort: "
+                                    f"`ap2 profile choose {name}` finishes it") from None
+    _print_json(out)
+    return 0
+
+
+def _profile_choose(data, args) -> int:
+    from assistant import profiles
+
+    name = args.name
+    if args.model is not None and args.effort is not None:
+        _print_json(profiles.choose(data, name, args.model, args.effort))
+        return 0
+    c = profiles.choices(data, profiles.load(data, name))
+    if not _stdin_is_terminal():
+        _check_given(c, args.model, args.effort)
+        return _print_choices(c, f"no terminal to ask in: run `ap2 profile choose {name} --model M --effort E` "
+                                 "with values from the list above")
+    try:
+        out = _prompt_choose(data, name, c, args.model, args.effort)
+    except EOFError:
+        raise profiles.ProfileError("no choice made; nothing changed") from None
+    _print_json(out)
+    return 0
+
+
+def _profile_use(data, name: str) -> int:
+    """Switch to `name`. A profile never chosen is chosen first (in a terminal) or nothing switches (exit 3). The
+    active profile is switched to again without a question: workers already run on it."""
+    from assistant import profiles
+
+    p = profiles.load(data, name)
+    try:
+        current = profiles.active_name(data)
+    except profiles.ProfileError:
+        current = None  # broken: `use` is its fix, so it goes on
+    if name != current and profiles.needs_choice(data, p):
+        c = profiles.choices(data, p)
+        if not _stdin_is_terminal():
+            return _print_choices(c, f"{name} has no model and effort chosen yet, so nothing switched: run "
+                                     f"`ap2 profile choose {name} --model M --effort E`, then `ap2 profile use {name}`")
+        try:
+            _prompt_choose(data, name, c)
+        except EOFError:
+            raise profiles.ProfileError("no choice made; nothing changed") from None
+    _print_json(profiles.use(data, name))
+    return 0
+
+
+def _stdin_is_terminal() -> bool:
+    try:
+        return sys.stdin is not None and sys.stdin.isatty()
+    except (AttributeError, ValueError, OSError):  # a closed or replaced stdin
+        return False
+
+
+def _check_given(c: dict, model, effort) -> None:
+    """Refuse a flag value that is not offered, before anything is asked or printed."""
+    from assistant import profiles
+
+    if effort is not None:
+        profiles.check_effort(effort)
+    if model is not None:
+        profiles.check_model(model, c["models"])
+
+
+def _print_choices(c: dict, hint: str) -> int:
+    """No terminal to ask in: the choices as JSON on stdout, one hint line on stderr, exit NEEDS_CHOICE."""
+    from assistant import profiles
+
+    _print_json(c)
+    _write(f"ap2: {hint}\n", sys.stderr)
+    return profiles.NEEDS_CHOICE
+
+
+def _prompt_choose(data, name: str, c: dict, model=None, effort=None) -> dict:
+    """Ask in the terminal for what is missing, then save the choice against the same list `c` shows. EOFError when
+    the input ends; ProfileError when a given value is not offered."""
+    from assistant import profiles
+
+    _check_given(c, model, effort)
+    if not c["models"]:
+        raise profiles.ProfileError("gateway.models_command: listed no models, so there is nothing to choose")
+    if model is None:
+        model = _ask(f"Model for {name}:", c["models"], c["recommended_model"])
+    if effort is None:
+        effort = _ask(f"Effort for {name}:", c["efforts"], c["recommended_effort"])
+    return profiles.choose(data, name, model, effort, c["models"])
+
+
+def _ask(title: str, options: list, recommended) -> str:
+    """A numbered prompt on stderr (stdout keeps only the JSON); Enter takes the recommended entry, a number or the
+    exact name is taken, anything else asks again. EOFError when the input ends."""
+    lines = [title] + [f"  {i}) {o}" + (" (recommended)" if o == recommended else "")
+                       for i, o in enumerate(options, 1)]
+    _write("\n".join(lines) + "\n", sys.stderr)
+    default = options.index(recommended) + 1 if recommended in options else None
+    while True:
+        _write(f"Number{f' [{default}]' if default else ''}: ", sys.stderr)
+        try:
+            got = input().strip()
+        except EOFError:
+            _write("\n", sys.stderr)  # end the prompt's line, so the error line that follows starts on its own
+            raise
+        if not got and default:
+            return options[default - 1]
+        if got.isdigit() and 1 <= int(got) <= len(options):
+            return options[int(got) - 1]
+        if got in options:
+            return got
+        _write(f"Type a number from 1 to {len(options)}, or press Enter for the recommended one.\n", sys.stderr)
 
 
 # -- ap2 spend (the spend ledger, design section 12) ------------------------------------------------------------------

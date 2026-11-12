@@ -24,6 +24,7 @@ from assistant.profiles import ProfileError
 
 URL = "https://llm-gateway.example.com/anthropic"
 AP2 = ROOT / "bin" / "ap2"
+CHOSEN = ("--model", "default", "--effort", "xhigh")  # `add` with both: chosen at creation, nothing asked
 BLANKED = ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL",
            "ANTHROPIC_DEFAULT_HAIKU_MODEL")
 
@@ -33,7 +34,7 @@ def gateway(name="g", key_command="echo k", **over) -> dict:
          "small_model": "small", "effort": "high", "daily_cap_usd": 5,
          "gateway": {"base_url": URL, "key_command": key_command, "refresh_command": None, "rotate_command": None,
                      "models_command": None},
-         "env": {}, "settings": {}}
+         "env": {}, "settings": {}, "chosen_at": None}
     p.update(over)
     return p
 
@@ -379,7 +380,9 @@ class ProfileNameAndLongContextTest(WorkerCase):
 
     def test_an_underscore_name_round_trips(self):
         """A bug v1 had: a name `save` accepted but `load` refused was saved, then broke `profile list`."""
-        p = profiles.save(self.data, dict(profiles.builtin(), name="team_project", label="Team"))
+        # Chosen, so the command-line `use team_project` below switches without asking (exit 3 with no terminal).
+        p = profiles.save(self.data, dict(profiles.builtin(), name="team_project", label="Team",
+                                          chosen_at="2026-11-12T10:00:00+00:00"))
         self.assertEqual(p["name"], "team_project")
         self.assertTrue((self.data / "profiles" / "team_project.json").exists())
         self.assertEqual(profiles.load(self.data, "team_project")["label"], "Team")
@@ -584,8 +587,9 @@ class ProfileCliTest(unittest.TestCase):
         self.env.update(HOME=str(home), AUTOPILOT_DATA=str(self.v1), PYTHONIOENCODING="utf-8")
 
     def run_ap2(self, *args):
+        # stdin is never a terminal here: an unchosen profile prints its choices and exits 3, never waits.
         return subprocess.run([sys.executable, str(AP2), "profile", *args, "--data", str(self.data)],
-                              capture_output=True, text=True, env=self.env, timeout=60)
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True, env=self.env, timeout=60)
 
     def ok(self, *args):
         r = self.run_ap2(*args)
@@ -627,7 +631,7 @@ class ProfileCliTest(unittest.TestCase):
         self.assertFalse((self.data / "profiles" / "h.json").exists())
         extra = self.tmp / "extra.json"
         extra.write_text(json.dumps({"pluginConfigs": {"p": {}}}))
-        self.assertEqual(self.ok("add", "s", "--subscription", "--settings-file", str(extra))["settings"],
+        self.assertEqual(self.ok("add", "s", "--subscription", "--settings-file", str(extra), *CHOSEN)["settings"],
                          {"pluginConfigs": {"p": {}}})
         self.assertEqual(json.loads((self.data / "profiles" / "s.json").read_text())["settings"],
                          {"pluginConfigs": {"p": {}}})
@@ -681,7 +685,7 @@ class ProfileCliTest(unittest.TestCase):
     def test_a_write_error_prints_one_line(self):
         if os.geteuid() == 0:
             self.skipTest("root writes into a read-only folder")
-        self.ok("add", "s2", "--subscription")
+        self.ok("add", "s2", "--subscription", *CHOSEN)
         folder = self.data / "profiles"
         folder.chmod(0o555)
         self.addCleanup(folder.chmod, 0o755)
@@ -729,7 +733,7 @@ class ProfileCliTest(unittest.TestCase):
     def test_an_unreadable_profiles_folder_prints_one_line(self):
         if os.geteuid() == 0:
             self.skipTest("root reads a folder with mode 000")
-        self.ok("add", "s2", "--subscription")
+        self.ok("add", "s2", "--subscription", *CHOSEN)
         folder = self.data / "profiles"
         folder.chmod(0)
         self.addCleanup(folder.chmod, 0o755)
