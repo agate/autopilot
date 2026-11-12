@@ -1909,7 +1909,10 @@ Calls the author made without asking (check them):
       `"- tests: $AP2_RUN_DIR/test.txt [pass]"` or one with a markdown link). Each word carries a mask that hides
       its quoted ones (inside a `"${...}"` nothing is hidden, below). A `..` part, a `$` or backtick and a
       `settings-*.json` name count however they are quoted (`cp x "$AP2_RUN_DIR/../c"` and
-      `cp x "$AP2_RUN_DIR/settings-implement.json"` are denied). The per-segment unquoted-`{` rule stays: without
+      `cp x "$AP2_RUN_DIR/settings-implement.json"` are denied). In code inside quotes a file name ends at the
+      first quote, comma or paren a quote made text, so the part up to there is judged too (`python3 -c
+      "open('<run>/settings-implement.json', 'w').write('NEW')"` writes the floor file: its part runs on into
+      `', 'w').write(...)` and was no `settings-*.json` name). The per-segment unquoted-`{` rule stays: without
       it a comma in a file name (`$AP2_RUN_DIR/a,b.txt`) would be refused. Still possible, and left as best effort: removing or copying into the run
       directory itself (`rm -rf $AP2_RUN_DIR`, `cp /tmp/settings-implement.json $AP2_RUN_DIR/`); ap2 writes the
       settings file again before every launch. And a symlink made inside the run directory that points out of it
@@ -2059,10 +2062,15 @@ Calls the author made without asking (check them):
       `cp x =ap2` copies over the `ap2` that `PATH` finds).
     - A name rebound in the same command: a function definition (`name()`, `name ()`, `function name`, which
       covers bash's `command_not_found_handle` and zsh's `command_not_found_handler`), a word `alias`, `unalias`,
-      `hash`, `enable`, `builtin`, `function`, `functions`, `eval`, `source` or zsh's `autoload` anywhere in a
-      segment (not only where it is the command: after a case pattern, `case x in x) hash ap2=/bin/cp;; esac`, a
-      zsh precommand modifier, `noglob hash ...`, or a zsh short loop, `for x (1) hash ...`; fail-closed, so
-      `grep -rw hash <data>/items` is a false deny), a command word `.` (only there: `find .` is common), or a word
+      `hash`, `enable`, `builtin`, `function`, `functions`, `eval`, `source` or zsh's `autoload` as a command word
+      (after a runner, an assignment, a zsh precommand modifier or a backslash too: `command hash ...`, `x=1 hash
+      ...`, `noglob hash ...`, `\hash`), after a command word with a `$` or backtick (`$e hash ...`, `$e` may be
+      empty) or after `repeat N`, or as any word of a segment with an unquoted `)`, `]]` or `}` (after a case
+      pattern, `case x in x) hash ap2=/bin/cp;; esac`, a zsh short loop, `for x (1) hash ...` and `while { true } {
+      hash ...; break }`, or a zsh condition, `if [[ -n x ]] hash ...`; fail-closed there). As an argument such a
+      name rebinds nothing: `<pkg>/bin/ap2 source list`, `ap2 search hash` and `grep -rw hash <data>/items` are
+      allowed (any word was counted before, which denied them). A command word `.` (only there: `find .` is
+      common), or a word
       that sets the search path, zsh's function path or one of zsh's name tables (`PATH=...`, `path=...`,
       `FPATH=...`, `fpath=(...)`, `functions[...]`, `aliases[...]`, `commands[...]`) can make `ap2`, `<pkg>/bin/ap2` (bash allows `function <pkg>/bin/ap2 { ... }`) or any
       other name run a write (`ap2() { cp "$@"; }; ap2 src <data>/config.yaml`, `hash -p /bin/cp ap2`). In a
@@ -2095,9 +2103,20 @@ Calls the author made without asking (check them):
       count), and so are the words of a segment piped into a shell once they read as a script that writes nothing:
       otherwise the script, one word to the outer segment, names the run directory with a later `$?`, `$f` or
       `$(date)` in the same word, and `bash -c 'make > "$AP2_RUN_DIR/m.log"; echo "exit $?"'` or `echo '...' | sh`
-      were denied. That holds only where each word was also read on its own (the top level, or a single word),
-      and not in a command that may rebind a name (there `bash -c 'ap2 src <data>/c'` after `export PATH=...` is
-      still denied outright). `cp bash <data>/x` (`bash` is no command word there) and `bash -c 'cp a <data>/c'`
+      were denied. Only the script word itself leaves: the first word after a `-c` flag that is no flag and no
+      option's value (`bash -e -o pipefail -c '<script>'`); the words after it are the script's `$0`, `$1`, ...,
+      and stay in the outer reading, judged with the outer verb and the script's own verb (quotes removed), so
+      `sh -c 'cp "$1" "$2" && echo ok' _ a <data>/x` and `bash -c 'cp "$@"' '#' src <data>/config.yaml` are
+      denied (the script reading joins the words with blanks, where a quoted `#`, `;` or blank hid the write),
+      while `sh -c 'cp "$1" "$2" && echo ok' _ a "$AP2_RUN_DIR/media/a.png"` is allowed. A shell with no `-c`
+      (`bash run.sh <args>`) leaves nothing out. A segment piped into a shell leaves its words out only when its
+      own command is `echo` or `printf`, which print their words and write nothing; any other command runs before
+      the shell reads its output (`touch a '#' <data>/x | sh` touches the file), so it keeps its own reading, and
+      only a segment a `|` or `|&` ends is fed (`cp ... ; echo ls | sh` is not). zsh closes a brace list at a
+      word-final `}`, so a shell's name or a `-c` script word is also read with an unquoted `}` at its end dropped
+      (`{ printf '%s\n' '<write>' | sh}` runs `sh`). That holds only where each word was also read on its own
+      (the top level, or a single word for a fed segment), and not in a command that may rebind a name (there
+      `bash -c 'ap2 src <data>/c'` after `export PATH=...` is still denied outright). `cp bash <data>/x` (`bash` is no command word there) and `bash -c 'cp a <data>/c'`
       stay denied.
     - Other bash 3.2 rules added with these: inside `"${...}"` bash 3.2 ends the quote at an inner `"`, so a `{`
       there brace-expands (`x=; echo "${x:-"{a,b}"}"` prints `a b`): any `{` inside a `"${...}"`, quoted inside it

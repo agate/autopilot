@@ -361,7 +361,7 @@ class ProjectSetupTest(WorkerCase):
         self.assertLessEqual({"config.yaml", "workers.json", ".workers.lock", ".store.lock", "index.sqlite",
                               "items/**", "restore/**", "projects/**", "templates/**", "sources/**",
                               "sessions/**/settings-*.json", "gate.json", "index.sqlite-*", "routines/**",
-                              "chat/**"}, set(PROTECTED))
+                              "chat/**", f"{profiles.FOLDER}/**", profiles.ACTIVE}, set(PROTECTED))
         for name in PROTECTED:
             self.assertIn(f"Edit(/{self.data}/{name})", deny)
         self.assertIn(f"Edit(/{self.data}/gate.json)", deny)

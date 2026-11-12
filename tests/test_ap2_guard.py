@@ -504,7 +504,20 @@ class DecideTest(unittest.TestCase):
                     # `${HOME` with an operator before the data folder's path under HOME is the data folder too.
                     "cp src ${HOME:?}/Documents/Assistant/config.yaml", "cp src ${HOME%/}/Documents/Assistant/c",
                     'cp src "${HOME:-/x}/Documents/Assistant/config.yaml"',
-                    "echo x > ${HOME:?}/Documents/Assistant/sessions/C1/x.txt"], deny=True)
+                    "echo x > ${HOME:?}/Documents/Assistant/sessions/C1/x.txt",
+                    # Each operator bash or zsh takes after the name.
+                    "cp src ${HOME-}/Documents/Assistant/config.yaml", "cp src ${HOME?}/Documents/Assistant/config.yaml",
+                    "cp src ${HOME#}/Documents/Assistant/config.yaml", "cp src ${HOME/x/x}/Documents/Assistant/c",
+                    "cp src ${HOME+$HOME}/Documents/Assistant/config.yaml",
+                    "cp src ${HOME=}/Documents/Assistant/config.yaml",
+                    "cp src ${HOME[1,-1]}/Documents/Assistant/config.yaml",
+                    "cp src ${HOME:-$HOME}/Documents/Assistant/config.yaml",
+                    "cp src ${HOME^}/Documents/Assistant/config.yaml", "cp src ${HOME,}/Documents/Assistant/c"],
+                   deny=True)
+        # The package's path under HOME, by a `${HOME` expansion.
+        home = str(Path(PKG).parent)
+        self.check([f"cp src ${{HOME:?}}/{Path(PKG).name}/lib/assistant/guard.py"], deny=True,
+                   env=dict(WORKER, HOME=home))
         self.check(["echo ${AP2_DATA_OLD:-x} > /tmp/x", "cp src ${HOME:?}/Documents/Assistant2/x",
                     "cp src ${HOME:?}/x"], deny=False)
 
@@ -846,7 +859,12 @@ class DecideTest(unittest.TestCase):
                     # `|&` pipes too, and a shell after a runner still reads its input.
                     "printf '%s\\n' 'cp src $AP2_\\\nDATA/config.yaml' |& sh",
                     "printf '%s\\n' 'cp src $AP2_\\\nDATA/config.yaml' | env sh",
-                    "printf '%s\\n' 'cp src $AP2_\\\nDATA/config.yaml' | command bash"], deny=True)
+                    "printf '%s\\n' 'cp src $AP2_\\\nDATA/config.yaml' | command bash",
+                    # zsh closes a brace list at a word-final `}`: `sh}` is `sh`.
+                    "{ printf '%s\\n' 'cp src $AP2_RUN_DIR/*.json' | sh}",
+                    "{ echo 'cp src $AP2_RUN_DIR/settings-*' | zsh}",
+                    # Words piped into a zsh: its script reads `(` as a glob qualifier.
+                    "echo 'c=cp; ls /(e:\"$c src $AP2_DATA/config.yaml\":)' | zsh"], deny=True)
         self.check(["cat $AP2_RUN_DIR/x | sh -c 'wc -l'", "echo hi | bash", "cat $AP2_RUN_DIR/x | sh",
                     "echo 'cp src $AP2_\\\nDATA/config.yaml' || sh", "echo 'cp src $AP2_\\\nDATA/c' | eval wc"],
                    deny=False)
@@ -875,6 +893,53 @@ class DecideTest(unittest.TestCase):
                     "echo 'echo hi' > $AP2_DATA/c | sh", "cp a $AP2_DATA/c | sh"], deny=True)
         self.assertGreater(len("bash -c \"cat > $AP2_RUN_DIR/notes.md <<'EOF'\n"
                                + "it's ${HOME} and more text here\n" * 480 + "EOF\""), 15 << 10)
+
+    def test_a_shells_positional_arguments_stay_in_the_outer_reading(self):
+        """Only the script word of a `-c` shell leaves the outer reading: the words after it are the script's `$0`,
+        `$1`, ... (a quoted `#`, `;` or blank there hides nothing from the script, which reads them as values), so
+        the outer verb with an unsafe argument is a write."""
+        rm = "r" + "m"
+        self.check(['sh -c \'cp "$1" "$2" && echo ok\' _ new.json "$AP2_RUN_DIR/settings-implement.json"',
+                    'sh -c \'cp "$1" "$2" && echo ok\' _ a "$AP2_DATA/x"',
+                    'bash -c \'cp "$1" "$2"; echo copied\' _ a "$AP2_DATA/x"',
+                    'ls | xargs -I{} sh -c \'cp "$1" "$2" && echo ok\' _ {} "$AP2_DATA/x"',
+                    'for f in *.png; do sh -c \'mv "$1" "$2"; echo moved\' _ "$f" "$AP2_DATA/media/"; done',
+                    'sh -c \'cp "$1" "$2" || exit 1\' _ a "$AP2_DATA/x"',
+                    'sh -c \'cp "$1" "$2"\necho ok\' _ a "$AP2_DATA/x"',
+                    'sh -c \'cp "$1" "$2" && echo ok\' _ a ~/Documents/Assistant/x',
+                    f'sh -c \'cp "$1" "$2" && echo ok\' _ a {PKG}/lib/x',
+                    'zsh -c \'cp "$1" "$2" && echo ok\' _ a "$AP2_DATA/x"',
+                    'sh -c \'tee "$1" >/dev/null && echo ok\' _ "$AP2_DATA/x" < a',
+                    "bash -c 'cp \"$@\"' '#' src $AP2_DATA/config.yaml",
+                    'bash -c \'cp "$1" "$2"\' _ src "$AP2_RUN_DIR/a b/../../../config.yaml"',
+                    "while { bash -c true '#' } { cp src $AP2_DATA/config.yaml; break }",
+                    "{ bash -c true '#' } always { cp src $AP2_DATA/config.yaml }",
+                    # Flags and option values before or after the `-c`, and a verb the script quotes.
+                    'bash -e -o pipefail -c \'cp "$1" "$2"; echo ok\' _ a "$AP2_DATA/x"',
+                    'bash -c -o pipefail \'cp "$1" "$2"; echo ok\' _ a "$AP2_DATA/x"',
+                    'sh -c \'c""p "$1" "$2"; echo ok\' _ a "$AP2_DATA/x"',
+                    'sh -c \'c\\p "$@"; echo ok\' _ a "$AP2_DATA/x"',
+                    f'sh -c \'{rm} -f "$1" && echo gone\' _ "$AP2_DATA/config.yaml"',
+                    # A shell with no `-c` runs a script file: every word after it stays.
+                    'sh -e install.sh "$AP2_DATA/x"'], deny=True)
+        self.check(['sh -c \'cp "$1" "$2" && echo ok\' _ a "$AP2_RUN_DIR/media/a.png"',
+                    'bash -o pipefail -c \'make > "$AP2_RUN_DIR/m.log"; echo "exit $?"\'',
+                    'bash -ec \'cp a.png "$AP2_RUN_DIR/media/"; echo $?\'',
+                    'sh -c \'cp "$1" "$2"\' _ "$AP2_RUN_DIR/a.png" "$AP2_RUN_DIR/media/b.png"'], deny=False)
+
+    def test_only_an_echo_or_printf_piped_into_a_shell_leaves_the_outer_reading(self):
+        """A segment piped into a shell runs before the shell reads its output: only an `echo` or a `printf` (they
+        print their words and write nothing) leaves its words to the script reading; any other command keeps its
+        own (`touch a '#' <data>/x | sh` touches the file whatever the script reading finds), and only a segment a
+        `|` ends is fed."""
+        self.check(['touch a \'#\' "$AP2_DATA/x" | sh', 'touch a \';\' "$AP2_DATA/x" | sh',
+                    'echo x | tee \';\' "$AP2_DATA/config.yaml" | sh', 'echo x | tee \'#\' "$AP2_DATA/config.yaml" | sh',
+                    'cp src "$AP2_RUN_DIR/a b/../../../config.yaml" | sh',
+                    'cp src "$AP2_RUN_DIR/a b/../../../config.yaml"; echo ls | sh',
+                    "echo 'ls' > \"$AP2_DATA/x\" | sh"], deny=True)
+        self.check(["echo 'make > \"$AP2_RUN_DIR/m.log\"; echo \"exit $?\"' | sh",
+                    "printf '%s\\n' 'echo \"done $(date)\" >> \"$AP2_RUN_DIR/journal.md\"' | sh",
+                    "echo 'echo $? > \"$AP2_RUN_DIR/rc.txt\"' | bash"], deny=False)
 
     def test_a_quoted_or_escaped_verb_is_still_its_verb(self):
         """The shell removes quotes and backslashes before it runs a word: `c\\p` and `c''p` are `cp`."""
@@ -906,7 +971,9 @@ class DecideTest(unittest.TestCase):
                     "while { ap2 card list } { cp src $AP2_RUN_DIR/settings-implement.json; break }",
                     "until { ap2 card list } { cp src $AP2_DATA/config.yaml; break }",
                     "until { ap2 card list} { cp src $AP2_DATA/config.yaml; break}",
-                    "while { ap2 card list } 2>/dev/null { cp src $AP2_DATA/config.yaml; break }"], deny=True)
+                    "while { ap2 card list } 2>/dev/null { cp src $AP2_DATA/config.yaml; break }",
+                    "while { ap2 card list }>/dev/null { cp src $AP2_DATA/config.yaml; break }",
+                    "while { ap2 card list }</dev/null { cp src $AP2_DATA/config.yaml; break }"], deny=True)
         self.check(["{ ap2 card list --data $AP2_DATA }", "{ ap2 card list --data $AP2_DATA } > /tmp/x",
                     "{ ap2 card list --data $AP2_DATA; } 2>&1", "ap2 card show ${C} --data $AP2_DATA",
                     "for c in C1; do { ap2 card show $c --data $AP2_DATA } ; done",
@@ -957,8 +1024,9 @@ class DecideTest(unittest.TestCase):
                     # Blanks inside a definition's `()`.
                     'ap2(  ) { cp "$@"; }; ap2 src $AP2_DATA/config.yaml',
                     'ap2 (\t) { cp "$@"; }; ap2 src $AP2_DATA/config.yaml',
-                    # A rebinding word anywhere in a segment: after a case pattern, a zsh precommand modifier, a
-                    # zsh short loop.
+                    # A rebinding word as a command word (after a zsh precommand modifier, `command`, an
+                    # assignment, a backslash, a word that may expand to nothing), or anywhere in a segment with
+                    # an unquoted `)`, `]]` or `}` (after a case pattern, a zsh short loop or condition).
                     'case x in x) function ap2 { cp "$@"; };; esac; ap2 src $AP2_DATA/config.yaml',
                     "case x in x) hash -p /bin/cp ap2;; esac; ap2 src $AP2_DATA/config.yaml",
                     "case x in x) hash ap2=/bin/cp;; esac; ap2 src $AP2_DATA/config.yaml",
@@ -968,6 +1036,12 @@ class DecideTest(unittest.TestCase):
                     "repeat 1 hash ap2=/bin/cp; ap2 src $AP2_DATA/config.yaml",
                     "for x (1) hash ap2=/bin/cp; ap2 src $AP2_DATA/config.yaml",
                     "noglob builtin hash ap2=/bin/cp; ap2 src $AP2_DATA/config.yaml",
+                    "if [[ -n x ]] hash ap2=/bin/cp; ap2 src $AP2_DATA/config.yaml",
+                    "while { true } { hash ap2=/bin/cp; break }; ap2 src $AP2_DATA/config.yaml",
+                    "\\hash ap2=/bin/cp; ap2 src $AP2_DATA/config.yaml", "command hash ap2=/bin/cp; ap2 src $AP2_DATA/c",
+                    "x=1 hash ap2=/bin/cp; ap2 src $AP2_DATA/config.yaml", "alias ap2=cp; ap2 src $AP2_DATA/c",
+                    "$e hash -p /bin/cp ap2; ap2 src $AP2_DATA/config.yaml",
+                    "repeat $n hash ap2=/bin/cp; ap2 src $AP2_DATA/config.yaml",
                     # zsh's autoload: a function file found on `fpath`.
                     "fpath=(/tmp/fn); autoload -U ap2; ap2 src $AP2_DATA/config.yaml",
                     "FPATH=/tmp/fn; autoload -U ap2; ap2 src $AP2_DATA/config.yaml",
@@ -981,7 +1055,8 @@ class DecideTest(unittest.TestCase):
                     "case x in x) hash ap2=/bin/cp", "noglob source x"):
             with self.subTest(seg=seg):
                 self.assertTrue(guard._rebinds([guard._Parsed(seg, True, True)]))
-        for seg in ("find . -name x", "echo . ok", 'echo "source of truth"'):
+        for seg in ("find . -name x", "echo . ok", 'echo "source of truth"', "ap2 source list", "grep -i hash f",
+                    "grep -c 'x) hash' f", "echo '}' eval"):
             with self.subTest(seg=seg):
                 self.assertFalse(guard._rebinds([guard._Parsed(seg, True, True)]))
         self.check(["ap2 card list > /tmp/x", 'f() { echo hi; }; f > "$AP2_RUN_DIR/x"',
@@ -994,7 +1069,13 @@ class DecideTest(unittest.TestCase):
                     "set -a; source .env; set +a; python3 app.py > $AP2_RUN_DIR/app.log",
                     # zsh's precommand modifiers and `repeat N` run the next word: still an ap2 call.
                     "noglob ap2 card list --data $AP2_DATA > /tmp/x", "nocorrect ap2 card list --data $AP2_DATA",
-                    "- ap2 card list --data $AP2_DATA", "repeat 2 ap2 card list --data $AP2_DATA > /tmp/x"],
+                    "- ap2 card list --data $AP2_DATA", "repeat 2 ap2 card list --data $AP2_DATA > /tmp/x",
+                    # A rebinding name as an argument rebinds nothing.
+                    f"{PKG}/bin/ap2 source list", f"{PKG}/bin/ap2 source show gh | jq .",
+                    f'"{PKG}/bin/ap2" source read gh', f"{PKG}/bin/ap2 search hash --json",
+                    f"{PKG}/bin/ap2 card list | grep -c eval", "grep -i hash $AP2_DATA/items/C1.yaml",
+                    "cat $AP2_DATA/items/C1.yaml | grep -i source", "grep -rw source $AP2_DATA/sources",
+                    f"rg -n alias {PKG}/lib", "grep -rw hash $AP2_DATA/items"],
                    deny=False)
 
     def test_a_final_lone_backslash_adds_nothing(self):
@@ -1031,7 +1112,13 @@ class DecideTest(unittest.TestCase):
                     # `//` and `/./` read as `/`, so they do not hide the top level.
                     "rm $AP2_RUN_DIR//*", "rm $AP2_RUN_DIR/./settings*",
                     # A glob past 64 characters at the top level is denied outright.
-                    "rm $AP2_RUN_DIR/" + "*" * 65, "rm $AP2_RUN_DIR/settings-" + "?" * 60 + "*"], deny=True)
+                    "rm $AP2_RUN_DIR/" + "*" * 65, "rm $AP2_RUN_DIR/settings-" + "?" * 60 + "*",
+                    # A path part cut at a quote, comma or paren that a quote made text (Python's `open('...', 'w')`).
+                    "python3 -c \"open('$AP2_RUN_DIR/settings-implement.json', 'w').write('NEW')\"",
+                    f"python3 -c \"open('{RUN}/settings-implement.json', 'w').write('NEW')\"",
+                    "python3 -c \"open('$AP2_RUN_DIR/settings-review.json','w')\"",
+                    'python3 -c "open(\\"$AP2_RUN_DIR/settings-pr.json\\", \\"w\\")"',
+                    "python3 -c \"p='$AP2_RUN_DIR/..';open(p+'/config.yaml','w')\""], deny=True)
         # The settings files live at the run directory's top level only: a glob below it is fine.
         self.check(["rm $AP2_RUN_DIR/media/*.png", "cp a.png $AP2_RUN_DIR/media/shot-?.png",
                     "rm -f $AP2_RUN_DIR/media/*", "cp $AP2_RUN_DIR/media/* /tmp/out/"], deny=False)
@@ -1082,12 +1169,13 @@ class DecideTest(unittest.TestCase):
             with self.subTest(payload=payload):
                 self.assertIsNone(guard.decide(payload, WORKER))
 
-    def fast(self, call, *args):
-        """`call(*args)`, asserted to take well under the hook's 5 s timeout. CPU time, not wall time: the point is
-        that each step is linear (the quadratic shapes took 4-14 s), and a loaded machine does not change CPU time."""
+    def fast(self, call, *args, limit: float = 2.0):
+        """`call(*args)`, asserted to take well under the hook's 5 s timeout (`limit` seconds). CPU time, not wall
+        time: the point is that each step is linear (the quadratic shapes took 4-14 s), and a loaded machine does not
+        change CPU time."""
         t = time.process_time()
         out = call(*args)
-        self.assertLess(time.process_time() - t, 2.0)
+        self.assertLess(time.process_time() - t, limit)
         return out
 
     def test_a_command_too_long_to_check_is_denied_when_it_names_the_data_folder(self):
@@ -1116,8 +1204,10 @@ class DecideTest(unittest.TestCase):
         self.assertTrue(denied(self.fast(guard._fallback, raw, WORKER)))
         self.assertIsNone(self.fast(guard._fallback, raw.replace(b"$AP2_", b"$NOPE_"), WORKER))
         # And the largest command `decide` sees after a parse, with the same spelling.
+        # It reads 1 MiB as text and as words (about 0.6 s here): a wider bound than the 64 KiB shapes', still well
+        # inside the 5 s timeout.
         self.assertTrue(denied(self.fast(guard.decide, bash("a " * (guard.MAX_STDIN // 2 - 40) + '> "$AP2_"DATA/c'),
-                                         WORKER)))
+                                         WORKER, limit=3.0)))
 
     def test_each_parser_shape_at_the_cap_answers_fast(self):
         """The shapes that were slow (a digit run before a redirect, a long `sed -x -x ...`, a word with the run
@@ -1189,7 +1279,12 @@ class DecideTest(unittest.TestCase):
                   "${HOME: rel": fill("${HOME:?}/Documents/Assistant/ "), "set -E": fill("-Eeua ", "set "),
                   "zsh (": fill("(a) ", "zsh -c '"), "${( quoted": fill("'${(a)' "),
                   "heredoc ${(": fill("${(a)\n", "cat <<'E'\n"), "bash -c $?": fill("echo $? ", "bash -c '$AP2_RUN_DIR "),
-                  "| sh $?": fill("echo $AP2_RUN_DIR/a $? ", "echo '") + "' | sh"}
+                  "| sh $?": fill("echo $AP2_RUN_DIR/a $? ", "echo '") + "' | sh",
+                  "sh -c args": fill('"$AP2_RUN_DIR/a" ', "sh -c 'cp \"$@\"; echo ok' _ "),
+                  "sh -c flags": fill("-o x ", "bash -e ") + " -c 'cp a b'",
+                  "| sh fed": fill("x ", "touch a ';' ") + " | sh", "sh}": fill("a | sh} "),
+                  "open( quoted": fill("$AP2_RUN_DIR/a', 'w'),(", "python3 -c \"open('") + '"',
+                  "rebind loose": fill("x) hash ", "case x in "), "rebind $": fill("$e hash ")}
         for name, cmd in shapes.items():
             with self.subTest(name):
                 self.assertLessEqual(len(cmd), guard.MAX_COMMAND)
