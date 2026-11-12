@@ -1676,7 +1676,8 @@ Calls the author made without asking (check them):
     start or timed out), nothing starts: the `WorkerError` says to list them in `projects/<name>.yaml` `tools`. On a dead
     worker's resume that counts as its one resume; a parked worker is stopped as when its resume cannot start. An in-place resume first
     checks that the worker's folder is still there, so a gone worktree says "cannot start the session". The branch is the card's `branch`, else the pattern with the card's `key` (else its id) and the first
-    three words of its title in the primary language. The session gets them the way v1 passes setup:
+    three words of its title as `cards.title_for` picks it for the primary language (that slot, else any other
+    non-blank slot). The session gets them the way v1 passes setup:
     `--settings <run dir>/settings-<role>.json`
     (the permission floor: v1's outward-tool and Bash denials, plus `Edit` denials on the data folder's own files
     (including the user's `templates/**` and `sources/**`, the rules the worker floor in `roles.py` promises; every
@@ -1948,7 +1949,8 @@ Calls the author made without asking (check them):
     the import writes has the same title shape.
   - **[decided by the builder]** A closed question card's title is its old words, one slot per language: each slot is
     the old card's `plain.what` text in that language, else its old title in that language, else in the primary
-    language (`cards.title_for`, so an old one-text title and an old object title both work), else the decision id. It
+    language, else any other non-blank slot (`cards.title_for`, so an old one-text title and an old object title
+    both work), else the decision id. It
     equals the closed card's `plain.what`. In a language no longer configured, a closed question card keeps the old
     card's `what` (so its title) and `where` words (they cannot be made again from v1), so adding that language back
     finds them; its `do` there is the closed phrase, not the old one.

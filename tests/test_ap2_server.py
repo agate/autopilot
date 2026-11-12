@@ -451,6 +451,8 @@ class ListTest(ServerCase):
         self.assertEqual(server.titles({"title": {"ko": "b", "ja": "a"}}, ("en",)), {"en": "a"})
         self.assertEqual(server.titles({"title": {"en": "Retry", "ja": "x"}}, ("en", "zh")),
                          {"en": "Retry", "zh": "Retry"})
+        self.assertEqual(server.titles({"title": {"en": "Retry", "de": "x"}}, ("en", "zh")),
+                         {"en": "Retry", "zh": "Retry"})
         self.assertIsNone(server.titles({"title": {"ja": " "}}, ("en", "zh")))
 
     def test_state_projects_have_the_title_in_every_language(self):
@@ -1130,6 +1132,7 @@ const out = [
   titleIn(null), titleIn(undefined), titleIn(''), titleIn('   '), titleIn({}), titleIn({ja: 'x'}), titleIn(3),
   titleIn(null, 'c-id'), titleIn({en: 'E'}, 'c-id'),
   titleIn({en: '', zh: ' '}), titleIn({ko: 'b', ja: 'a'}), titleIn({en: 'Retry', ja: 'x'}), titleIn({ja: 3}, 'c-id'),
+  titleIn({en: 'Retry', de: 'x'}), titleIn(['', 'x']),
 ];
 S.lang = 'en';
 out.push(titleIn({en: 'Retry payments', zh: '重试付款'}), titleIn({zh: '只有中文'}));
@@ -1142,7 +1145,7 @@ console.log(JSON.stringify(out));
         self.assertEqual(json.loads(out.stdout), [
             "重试付款", "English only", "English only", "One text from an older reply",
             "[card.untitled]", "[card.untitled]", "[card.untitled]", "[card.untitled]", "[card.untitled]",
-            "x", "[card.untitled]", "c-id", "E", "[card.untitled]", "a", "Retry", "c-id",
+            "x", "[card.untitled]", "c-id", "E", "[card.untitled]", "a", "Retry", "c-id", "Retry", "[card.untitled]",
             "Retry payments", "只有中文", "J"])
 
     def test_the_pages_search_caps_match_the_servers(self):

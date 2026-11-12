@@ -582,7 +582,7 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     // on one screen), else its first non-blank slot in sorted key order (cards.title_for's third step), else one
     // text (a stored card's same words in every language, or an older reply), else the fallback (the untitled
     // label unless given).
-    if (t && typeof t === 'object') {
+    if (t && typeof t === 'object' && !Array.isArray(t)) {
       const primary = (S.state && S.state.primary_language) || languages()[0];
       for (const lang of [S.lang, primary, ...Object.keys(t).sort()]) {
         if (typeof t[lang] === 'string' && t[lang].trim()) return t[lang];

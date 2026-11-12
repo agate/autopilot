@@ -422,6 +422,7 @@ class TitleForTest(unittest.TestCase):
 
     def test_the_viewers_and_the_primary_slot_still_come_first(self):
         self.assertEqual(cards.title_for({"title": {"en": "Retry", "ja": "x"}}, "zh", "en"), "Retry")
+        self.assertEqual(cards.title_for({"title": {"en": "Retry", "de": "x"}}, "zh", "en"), "Retry")
         self.assertEqual(cards.title_for({"title": {"zh": "重试", "en": "Retry"}}, "zh", "en"), "重试")
         self.assertEqual(cards.title_for({"title": {"zh": "重试", "ja": "a"}}, "zh", "en"), "重试")
 
