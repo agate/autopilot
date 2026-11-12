@@ -174,6 +174,79 @@ class ChooseTest(unittest.TestCase):
             self.assertEqual((p["model"], p["effort"]), (None, "medium"))
 
 
+class ReviewFixTest(unittest.TestCase):
+    def test_the_builtin_subscription_without_a_file_needs_no_choice(self):
+        with TempData():
+            self.assertFalse(profile.needs_choice(profile.load("subscription")))
+
+    def test_re_applying_the_active_profile_never_asks(self):
+        with TempData() as d:
+            gateway(d)
+            profile.use("g")   # e.g. made active before it had a choice
+            code, out, err = run("profile", "use", "g")
+            self.assertEqual((code, out), (0, ""), err)
+
+    def test_add_with_both_flags_checks_the_model_against_a_fresh_list(self):
+        with TempData() as d:
+            code, _, err = add_gateway(d, "--model", "claude-haiku-4-5[1m]", "--effort", "high")
+            self.assertEqual(code, 1)
+            self.assertIn("claude-haiku-4-5[1m]", err)
+            self.assertEqual(profile.names(), ["subscription"])
+            code, _, err = run("profile", "add", "s", "--subscription", "--model", "default", "--effort", "low")
+            self.assertEqual(code, 0, err)
+            p = profile.load("s")
+            self.assertEqual((p["model"], p["effort"]), (None, "low"))
+            self.assertFalse(profile.needs_choice(p))
+
+    def test_one_choice_runs_the_models_command_once(self):
+        with TempData() as d:
+            gateway(d)
+            before = runs(d)
+            self.assertEqual(run("profile", "choose", "g", "--model", "gpt-5", "--effort", "high")[0], 0)
+            self.assertEqual(runs(d) - before, 1)
+            before = runs(d)
+            self.assertEqual(run("profile", "choose", "g", tty=True, answers=["", ""])[0], 0)
+            self.assertEqual(runs(d) - before, 1)
+
+    def test_add_with_both_flags_runs_the_models_command_once(self):
+        with TempData() as d:
+            before = runs(d)
+            self.assertEqual(add_gateway(d, "--model", "gpt-5", "--effort", "high")[0], 0)
+            self.assertEqual(runs(d) - before, 1)
+
+    def test_a_cli_switch_closes_an_abandoned_choice_card(self):
+        with TempData() as d:
+            gateway(d)
+            profile.open_choice("g")
+            self.assertEqual(run("profile", "use", "subscription")[0], 0)
+            self.assertIsNone(profile.choice_card())
+
+    def test_a_choice_card_expires_six_hours_after_it_opened(self):
+        from datetime import datetime, timedelta
+        with TempData() as d:
+            gateway(d)
+            profile.open_choice("g")
+            f = d / "profile-choice.json"
+            c = json.loads(f.read_text())
+            c["at"] = (datetime.now().astimezone() - timedelta(hours=5, minutes=50)).isoformat()
+            f.write_text(json.dumps(c))
+            self.assertEqual(profile.choice_card()["profile"], "g")
+            c["at"] = (datetime.now().astimezone() - timedelta(hours=6, minutes=1)).isoformat()
+            f.write_text(json.dumps(c))
+            self.assertIsNone(profile.choice_card())
+            self.assertFalse(f.exists())
+
+    def test_choose_leaves_the_card_to_its_caller(self):
+        with TempData() as d:
+            gateway(d)
+            profile.open_choice("g")
+            profile.choose("g", "gpt-5", "high")
+            self.assertEqual(profile.choice_card()["profile"], "g")   # the page path closes it after the switch
+            profile.open_choice("g")
+            self.assertEqual(run("profile", "choose", "g", "--model", "gpt-5", "--effort", "low")[0], 0)
+            self.assertIsNone(profile.choice_card())
+
+
 class ChoicesCliTest(unittest.TestCase):
     def test_choices_json(self):
         with TempData() as d:

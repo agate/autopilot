@@ -188,6 +188,10 @@ def _apply_choice(r: dict) -> str:
     a list that cannot be fetched) is refused and the card shows the fresh list (or the error)."""
     name, model, effort = str(r.get("profile") or ""), str(r.get("model") or ""), str(r.get("effort") or "")
     if (profile.choice_card() or {}).get("profile") != name:
+        # A retry after the switch failed: the choice is saved, so only the switch is left to do.
+        if name in profile.names() and profile.is_chosen_as(profile.load(name), model, effort):
+            profile.use(name)
+            return f"applied: profile_choice {name} {model} {effort} (saved before; switched now)"
         events.append_global("profile_choice_ignored", {"profile": name})
         return f"ignored: no choice card open for {name!r}"
     if name not in profile.names():
@@ -211,6 +215,7 @@ def _apply_choice(r: dict) -> str:
         profile.open_choice(name, refused=str(e))
         return _refused("profile_choice", name, str(e))
     profile.use(name)
+    profile.close_choice()   # only once the switch worked: a failed switch keeps the card for the retry
     return f"applied: profile_choice {name} {model} {effort}"
 
 
@@ -225,7 +230,8 @@ def _apply(r: dict, now: datetime) -> str:
         if option not in profile.names():
             events.append_global("profile_unknown", {"option": option})
             return f"ignored: no profile named {option!r}"
-        if profile.needs_choice(profile.load(option)):
+        active = config.load_global().get("active_profile")
+        if profile.needs_choice(profile.load(option)) and option != active:
             # Nothing switches before a model and effort are chosen: the page shows the choice card instead.
             c = profile.open_choice(option)
             events.append_global("profile_choice_needed", {"profile": option, "error": c.get("error")})

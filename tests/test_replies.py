@@ -519,6 +519,62 @@ class ChoiceTest(SwitchBase):
         self.assertIn("r2", replies._applied())
         self.assertEqual(profile.active()["name"], "subscription")
 
+    def test_a_choice_whose_switch_fails_is_kept_and_retried(self):
+        replies.apply_kind(self.switch(), self.NOON)
+        real = profile.use
+        calls = []
+
+        def flaky(name):
+            calls.append(name)
+            if len(calls) == 1:
+                raise OSError("settings.json is read-only")
+            return real(name)
+
+        with mock.patch.object(profile, "use", flaky):
+            with self.assertRaises(OSError):
+                replies.apply_kind(self.pick(), self.NOON)
+            self.assertNotIn("r2", replies._applied())
+            self.assertEqual(profile.choice_card()["profile"], "u")   # still open for the retry
+            self.assertIn("applied", replies.apply_kind(self.pick(), self.NOON))
+        self.assertEqual(profile.active()["name"], "u")
+        self.assertIsNone(profile.choice_card())
+
+    def test_a_retry_with_the_card_gone_still_switches_when_the_choice_was_saved(self):
+        replies.apply_kind(self.switch(), self.NOON)
+        with mock.patch.object(profile, "use", side_effect=OSError("read-only")):
+            with self.assertRaises(OSError):
+                replies.apply_kind(self.pick(), self.NOON)
+        profile.close_choice()   # e.g. the card expired before the retry
+        self.assertIn("applied", replies.apply_kind(self.pick(), self.NOON))
+        self.assertEqual(profile.active()["name"], "u")
+        # A different pick with no card open is still ignored.
+        profile.use("subscription")
+        self.assertIn("ignored", replies.apply_kind(self.pick(effort="low", rid="r9"), self.NOON))
+        self.assertEqual(profile.active()["name"], "subscription")
+
+    def test_one_page_choice_runs_the_models_command_once(self):
+        replies.apply_kind(self.switch(), self.NOON)
+        self.cmd.write_text(f"echo run >> {self.data}/runs\nprintf '%s' '{self.LIST}'\n")
+        replies.apply_kind(self.pick(), self.NOON)
+        self.assertEqual(len((self.data / "runs").read_text().splitlines()), 1)
+
+    def test_a_page_switch_to_the_active_profile_re_applies_without_a_card(self):
+        profile.use("u")   # active before it had a choice
+        out = replies.apply_kind(self.switch(), self.NOON)
+        self.assertIn("applied", out)
+        self.assertIsNone(profile.choice_card())
+
+    def test_an_expired_card_stops_the_minute_check(self):
+        gs = {}
+        self.result = {"ok": True, "replies": [self.switch()]}
+        replies.step(config.load_global(), gs, self.NOON)
+        f = self.data / "profile-choice.json"
+        c = json.loads(f.read_text())
+        c["at"] = "2000-01-01T00:00:00+00:00"
+        f.write_text(json.dumps(c))
+        replies.step(config.load_global(), gs, self.NOON + timedelta(seconds=61))
+        self.assertEqual(len(self.calls), 1)
+
     def test_switching_to_another_profile_closes_the_card(self):
         replies.apply_kind(self.switch(), self.NOON)
         replies.apply_kind({"id": "r5", "kind": "profile", "option": "g"}, self.NOON)
