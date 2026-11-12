@@ -1025,9 +1025,9 @@ class PrKeyTest(EngineCase):
     def engine(self, cfg=None):
         return Engine(self.data, cfg=cfg or self.cfg, plugin_dir=sources.PLUGIN_DIR, clock=self.clock)
 
-    def slack(self, *records):
+    def slack(self, *records, text=None):
         raw = self.tmp / "slack.txt"
-        raw.write_text(self.SLACK)
+        raw.write_text(self.SLACK if text is None else text)
         return self.engine().read_saved("slack-mentions", raw, records=list(records or [self.ASK]))
 
     def github(self):
@@ -1087,6 +1087,20 @@ class PrKeyTest(EngineCase):
             self.assertEqual(self.item(self.slack(), self.KEY)["action"], "unchanged")
             self.assertEqual(self.item(self.github(), self.KEY)["action"], "unchanged")
         self.assertEqual(self.assert_github_card(), after)
+
+    def test_a_newer_slack_ask_updates_the_card_slack_made(self):
+        self.assertEqual(self.item(self.slack(), self.KEY)["action"], "add")
+        again = {**self.ASK, "id": "1730000300.000400", "at": "1730000300.000400",
+                 "text": "<@U0EXAMPLE1> PTAL again <https://github.com/example/widgets/pull/42>"}
+        raw = ("## Channel: #payments (C0123ABCD)\n"
+               "From: U0EXAMPLE2\nMessage_ts: 1730000300.000400\n"
+               "Text: <@U0EXAMPLE1> PTAL again <https://github.com/example/widgets/pull/42>\n")
+        result = self.slack(again, text=raw)
+        self.assertEqual(result["dropped"], [])
+        self.assertEqual(self.item(result, self.KEY)["action"], "update")  # its own card, so not left alone
+        [card] = self.pr_cards()
+        self.assertEqual((card["source"]["name"], card["source"]["record"]["id"]),
+                         ("slack-mentions", "1730000300.000400"))
 
     def test_a_dry_run_slack_ask_on_a_github_card_is_unchanged_too(self):
         self.github()

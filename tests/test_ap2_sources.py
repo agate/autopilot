@@ -449,6 +449,20 @@ class KeyForTest(SourceCase):
         self.assertEqual(src.data["key"], "{place_id}:{thread_or_id}")  # the thread key is unchanged
         self.assertIn("review_request", src.data["instructions"])
 
+    def test_a_user_null_turns_a_key_for_category_off(self):
+        self.user("slack-mentions", "extends: slack-mentions\nsettings: { me: U1 }\n"
+                                    "key_for: { review_request: null }\n")
+        src = Loader(self.data, plugin_dir=sources.PLUGIN_DIR).load("slack-mentions")
+        self.assertEqual(src.key_for, {})  # a review ask keys on `key`, its thread, again
+
+    def test_an_empty_setting_named_in_key_for_refuses_the_source(self):
+        p = self.user("slack-mentions", "extends: slack-mentions\nsettings: { me: U1, org: '' }\n"
+                                        "key_for: { review_request: \"{org}/{pr}\" }\n")
+        src = Loader(self.data, plugin_dir=sources.PLUGIN_DIR).load("slack-mentions")
+        with self.assertRaises(SourceError) as cm:
+            sources.unset_settings(src)
+        self.assertEqual(str(cm.exception), f"slack-mentions: settings.org is not set; add it in {p}")
+
 
 if __name__ == "__main__":
     unittest.main()

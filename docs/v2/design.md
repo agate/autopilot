@@ -684,7 +684,10 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   record only.
 - **[decided by the builder]** Threads still group. In one `fill: ai` read, a `key_for` record groups by its own
   key, never with its thread: a thread whose first message asks for a review gives a `pr-review` card keyed on the
-  PR, and its replies still group on the thread key as before.
+  PR, and its replies still group on the thread key as before. A Slack review ask read before `key_for` was added
+  became a `question` card keyed on its thread; that card is not moved or closed. The next read keys the ask on its
+  PR, so an ask still in the read window shows once more, as the PR's card, and the old `question` card is closed
+  by hand.
 - Not built here: starting the `pr-review` role on its own when a card is made, and running `apply` and `sync` from
   the worker's done path or the gate (they need the worker sessions); and the PR loop's end (6.3).
 
