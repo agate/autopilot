@@ -1037,7 +1037,7 @@ function renderStatus() {
     gw && u.unknown ? el("div", { class: "note warn" }, "▲ " + L("usage_unknown")) : null,
     !gw && b.stale ? el("div", { class: "note warn" }, "▲ " + L("stale")) : null);
 
-  // Profile switch: one button per profile; the gate applies the answer within a minute (up to 30 at night).
+  // Profile switch: one button per profile; the gate applies the answer within about 5 minutes (about 1 when a card is waiting; up to 30 at night).
   // Done when the active profile changed to anything, or after 35 minutes (the longest a switch takes).
   if (acc && pendingSwitch && (acc.profile.name !== pendingSwitch.from || Date.now() - pendingSwitch.at > SWITCH_PENDING_MS)) pendingSwitch = null;
   const off = canWrite === false || !db;

@@ -73,7 +73,7 @@ Map the user's words to `ap profile` and confirm in one line:
 | The user says | Run |
 |---|---|
 | "show profiles", "which profile is on" | `ap profile list` (`*` marks the active one); `ap profile show <name>` for one |
-| "create a profile ...", "add a gateway" | `ap profile add <name> --gateway ...`. Required: `--base-url`, `--key-command`. Ask for what is missing. Offer `--refresh-command`, `--rotate-command`, `--models-command`, `--daily-cap` (dollars per day), `--model`, `--small-model`, `--effort`, `--label`, `--env KEY=VALUE`, `--settings-file`. |
+| "create a profile ...", "add a gateway" | `ap profile add <name> --gateway ...`. Required: `--base-url`, `--key-command`, `--small-model`, `--daily-cap` (dollars per day, above 0). Ask for what is missing. Offer `--refresh-command`, `--rotate-command`, `--models-command`, `--model`, `--effort`, `--label`, `--env KEY=VALUE`, `--settings-file`. |
 | "switch to X", "use the subscription" | `ap profile use <name>` (the subscription profile is named `subscription`) |
 | "rotate the key" | `ap profile rotate <name>` |
 | "remove X" | Ask first, then `ap profile remove <name>` (the active one is refused) |
@@ -82,6 +82,7 @@ Map the user's words to `ap profile` and confirm in one line:
   always use the subscription.
 - Never print what a key command prints. Pass the command line as the user gave it, and show only
   `ap profile show` output, which holds commands, never keys.
+- A switch made from the page takes up to about 5 minutes (about 1 when a card is waiting); during the quiet hours up to 30 minutes. `ap profile use` is immediate.
 - A key problem shows as `key_error` on the page with its fix. Do not work around it by switching
   profiles unless the user asks.
 

@@ -150,20 +150,21 @@ ap profile use team-gateway  # switch; ap profile use subscription switches back
 ap profile rotate team-gateway
 ```
 
+A gateway profile requires four options: `--base-url`, `--key-command`, `--small-model` and `--daily-cap`.
 Other commands: `ap profile show <name>`, `ap profile remove <name>`. You can say the same in
 `/autopilot` ("create a profile ...", "switch to the subscription", "rotate the key"). Options:
-`--models-command`, `--small-model`, `--dispatcher-model`, `--label`, `--settings-file`. A profile stores the
+`--models-command`, `--dispatcher-model`, `--label`, `--settings-file`. A profile stores the
 commands that print a key, never the key.
 
 - **Daily cap.** `--daily-cap` is dollars per local day. At the cap no new worker starts and
   running ones continue. One card on the page asks you to raise today's limit by 50% or 100%, or to
   pause. Pause pauses every autopilot and stops running workers; resume by hand. An unanswered
-  card ends at local midnight and workers start again. If today's cost cannot be read, it counts
+  card ends at local midnight, when today's spend starts again at $0, and workers start again. If today's cost cannot be read, it counts
   as over the cap.
 - **Key health.** If the key command fails, no new worker starts and the page shows the error with its
   fix. It never falls back to the subscription. Fix the key, or run `ap profile rotate <name>`.
-- **Switching from the page.** The answer check applies the switch, within about a minute. In the quiet
-  hours (`reply_check.quiet`) only the forced pass reads answers, so it can take up to 30 minutes.
+- **Switching from the page.** The answer check applies the switch. It takes up to about 5 minutes (about 1 when a card
+  is waiting). In the quiet hours (`reply_check.quiet`) only the forced pass reads answers, so it can take up to 30 minutes.
   Switching with `ap profile use` is immediate.
 
 ## What it may do on its own

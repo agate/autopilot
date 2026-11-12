@@ -183,7 +183,7 @@
   "access_workers": "Workers: Gateway · {label}",
   "access_page_sessions": "Page sessions: Subscription",
   "access_switch": "Switch profile",
-  "access_switch_note": "Switching takes up to a minute, up to 30 minutes between 22:00 and 06:00.",
+  "access_switch_note": "Switching takes up to about 5 minutes (about 1 when a card is waiting) and up to 30 minutes between 22:00 and 06:00.",
   "access_switch_pending": "Switching to {name}. {note}",
   "access_current": "in use",
   "access_key_error": "Gateway key not working: {error}. New workers are paused.",

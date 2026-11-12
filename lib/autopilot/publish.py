@@ -103,7 +103,7 @@ def _evidence(ap: str, task: str, assets: dict):
     return ev
 
 
-SWITCH_NOTE = ("Switching takes up to a minute. Between 22:00 and 06:00 it can take up to 30 minutes.")
+SWITCH_NOTE = ("Switching takes up to about 5 minutes (about 1 when a card is waiting) and up to 30 minutes between 22:00 and 06:00.")
 
 
 def _access(cur: dict, now: datetime) -> dict:
