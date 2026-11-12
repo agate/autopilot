@@ -325,7 +325,8 @@ def _raw_active(f: Path):
 
 def remove(data, name: str) -> dict:
     """Delete a stored profile. The subscription and the active profile cannot be removed, and nothing is removed
-    while active-profile.json is there but names no profile it can read (the active one is then unknown)."""
+    while active-profile.json is there but holds no name at all (unreadable, bad JSON, no string `name`): the active
+    one is then unknown."""
     f = path(data, name)
     if name == SUBSCRIPTION:
         raise ProfileError("the subscription profile cannot be removed")

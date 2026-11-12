@@ -245,6 +245,8 @@ class ProfileStoreTest(WorkerCase):
         g = self.data / "profiles" / "g.json"
         for label, body in (("mode 000", None), ("bad JSON", "{nope"), ("a list", '["g"]'), ("no name", "{}")):
             with self.subTest(label):
+                if active.exists():
+                    active.chmod(0o644)  # a failed earlier case must not leave the file unwritable for this one
                 profiles.save(self.data, gateway())  # each case on its own, even when an earlier one removed g
                 active.write_text('{"name": "g"}' if body is None else body)
                 if body is None:
@@ -259,7 +261,6 @@ class ProfileStoreTest(WorkerCase):
                 self.assertIn(profiles.FIX, msg)
                 self.assertNotIn("\n", msg)
                 self.assertTrue(g.exists())
-                active.chmod(0o644)
         # `ap2 profile use` rewrites the file, and the same remove then works.
         profiles.use(self.data, "subscription")
         self.assertEqual(profiles.remove(self.data, "g"), {"removed": "g"})
@@ -271,7 +272,7 @@ class ProfileStoreTest(WorkerCase):
         active = self.data / "active-profile.json"
         # A name that is not a profile name: that name is refused, another stored profile can go.
         active.write_text('{"name": "Bad/Name"}')
-        with self.assertRaises(ProfileError):
+        with self.assertRaisesRegex(ProfileError, "not a profile name"):
             profiles.remove(self.data, "Bad/Name")
         self.assertEqual(profiles.remove(self.data, "h"), {"removed": "h"})
         # The active profile's own file is broken: it is still the active one, so it is refused.
