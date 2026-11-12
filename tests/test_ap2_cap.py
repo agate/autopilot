@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -323,6 +324,7 @@ class FilesTest(CapCase):
     def test_the_day_is_the_local_day_of_now(self):
         late = datetime(2026, 11, 11, 23, 30, tzinfo=TZ)  # 04:30 UTC on the 12th
         self.assertEqual(cap.state(self.data, late)["day"], "2026-11-11")
+        self.assertEqual(cap.state(self.data, datetime(2026, 11, 11, 23, 30))["day"], "2026-11-11")  # naive: as is
 
 
 # -- 5. workers: every start and resume is refused at the cap ---------------------------------------------------------------
@@ -450,6 +452,22 @@ class WorkerCapTest(CapWorkerCase):
         self.totals_calls = 0
         self.workers().check()  # nothing to resume: no totals at all
         self.assertEqual(self.totals_calls, 0)
+
+    def test_workers_count_the_local_day_not_the_utc_day(self):
+        if not hasattr(time, "tzset"):
+            self.skipTest("time.tzset is not available")
+        patch = mock.patch.dict(os.environ, {"TZ": "America/Chicago"})
+        patch.start()
+        self.addCleanup(time.tzset)  # runs last: after the zone is restored
+        self.addCleanup(patch.stop)
+        time.tzset()
+        self.use_gateway()
+        self.clock.at = datetime(2026, 11, 12, 3, 0, tzinfo=timezone.utc)  # 21:00 CST on the 11th
+        cap.answer(self.data, "raise50", datetime(2026, 11, 11, 15, 0))  # today's raise: $750, naive local time
+        self.spent = totals(600.0)  # over the base $500, under today's $750
+        a = self.workers().start(self.add_card(), "implement", cwd=self.wt, prompt="Do the work.")
+        self.assertEqual([r["short_id"] for r in self.records()], [a["short_id"]])
+        self.assertEqual(len(self.bg_calls()), 1)
 
     def test_cap_state_is_edit_denied(self):
         self.use_gateway()
