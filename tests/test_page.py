@@ -430,6 +430,101 @@ class AccessTest(unittest.TestCase):
         self.assertIn('kind: "cap"', PAGE)
 
 
+class ChoiceCardTest(unittest.TestCase):
+    """The page's choice card: a switch to a profile with no chosen model and effort opens it, and the page draws it
+    from meta.access.profile_choice."""
+
+    def setUp(self):
+        self.td = TempData()
+        self.data = self.td.__enter__()
+
+    def tearDown(self):
+        self.td.__exit__(None, None, None)
+
+    def unchosen(self, cmd="printf '%s' '[\"claude-opus-5-5\",\"gpt-5\"]'"):
+        profile.save({"name": "u", "mode": "gateway", "label": "New gateway", "small_model": "gpt-5",
+                      "daily_cap_usd": 10, "gateway": {"base_url": "https://llm-gateway.example.com/anthropic",
+                                                       "key_command": "echo SECRET-KEY-VALUE", "models_command": cmd}})
+
+    def test_no_card_by_default(self):
+        self.assertIsNone(publish.collect([])["meta"]["access"]["profile_choice"])
+
+    def test_collect_carries_the_card_and_no_key_text(self):
+        self.unchosen()
+        profile.open_choice("u")
+        data = publish.collect([])
+        c = data["meta"]["access"]["profile_choice"]
+        self.assertEqual((c["profile"], c["label"]), ("u", "New gateway"))
+        self.assertEqual(c["models"], ["claude-opus-5-5[1m]", "claude-opus-5-5", "gpt-5"])
+        self.assertEqual((c["recommended_model"], c["recommended_effort"]), ("claude-opus-5-5[1m]", "high"))
+        self.assertEqual(c["efforts"], list(profile.EFFORTS))
+        blob = json.dumps(data)
+        for secret in ("SECRET-KEY-VALUE", "key_command", "models_command", "llm-gateway.example.com"):
+            self.assertNotIn(secret, blob)
+
+    def test_collect_carries_a_fetch_failure(self):
+        self.unchosen()
+        profile.open_choice("u")
+        p = json.loads((self.data / "profiles" / "u.json").read_text())
+        p["gateway"]["models_command"] = "exit 9"
+        (self.data / "profiles" / "u.json").write_text(json.dumps(p))
+        profile.open_choice("u")
+        c = publish.collect([])["meta"]["access"]["profile_choice"]
+        self.assertIn("exit 9", c["error"])
+        self.assertNotIn("models", c)
+
+    def test_the_card_has_two_selects_and_one_confirm(self):
+        p = Ids()
+        p.feed(PAGE)
+        self.assertIn("choicecard", p.ids)
+        body = js_fn("renderChoiceCard")
+        self.assertIn("a.profile_choice", body)
+        self.assertEqual(body.count('el("select"'), 2)
+        self.assertIn('L("choice_card_title"', body)
+        self.assertIn("c.error", body)
+        self.assertIn("c.refused", body)
+        self.assertIn("renderChoiceCard()", PAGE[PAGE.index("function render()"):])
+        self.assertIn('kind: "profile_choice"', js_fn("sendChoice"))
+        for k in ("choice_card_title", "choice_card_body", "choice_model", "choice_effort", "choice_confirm",
+                  "choice_recommended", "choice_default", "choice_pending", "choice_error", "choice_error_fix",
+                  "choice_refused"):
+            self.assertTrue(LABELS.get(k), k)
+        self.assertIn("{label}", LABELS["choice_card_title"])
+        # The switch note gives way to the card once the card names the profile that was asked for.
+        self.assertIn("(acc.profile_choice || {}).profile === pendingSwitch.name", js_fn("renderStatus"))
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_the_recommended_entries_are_preselected(self):
+        dom = """
+class N { constructor(t) { this.tag = t; this.attrs = {}; this.kids = []; this.text = ""; }
+  setAttribute(k, v) { this.attrs[k] = v; } addEventListener() {}
+  append(...k) { this.kids.push(...k); } replaceChildren(...k) { this.kids = k; }
+  set textContent(v) { this.text = v; } set className(v) { this.attrs.class = v; } }
+class Node {}
+Object.setPrototypeOf(N.prototype, Node.prototype);
+const document = { createElement: (t) => new N(t), createTextNode: (s) => { const n = new N("#text"); n.text = s; return n; } };
+const box = new N("div"); const $ = () => box;
+const S = {meta: {labels: {}, reply_check: {every_s: 60}, access: {profile_choice: {profile: "u", label: "New gateway",
+  models: ["claude-opus-5-5[1m]", "gpt-5", "default"], efforts: ["low", "high"], recommended_model: "claude-opus-5-5[1m]",
+  recommended_effort: "high", at: "T"}}}};
+const LABELS_EN = %s; let lang = "en", canWrite = true, db = {}, choiceSent = null; const sendErrors = {};
+""" % json.dumps(LABELS)
+        js = dom + "".join(js_fn(n) for n in ("labelsFor", "L", "T", "el", "fill", "errNote", "switchNote",
+                                              "renderChoiceCard")) + """
+renderChoiceCard();
+const all = []; const walk = (n) => { all.push(n); (n.kids || []).forEach(walk); }; walk(box);
+const sel = all.filter((n) => n.tag === "select");
+const picked = sel.map((s) => s.kids.filter((o) => "selected" in o.attrs).map((o) => o.attrs.value));
+const texts = all.filter((n) => n.tag === "#text").map((n) => n.text).join("|");
+console.log(JSON.stringify({picked, buttons: all.filter((n) => n.tag === "button").length, texts}));
+"""
+        got = json.loads(node(js))
+        self.assertEqual(got["picked"], [["claude-opus-5-5[1m]"], ["high"]])
+        self.assertEqual(got["buttons"], 1)
+        self.assertIn("New gateway", got["texts"])
+        self.assertIn(LABELS["choice_default"], got["texts"])
+
+
 class UsageValueTest(unittest.TestCase):
     """The usage value is never clipped: it sizes to its content and the bar shrinks instead."""
 

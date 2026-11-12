@@ -81,6 +81,9 @@ h1 { font-size: 16px; font-weight: 700; letter-spacing: -.01em }
 .abadge.gw { background: var(--warn-soft); color: var(--warn) }
 .switch { display: flex; flex-wrap: wrap; gap: 6px }
 .capcard { border-left: 5px solid var(--warn) }
+.choice { display: grid; gap: 4px; min-width: 0 }
+.choice span { font-size: 12.5px; color: var(--muted) }
+.choice select { font: inherit; color: inherit; width: 100%; max-width: 100%; min-height: 40px; padding: 0 10px; border-radius: var(--r-sm); border: 1.5px solid var(--line-strong); background: var(--bg) }
 
 /* Layout */
 .shell { padding-bottom: 20px }
@@ -349,6 +352,7 @@ details.fold > summary + * { margin-top: 8px }
     <p id="status-note" class="note" hidden></p>
     <section class="view" id="v-needs" data-view="needs" aria-labelledby="hero-t">
       <div id="capcard"></div>
+      <div id="choicecard"></div>
       <div class="sec" id="systems"></div>
       <div class="hero" id="hero"></div>
       <div id="self-remind"></div>
@@ -377,7 +381,7 @@ let lang = "en", langPicked = false, filterAp = "", tab = "needs", ticketFilter 
 // canWrite: only the page's owner answers (the db rules let nobody else write replies). myId goes on each reply.
 let db = null, user = null, downloads = null, canWrite = null, myId = null, loaded = false, unreachable = false;
 const sendErrors = {};
-let pendingSwitch = null, capSent = null;   // pendingSwitch: {name, from, at}
+let pendingSwitch = null, capSent = null, choiceSent = null;   // pendingSwitch: {name, from, at}; choiceSent: {profile, at, model, effort}
 const VIEWS = ["needs", "tasks", "status"];
 const $ = (id) => document.getElementById(id);
 
@@ -997,6 +1001,10 @@ async function sendSwitch(name) {
   if (await sendAccess({ kind: "profile", option: name }, "profile")) pendingSwitch = { name, from: ((S.meta.access || {}).profile || {}).name, at: Date.now() };
   render();
 }
+async function sendChoice(name, model, effort, at) {
+  if (await sendAccess({ kind: "profile_choice", profile: name, model, effort }, "profile_choice")) choiceSent = { profile: name, at, model, effort };
+  render();
+}
 async function sendCap(option, day) {
   if (await sendAccess({ kind: "cap", option, day }, "cap")) capSent = { option, day };
   render();
@@ -1038,6 +1046,29 @@ function renderCapCard() {
       el("div", { class: "switch" }, opts.map(([id, label]) => el("button", { type: "button", class: id === "pause" ? "btn ghost" : "btn", disabled: off, onclick: () => sendCap(id, c.day) }, label))),
     errNote("cap")));
 }
+// The choice card: a switch to a profile whose model and effort were never chosen waits for this choice. The
+// lists were fetched when the switch was read; the gate checks the answer against a fresh list, saves it, then switches.
+function renderChoiceCard() {
+  const a = S.meta.access, c = a && a.profile_choice, off = canWrite === false || !db;
+  // A refreshed card (a refused pick, or another switch) drops the note that an answer is on its way.
+  if (c && choiceSent && (choiceSent.profile !== c.profile || choiceSent.at !== c.at)) choiceSent = null;
+  if (!c) { choiceSent = null; fill($("choicecard")); return; }
+  const opt = (v, rec) => el("option", { value: v, selected: v === rec },
+    (v === "default" ? L("choice_default") : v) + (v === rec ? " " + L("choice_recommended") : ""));
+  const models = el("select", { "aria-label": L("choice_model"), disabled: off }, (c.models || []).map((v) => opt(v, c.recommended_model)));
+  const efforts = el("select", { "aria-label": L("choice_effort"), disabled: off }, (c.efforts || []).map((v) => opt(v, c.recommended_effort)));
+  fill($("choicecard"), el("div", { class: "card dec capcard", role: "group", "aria-label": L("choice_card_title", { label: c.label || c.profile }) },
+    el("h2", {}, "▲ " + L("choice_card_title", { label: c.label || c.profile })),
+    c.error ? [el("p", { class: "note crit", role: "alert" }, L("choice_error", { error: c.error })), el("p", { class: "meta" }, L("choice_error_fix"))] : [
+      el("p", {}, L("choice_card_body")),
+      c.refused ? el("p", { class: "note warn" }, "▲ " + L("choice_refused", { error: c.refused })) : null,
+      el("label", { class: "choice" }, el("span", {}, L("choice_model")), models),
+      el("label", { class: "choice" }, el("span", {}, L("choice_effort")), efforts),
+      choiceSent ? el("div", { class: "sent", role: "status" }, L("choice_pending", { model: choiceSent.model, effort: choiceSent.effort, note: switchNote() })) :
+        el("div", { class: "switch" }, el("button", { type: "button", class: "btn", disabled: off,
+          onclick: () => sendChoice(c.profile, models.value, efforts.value, c.at) }, L("choice_confirm"))),
+      errNote("profile_choice")]));
+}
 function renderStatus() {
   const bud = S.meta.budget || {}, b = bud.budget || {}, a = bud.allowance || {};
   const health = S.meta.health || {}, cap = S.meta.cap || {};
@@ -1071,6 +1102,8 @@ function renderStatus() {
   // Profile switch: one button per profile; switchNote() says when the gate applies the answer.
   // Done when the active profile changed to anything, or after the forced pass interval and 5 minutes (the longest a switch takes).
   if (acc && pendingSwitch && (acc.profile.name !== pendingSwitch.from || Date.now() - pendingSwitch.at > ((S.meta.reply_check || {}).forced_pass_min || 30) * 60000 + 5 * 60000)) pendingSwitch = null;
+  // A switch to a profile that needs a choice is done here: the choice card took over.
+  if (acc && pendingSwitch && (acc.profile_choice || {}).profile === pendingSwitch.name) pendingSwitch = null;
   const off = canWrite === false || !db;
   const switchSec = acc && ((acc.profiles || []).length > 1 || (acc.broken_profiles || []).length) ? el("div", { class: "ps" },
     el("div", { class: "ps-h" }, el("span", {}, L("access_switch"))),
@@ -1133,7 +1166,7 @@ function showTab(name) {
   render();
 }
 function render() {
-  renderHeader(); renderAccess(); renderBanners(); renderCapCard(); renderNeeds(); renderTasks(); renderStatus(); renderTabbar();
+  renderHeader(); renderAccess(); renderBanners(); renderCapCard(); renderChoiceCard(); renderNeeds(); renderTasks(); renderStatus(); renderTabbar();
 }
 
 $("lang").addEventListener("click", () => {

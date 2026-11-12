@@ -140,6 +140,7 @@ def _access(cur: dict, now: datetime, gcfg: dict = None) -> dict:
             acc["profiles"].append({k: q.get(k) for k in ("name", "label", "mode")})
         except Exception:
             acc["broken_profiles"].append({"name": n, "error": "unreadable"})
+    acc["profile_choice"] = _choice_card()
     if p.get("mode") == "gateway":
         if cur["workers"].get("reason") == "key":
             acc["key_error"] = {"error": cur["workers"].get("error"), "fix": profile.KEY_FIX}
@@ -160,6 +161,23 @@ def _access(cur: dict, now: datetime, gcfg: dict = None) -> dict:
         acc["usage"] = {"session_pct": session_pct, "credits_used_usd": b.get("credits_used_usd", 0.0),
                         "credits_limit_usd": b.get("credits_limit_usd", 0.0)}
     return acc
+
+
+def _choice_card():
+    """The open choice card (a switch from the page to a profile whose model and effort were never chosen): the
+    fetched lists, or the fetch error, with the profile's label. Model names and efforts only."""
+    try:
+        c = profile.choice_card()
+        if not c:
+            return None
+        try:
+            label = profile.load(c["profile"]).get("label")
+        except (KeyError, ValueError, OSError):
+            label = None
+        keep = ("profile", "models", "efforts", "recommended_model", "recommended_effort", "at", "error", "refused")
+        return {**{k: c[k] for k in keep if k in c}, "label": label or c["profile"]}
+    except Exception:  # noqa: BLE001 - a broken card file must not break the page data
+        return None
 
 
 def collect(aps: list) -> dict:

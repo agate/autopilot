@@ -44,8 +44,10 @@ def _command_output(cmd: str, timeout: int = 30):
     try:
         r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout,
                            stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return None, f"timed out after {timeout} s"
     except (OSError, subprocess.SubprocessError) as e:
-        return None, str(e)
+        return None, type(e).__name__   # never the command line: the page shows this text
     if r.returncode != 0:
         return None, f"exit {r.returncode}"
     return r.stdout, ""
