@@ -79,6 +79,7 @@ def _parser() -> argparse.ArgumentParser:
     _scan_parser(sub)
     _gate_parser(sub)
     _template_parser(sub)
+    _review_parser(sub)
     _worker_parser(sub)
     _serve_parser(sub)
     _phone_parser(sub)
@@ -449,6 +450,95 @@ def cmd_template(args) -> int:
 
 
 COMMANDS["template"] = cmd_template
+
+
+# --- ap2 review (PR review cards, design 6.2) --------------------------------------------------------------------
+# Every gh call reads (prreview.gh_read refuses anything else); only the card and its run directory are written, in
+# shadow or live mode. A ReviewError is a ConfigError: one `ap2: ...` line, exit 1.
+
+def _review_parser(sub) -> None:
+    r = sub.add_parser("review", help="plan, check and apply a PR review card's review",
+                       description="The pr-review role's steps on a PR review card: plan the review (read from "
+                                   "GitHub), give the verdict the findings imply, check the report, put it on the "
+                                   "card, and sync the card with the PR. Nothing is ever posted to GitHub.")
+    r_sub = r.add_subparsers(dest="review_command", metavar="<review command>", title="review commands")
+    r_sub.required = True
+    pl = r_sub.add_parser("plan", help="read the PR and write the review plan",
+                          description="Read CARD's pull request from GitHub (its head, merge base and files), pick "
+                                      "the review angles, write <data>/sessions/CARD/prreview-plan.json and print "
+                                      "it. A delta reviews only the commits since the last review.")
+    pl.add_argument("card", metavar="CARD")
+    pl.add_argument("--stage", choices=("review", "delta"), default="review")
+    pl.add_argument("--checkout", metavar="PATH",
+                    help="a git checkout of the repo; its .autopilot/review.yaml is read at the head commit when the "
+                         "checkout has it (nothing is fetched)")
+    pl.add_argument("--data", metavar="PATH", help=DATA_HELP)
+    ve = r_sub.add_parser("verdict", help="print the verdict the four finding groups give",
+                          description="Check the four finding groups in FILE (JSON, or a report holding them as "
+                                      "findings; - reads stdin) and print the verdict they give. Exit 1 with every "
+                                      "error.")
+    ve.add_argument("--file", required=True, metavar="FILE")
+    ve.add_argument("--data", metavar="PATH", help=DATA_HELP)
+    ch = r_sub.add_parser("check", help="check the review report against the plan and the card",
+                          description="Check <data>/sessions/CARD/prreview.json and print {ok, errors}. Exit 1 when "
+                                      "it is not ok.")
+    ch.add_argument("card", metavar="CARD")
+    ch.add_argument("--data", metavar="PATH", help=DATA_HELP)
+    ap = r_sub.add_parser("apply", help="put a checked report on the card",
+                          description="Put the checked report on CARD (a restore point is saved) and print the card.")
+    ap.add_argument("card", metavar="CARD")
+    ap.add_argument("--by", default="ap2 review", help=BY_HELP.replace("ap2)", "ap2 review)"))
+    ap.add_argument("--data", metavar="PATH", help=DATA_HELP)
+    sy = r_sub.add_parser("sync", help="read the PR's state and close the card when it is done",
+                          description="Read the PR on GitHub and print its state: merged, closed, reviewed, "
+                                      "request_removed (these move the card to done), not_reviewed, new_commits or "
+                                      "current. Records the head on the card.")
+    sy.add_argument("card", metavar="CARD")
+    sy.add_argument("--data", metavar="PATH", help=DATA_HELP)
+
+
+def cmd_review(args) -> int:
+    from assistant import cards, prreview
+
+    if args.review_command == "verdict":
+        data = datadir.resolve(args.data)
+        out = prreview.verdict_of(_read_review_file(args.file), cards.languages(config.load(data)))
+        _print_json(out)
+        return 1 if out["errors"] else 0
+    if args.review_command == "check":
+        out = prreview.check(datadir.resolve(args.data), args.card)
+        _print_json(out)
+        return 0 if out["ok"] else 1
+    data = datadir.ensure(datadir.resolve(args.data))
+    if args.review_command == "plan":
+        out = prreview.plan(data, args.card, args.stage, args.checkout)
+    elif args.review_command == "apply":
+        out = prreview.apply(data, args.card, by=args.by)
+    else:
+        out = prreview.sync(data, args.card)
+    _print_json(out)
+    return 0
+
+
+def _read_review_file(name: str):
+    from assistant import prreview, sources
+
+    if name == "-" and sys.stdin is None:
+        raise prreview.ReviewError("cannot read -: stdin is closed")
+    try:
+        if name == "-":
+            raw = sys.stdin.buffer.read(sources.MAX_SOURCE + 1) if getattr(sys.stdin, "buffer", None) is not None \
+                else sys.stdin.read(sources.MAX_SOURCE + 1).encode("utf-8")
+            if len(raw) > sources.MAX_SOURCE:
+                raise prreview.ReviewError(f"-: larger than {sources.MAX_SOURCE} bytes")
+        else:
+            raw = sources.read_capped(name, sources.MAX_SOURCE, f"{name!r}: larger than {sources.MAX_SOURCE} bytes")
+        return json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError) as e:
+        raise prreview.ReviewError(f"cannot read {name!r}: {e}") from e
+
+
+COMMANDS["review"] = cmd_review
 
 
 # --- ap2 scan (scan sessions, design 5.3) ------------------------------------------------------------------------

@@ -508,7 +508,7 @@ How it is built (`lib/assistant/angles.py`, the table in `review/angles.yaml`):
 - Not built here: running the angles (the PR loop and the `pr-review` role, 6.2 and 6.3) and showing on the page
   that a built-in angle the user changed was updated.
 
-### 6.2 PR review cards **[proposed]**
+### 6.2 PR review cards **[decided]**
 
 A review request becomes a card that reviews itself, as secretary does today: the user opens it to a verdict, not a
 to-do.
@@ -534,6 +534,103 @@ to-do.
 
 Built from secretary's `commands/review.md`, `agents/reviewer.md` and its report checks (`review roles`, `review
 verdict`, `report validate`), copied, not called (3.2).
+
+How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 review`):
+
+- **[decided by the builder]** Files. `lib/assistant/prreview.py` (standard library and `assistant` modules only),
+  the role's process `commands/pr-review.md` (secretary's `commands/review.md` adapted; frontmatter
+  `disable-model-invocation: true`, argument hint `<card id> <review|delta>`) and the `ap2 review` command. No new
+  agent file: the process starts its per-angle reviewers with the Agent tool as fresh `general-purpose`
+  subagents, each prompt carrying secretary's reviewer rules and return contract (`agents/reviewer.md`), as v1's
+  PR loop does; they run under the role's read-only floor. Result files live in the card's run directory:
+  `<data>/sessions/<card>/prreview-plan.json` (written by `plan`) and `prreview.json` (the report the role writes).
+- **[decided by the builder]** The role. `pr-review`: tools Agent, Bash, Glob, Grep, Read, Write, floor
+  `read-only` (its one write is `prreview.json`), built from secretary's review command. The built-in `pr-review`
+  template's one role is `pr-review`, with the brief "Review the pull request on card {id} with
+  commands/pr-review.md, read-only. Lead with a verdict: approve, changes or question. Post nothing."
+- **[decided by the builder]** Reading GitHub never writes. Every `gh` call in `prreview.py` goes through one
+  wrapper, `gh_read(args, run=None)`. It allows only `pr view`, `pr diff`, `pr checks`, `api graphql` whose
+  `query=` holds no `mutation` (secretary's `\bmutation\b`; a `-F query=@file` it cannot read is refused too),
+  and `api <path>` with no `-X`, `--method`, `--input`, `-f`, `-F`, `--field` or `--raw-field` (a field makes
+  `gh api` POST), in any spelling (`-XPOST`, `--method=PATCH`, `-fbody=x`). Anything else raises `PostRefused`
+  before any process starts. The default runner runs `gh` from `PATH` with `GH_PROMPT_DISABLED=1` and a 60 s
+  timeout; a failure is a `ReviewError` naming the call and gh's first stderr line. `ReviewError` is a
+  `ConfigError` (one `ap2: ...` line, exit 1); `PostRefused` is a `ReviewError`. Nothing here calls
+  `config.require_live`: there is no write to allow, in shadow or live mode.
+- **[decided by the builder]** Which PR. From the card: kind `pr-review`, `key` matching `<owner>/<repo>#<number>`
+  (`[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*`), the URL from `source.link`, else
+  `https://github.com/<repo>/pull/<n>`. Anything else is a `ReviewError`. Every SHA from GitHub must be 40
+  lowercase hex before it goes into a path.
+- **[decided by the builder]** `ap2 review plan CARD [--stage review|delta] [--checkout PATH] [--data PATH]`
+  (secretary's `review roles`) prints and writes the plan: `card`, `stage`, `pr`, `repo`, `number`, `head_sha`,
+  `base_sha`, `merge_base`, `reviewed_sha`, `changed_lines`, `file_count`, `docs_only`, `angles` (as
+  `angles.pick` returns them, mode `review`), `repo_layer`, `report` (the absolute report path) and `languages`.
+  The PR's files come from secretary's GraphQL query, every page. Angles: `angles.load(data_dir)` plus the repo
+  layer at the head commit only when `--checkout` already has that commit (`git cat-file -e <sha>^{commit}`, with
+  angles.py's no-fetch git settings); otherwise no repo layer, and `repo_layer` says why ("no checkout given",
+  "<path> does not have <sha7>"). Nothing is ever fetched. A delta, as in secretary: with no earlier review it is a
+  full review; with the head equal to the reviewed commit it is refused ("nothing new since <sha7>"); else
+  `compare` is `repos/<repo>/compare/<reviewed>...<head>` and `whole_pr` is null, or, after a merge commit, a
+  rewrite (status `diverged` or `behind`) or a 404 on the reviewed commit, `compare` starts at `base_sha` and
+  `whole_pr` gives the reason. A delta keeps the last review's angle names that the current table still has, in
+  their order, as the table has them now; when fewer than 2 remain it picks anew.
+- **[decided by the builder]** The findings and the verdict (`ap2 review verdict --file FILE|- [--data PATH]`,
+  secretary's `review verdict`): four groups `confirmed`, `out_of_scope`, `rejected`, `questions`; each finding has
+  `id` (lowercase words joined by `-`, unique across the groups), `severity` (`blocker`, `should-fix`, `nit`),
+  `where`, and the text fields `trigger`, `before`, `after`, `impact`, `fix`, plus `checked` (confirmed), `reason`
+  (rejected) or `question` (questions). A text field is `{<lang>: text}` holding exactly the configured languages,
+  each non-empty. Verdict: `changes` when a confirmed finding is a blocker or should-fix, else `question` when a
+  question is open, else `approve`. It prints `{"verdict", "counts", "errors"}`; exit 0, or 1 with `verdict` and
+  `counts` null and every error.
+- **[decided by the builder]** The report (`prreview.json`; `ap2 review check CARD`, secretary's `report
+  validate`): `card`, `stage`, `head_sha`, `reviewed_at` (`YYYY-MM-DDTHH:MM:SSZ`), `verdict`, the text blocks
+  `tldr`, `background`, `problem`, `solution`, `reply_draft`, an optional `diagram` (one `<svg>`, secretary's
+  unsafe-content check), `findings`, `angles` (`[{"name", "origin", "why"}]`, names and origins equal to the
+  plan's, in order, `why` a text), `checks` (`ci` `green|red|pending`, `notes`), and for a delta only (refused on
+  a full review) `since_last` and `earlier`. Any other key is refused. The TL;DR (point 3) is one line per
+  language of at most 200 characters, and its `en` text (when `en` is configured) starts with the verdict:
+  `Approve`, `Changes` or `Question`. `stage` and `head_sha` must equal the plan's. The file is read with
+  `sources.read_capped` at `MAX_SOURCE`. It prints `{"ok", "errors"}`; exit 0 when ok, else 1. A missing or broken
+  plan is a `ReviewError` (D19).
+- **[decided by the builder]** Delta marks (point 5). `earlier` lists every `confirmed` and `questions` id now on
+  the card exactly once, as `{"id", "state"}`: `open` (the id is still in its group), `fixed` (a confirmed id, gone
+  from the groups) or `answered` (a question id, gone). An earlier id that moved to another group is refused. A new
+  finding may not reuse an id the card lists as fixed or answered. `out_of_scope` and `rejected` are carried
+  forward by the role, unchecked.
+- **[decided by the builder]** `ap2 review apply CARD [--by BY] [--data PATH]` puts a checked report on the card
+  with one `store.update` (so a restore point is saved), `did` "reviewed <sha7>: <verdict>" or "delta review
+  <sha7>: <verdict>, <n> fixed, <m> open" (n and m count the `fixed` and `open` marks). Fields (the template's view
+  blocks): `verdict` (verdict, tldr, background, problem, solution, since_last and diagram when given, ci, notes,
+  angles, stage, head_sha, reviewed_at); `findings` (the four groups, plus `fixed` and `answered`: the earlier ones
+  so marked, each with `fixed_in: <head>`, kept across deltas; a full review starts them empty); `draft`
+  (`{"text": <reply_draft>, "sent": false}`, point 3); `pr` (`repo`, `number`, `url`, `head_sha`, `reviewed_sha`
+  = the head); `reviews` (one `{stage, head_sha, verdict, at}` per apply, `at` the apply time); and `plain`. The
+  same report (head and `reviewed_at`) applied twice is refused. The role never runs `apply` (its process ends
+  with `check`, as secretary's ends with `report validate`); the worker's done path will, once wired.
+- **[decided by the builder]** Plain words (point 4, 3.7): one function, `prreview.plain_for(record, card, langs)`,
+  used by the source engine and by `apply`, so a re-read computes the same words. What: "<author> asked you to
+  review PR #<id>: <title>" ("Someone" with no author; the title is the record's first line, cut at 120
+  characters). Where: before a review "Not reviewed yet."; after one, the TL;DR. Do: before, "Nothing yet; open it
+  again once its review has run."; after, "Read the <n> findings, then approve or ask for changes on GitHub
+  yourself." (n = open confirmed + questions; "the 1 finding"; n = 0: "Read the review, then approve or ask for
+  changes on GitHub yourself."). Phrases in `en` and `zh`, the languages of `engine.PHRASES`. In `engine.py` a
+  card that becomes `pr-review` takes these words, and a same-key re-read passes the old card in, so it keeps the
+  TL;DR (D18 still holds: the re-read changes only the words and the source block). Every other kind's words are
+  unchanged.
+- **[decided by the builder]** `ap2 review sync CARD [--data PATH]` (points 5-6) reads `gh pr view <n> --repo
+  <repo> --json state,headRefOid,reviewRequests,latestReviews` and `gh api user --jq .login`, and prints `state`:
+  `merged`, `closed`, `reviewed` (the user has a review in `latestReviews`), `request_removed` (no review, and
+  neither the user nor any team is in `reviewRequests`; a team request keeps the card open, since its members are
+  not read), then `not_reviewed`, `new_commits` (the head is not `pr.reviewed_sha`: a delta is due) or `current`.
+  The first four move the card to lane `done` with the reason as `did` (a card already in `done` is left alone);
+  every other state writes `pr.head_sha`. Only the card changes, in the data folder, so shadow mode allows it.
+- **[decided by the builder]** `ap2 review` subcommands are `plan`, `verdict`, `check`, `apply` and `sync`, each
+  printing JSON. They take the data folder like `ap2 card` (`--data`, else `AP2_DATA`); `verdict` and `check` only
+  read, so they do not create it.
+- Not built here: starting the `pr-review` role on its own when a card is made, and running `apply` and `sync` from
+  the worker's done path or the gate (they need the worker sessions); a Slack or other message asking for a review
+  landing on the same card (point 1, second half); own wording for the user's own PRs (`github-my-prs` sorts them
+  into `pr-review` too, so they read as a review request for now); and the PR loop's end (6.3).
 
 ### 6.3 How the PR loop ends **[decided by the user, 2026-11-10]**
 
@@ -831,7 +928,9 @@ Calls the author made without asking (check them):
   add, get, update, update_checked, list, restore, propose_opposite, prune, search), `restore.py` (restore points and proposed
   opposite actions) and `index.py` (`index.sqlite`); the gate: `routines.py` (routine files and slots) and `gate.py`
   (one gate run, `ap2 gate`); templates and roles: `templates.py` (loading, the user's override, validation,
-  briefs) and `roles.py` (the shipped roles and their tools); the source engine: `sources.py` (loading,
+  briefs) and `roles.py` (the shipped roles and their tools);
+  PR review cards: `prreview.py` (the plan, the verdict, the report check, apply and sync, design 6.2);
+  the source engine: `sources.py` (loading,
   `extends:`, checks), `form.py` (the form, the path language, `{field}` patterns and derived fields) and
   `engine.py` (read, fill, check, link and key, sort, card); scan sessions: `scan.py` (the plan, the brief, the
   save-raw hook and the take); review angles: `angles.py` (the three layers, kinds, globs and the picker,
@@ -1340,9 +1439,11 @@ Calls the author made without asking (check them):
     - `investigate` and `analyze` (secretary's investigator and analyst), read-only: Bash, Glob, Grep, Read,
       WebFetch, WebSearch, Write (the result file only).
     - `reviewer-angle` (secretary's reviewer; one review angle, 6.1), read-only: Bash, Glob, Grep, Read.
+    - `pr-review` (secretary's review command, copied into `commands/pr-review.md`; 6.2), read-only: Agent,
+      Bash, Glob, Grep, Read, Write (the report file only).
     - `general`, worker: Bash, Edit, Glob, Grep, Read, WebFetch, WebSearch, Write.
-    - Adding a role is one more entry in the table; the PR review cards slice adds `pr-review` (6.2) and moves the
-      `pr-review` template to it (it uses `reviewer-angle` until then).
+    - Adding a role is one more entry in the table; the PR review cards slice added `pr-review` (6.2), and the
+      built-in `pr-review` template runs it.
   - Commands, each with `--data PATH` and JSON on stdout: `ap2 template list` (every template's kind, title,
     origin, file, and whether it replaces a built-in one), `ap2 template show <kind>` (the template in use, as
     written, and each role with its tools and floor) and `ap2 template check <file>` (validates the file and says

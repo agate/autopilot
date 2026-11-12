@@ -34,6 +34,7 @@ from pathlib import Path, PurePosixPath
 from typing import Callable, Optional
 
 from assistant import cards, config, form, sources
+from assistant.prreview import KIND as PR_REVIEW, plain_for as pr_review_words
 from assistant.cards import CardError
 from assistant.sources import SourceError
 from assistant.store import Store, write_json
@@ -470,7 +471,7 @@ class Engine:
                            reason="sort says none" if becomes == "none" else "no card has this key")
                 items.append(out)
                 continue
-            new = self._card(src, becomes, record, link, key, raw)
+            new = self._card(src, becomes, record, link, key, raw, old)
             if old is None:
                 out["action"] = "add"
                 if dry_run:
@@ -535,9 +536,15 @@ class Engine:
                 out.setdefault(c["key"], c)
         return out
 
-    def _card(self, src, kind: str, record: dict, link, key: str, raw) -> dict:
+    def _card(self, src, kind: str, record: dict, link, key: str, raw, old: Optional[dict] = None) -> dict:
+        """The card a record makes. A PR review card's words come from its review too (design 6.2), so a same-key
+        re-read passes the card it has (`old`) and keeps its TL;DR."""
+        if kind == PR_REVIEW:
+            plain = pr_review_words(record, {**(old or {}), "key": key}, self.languages)
+        else:
+            plain = plain_words(src, record, link, self.languages)
         card = {"kind": kind, "lane": LANE[src.brings], "feed": src.name, "links": [], "pri": PRI,
-                "origin": "source", "plain": plain_words(src, record, link, self.languages),
+                "origin": "source", "plain": plain,
                 "title": {lang: snippet(record["text"], TITLE) for lang in self.languages}, "key": key,
                 "source": {"name": src.name, "record": record, "link": link, "raw": raw}}
         if src.brings == "work" and "status" in record:

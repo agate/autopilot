@@ -1,0 +1,96 @@
+{
+  "card": "CARD",
+  "stage": "review",
+  "head_sha": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+  "reviewed_at": "2026-11-11T09:30:00Z",
+  "verdict": "changes",
+  "tldr": {
+    "en": "Changes: a timed-out charge can be retried with a new key, so a customer is charged twice.",
+    "zh": "Changes：超时的扣款会用新的键重试，客户可能被扣两次。"
+  },
+  "background": {
+    "en": "The PR retries a failed card payment once, 2 seconds later.",
+    "zh": "这个 PR 让失败的扣款在 2 秒后重试一次。"
+  },
+  "problem": {
+    "en": "A failed payment was never retried, so a brief gateway error lost the order.",
+    "zh": "以前失败的扣款不会重试，网关短暂出错就会丢单。"
+  },
+  "solution": {
+    "en": "billing/retry.py adds `retry_charge`; tests/test_retry.py covers the retry.",
+    "zh": "billing/retry.py 加了 `retry_charge`；tests/test_retry.py 测了重试。"
+  },
+  "reply_draft": {
+    "en": "Thanks! One thing: billing/retry.py:41 makes a new idempotency key per attempt; reusing the first one would stop a double charge.",
+    "zh": "谢谢！有一点：billing/retry.py:41 每次尝试都生成新的幂等键；复用第一次的键可以避免重复扣款。"
+  },
+  "findings": {
+    "confirmed": [
+      {
+        "id": "correctness-1",
+        "severity": "should-fix",
+        "where": "billing/retry.py:41",
+        "trigger": {
+          "en": "A card is declined at 09:00:00 and the gateway times out on the first charge.",
+          "zh": "一张卡在 09:00:00 被拒，第一次扣款时网关超时。"
+        },
+        "before": {
+          "en": "At the merge base a timeout was not retried, so the customer was charged at most once.",
+          "zh": "在 merge base 上，超时不会重试，所以客户最多被扣一次。"
+        },
+        "after": {
+          "en": "Now `retry_charge` runs 2 seconds later with a new idempotency key, so the first charge and the retry can both land.",
+          "zh": "现在 `retry_charge` 在 2 秒后用新的幂等键重试，所以第一次扣款和重试可能都成功。"
+        },
+        "impact": {
+          "en": "The customer sees two charges for one order.",
+          "zh": "客户看到一个订单被扣了两次。"
+        },
+        "fix": {
+          "en": "Reuse the first attempt's idempotency key in `retry_charge`.",
+          "zh": "在 `retry_charge` 里复用第一次的幂等键。"
+        },
+        "checked": {
+          "en": "Opened billing/retry.py:41 at the head: `key = new_key()` runs on every attempt.",
+          "zh": "在 head 打开 billing/retry.py:41：每次尝试都会运行 `key = new_key()`。"
+        }
+      }
+    ],
+    "out_of_scope": [],
+    "rejected": [],
+    "questions": []
+  },
+  "angles": [
+    {
+      "name": "Correctness",
+      "origin": "built-in",
+      "why": {
+        "en": "Always.",
+        "zh": "总是要看。"
+      }
+    },
+    {
+      "name": "Test value",
+      "origin": "built-in",
+      "why": {
+        "en": "The PR changes tests/test_retry.py.",
+        "zh": "这个 PR 改了 tests/test_retry.py。"
+      }
+    },
+    {
+      "name": "Flakiness & isolation",
+      "origin": "built-in",
+      "why": {
+        "en": "The new test sleeps 2 seconds.",
+        "zh": "新测试会 sleep 2 秒。"
+      }
+    }
+  ],
+  "checks": {
+    "ci": "green",
+    "notes": {
+      "en": "Read the diff and both versions of billing/retry.py.",
+      "zh": "读了 diff 和 billing/retry.py 的两个版本。"
+    }
+  }
+}

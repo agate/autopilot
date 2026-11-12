@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+"""Test stand-in for gh that answers from recorded replies.
+
+FAKE_GH_REPLIES names a JSON file: a list of {"argv": [...], "stdout": <text or any JSON value>, "exit": <code>,
+"stderr": <text>}; `exit` and `stderr` are optional (0 and ""). The first entry whose argv equals this call's
+argv (without the leading gh) answers it; a stdout that is not text is printed as JSON. FAKE_GH_LOG, when set,
+gets every argv as one JSON line, known or not. An argv with no entry exits 1 and says so on stderr.
+"""
+import json
+import os
+import sys
+
+
+def main() -> int:
+    argv = sys.argv[1:]
+    log = os.environ.get("FAKE_GH_LOG")
+    if log:
+        with open(log, "a", encoding="utf-8") as f:
+            f.write(json.dumps(argv) + "\n")
+    path = os.environ.get("FAKE_GH_REPLIES")
+    table = []
+    if path:
+        with open(path, encoding="utf-8") as f:
+            table = json.load(f)
+    for entry in table:
+        if entry.get("argv") == argv:
+            out = entry.get("stdout", "")
+            sys.stdout.write(out if isinstance(out, str) else json.dumps(out))
+            sys.stderr.write(entry.get("stderr", ""))
+            return int(entry.get("exit", 0))
+    sys.stderr.write("fake-gh-replay: no recorded reply for %s\n" % json.dumps(argv))
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
