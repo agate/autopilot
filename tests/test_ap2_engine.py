@@ -1142,6 +1142,15 @@ class PrKeyTest(EngineCase):
         self.assertTrue(after["plain"]["what"]["en"].startswith("Your PR #42:"), after["plain"]["what"]["en"])
         self.assertEqual(self.item(self.my_prs(), self.KEY)["action"], "unchanged")
 
+    def test_a_my_prs_read_that_is_not_pr_review_keeps_the_feed(self):
+        """Only a github-my-prs read that makes a pr-review card moves the feed: one whose sort says update_card
+        leaves the Slack ask's feed as it is."""
+        self.assertEqual(self.item(self.slack(), self.KEY)["action"], "add")
+        self.user_source("github-my-prs", "extends: github-my-prs\nsort: { all: update_card }\n")
+        self.item(self.my_prs(), self.KEY)
+        [card] = self.pr_cards()
+        self.assertEqual(card["feed"], "slack-mentions")
+
     def test_a_key_for_pattern_can_name_a_setting(self):
         self.user_source("slack-mentions", "extends: slack-mentions\nsettings: { me: U0EXAMPLE1, org: acme }\n"
                                            "key_for: { review_request: \"{org}/{pr}\" }\n")

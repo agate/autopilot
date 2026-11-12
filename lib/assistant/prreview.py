@@ -333,6 +333,13 @@ def _is_pr_page(link, repo: str, number: int) -> bool:
     return isinstance(link, str) and bool(own.match(link))
 
 
+def _asked_elsewhere(card: dict, repo: str, number: int) -> bool:
+    """True when the card's source link is text that names no `/<repo>/pull/<number>` (a Slack ask's message)."""
+    link = _source_link(card)
+    names = re.compile("/" + re.escape(repo) + f"/pull/{number}" + r"(?!\d)")
+    return isinstance(link, str) and not names.search(link)
+
+
 def run_dir(data, card_id: str) -> Path:
     return Path(data) / "sessions" / cards.check_id(card_id)
 
@@ -815,8 +822,8 @@ def sync(data, card_id: str, by: str = "ap2 review", cfg=None, run=None) -> dict
     request_removed (neither the user nor a team is asked any more), not_reviewed, new_commits (a delta is due) or
     current. The first four move the card to done; every state records the head. Only the card changes. The user's
     own PR (its author's login is the user's) is never reviewed or request_removed: only merged and closed end it. A
-    card whose source link is not this PR's page (a Slack ask) was never asked on GitHub, so it is never
-    request_removed."""
+    card whose source link is text naming no `/<repo>/pull/<number>` (a Slack ask's message) was never asked on
+    GitHub, so it is never request_removed; a card with no text link, or one naming this PR anywhere, still is."""
     data = Path(data)
     cfg = cfg if cfg is not None else config.load(data)
     store = Store(data, cfg=cfg)
@@ -847,8 +854,8 @@ def sync(data, card_id: str, by: str = "ap2 review", cfg=None, run=None) -> dict
         out = "not_reviewed" if reviewed is None else "new_commits" if head != reviewed else "current"
     elif mine:
         out = "reviewed"
-    elif not asked and not team and _is_pr_page(_source_link(card), pr["repo"], pr["number"]):
-        # Only a card GitHub made can lose its request: a Slack ask's card (its link is the message) never had one.
+    elif not asked and not team and not _asked_elsewhere(card, pr["repo"], pr["number"]):
+        # A Slack ask's card (its link is the message, naming no PR page) never had a request on GitHub to lose.
         out = "request_removed"
     elif reviewed is None:
         out = "not_reviewed"

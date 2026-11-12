@@ -428,6 +428,9 @@ class PlainWordsTest(Case):
         with self.subTest("a key that is not owner/repo#number falls back to the record's id"):
             words = prreview.plain_for({"id": "7", "text": "x"}, {"key": "C0123:1.2"}, ("en",))
             self.assertEqual(words["what"]["en"], "Someone asked you to review PR #7: x")
+        with self.subTest("no PR number in the key and no record id"):
+            words = prreview.plain_for({"text": "x"}, {"key": "C0123:1.2"}, ("en",))
+            self.assertEqual(words["what"]["en"], "Someone asked you to review PR #?: x")
 
 
 class PrOfTest(unittest.TestCase):
@@ -456,6 +459,7 @@ class PrOfTest(unittest.TestCase):
             (f"https://a b/{REPO}/pull/42", github),  # checkpkg: ignore
             (github + "/ x", github),
             (None, github),
+            (7, github),
         ]
         for link, url in cases:
             with self.subTest(link=link):
@@ -1574,6 +1578,25 @@ class SyncTest(Case):
                 self.assertEqual((out["state"], out["lane"]), (state, lane))
                 self.assertEqual(self.store().get(cid)["lane"], lane)
 
+
+    def test_a_card_whose_link_names_the_pr_or_is_not_text_can_lose_its_request(self):
+        """Only a link that is text naming no `/<repo>/pull/<number>` holds back request_removed: a card with no
+        link, a non-text one, or one naming this PR on another scheme, host or path still closes."""
+        base = {k: v for k, v in self.card().items() if k not in ("id", "created_at", "updated_at", "audit")}
+        nobody = own_view(author="octo-dev")
+        for name, link in (("no link", None), ("a non-text link", 7),
+                           ("http on another host", f"http://ghe.example.com/{REPO}/pull/42"),
+                           ("a path before the repo", f"https://corp.example.com/github/{REPO}/pull/42")):
+            with self.subTest(name):
+                card = dict(base, source=dict(base["source"]))
+                if link is None:
+                    card["source"].pop("link", None)
+                else:
+                    card["source"]["link"] = link
+                cid = self.store().add(card, by="test")["id"]
+                out = self.sync(cid, nobody)
+                self.assertEqual((out["state"], out["lane"]), ("request_removed", "done"))
+                self.assertEqual(self.store().get(cid)["audit"][-1]["did"], "the review request was removed")
 
 def own_view(head=A, state="OPEN", reviews=(), requests=(), author="octo-me"):
     """A pr view reply for a PR whose author is `author` (the recorded user is octo-me)."""

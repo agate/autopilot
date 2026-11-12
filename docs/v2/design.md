@@ -641,9 +641,10 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   <repo> --json state,headRefOid,reviewRequests,latestReviews,author` and `gh api user --jq .login`, and prints `state`:
   `merged`, `closed`, `reviewed` (the user has a review in `latestReviews`), `request_removed` (no review, and
   neither the user nor any team is in `reviewRequests`; a team request keeps the card open, since its members are
-  not read; a card whose `source.link` is not this PR's own page, `https://<host>/<repo>/pull/<number>` with an
-  optional `/`, `?...` or `#...` tail as for the PR's URL, was made by a Slack ask and never asked on GitHub, so it
-  is never given `request_removed`), then `not_reviewed`, `new_commits` (the head is not `pr.reviewed_sha`: a delta is due) or `current`.
+  not read; a card whose `source.link` is text that holds no `/<repo>/pull/<number>` (the number not followed by
+  another digit) anywhere was made by a Slack ask and never asked on GitHub, so it is never given
+  `request_removed`; a card with no `source.link`, a non-text one, or one that names this PR on any host or path
+  still is), then `not_reviewed`, `new_commits` (the head is not `pr.reviewed_sha`: a delta is due) or `current`.
   The first four move the card to lane `done` with the reason as `did` (a card already in `done` is left alone);
   every other state writes `pr.head_sha`. Only the card changes, in the data folder, so shadow mode allows it.
 - **[decided by the builder]** The user's own PRs (`github-my-prs` sorts them into `pr-review` too) are told apart
