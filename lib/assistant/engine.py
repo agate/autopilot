@@ -34,7 +34,7 @@ from pathlib import Path, PurePosixPath
 from typing import Callable, Optional
 
 from assistant import cards, config, form, sources
-from assistant.prreview import KIND as PR_REVIEW, plain_for as pr_review_words
+from assistant.prreview import KEY as PR_KEY, KIND as PR_REVIEW, OWN_FEED, plain_for as pr_review_words
 from assistant.cards import CardError
 from assistant.sources import SourceError
 from assistant.store import Store, write_json
@@ -45,6 +45,7 @@ SNIPPET = 120
 TITLE = 80
 LANE = {"messages": "needs", "work": "planned"}
 PRI = "P2"
+REVIEW_REQUESTS = "github-review-requests"  # the other GitHub source that sorts into pr-review (design 6.2)
 # Seconds a read waits for the rest of its output after its timeout kill.
 DRAIN = 5
 # The most stdout a read keeps; past it the command is stopped. Only the end of its stderr is kept.
@@ -376,7 +377,9 @@ class Engine:
         `place` in the reason), must appear word for word in `raw_text`, the tool's raw output, as a whole token
         (`word_for_word`), so a model cannot invent them. A record whose `place` or `place_id` is in
         `read.skip_channels` (a leading `#` ignored) is dropped. Each record carries its `category`, one of
-        `sort`'s. Too many records is refused (SourceError, naming `raw`, where the raw output was saved)."""
+        `sort`'s. A `pr` must be `<owner>/<repo>#<number>` found in `raw_text` (`pr_in_raw`); a blank one is left out.
+        A record whose category is in `key_for` must have every field that pattern names. Too many records is refused
+        (SourceError, naming `raw`, where the raw output was saved)."""
         if not isinstance(records, list):
             raise SourceError(f"{src.name}: records must be a list, not {type(records).__name__}")
         _check_count(src, len(records), raw)
@@ -395,6 +398,19 @@ class Engine:
                 category = rec.get("category")
                 if not isinstance(category, str) or category not in src.sort:
                     raise ValueError(f"category {category!r} is not one of sort's ({', '.join(src.sort)})")
+                if "pr" in record and not record["pr"].strip():
+                    del record["pr"]  # "no PR" said as empty text: the field is left out
+                if "pr" in record:
+                    if not PR_KEY.match(record["pr"]):
+                        raise ValueError(f"form.pr {record['pr']!r} is not <owner>/<repo>#<number>")
+                    if not pr_in_raw(record["pr"], raw_text):
+                        raise ValueError(f"form.pr {record['pr']!r} is not in the raw output")
+                if category in src.key_for:
+                    try:
+                        form.fill_pattern(src.key_for[category], {**sources.settings(src),
+                                                                  **form.derived(record, src.name)})
+                    except ValueError as e:
+                        raise ValueError(f"key: {e}") from None
             except ValueError as e:
                 dropped.append({"item": n, "reason": str(e)})
                 continue
@@ -403,15 +419,17 @@ class Engine:
 
     # -- link, key, sort, card ----------------------------------------------------------------------------------
 
-    def link_and_key(self, src: sources.Source, record: dict, link: Optional[str] = None) -> tuple:
-        """The record's (link, key). Patterns may name the record's fields, the derived ones and the source's
-        settings (which never share a name with those). A setting is the user's own text, so it goes into a link as
+    def link_and_key(self, src: sources.Source, record: dict, link: Optional[str] = None,
+                     category: Optional[str] = None) -> tuple:
+        """The record's (link, key). The key is `key_for`'s pattern for `category` when it lists one, else `key`.
+        Patterns may name the record's fields, the derived ones and the source's settings (which never share a name
+        with those). A setting is the user's own text, so it goes into a link as
         written (`site: jira.example.com:8443`); only the record's values are percent-encoded. Raises ValueError
         naming what is missing or wrong."""
         settings = sources.settings(src)
         values = {**settings, **form.derived(record, src.name)}
         try:
-            key = form.fill_pattern(src.key, values)
+            key = form.fill_pattern(key_pattern(src, category), values)
         except ValueError as e:
             raise ValueError(f"key: {e}") from None
         if src.link[0] == "none":
@@ -435,7 +453,9 @@ class Engine:
 
     def build(self, src: sources.Source, entries: list, dropped: Optional[list] = None, raw: Optional[str] = None,
               dry_run: bool = False) -> dict:
-        """Link, key and sort each entry, then add or update its card (nothing when `dry_run`)."""
+        """Link, key and sort each entry, then add or update its card (nothing when `dry_run`). A record keyed by
+        `key_for` never changes a card another source made (design 6.2): it is `unchanged` there, so a Slack review
+        ask and the GitHub review request share one card without writing over each other on every read."""
         self._check_languages(src)
         dropped = list(dropped or [])
         store = Store(self.data, cfg=self.cfg, clock=self.clock)
@@ -449,15 +469,15 @@ class Engine:
         items = []
         for e in entries:
             record = e["record"]
+            category = e.get("category")
+            if category is None and len(src.sort) == 1:
+                category = next(iter(src.sort))
             try:
-                link, key = self.link_and_key(src, record, e.get("link"))
+                link, key = self.link_and_key(src, record, e.get("link"), category)
             except ValueError as err:
                 dropped.append({"item": e["item"], "reason": str(err)})
                 continue
-            category = e.get("category")
             out = {"item": e["item"], "record": record, "key": key, "link": link}
-            if category is None and len(src.sort) == 1:
-                category = next(iter(src.sort))
             if category is None:
                 out.update(category=None, becomes=None, action="none", card=None,
                            reason=f"sort has {len(src.sort)} categories; fill: paths cannot pick one")
@@ -469,6 +489,13 @@ class Engine:
             if becomes == "none" or (becomes == "update_card" and old is None):
                 out.update(action="none", card=None,
                            reason="sort says none" if becomes == "none" else "no card has this key")
+                items.append(out)
+                continue
+            made_by = old.get("source") if old is not None and isinstance(old.get("source"), dict) else {}
+            owner = made_by.get("name")
+            if old is not None and category in src.key_for and owner != src.name:
+                out.update(action="unchanged", card=old.get("id"),
+                           reason=f"the card is {owner or 'not a source'}'s; a key_for record leaves it alone")
                 items.append(out)
                 continue
             new = self._card(src, becomes, record, link, key, raw, old)
@@ -491,6 +518,8 @@ class Engine:
                     existing[key] = added
             else:
                 changes = {k: new[k] for k in ("plain", "title", "source", "status") if k in new}
+                if becomes == PR_REVIEW and _takes_own_feed(src, old):
+                    changes["feed"] = OWN_FEED  # the user's own PR, though another source made its card
                 same = all(_same(k, old.get(k), v) for k, v in changes.items())
                 out["action"] = "unchanged" if same else "update"
                 out["card"] = old.get("id")
@@ -540,9 +569,11 @@ class Engine:
         """The card a record makes. A PR review card's words come from its review too (design 6.2), so a same-key
         re-read passes the card it has (`old`) and keeps its TL;DR. The words follow the card's own feed (this
         source for a new card), so the user's own PRs (github-my-prs) get their own words, and a re-read by the
-        other GitHub source keeps them, as `prreview.apply` does."""
+        other GitHub source keeps them, as `prreview.apply` does. Every PR github-my-prs lists is the user's own, so
+        its read makes the feed github-my-prs on a card a non-GitHub source made (a Slack ask read first)."""
         if kind == PR_REVIEW:
-            plain = pr_review_words(record, {"feed": src.name, **(old or {}), "key": key}, self.languages)
+            feed = {"feed": OWN_FEED} if _takes_own_feed(src, old) else {}
+            plain = pr_review_words(record, {"feed": src.name, **(old or {}), **feed, "key": key}, self.languages)
         else:
             plain = plain_words(src, record, link, self.languages)
         card = {"kind": kind, "lane": LANE[src.brings], "feed": src.name, "links": [], "pri": PRI,
@@ -674,6 +705,30 @@ def word_for_word(value: str, text: str) -> bool:
     return False
 
 
+def _takes_own_feed(src: sources.Source, old: Optional[dict]) -> bool:
+    """Whether a github-my-prs read moves a PR review card's feed to github-my-prs: every PR it lists is the user's
+    own, so a card a Slack ask made reads as the user's own PR from then on. A card github-review-requests made
+    keeps its feed, so the words of the two GitHub sources never flip from read to read (design 6.2)."""
+    return src.name == OWN_FEED and (old or {}).get("feed") != REVIEW_REQUESTS
+
+
+def pr_in_raw(pr: str, text: str) -> bool:
+    """Whether `pr` (`<owner>/<repo>#<number>`) is in `text`: as a `github.com/<owner>/<repo>/pull/<number>` link
+    (the host not inside a longer name, the number not followed by a digit), or word for word (`word_for_word`). A
+    link in JSON, its slashes escaped (`\\/`), counts too. So a model cannot invent the PR a message asks about."""
+    m = PR_KEY.match(pr)
+    if not m:
+        return False
+    link = re.compile(r"(?<![A-Za-z0-9-])github\.com/" + re.escape(m.group(1)) + "/pull/" + m.group(2) + r"(?!\d)")
+    texts = (text, text.replace("\\/", "/")) if "\\/" in text else (text,)
+    return any(link.search(t) or word_for_word(pr, t) for t in texts)
+
+
+def key_pattern(src: sources.Source, category: Optional[str]) -> tuple:
+    """The key pattern of a record of `category`: its `key_for` pattern when the source lists one, else `key`."""
+    return src.key_for.get(category, src.key) if isinstance(category, str) else src.key
+
+
 def _edge(text: str, i: int, step: int) -> bool:
     """Whether text[i], the character next to a match (`step` points away from it), ends the token there."""
     if i < 0 or i >= len(text):
@@ -691,12 +746,14 @@ def _one_per_key(src: sources.Source, entries: list) -> list:
     read. The latest record (by `at`, then `id`, as text) gives every entry of the key its record; the earliest
     record whose category makes a card (a template, not `update_card` or `none`) gives the category, else the latest
     `update_card` one's, else the latest's, so a recovery and a later `fyi` reply still update the card in either
-    order. Each entry keeps its `item`, so the report still lists every record. An entry whose key cannot be made is
-    kept as it is, for `build` to drop with the reason."""
+    order. Each entry keeps its `item`, so the report still lists every record. A record whose category is in
+    `key_for` groups by that key, never with its thread (a review ask keys on its PR; the thread's replies still group
+    on the thread). An entry whose key cannot be made is kept as it is, for `build` to drop with the reason."""
     groups, order = {}, []
     for e in entries:
         try:
-            key = form.fill_pattern(src.key, {**sources.settings(src), **form.derived(e["record"], src.name)})
+            key = form.fill_pattern(key_pattern(src, e["category"]),
+                                    {**sources.settings(src), **form.derived(e["record"], src.name)})
         except ValueError:
             order.append([e])
             continue

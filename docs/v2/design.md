@@ -328,6 +328,8 @@ Every item fills the same fields:
 - `key` names what the card is about. The same key updates the same card: a Slack thread is
   `{channel}:{thread}`, a PR is `{repo}#{number}` (so a Slack ask about a PR and the GitHub review request become
   one card).
+- **[decided by the builder]** One category may key on its own pattern: `key_for: {<category>: <pattern>}` (the
+  Slack ask keys on `{pr}`); the rule, the `pr` field and who wins a shared card are in 6.2.
 - Every card from a source shows a **source block** at the top: who, where, when, their words, and an "Open in
   Slack" / "Open on GitHub" / "Open in Jira" button. It is drawn from the record, so templates never hold links.
   The phone page shows the same button.
@@ -571,8 +573,10 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   flag cluster ends at `=`, as pflag reads it: in `-i=t` the `t` is the value of `-i`, not `-t`, so the next
   argument is checked as its own.
 - **[decided by the builder]** Which PR. From the card: kind `pr-review`, `key` matching `<owner>/<repo>#<number>`
-  (`[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*`), the URL from `source.link`, else
-  `https://github.com/<repo>/pull/<n>`. Anything else is a `ReviewError`. Every SHA from GitHub must be 40
+  (`[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*`), the URL from `source.link` when it is
+  `https://<host>/<repo>/pull/<n>` for the key's own repo and number (then `/`, `?...` or `#...` allowed), else
+  `https://github.com/<repo>/pull/<n>` (so a card a Slack ask made reviews the PR, not the message). Anything else
+  is a `ReviewError`. Every SHA from GitHub must be 40
   lowercase hex before it goes into a path.
 - **[decided by the builder]** `ap2 review plan CARD [--stage review|delta] [--checkout PATH] [--data PATH]`
   (secretary's `review roles`) prints and writes the plan: `card`, `stage`, `pr`, `repo`, `number`, `head_sha`,
@@ -624,7 +628,8 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   with `check`, as secretary's ends with `report validate`); the worker's done path will, once wired.
 - **[decided by the builder]** Plain words (point 4, 3.7): one function, `prreview.plain_for(record, card, langs)`,
   used by the source engine and by `apply`, so a re-read computes the same words. What: "<author> asked you to
-  review PR #<id>: <title>" ("Someone" with no author; the title is the record's first line, cut at 120
+  review PR #<n>: <title>" (n from the card's `key` when it is `<owner>/<repo>#<number>`, else the record's `id`,
+  so a Slack ask, whose `id` is a message ts, still reads "PR #5"; "Someone" with no author; the title is the record's first line, cut at 120
   characters). Where: before a review "Not reviewed yet."; after one, the TL;DR. Do: before, "Nothing yet; open it
   again once its review has run."; after, "Read the <n> findings, then approve or ask for changes on GitHub
   yourself." (n = open confirmed + questions; "the 1 finding"; n = 0: "Read the review, then approve or ask for
@@ -636,7 +641,10 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   <repo> --json state,headRefOid,reviewRequests,latestReviews,author` and `gh api user --jq .login`, and prints `state`:
   `merged`, `closed`, `reviewed` (the user has a review in `latestReviews`), `request_removed` (no review, and
   neither the user nor any team is in `reviewRequests`; a team request keeps the card open, since its members are
-  not read), then `not_reviewed`, `new_commits` (the head is not `pr.reviewed_sha`: a delta is due) or `current`.
+  not read; a card whose `source.link` is text that holds no `/<repo>/pull/<number>` (the number not followed by
+  another digit) anywhere was made by a Slack ask and never asked on GitHub, so it is never given
+  `request_removed`; a card with no `source.link`, a non-text one, or one that names this PR on any host or path
+  still is), then `not_reviewed`, `new_commits` (the head is not `pr.reviewed_sha`: a delta is due) or `current`.
   The first four move the card to lane `done` with the reason as `did` (a card already in `done` is left alone);
   every other state writes `pr.head_sha`. Only the card changes, in the data folder, so shadow mode allows it.
 - **[decided by the builder]** The user's own PRs (`github-my-prs` sorts them into `pr-review` too) are told apart
@@ -645,7 +653,8 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   the same wait, and after one is "Read the <n> findings, then fix the ones you agree with on your branch.", "Read
   the 1 finding, then fix it on your branch if you agree." or, with none open, "Read the review; nothing needs
   fixing." (`prreview.OWN_PHRASES`, in `en` and `zh`). The words follow the card's own `feed` (the source that
-  made it); a re-read by the other GitHub source keeps it, so the words do not flip. For `sync`, by the PR's author: when the reply's `author.login` is the
+  made it, or `github-my-prs` once it reads a card a Slack ask made, as "Who wins a shared card" says); a re-read
+  by the other GitHub source keeps it, so the words do not flip. For `sync`, by the PR's author: when the reply's `author.login` is the
   `gh api user` login, the user is never in their own `reviewRequests` and a comment they leave shows in
   `latestReviews`, so `reviewed` and `request_removed` are never given; only `merged` and `closed` move the card to
   `done`, else it is `not_reviewed`, `new_commits` or `current`. A reply with no author (an older recording, or a
@@ -656,9 +665,44 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
 - **[decided by the builder]** `ap2 review` subcommands are `plan`, `verdict`, `check`, `apply` and `sync`, each
   printing JSON. They take the data folder like `ap2 card` (`--data`, else `AP2_DATA`); `verdict` and `check` only
   read, so they do not create it.
+- **[decided by the builder]** A Slack ask lands on the review request's card (point 1, second half). A source may
+  have `key_for: {<category>: <pattern>}`: a record of a listed category keys on that pattern, every other record
+  on `key` as before. Each category must be one of `sort`'s, and each pattern is checked as `key` is (a `{field}`
+  pattern naming at least one field, not a path); a user's `<category>: null` turns one off. To turn the PR
+  keying off, also sort that category elsewhere (`sort: { review_request: question }`), since a `pr-review` card
+  needs a PR key. A user file that changes the sort of a `key_for` category without setting that category's
+  `key_for` is refused, anywhere in an `extends:` chain; writing the same value is not a change. The form gains one
+  optional field, `pr`: `<owner>/<repo>#<number>`. The built-in `slack-mentions` adds the form hint `pr`, `sort:
+  review_request: pr-review`, `key_for: {review_request: "{pr}"}` and an `instructions` line saying when a message
+  is a `review_request` ("PTAL", "take a look", "can you review", a review-assignment bot) and that it needs the PR
+  link; its thread `key` is unchanged.
+- **[decided by the builder]** `pr` cannot be invented. A `fill: ai` record keeps its `pr` only when it matches the
+  key shape above and the raw tool output holds `github.com/<owner>/<repo>/pull/<number>` (the host not inside a
+  longer name, the number not followed by a digit; a JSON reply's escaped `\/` counts) or the literal
+  `<owner>/<repo>#<number>` as a whole token; else the record is dropped with a reason naming `form.pr`. A blank
+  `pr` is left out, not a reason to drop the record. A record whose category is in `key_for` but lacks a field
+  its pattern names is dropped with the reason naming that field (`key: {pr} missing`).
+- **[decided by the builder]** Who wins a shared card. A record keyed by `key_for` never changes a card whose
+  `source.name` is another source: the item is `unchanged`, with a reason naming that source. A record keyed by
+  its source's plain `key` (the GitHub review request) updates a card a `key_for` record made, as any same-key read
+  does (words, title, source block). So whichever is read first, the card ends up holding the GitHub record, and
+  later reads of both are `unchanged`. The card's `feed` stays the source that made it, except that a
+  `github-my-prs` read moves it to `github-my-prs` on a card `github-review-requests` did not make: every PR that
+  source lists is the user's own, so a card a Slack ask made for the user's own PR gets the own words once
+  `github-my-prs` reads it. The Slack ask is not kept
+  on the card once the GitHub record takes it over (no second link or source block): the card shows the GitHub
+  record only.
+  A review ask for a PR whose card is already `done` lands on that card and does not reopen it, as a GitHub
+  re-request does not; reopening a done PR card on a new ask is not built here.
+- **[decided by the builder]** Threads still group. In one `fill: ai` read, a `key_for` record groups by its own
+  key, never with its thread: a thread whose first message asks for a review gives a `pr-review` card keyed on the
+  PR, and its replies still group on the thread key as before. A Slack review ask read before `key_for` was added
+  became a `question` card keyed on its thread; that card is not moved or closed. The next read keys the ask on its
+  PR, so an ask still in the read window shows once more, as the PR's card, and the old `question` card is closed
+  by hand.
 - Not built here: starting the `pr-review` role on its own when a card is made, and running `apply` and `sync` from
-  the worker's done path or the gate (they need the worker sessions); a Slack or other message asking for a review
-  landing on the same card (point 1, second half); and the PR loop's end (6.3).
+  the worker's done path or the gate (they need the worker sessions); reopening a done PR card when a new review
+  ask arrives; and the PR loop's end (6.3).
 
 ### 6.3 How the PR loop ends **[decided by the user, 2026-11-10]**
 

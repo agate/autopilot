@@ -1,5 +1,5 @@
 {
-  "brief": "You are an ap2 scan session. You only read sources; you decide nothing about work.\n\nRules:\n1. Call only the tools listed below, with exactly the arguments given.\n2. Do not copy tool replies into files. ap2 saves every reply itself.\n3. For a call with a records file, write that file as a JSON list with one object per item. Use only the form's\n   fields and category. Copy id, thread_id, at and place_id (or place, when there is no place_id) exactly as the\n   tool returned them, character for character. Take category from the call's categories. Leave out a field the\n   reply does not have; never make one up.\n4. Follow a call's instructions when it has some.\n5. Post, send, create, edit or comment nowhere. Write no file other than the records files.\n\nCalls:\n1. jira-epic (mcp): call the tool search_issues on the atlassian server.\n   Arguments: {\"jql\": \"parent = PROJ-1 AND (assignee = currentUser() OR assignee is EMPTY)\"}\n   Code fills the records from the reply; write no records file for this call.\n2. jira-ticket (mcp): call the tool get_issue on the atlassian server.\n   Arguments: {\"issue\": \"PROJ-7\"}\n   Code fills the records from the reply; write no records file for this call.\n3. slack-alerts (connector): call the tool slack_read_channel.\n   Arguments: {\"channel_id\": \"C0444ALRT\"}\n   Records file: <scan>/records/slack-alerts.records.json\n   Form: id = Message_ts; thread_id = thread_ts; author = From; at = Message_ts; text = Text; place = Channel; place_id = Channel id (C...)\n   Categories: alert, recovered, fyi\n4. slack-mentions (connector): call the tools slack_search_public, slack_read_thread.\n   Arguments: {\"query\": \"<@U0EXAMPLE1>\"}\n   Records file: <scan>/records/slack-mentions.records.json\n   Form: id = Message_ts; thread_id = thread_ts; author = From; at = Message_ts; text = Text; place = Channel; place_id = Channel id (C...)\n   Categories: question, ask_to_do, alert, fyi\n",
+  "brief": "You are an ap2 scan session. You only read sources; you decide nothing about work.\n\nRules:\n1. Call only the tools listed below, with exactly the arguments given.\n2. Do not copy tool replies into files. ap2 saves every reply itself.\n3. For a call with a records file, write that file as a JSON list with one object per item. Use only the form's\n   fields and category. Copy id, thread_id, at and place_id (or place, when there is no place_id) exactly as the\n   tool returned them, character for character. Take category from the call's categories. Leave out a field the\n   reply does not have; never make one up.\n4. Follow a call's instructions when it has some.\n5. Post, send, create, edit or comment nowhere. Write no file other than the records files.\n\nCalls:\n1. jira-epic (mcp): call the tool search_issues on the atlassian server.\n   Arguments: {\"jql\": \"parent = PROJ-1 AND (assignee = currentUser() OR assignee is EMPTY)\"}\n   Code fills the records from the reply; write no records file for this call.\n2. jira-ticket (mcp): call the tool get_issue on the atlassian server.\n   Arguments: {\"issue\": \"PROJ-7\"}\n   Code fills the records from the reply; write no records file for this call.\n3. slack-alerts (connector): call the tool slack_read_channel.\n   Arguments: {\"channel_id\": \"C0444ALRT\"}\n   Records file: <scan>/records/slack-alerts.records.json\n   Form: id = Message_ts; thread_id = thread_ts; author = From; at = Message_ts; text = Text; place = Channel; place_id = Channel id (C...)\n   Categories: alert, recovered, fyi\n4. slack-mentions (connector): call the tools slack_search_public, slack_read_thread.\n   Arguments: {\"query\": \"<@U0EXAMPLE1>\"}\n   Records file: <scan>/records/slack-mentions.records.json\n   Form: id = Message_ts; thread_id = thread_ts; author = From; at = Message_ts; text = Text; place = Channel; place_id = Channel id (C...); pr = The GitHub PR the message asks you to review, as owner/repo#number, taken from a github.com/<owner>/<repo>/pull/<number> link in the message; leave it out otherwise\n   Categories: question, ask_to_do, alert, fyi, review_request\n   Instructions: A message is a review_request when it asks you to review a GitHub PR (PTAL, take a look, can you review, or a review-assignment bot) and holds the PR's github.com/<owner>/<repo>/pull/<number> link; fill pr from that link. A message that asks for a review without a PR link is a question.\n",
   "calls": [
     {
       "allowed_tools": [
@@ -68,7 +68,8 @@
         "question",
         "ask_to_do",
         "alert",
-        "fyi"
+        "fyi",
+        "review_request"
       ],
       "fill": "ai",
       "form": {
@@ -77,9 +78,11 @@
         "id": "Message_ts",
         "place": "Channel",
         "place_id": "Channel id (C...)",
+        "pr": "The GitHub PR the message asks you to review, as owner/repo#number, taken from a github.com/<owner>/<repo>/pull/<number> link in the message; leave it out otherwise",
         "text": "Text",
         "thread_id": "thread_ts"
       },
+      "instructions": "A message is a review_request when it asks you to review a GitHub PR (PTAL, take a look, can you review, or a review-assignment bot) and holds the PR's github.com/<owner>/<repo>/pull/<number> link; fill pr from that link. A message that asks for a review without a PR link is a question.",
       "records": "<scan>/records/slack-mentions.records.json",
       "source": "slack-mentions",
       "tools": [

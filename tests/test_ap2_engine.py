@@ -994,6 +994,285 @@ class SavedReadTest(EngineCase):
         self.assertFalse((self.data / "sources" / ".raw").exists())  # nothing copied
 
 
+class PrKeyTest(EngineCase):
+    """A Slack message asking for a PR review keys on `{repo}#{number}` (design 6.2 point 1), so it lands on the
+    same card as the GitHub review request. Through the real built-in files, as `ap2 source read` reads them."""
+
+    SLACK = ("## Channel: #payments (C0123ABCD)\n"
+             "From: U0EXAMPLE2\nMessage_ts: 1730000000.123456\n"
+             "Text: <@U0EXAMPLE1> PTAL <https://github.com/example/widgets/pull/42>\n\n"
+             "## Channel: #payments (C0123ABCD)\n"
+             "From: U0EXAMPLE3\nMessage_ts: 1730000100.000200\nthread_ts: 1730000000.123456\n"
+             "Text: <@U0EXAMPLE1> fyi CI is green now\n\n"
+             "## Channel: #payments (C0123ABCD)\n"
+             "From: U0EXAMPLE3\nMessage_ts: 1730000200.000300\nthread_ts: 1730000000.123456\n"
+             "Text: <@U0EXAMPLE1> does it change the retry delay?\n")
+    ASK = {"id": "1730000000.123456", "author": "U0EXAMPLE2", "at": "1730000000.123456",
+           "text": "<@U0EXAMPLE1> PTAL <https://github.com/example/widgets/pull/42>", "place": "payments",
+           "place_id": "C0123ABCD", "pr": "example/widgets#42", "category": "review_request"}
+    FYI = {"id": "1730000100.000200", "thread_id": "1730000000.123456", "author": "U0EXAMPLE3",
+           "at": "1730000100.000200", "text": "<@U0EXAMPLE1> fyi CI is green now", "place": "payments",
+           "place_id": "C0123ABCD", "category": "fyi"}
+    QUESTION = {"id": "1730000200.000300", "thread_id": "1730000000.123456", "author": "U0EXAMPLE3",
+                "at": "1730000200.000300", "text": "<@U0EXAMPLE1> does it change the retry delay?",
+                "place": "payments", "place_id": "C0123ABCD", "category": "question"}
+    KEY = "example/widgets#42"
+
+    def setUp(self):
+        super().setUp()
+        self.user_source("slack-mentions", "extends: slack-mentions\nsettings: { me: U0EXAMPLE1 }\n")
+
+    def engine(self, cfg=None):
+        return Engine(self.data, cfg=cfg or self.cfg, plugin_dir=sources.PLUGIN_DIR, clock=self.clock)
+
+    def slack(self, *records, text=None):
+        raw = self.tmp / "slack.txt"
+        raw.write_text(self.SLACK if text is None else text)
+        return self.engine().read_saved("slack-mentions", raw, records=list(records or [self.ASK]))
+
+    def github(self):
+        raw = self.tmp / "gh-search-prs.json"
+        shutil.copy(ROOT / "tests" / "fixtures" / "ap2" / "scan" / "gh-search-prs.json", raw)
+        return self.engine().read_saved("github-review-requests", raw)
+
+    def pr_cards(self):
+        return [c for c in self.store().list() if c.get("key") == self.KEY]
+
+    @staticmethod
+    def item(result, key):
+        [item] = [i for i in result["items"] if i["key"] == key]
+        return item
+
+    def assert_github_card(self):
+        [card] = self.pr_cards()
+        self.assertEqual(card["kind"], "pr-review")
+        self.assertEqual(card["source"]["name"], "github-review-requests")
+        self.assertEqual(card["source"]["link"], "https://github.com/example/widgets/pull/42")
+        self.assertEqual(card["source"]["record"]["id"], "42")
+        self.assertEqual(card["title"], {"en": "Retry failed card payments once, 2 seconds later"})
+        return card
+
+    def test_github_first_then_slack_is_one_card_the_slack_ask_leaves_alone(self):
+        gh = self.github()
+        self.assertEqual(self.item(gh, self.KEY)["action"], "add")
+        before = self.assert_github_card()
+        sl = self.slack()
+        self.assertEqual(sl["dropped"], [])
+        item = self.item(sl, self.KEY)
+        self.assertEqual((item["category"], item["becomes"], item["action"], item["card"]),
+                         ("review_request", "pr-review", "unchanged", before["id"]))
+        self.assertIn("github-review-requests", item["reason"])
+        self.assertEqual(self.assert_github_card(), before)  # not one field changed, the audit included
+        # Repeated reads of both sources change nothing.
+        for _ in range(2):
+            self.assertEqual(self.item(self.github(), self.KEY)["action"], "unchanged")
+            self.assertEqual(self.item(self.slack(), self.KEY)["action"], "unchanged")
+        self.assertEqual(self.assert_github_card(), before)
+
+    def test_slack_first_then_github_is_one_card_the_github_record_wins(self):
+        sl = self.slack()
+        self.assertEqual(sl["dropped"], [])
+        item = self.item(sl, self.KEY)
+        self.assertEqual((item["category"], item["becomes"], item["action"]), ("review_request", "pr-review", "add"))
+        [card] = self.pr_cards()
+        self.assertEqual((card["kind"], card["source"]["name"]), ("pr-review", "slack-mentions"))
+        self.assertEqual(card["plain"]["what"]["en"],
+                         "U0EXAMPLE2 asked you to review PR #42: <@U0EXAMPLE1> PTAL "
+                         "<https://github.com/example/widgets/pull/42>")
+        gh = self.item(self.github(), self.KEY)
+        self.assertEqual((gh["action"], gh["card"]), ("update", card["id"]))
+        after = self.assert_github_card()
+        self.assertEqual(after["id"], card["id"])
+        for _ in range(2):
+            self.assertEqual(self.item(self.slack(), self.KEY)["action"], "unchanged")
+            self.assertEqual(self.item(self.github(), self.KEY)["action"], "unchanged")
+        self.assertEqual(self.assert_github_card(), after)
+
+    def test_a_newer_slack_ask_updates_the_card_slack_made(self):
+        self.assertEqual(self.item(self.slack(), self.KEY)["action"], "add")
+        again = {**self.ASK, "id": "1730000300.000400", "at": "1730000300.000400",
+                 "text": "<@U0EXAMPLE1> PTAL again <https://github.com/example/widgets/pull/42>"}
+        raw = ("## Channel: #payments (C0123ABCD)\n"
+               "From: U0EXAMPLE2\nMessage_ts: 1730000300.000400\n"
+               "Text: <@U0EXAMPLE1> PTAL again <https://github.com/example/widgets/pull/42>\n")
+        result = self.slack(again, text=raw)
+        self.assertEqual(result["dropped"], [])
+        self.assertEqual(self.item(result, self.KEY)["action"], "update")  # its own card, so not left alone
+        [card] = self.pr_cards()
+        self.assertEqual((card["source"]["name"], card["source"]["record"]["id"]),
+                         ("slack-mentions", "1730000300.000400"))
+
+    def test_a_new_ask_on_a_done_pr_card_lands_on_it_and_leaves_it_done(self):
+        # Design 6.2: a review ask for a PR whose card is done lands on that card and does not reopen it, as a
+        # GitHub re-request does not; no new card is made.
+        self.assertEqual(self.item(self.slack(), self.KEY)["action"], "add")
+        [card] = self.pr_cards()
+        self.store().update(card["id"], {"lane": "done"}, by="tester")
+        again = {**self.ASK, "id": "1730000300.000400", "at": "1730000300.000400",
+                 "text": "<@U0EXAMPLE1> PTAL again <https://github.com/example/widgets/pull/42>"}
+        raw = ("## Channel: #payments (C0123ABCD)\n"
+               "From: U0EXAMPLE2\nMessage_ts: 1730000300.000400\n"
+               "Text: <@U0EXAMPLE1> PTAL again <https://github.com/example/widgets/pull/42>\n")
+        result = self.slack(again, text=raw)
+        self.assertEqual(result["dropped"], [])
+        item = self.item(result, self.KEY)
+        self.assertEqual((item["action"], item["card"]), ("update", card["id"]))
+        [after] = self.pr_cards()
+        self.assertEqual((after["id"], after["lane"], after["source"]["record"]["id"]),
+                         (card["id"], "done", "1730000300.000400"))
+        self.assertEqual([c["id"] for c in self.store().list()], [card["id"]])  # no card for the thread key
+
+    def test_a_dry_run_slack_ask_on_a_github_card_is_unchanged_too(self):
+        self.github()
+        raw = self.tmp / "slack.txt"
+        raw.write_text(self.SLACK)
+        result = self.engine().read_saved("slack-mentions", raw, records=[self.ASK], dry_run=True)
+        self.assertEqual(self.item(result, self.KEY)["action"], "unchanged")
+
+    def test_a_thread_whose_first_message_asks_for_a_review_still_groups_its_replies(self):
+        result = self.slack(self.ASK, self.FYI, self.QUESTION)
+        self.assertEqual(result["dropped"], [])
+        thread = "C0123ABCD:1730000000.123456"
+        self.assertEqual([(i["item"], i["key"], i["category"], i["action"]) for i in result["items"]],
+                         [(0, self.KEY, "review_request", "add"), (1, thread, "question", "add"),
+                          (2, thread, "question", "unchanged")])
+        by_key = {c["key"]: c for c in self.store().list()}
+        self.assertEqual(sorted(by_key), sorted([self.KEY, thread]))
+        self.assertEqual(by_key[self.KEY]["kind"], "pr-review")
+        self.assertEqual(by_key[self.KEY]["source"]["record"]["id"], "1730000000.123456")  # the ask's own record
+        self.assertEqual(by_key[thread]["kind"], "question")
+        self.assertEqual(by_key[thread]["source"]["record"]["id"], "1730000200.000300")  # the thread's latest
+
+    def my_prs(self):
+        raw = self.tmp / "gh-search-prs.json"
+        shutil.copy(ROOT / "tests" / "fixtures" / "ap2" / "scan" / "gh-search-prs.json", raw)
+        return self.engine().read_saved("github-my-prs", raw)
+
+    def test_slack_first_then_my_prs_gives_the_users_own_pr_its_words(self):
+        """Every PR github-my-prs lists is the user's own, so its read moves the feed of a card a Slack ask made
+        to github-my-prs, and the card reads as the user's own PR."""
+        self.assertEqual(self.item(self.slack(), self.KEY)["action"], "add")
+        [card] = self.pr_cards()
+        self.assertEqual(card["feed"], "slack-mentions")
+        mine = self.item(self.my_prs(), self.KEY)
+        self.assertEqual((mine["action"], mine["card"]), ("update", card["id"]))
+        [after] = self.pr_cards()
+        self.assertEqual((after["id"], after["feed"], after["source"]["name"]),
+                         (card["id"], "github-my-prs", "github-my-prs"))
+        self.assertTrue(after["plain"]["what"]["en"].startswith("Your PR #42:"), after["plain"]["what"]["en"])
+        self.assertEqual(self.item(self.my_prs(), self.KEY)["action"], "unchanged")
+
+    def test_a_my_prs_read_that_is_not_pr_review_keeps_the_feed(self):
+        """Only a github-my-prs read that makes a pr-review card moves the feed: one whose sort says update_card
+        leaves the Slack ask's feed as it is."""
+        self.assertEqual(self.item(self.slack(), self.KEY)["action"], "add")
+        self.user_source("github-my-prs", "extends: github-my-prs\nsort: { all: update_card }\n")
+        self.item(self.my_prs(), self.KEY)
+        [card] = self.pr_cards()
+        self.assertEqual(card["feed"], "slack-mentions")
+
+    def test_a_key_for_pattern_can_name_a_setting(self):
+        self.user_source("slack-mentions", "extends: slack-mentions\nsettings: { me: U0EXAMPLE1, org: acme }\n"
+                                           "key_for: { review_request: \"{org}/{pr}\" }\n")
+        result = self.slack()
+        self.assertEqual(result["dropped"], [])
+        [item] = result["items"]
+        self.assertEqual((item["key"], item["category"], item["action"]),
+                         ("acme/example/widgets#42", "review_request", "add"))
+
+    def test_a_card_with_no_source_name_is_left_alone_by_a_slack_ask(self):
+        """A card no source made (no source block) is not the Slack source's either, so a key_for record leaves
+        it alone."""
+        made = self.store().add({"kind": "pr-review", "lane": "needs", "feed": "by-hand", "links": [], "pri": "P2",
+                                 "origin": "found", "key": self.KEY,
+                                 "plain": {"what": {"en": "Review PR 42"}, "where": {"en": "Not reviewed yet."},
+                                           "do": {"en": "Wait."}}}, by="test")
+        before = self.store().get(made["id"])
+        item = self.item(self.slack(), self.KEY)
+        self.assertEqual((item["action"], item["card"]), ("unchanged", made["id"]))
+        self.assertIn("not a source", item["reason"])
+        self.assertEqual(self.store().get(made["id"]), before)
+
+    def check(self, raw_text, *records):
+        src = self.engine().source("slack-mentions")
+        return Engine.check_records(src, list(records), raw_text)
+
+    def test_pr_must_be_owner_repo_number_and_in_the_raw_output(self):
+        raw = ("Message_ts: 1730000000.123456 Channel: C0123ABCD\n"
+               "Text: PTAL https://github.com/example/widgets/pull/42/files and example/gadgets#7, "
+               "also see example/tools#123 and evilgithub.com/example/evil/pull/9 and "
+               "https:\\/\\/github.com\\/example\\/escaped\\/pull\\/3 and my-github.com/example/dash/pull/5 and "
+               "githubXcom/example/dotted/pull/6\n")
+        base = {"id": "1730000000.123456", "at": "1730000000.123456", "text": "PTAL", "place_id": "C0123ABCD",
+                "category": "review_request"}
+        cases = [
+            ("example/widgets#42", None),                    # a link, then /files
+            ("example/gadgets#7", None),                     # the literal owner/repo#number
+            ("example/escaped#3", None),                     # a link in JSON, its slashes escaped
+            ("example/widgets#4", "form.pr 'example/widgets#4' is not in the raw output"),  # pull/42, not /4
+            ("example/tools#12", "form.pr 'example/tools#12' is not in the raw output"),    # not a whole token
+            ("example/evil#9", "form.pr 'example/evil#9' is not in the raw output"),        # not github.com
+            ("example/dash#5", "form.pr 'example/dash#5' is not in the raw output"),        # my-github.com, not github.com
+            ("example/dotted#6", "form.pr 'example/dotted#6' is not in the raw output"),    # githubXcom: the dot is a dot
+            ("other/widgets#42", "form.pr 'other/widgets#42' is not in the raw output"),
+            ("example/widgets#042", "form.pr 'example/widgets#042' is not <owner>/<repo>#<number>"),
+            ("https://github.com/example/widgets/pull/42",
+             "form.pr 'https://github.com/example/widgets/pull/42' is not <owner>/<repo>#<number>"),
+            ("widgets#42", "form.pr 'widgets#42' is not <owner>/<repo>#<number>"),
+        ]
+        for pr, reason in cases:
+            with self.subTest(pr=pr):
+                entries, dropped = self.check(raw, dict(base, pr=pr))
+                if reason is None:
+                    self.assertEqual(dropped, [])
+                    self.assertEqual(entries[0]["record"]["pr"], pr)
+                else:
+                    self.assertEqual((entries, dropped), ([], [{"item": 0, "reason": reason}]))
+        with self.subTest("a pr on another category is checked too"):
+            entries, dropped = self.check(raw, dict(base, pr="example/widgets#4", category="question"))
+            self.assertEqual(dropped, [{"item": 0, "reason": "form.pr 'example/widgets#4' is not in the raw output"}])
+        with self.subTest("a dot in the repo name is a dot, not any character"):
+            dotted = "Message_ts: 1730000000.123456 Channel: C0123ABCD Text: PTAL github.com/acme/myXrepo/pull/3\n"
+            entries, dropped = self.check(dotted, dict(base, pr="acme/my.repo#3"))
+            self.assertEqual((entries, dropped),
+                             ([], [{"item": 0, "reason": "form.pr 'acme/my.repo#3' is not in the raw output"}]))
+
+    def test_a_review_request_without_its_pr_is_dropped_naming_the_field(self):
+        raw = "Message_ts: 1730000000.123456 Channel: C0123ABCD Text: PTAL\n"
+        base = {"id": "1730000000.123456", "at": "1730000000.123456", "text": "PTAL", "place_id": "C0123ABCD"}
+        for record in (dict(base, category="review_request"), dict(base, category="review_request", pr=""),
+                       dict(base, category="review_request", pr="  ")):
+            with self.subTest(record=record):
+                entries, dropped = self.check(raw, record)
+                self.assertEqual((entries, dropped), ([], [{"item": 0, "reason": "key: {pr} missing"}]))
+        with self.subTest("a blank pr on another category is left out, not a reason to drop it"):
+            entries, dropped = self.check(raw, dict(base, category="question", pr=""))
+            self.assertEqual(dropped, [])
+            self.assertNotIn("pr", entries[0]["record"])
+
+
+class KeyForDefaultCategoryTest(EngineCase):
+    def test_a_one_category_source_keys_an_uncategorised_entry_on_its_key_for(self):
+        """A fill: paths entry has no category; with one sort category it is that one, for key_for too."""
+        self.user_source("one", """\
+            source: one
+            brings: messages
+            read: { via: command, run: "echo []" }
+            fill: paths
+            form: { id: .id, at: .at, text: .text }
+            link: none
+            key: "{id}"
+            key_for: { all: "x-{id}" }
+            sort: { all: alert }
+            """)
+        engine = self.engine()
+        entry = {"item": 0, "record": {"id": "7", "at": "2026-11-10T14:00:00Z", "text": "it is down"}, "link": None}
+        result = engine.build(engine.source("one"), [entry], dry_run=True)
+        self.assertEqual(result["dropped"], [])
+        [item] = result["items"]
+        self.assertEqual((item["key"], item["category"], item["action"]), ("x-7", "all", "add"))
+
+
 class SortToCardTest(EngineCase):
     def test_a_read_makes_cards_and_a_second_read_updates_them(self):
         reply = self.reply_copy("status-incidents.json")
