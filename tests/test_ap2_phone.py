@@ -288,13 +288,162 @@ class FullCardTest(PhoneCase):
         other = self.add(kind="errand")
         data = self.build()
         self.assertIn("template_error", data["full"][card["id"]])
-        self.assertEqual(as_json(data["full"][card["id"]]), self.server_reply(card["id"]))
-        self.assertEqual(as_json(data["full"][other["id"]]), self.server_reply(other["id"]))
+        # The phone's copy names the data folder as `<data>` (the scrub below); the rest is the server's reply.
+        for c in (card, other):
+            expect = self.server_reply(c["id"])
+            expect["template_error"] = expect["template_error"].replace(str(self.data), "<data>")
+            self.assertEqual(as_json(data["full"][c["id"]]), expect)
 
     def test_the_store_is_not_changed_by_the_mac_only_fields_leaving(self):
         card = self.pr42()
         self.build()
         self.assertIn("raw", Store(self.data, cfg=self.cfg).get(card["id"])["source"])
+
+
+# --- local paths: the data folder becomes `<data>`, the home folder `~` ---------------------------------------
+
+class ScrubTest(PhoneCase):
+    def bad_template_and_gate(self) -> dict:
+        """A bad user template, a damaged gate.json and a card of the bad template's kind."""
+        (self.data / "templates" / "parcel.yaml").write_text("kind: parcel\n", encoding="utf-8")
+        (self.data / "gate.json").write_text("{not json", encoding="utf-8")
+        return self.add(kind="parcel")
+
+    def ask(self, text, **over) -> dict:
+        return self.add(ask={"type": "fix", "text": text, "role": "implement", "reason": "died"}, **over)
+
+    def test_the_data_folder_becomes_data_as_given_and_resolved(self):
+        link = self.tmp / "data (link)+[1]"
+        link.symlink_to(self.data, target_is_directory=True)
+        card = self.bad_template_and_gate()
+        asked = self.ask(f"{self.data}/workers.json: cannot read; see '{link}/logs/x.log'")
+        data = phone.build(link, cfg=self.cfg, now=NOW, plugin_dir=self.plugin)
+        text = json.dumps(data, ensure_ascii=False)
+        for path in (str(link), str(self.data), str(self.tmp)):
+            self.assertNotIn(path, text)
+        self.assertIn("<data>/", text)
+        self.assertEqual(data["full"][card["id"]]["template_error"], "<data>/templates/parcel.yaml: missing key 'view'")
+        self.assertRegex(data["heartbeat"]["error"], r"^<data>/gate\.json: not JSON: ")
+        self.assertEqual(data["full"][asked["id"]]["card"]["ask"]["text"],
+                         "<data>/workers.json: cannot read; see '<data>/logs/x.log'")
+
+    def test_a_data_path_next_to_chinese_becomes_data(self):
+        asked = self.ask(f"看{self.data}里的log文件")
+        self.assertEqual(self.build()["full"][asked["id"]]["card"]["ask"]["text"], "看<data>里的log文件")
+
+    def test_a_data_path_after_a_flag_or_inside_a_longer_path_becomes_data(self):
+        flag = self.ask(f"ld: -L{self.data}/runs not found")
+        inside = self.ask(f"copied to /Volumes/Backup+{self.data}/g")
+        two = self.ask(f"看{self.data}/a和{self.data}/b")
+        full = self.build()["full"]
+        self.assertEqual(full[flag["id"]]["card"]["ask"]["text"], "ld: -L<data>/runs not found")
+        self.assertEqual(full[inside["id"]]["card"]["ask"]["text"], "copied to /Volumes/Backup+<data>/g")
+        self.assertEqual(full[two["id"]]["card"]["ask"]["text"], "看<data>/a和<data>/b")
+
+    def test_a_data_path_inside_markdown_marks_becomes_data(self):
+        asked = self.ask(f"_{self.data}_ is full")
+        dotted = self.ask(f"_{self.data}._ is full")
+        spaced = self.ask(f"the data folder {self.data} is locked")
+        full = self.build()["full"]
+        self.assertEqual(full[asked["id"]]["card"]["ask"]["text"], "_<data>_ is full")
+        self.assertEqual(full[dotted["id"]]["card"]["ask"]["text"], "_<data>._ is full")
+        self.assertEqual(full[spaced["id"]]["card"]["ask"]["text"], "the data folder <data> is locked")
+
+    def test_an_ask_text_that_is_not_a_string_has_each_string_scrubbed(self):
+        per_lang = self.ask({"en": f"see {self.data}/x", "zh": f"看 {self.data}/x",
+                             f"{self.data}/runs/c1/out.txt": "is this right?"})
+        listed = self.ask([f"see {self.data}/y", 3, None])
+        data = self.build()
+        self.assertEqual(data["full"][per_lang["id"]]["card"]["ask"]["text"],
+                         {"en": "see <data>/x", "zh": "看 <data>/x", "<data>/runs/c1/out.txt": "is this right?"})
+        self.assertEqual(data["full"][listed["id"]]["card"]["ask"]["text"], ["see <data>/y", 3, None])
+        self.assertNotIn(str(self.data), json.dumps(data, ensure_ascii=False))
+
+    def test_the_home_folder_becomes_a_tilde_as_given_and_resolved(self):
+        real = self.tmp / "Users" / "x"
+        real.mkdir(parents=True)
+        home = self.tmp / "home-link"
+        home.symlink_to(real, target_is_directory=True)
+        asked = self.ask(f"could not resume after parking (no worktree at {home}/worktrees/a); look at its "
+                         f"worktree, then start it again")
+        other = self.ask(f"see {real}/worktrees/b/log.txt, and {real}")
+        sibling = self.ask(f"{real}y/worktrees/c is not under home")
+        kept = {f"{real}.old/a": f"{real}.old/a", f"{real}+old/a": f"{real}+old/a",
+                f"/mnt/backup{real}/a": "/mnt/backup~/a", f"see {real}.": "see ~.",
+                f"请看{home}/worktrees/c 的日志": "请看~/worktrees/c 的日志",
+                f"clang -I{home}/a/include": "clang -I~/a/include", f"see _{real}/a_": "see _~/a_",
+                f"file://{real}/a": "file://~/a", f"HOME={home}/a": "HOME=~/a",
+                f"已把{home}/a改成{home}/b": "已把~/a改成~/b", f"{home}/a、{home}/b": "~/a、~/b",
+                f"cd {home}/w&&{home}/bin/run": "cd ~/w&&~/bin/run", f"mv /tmp/a {home}/b": "mv /tmp/a ~/b",
+                f"PATH=/usr/bin:{home}/bin": "PATH=/usr/bin:~/bin", f"/opt/a,{home}/b;{home}/c": "/opt/a,~/b;~/c",
+                f"{real}/repo{real}/repo/a": "~/repo~/repo/a", f"file://localhost{real}/a": "file://localhost~/a",
+                f"see _{real}_ or": "see _~_ or", f"~~{real}~~ was wrong": "~~~~~ was wrong",
+                f"_see {real}._": "_see ~._", f"~~{real}.~~ no": "~~~.~~ no", f"{real}的PR": "~的PR",
+                f"{real}._backup/a": f"{real}._backup/a", f"{real}--old/a": f"{real}--old/a",
+                f"cd {home}&&git pull": "cd ~&&git pull", f"cd {home};ls|head>{home}/o": "cd ~;ls|head>~/o",
+                f"HOME={home},PWD=/tmp": "HOME=~,PWD=/tmp", f"copied {real}...then": "copied ~...then",
+                f"cd {home} && ls\n{real}\tx": "cd ~ && ls\n~\tx",
+                " ".join(f"{c}{real}/a" for c in "`(\"[@*<|!?^])$#%."):
+                    " ".join(f"{c}~/a" for c in "`(\"[@*<|!?^])$#%."),
+                " ".join(f"{real}{c}a" for c in ",;:&|<>()'\"!?*^[]{}`"):
+                    " ".join(f"~{c}a" for c in ",;:&|<>()'\"!?*^[]{}`"),
+                f"{real}-a {real}@a {real}~a {real}$a {real}%a {real}#a {real}=a":
+                    f"{real}-a {real}@a {real}~a {real}$a {real}%a {real}#a {real}=a"}
+        rows = {text: self.ask(text) for text in kept}
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            full = self.build()["full"]
+        for text, want in kept.items():
+            self.assertEqual(full[rows[text]["id"]]["card"]["ask"]["text"], want, text)
+        self.assertEqual(full[asked["id"]]["card"]["ask"]["text"],
+                         "could not resume after parking (no worktree at ~/worktrees/a); look at its worktree, "
+                         "then start it again")
+        self.assertEqual(full[other["id"]]["card"]["ask"]["text"], "see ~/worktrees/b/log.txt, and ~")
+        self.assertEqual(full[sibling["id"]]["card"]["ask"]["text"], f"{real}y/worktrees/c is not under home")
+
+    def test_many_home_paths_in_one_text_are_all_replaced(self):
+        home = self.tmp / "Users" / "x"
+        home.mkdir(parents=True)
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            scrub = phone._Scrub(self.data)
+        self.assertEqual(scrub(f"{home}/a " * 20000), "~/a " * 20000)
+
+    def test_a_data_folder_under_home_is_data_not_a_tilde_path(self):
+        card = self.bad_template_and_gate()
+        asked = self.ask(f"{self.data}/cards and {self.tmp}/worktrees/a")
+        with mock.patch.dict(os.environ, {"HOME": str(self.tmp)}):
+            data = self.build()
+        self.assertEqual(data["full"][card["id"]]["template_error"], "<data>/templates/parcel.yaml: missing key 'view'")
+        self.assertRegex(data["heartbeat"]["error"], r"^<data>/gate\.json: ")
+        self.assertEqual(data["full"][asked["id"]]["card"]["ask"]["text"], "<data>/cards and ~/worktrees/a")
+        self.assertNotIn(str(self.tmp), json.dumps(data, ensure_ascii=False))
+
+    def test_a_home_at_the_root_changes_nothing(self):
+        text = "/tmp/worktrees/a is gone; cannot write to /"
+        asked = self.ask(text)
+        with mock.patch.dict(os.environ, {"HOME": "/"}):
+            full = self.build()["full"]
+        self.assertEqual(full[asked["id"]]["card"]["ask"]["text"], text)
+
+    def test_an_ask_without_text_and_other_fields_are_kept(self):
+        asked = self.add(ask={"type": "answer", "text": None, "role": "implement"},
+                         title=f"Look at {self.data}/cards")
+        full = self.build()["full"][asked["id"]]
+        self.assertIsNone(full["card"]["ask"]["text"])
+        self.assertEqual(full["card"]["title"], f"Look at {self.data}/cards")  # only the three texts are scrubbed
+
+    def test_the_store_and_the_local_page_keep_the_full_paths(self):
+        card = self.bad_template_and_gate()
+        text = f"no worktree at {self.data}/worktrees/a"
+        asked = self.ask(text)
+        self.build()
+        self.assertEqual(Store(self.data, cfg=self.cfg).get(asked["id"])["ask"]["text"], text)
+        self.assertEqual(self.server_reply(asked["id"])["card"]["ask"]["text"], text)
+        self.assertIn(str(self.data / "templates" / "parcel.yaml"), self.server_reply(card["id"])["template_error"])
+        found = Store(self.data, cfg=self.cfg).list()
+        reply = server.full_card(Store(self.data, cfg=self.cfg), self.data,
+                                 next(c for c in found if c["id"] == card["id"]), ("en",))
+        self.assertTrue(reply["template_error"].startswith(str(self.data / "templates" / "parcel.yaml")))
+        self.assertTrue(server.heartbeat(self.data, NOW)["error"].startswith(str(self.data / "gate.json")))
 
 
 # --- criterion 4: hide what people wrote -----------------------------------------------------------------------

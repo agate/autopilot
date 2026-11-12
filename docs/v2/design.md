@@ -1434,13 +1434,15 @@ Calls the author made without asking (check them):
   - The document: `{generated_at, mode, primary_language, secondary_language, languages, settings:
     {history_days, lanes, hide_quotes}, lanes, projects, heartbeat, cards, full}`. `lanes` (all four keys) counts
     only the cards on the phone; `projects` is the local page's project list over those cards (each `title` per
-    language, as there), `done`/`total` from the children on the phone; `heartbeat` is the local page's; `cards`
-    are the local page's rows in its order. These are the JSON shapes of the local page entry above.
+    language, as there), `done`/`total` from the children on the phone; `heartbeat` is the local page's (its
+    `error` scrubbed, see Local paths); `cards` are the local page's rows in its order. These are the JSON shapes of
+    the local page entry above.
   - `full` maps each card id in `cards` to the local page's full card (`GET /api/cards/<id>`), built by the
-    same function, `server.full_card`, with two changes only: the card's `sessions` and `source.raw` (a path to
-    a file on this Mac) are removed, and a child or link that is not on the phone (outside the window or the
-    lanes) is `{id, off_phone: true}` with no title or words, so old history does not reach the phone through a
-    link. A link to a card that is gone stays `{id, missing: true}`. Questions and their answers stay (9.4).
+    same function, `server.full_card`, with these changes only (plus hiding and the Local paths scrub below): the
+    card's `sessions` and `source.raw` (a path to a file on this Mac) are removed, and a child or link that is not
+    on the phone (outside the window or the lanes) is `{id, off_phone: true}` with no title or words, so old
+    history does not reach the phone through a link. A link to a card that is gone stays `{id, missing: true}`.
+    Questions and their answers stay (9.4).
   - Hiding what people wrote (`phone_hide_quotes: true`), for every card with a source record: the row has `title:
     null` and `title_hidden: {<language>: text}` for each configured language, so the page shows the chosen language
     only (anti-goal 1); the full card's `title` is the text per language, like `title_hidden`, `plain.what` is the
@@ -1455,6 +1457,32 @@ Calls the author made without asking (check them):
     unchanged.
   - **[decided by the builder]** Once titles have one slot per language, a hidden card's full-card `title` holds
     the phrase per language, so one screen never shows both languages.
+  - Local paths: three texts can name a file on this Mac, `full[id].template_error` (a bad user template's
+    file), `heartbeat.error` (`<data>/gate.json`) and `full[id].card.ask.text` (a worker's ask, such as a parked
+    worker's worktree). In the phone's copy of each, the data folder's path (as given and resolved) becomes
+    `<data>`, then the home folder's (`Path.home()`, as given and resolved) becomes `~`, so
+    `/Users/x/worktrees/a` reads `~/worktrees/a`; the file's name and the reason stay. The store and the local
+    page (`GET /api/cards/<id>`, `/api/state`) keep the full paths.
+    - **[decided by the builder]** A path that does not contain the data or home folder's path
+      (`/private/var/...`, `/tmp/...`) stays as it is: it names neither the user nor the data folder's place. Easy
+      to add later.
+    - **[decided by the builder]** A folder's path is replaced only as a whole name on its right side: an
+      optional dot and then a run of ASCII name characters (letters, digits and `_ - + @ ~ $ % # =`) right after
+      the folder make it a longer name only when the run holds a letter or digit, so home `/Users/x` does not
+      change `/Users/xy/...`, `/Users/x-old/...` or `/Users/x.old/...`, while `/Users/x.` and markdown marks like
+      `_/Users/x_`, `_/Users/x._` or `~~/Users/x~~` read `~.`, `_~_`, `_~._` and `~~~~~`; a folder literally
+      named `/Users/x_` would read `~_`: a wrong label, never a leak. A non-ASCII character (Chinese, `é`) right
+      next to a path does not stop it, so a folder `/Users/xé` would read `~é`: a wrong name, never a leak. An ask
+      text that is not a string (an object per language, a list) has each of its strings scrubbed, an object's
+      keys and values alike. A home of `/` (or none found) changes nothing. The data folder goes first, so a data
+      folder under home reads `<data>`, not `~/...`.
+    - **[decided by the builder]** On its left side there is no exception: a folder's path is replaced wherever
+      it sits, also inside a longer path, so `/mnt/backup/Users/x/a` reads `/mnt/backup~/a` and
+      `/Users/x/repo/Users/x/repo/a` reads `~/repo~/repo/a`. The folder's path in any spot still names the user or
+      the data folder's place; a path that looks odd is a wrong label, never a leak; and each left-side rule tried
+      let a realistic text through.
+    - **[decided by the builder]** Only these three texts are scrubbed; a card's own words (its title, plain
+      words, questions) are what a person or a source wrote and stay as they are.
   - Read-only, in shadow and live mode alike: building writes nothing in the data folder (it reads the store
     without its lock file, as the local page's GETs do, and never builds `index.sqlite`), starts no process and
     opens no connection. The command writes only to stdout or `--out` (inside the data folder is allowed, since
