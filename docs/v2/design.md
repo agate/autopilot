@@ -1986,9 +1986,12 @@ Calls the author made without asking (check them):
   - Checks (v1's): a gateway needs `base_url` (http or https), `key_command`, `small_model` and
     `daily_cap_usd > 0`; `settings` may not hold `permissions`, `hooks`, `apiKeyHelper` or `disableAllHooks`; `env`
     and `settings.env` may not hold a credential-looking name (`KEY`, `TOKEN`, `SECRET`, `PASSWORD`), a name the
-    overlay sets or blanks, a cloud-provider switch, or (v2's addition) any `AP2_*` or `AUTOPILOT_*` name. On save,
-    `gateway.models_command` runs (`shell=True`, 30 s) and every model the profile names must be in the JSON list it
-    prints; its output is only parsed, never printed or kept. A list holding anything but texts is refused with the
+    overlay sets or blanks, a cloud-provider switch, or (v2's addition) any `AP2_*` or `AUTOPILOT_*` name. On a save
+    without a fetched list, `gateway.models_command` runs (`shell=True`, 30 s) and every model the profile names must
+    be in the JSON list it prints; its output is only parsed, never printed or kept. `ap2 profile add`, `choose`,
+    `choices` and `use` fetch it with 20 s instead (`profiles.CHOICE_TIMEOUT`, see "Model and effort choice") and
+    show only the entries shaped like a model name (`profiles.MODEL_NAME`: a letter or digit, then up to 127 letters,
+    digits and `. _ : / @ [ ] -`), never any other output. A list holding anything but texts is refused with the
     same "must print a JSON list of model names" line. A model (`model`, `dispatcher_model` or `small_model`) may
     end in `[1m]` (`profiles.LONG_CONTEXT`, Claude Code's marker for the 1M context window): it is checked without
     the marker (`profiles.base_model` strips one trailing `[1m]`, nothing else), and stored and passed with it, to
@@ -2068,6 +2071,14 @@ Calls the author made without asking (check them):
     - **[decided by the builder]** `add` without both flags now fetches the list (and so reads the price override
       on a subscription profile) before it saves: the list the prompt shows is the one the save checked. A broken
       `prices.json` therefore fails such an `add` with its one line.
+    - **[decided by the builder]** The choices keep only the models command's entries shaped like a model name
+      (`profiles.MODEL_NAME`, checked before the `[1m]` variants are added); any other entry is dropped and never
+      shown. Why: the list is shown in a terminal and in logs (the choices JSON, the numbered list, the "choose one
+      of" error), so a secret-looking text or a control character the command prints must never reach them. A save
+      without a fetched list is unchanged: it only parses the output and shows none of it. When every entry is
+      dropped, it is a list with no models ("listed no models, so there is nothing to choose").
+    - **[decided by the builder]** Ctrl-C at a prompt counts as "no choice made", like the end of input: one `ap2:`
+      line and exit 1, never a traceback (`add` still says the profile is saved and how to finish it).
   - Model and effort. A fresh start gets `--model <profile model>` when the profile has one and
     `--effort <profile effort>` when it has one, after `--agent`. A resume gets neither (8.2): a resumed gateway
     session takes its model from the overlay's `ANTHROPIC_MODEL`.

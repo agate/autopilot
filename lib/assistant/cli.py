@@ -511,7 +511,8 @@ def _prompt_choose(data, name: str, c: dict, model=None, effort=None) -> dict:
 
 def _ask(title: str, options: list, recommended) -> str:
     """A numbered prompt on stderr (stdout keeps only the JSON); Enter takes the recommended entry, a number or the
-    exact name is taken, anything else asks again. EOFError when the input ends."""
+    exact name is taken, anything else asks again. EOFError when the input ends or the user presses Ctrl-C, so every
+    caller says "no choice made" in one line instead of a traceback."""
     lines = [title] + [f"  {i}) {o}" + (" (recommended)" if o == recommended else "")
                        for i, o in enumerate(options, 1)]
     _write("\n".join(lines) + "\n", sys.stderr)
@@ -520,12 +521,13 @@ def _ask(title: str, options: list, recommended) -> str:
         _write(f"Number{f' [{default}]' if default else ''}: ", sys.stderr)
         try:
             got = input().strip()
-        except EOFError:
+        except (EOFError, KeyboardInterrupt):
             _write("\n", sys.stderr)  # end the prompt's line, so the error line that follows starts on its own
-            raise
+            raise EOFError from None
         if not got and default:
             return options[default - 1]
-        if got.isdigit() and 1 <= int(got) <= len(options):
+        # ASCII digits only and 4 at most: `int` refuses "²" (a digit to isdigit) and a number too long to read.
+        if got.isascii() and got.isdigit() and len(got) <= 4 and 1 <= int(got) <= len(options):
             return options[int(got) - 1]
         if got in options:
             return got

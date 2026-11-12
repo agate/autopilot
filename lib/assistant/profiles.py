@@ -56,6 +56,10 @@ RECOMMENDED_MODEL = "claude-opus-5-5[1m]"
 RECOMMENDED_EFFORT = "high"
 DEFAULT_MODEL = "default"  # Claude Code's own default model, stored as null
 CHOICE_TIMEOUT = 20  # seconds `gateway.models_command` may take when it lists the choices
+# The shape of a model name the choices may show (`gpt-x`, `claude-opus-5-5[1m]`, `us.anthropic.claude-x-v1:0`,
+# `anthropic/claude-x`): the list is shown in a terminal and in logs, so an entry of any other shape (a secret, a
+# control character) is dropped from the choices, never shown.
+MODEL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@\[\]-]{0,127}")
 NEEDS_CHOICE = 3  # `ap2 profile`'s exit code when a choice is needed and no terminal can ask for it
 
 
@@ -221,8 +225,8 @@ def base_model(name: str) -> str:
 
 def _listed(cmd: str, timeout: int) -> list:
     """The JSON list of model names `cmd` prints. Raises ModelsUnavailable naming the exit code or the exception
-    only: the command's output is only parsed, never shown (it may hold more than model names), and its command line
-    is never shown either."""
+    only: an error never shows the command's output (it may hold more than model names) or its command line. The
+    list itself is only parsed here; `model_choices` shows only its entries shaped like a model name."""
     try:
         r = subprocess.run(cmd, shell=True, stdin=subprocess.DEVNULL, capture_output=True, text=True,
                            errors="replace", timeout=timeout)
@@ -420,13 +424,14 @@ def _with_long(names) -> list:
 
 
 def model_choices(data, p: dict) -> list:
-    """The models `p` may run, fetched now on every call (never cached). A gateway with a models command: the list it
-    prints. Otherwise (the subscription, or a gateway with no models command) the priced claude-* models of
+    """The models `p` may run, fetched now on every call (never cached). A gateway with a models command: the entries
+    of the list it prints that are shaped like a model name (`MODEL_NAME`); any other entry is dropped, never shown.
+    Otherwise (the subscription, or a gateway with no models command) the priced claude-* models of
     `spend.prices(data)`, then `default`. Raises ModelsUnavailable when the command fails, and SpendError (a
     ConfigError) when the price override is broken."""
     cmd = (p.get("gateway") or {}).get("models_command") if p.get("mode") == "gateway" else None
     if cmd:
-        return _with_long(_listed(cmd, CHOICE_TIMEOUT))
+        return _with_long(m for m in _listed(cmd, CHOICE_TIMEOUT) if MODEL_NAME.fullmatch(m))
     from assistant import spend  # imported here: spend reads transcripts, which a profile load never needs
     return _with_long(m for m in spend.prices(data) if m.startswith("claude-")) + [DEFAULT_MODEL]
 

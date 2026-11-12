@@ -29,6 +29,7 @@ from assistant.profiles import ModelsUnavailable, ProfileError
 AP2 = ROOT / "bin" / "ap2"
 LISTED = '["claude-opus-5-5", "claude-haiku-4-5", "claude-sonnet-5-5", "gpt-x"]'
 WHEN = "2026-11-12T10:00:00-08:00"
+CTRL_C = KeyboardInterrupt  # an answer that stands for the user pressing Ctrl-C at the prompt
 
 
 def counting(folder: Path, listed: str = LISTED) -> str:
@@ -66,21 +67,27 @@ class CliCase(Case):
 
     def run_cli(self, *argv, tty=False, answers=None):
         """`ap2 profile ...` in this process, with stdin a terminal or not; `answers` are what the user types at
-        each prompt, and the end of them is the end of input."""
+        each prompt (`CTRL_C`: Ctrl-C there), and the end of them is the end of input."""
         out, err = io.StringIO(), io.StringIO()
         typed = iter(answers or [])
 
         def fake_input(prompt=""):
             err.write(prompt)
             try:
-                return next(typed)
+                got = next(typed)
             except StopIteration:
                 raise EOFError from None
+            if got is CTRL_C:
+                raise KeyboardInterrupt
+            return got
 
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
                 mock.patch.object(sys, "stdin", SimpleNamespace(isatty=lambda: tty)), \
                 mock.patch("builtins.input", fake_input):
-            code = cli.main(["profile", *argv, "--data", str(self.data)])
+            try:
+                code = cli.main(["profile", *argv, "--data", str(self.data)])
+            except KeyboardInterrupt:  # caught here, so it fails this test instead of stopping the whole run
+                self.fail("Ctrl-C at a prompt escaped `ap2 profile` as a traceback")
         return code, out.getvalue(), err.getvalue()
 
     def add_gateway(self, *extra, tty=False, answers=None):
@@ -128,6 +135,8 @@ class ChosenAtTest(Case):
         # A stored subscription.json written by hand, with no chosen_at key at all.
         self.file("subscription").write_text(json.dumps({"name": "subscription", "mode": "subscription"}))
         self.assertFalse(profiles.needs_choice(self.data, profiles.load(self.data, "subscription")))
+        # Only the profile named subscription is exempt: another subscription-mode profile needs a choice.
+        self.assertTrue(profiles.needs_choice(self.data, dict(profiles.builtin(), name="s")))
 
     def test_from_args_marks_a_profile_chosen_only_with_both_flags(self):
         def args(**kw):
@@ -166,6 +175,15 @@ class ModelChoicesTest(Case):
         # No duplicates, whether the gateway lists the [1m] name too or a name twice.
         p["gateway"]["models_command"] = "printf '%s' '[\"claude-opus-5-5[1m]\", \"claude-opus-5-5\", \"gpt-x\", \"gpt-x\"]'"
         self.assertEqual(profiles.model_choices(self.data, p), ["claude-opus-5-5[1m]", "claude-opus-5-5", "gpt-x"])
+
+    def test_only_entries_shaped_like_a_model_name_are_offered(self):
+        p = self.gateway(small_model="claude-opus-5-5",
+                         listed=r'["claude-opus-5-5", "Bearer sk-ant-api03-SECRETVALUE", "\u001b]0;pwned\u0007x"]')
+        self.assertEqual(profiles.model_choices(self.data, p), ["claude-opus-5-5[1m]", "claude-opus-5-5"])
+        for name in ("gpt-x", "claude-opus-5-5[1m]", "us.anthropic.claude-x-v1:0", "anthropic/claude-x", "a@b"):
+            self.assertTrue(profiles.MODEL_NAME.fullmatch(name), name)
+        for name in ("", "-x", "a b", "x\n", "a\x1bb", "x" * 129):
+            self.assertIsNone(profiles.MODEL_NAME.fullmatch(name), name)
 
     def test_the_command_runs_on_every_call(self):
         p = self.gateway()
@@ -255,8 +273,11 @@ class ChooseTest(Case):
         self.assertFalse(profiles.needs_choice(self.data, p))
         # With the list given, no command runs at all.
         before = runs(self.tmp)
-        profiles.choose(self.data, "g", "gpt-x", "low", models=["gpt-x", "claude-haiku-4-5"])
+        later = "2026-11-13T09:00:00+00:00"
+        with mock.patch.object(profiles, "now", return_value=later):
+            p = profiles.choose(self.data, "g", "gpt-x", "low", models=["gpt-x", "claude-haiku-4-5"])
         self.assertEqual(runs(self.tmp), before)
+        self.assertEqual(p["chosen_at"], later)  # a second choice records its own time
 
     def test_a_refusal_writes_nothing(self):
         self.gateway()
@@ -303,6 +324,20 @@ class ChoicesCliTest(CliCase):
         self.assertNotIn("OUT-NOT-SHOWN", err)
         self.assertNotIn("printf", err)
         self.assert_one_error(*self.run_cli("choices", "nope"), text="no profile named 'nope'")
+
+
+    def test_a_listed_entry_not_shaped_like_a_model_name_is_never_shown(self):
+        self.gateway(small_model="claude-opus-5-5",
+                     listed=r'["claude-opus-5-5", "Bearer sk-ant-api03-SECRETVALUE", "\u001b]0;pwned\u0007x"]')
+        code, out, err = self.run_cli("choices", "g")
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(json.loads(out)["models"], ["claude-opus-5-5[1m]", "claude-opus-5-5"])
+        code, out, err = self.run_cli("choose", "g", "--model", "nope", "--effort", "high")
+        self.assert_one_error(code, out, err, "model 'nope' is not offered")
+        for shown in (out, err):
+            self.assertNotIn("SECRETVALUE", shown)
+            self.assertNotIn("\x1b", shown)
+            self.assertNotIn("pwned", shown)
 
 
 class ChooseCliTest(CliCase):
@@ -353,6 +388,25 @@ class ChooseCliTest(CliCase):
         self.assertNotIn("Model for g", err)
         p = profiles.load(self.data, "g")
         self.assertEqual((p["model"], p["effort"]), ("claude-opus-5-5", "xhigh"))
+
+    def test_a_digit_int_cannot_read_asks_again(self):
+        self.gateway()
+        code, out, err = self.run_cli("choose", "g", tty=True, answers=["\u00b2", "9" * 5000, "1", "1"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(err.count("Type a number from 1 to"), 2)
+        p = profiles.load(self.data, "g")
+        self.assertEqual((p["model"], p["effort"]), ("claude-opus-5-5[1m]", "low"))
+
+    def test_ctrl_c_at_the_prompt_changes_nothing(self):
+        self.gateway()
+        before = self.file().read_bytes()
+        for answers in ([CTRL_C], ["", CTRL_C]):
+            with self.subTest(answers=answers):
+                code, out, err = self.run_cli("choose", "g", tty=True, answers=answers)
+                self.assertEqual((code, out), (1, ""))
+                self.assertNotIn("Traceback", err)
+                self.assertTrue(err.endswith("\nap2: no choice made; nothing changed\n"), err)
+        self.assertEqual(self.file().read_bytes(), before)
 
     def test_end_of_input_changes_nothing(self):
         self.gateway()
@@ -422,6 +476,9 @@ class AddCliTest(CliCase):
         self.assert_one_error(*self.run_cli("add", "s", "--subscription", "--model", "bogus"),
                               text="model 'bogus' is not offered")
         self.assertFalse(self.file("s").exists())
+        # An effort flag alone is checked before anything is saved too.
+        self.assert_one_error(*self.add_gateway("--effort", "turbo"), text="effort 'turbo' is not offered")
+        self.assertFalse(self.file().exists())
 
     def test_both_flags_on_a_subscription_profile(self):
         code, out, err = self.run_cli("add", "s", "--subscription", "--model", "default", "--effort", "low")
@@ -446,6 +503,19 @@ class AddCliTest(CliCase):
         self.assertTrue(profiles.needs_choice(self.data, p))
         self.assertEqual(p["effort"], "low")
 
+    def test_a_subscription_mode_profile_needs_a_choice_too(self):
+        code, out, err = self.run_cli("add", "s", "--subscription")
+        self.assertEqual(code, profiles.NEEDS_CHOICE, err)
+        self.assertTrue(profiles.needs_choice(self.data, profiles.load(self.data, "s")))
+
+    def test_in_a_terminal_a_model_flag_alone_asks_only_for_the_effort(self):
+        self.assertEqual(profiles.RECOMMENDED_EFFORT, "high")
+        code, out, err = self.add_gateway("--model", "gpt-x", tty=True, answers=[""])
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("Model for g", err)
+        p = profiles.load(self.data, "g")
+        self.assertEqual((p["model"], p["effort"]), ("gpt-x", "high"))
+
     def test_in_a_terminal_it_asks_at_the_end(self):
         before = runs(self.tmp)
         code, out, err = self.add_gateway("--effort", "low", tty=True, answers=["6"])
@@ -462,6 +532,16 @@ class AddCliTest(CliCase):
         last = err.splitlines()[-1]
         self.assertTrue(last.startswith("ap2: no choice made; g is saved"), last)
         self.assertIn("`ap2 profile choose g` finishes it", last)
+        self.assertTrue(profiles.needs_choice(self.data, profiles.load(self.data, "g")))
+
+    def test_in_a_terminal_ctrl_c_at_the_prompt_says_it_is_saved(self):
+        code, out, err = self.add_gateway(tty=True, answers=[CTRL_C])
+        self.assertEqual((code, out), (1, ""))
+        self.assertNotIn("Traceback", err)
+        last = err.splitlines()[-1]
+        self.assertTrue(last.startswith("ap2: no choice made; g is saved"), last)
+        self.assertIn("`ap2 profile choose g` finishes it", last)
+        self.assertTrue(err.endswith(last + "\n") and err.count("ap2: ") == 1, err)
         self.assertTrue(profiles.needs_choice(self.data, profiles.load(self.data, "g")))
 
     def test_a_broken_profile_is_refused_before_its_models_command_runs(self):
@@ -505,6 +585,15 @@ class UseCliTest(CliCase):
         self.assertTrue(err.endswith("ap2: no choice made; nothing changed\n"), err)
         self.assertEqual((self.active.read_bytes(), self.file().read_bytes()), before)
 
+    def test_in_a_terminal_ctrl_c_at_the_prompt_switches_nothing(self):
+        self.gateway()
+        before = self.active.read_bytes(), self.file().read_bytes()
+        code, out, err = self.run_cli("use", "g", tty=True, answers=[CTRL_C])
+        self.assertEqual((code, out), (1, ""))
+        self.assertNotIn("Traceback", err)
+        self.assertTrue(err.endswith("\nap2: no choice made; nothing changed\n"), err)
+        self.assertEqual((self.active.read_bytes(), self.file().read_bytes()), before)
+
     def test_a_chosen_profile_the_active_one_and_the_subscription_ask_nothing(self):
         self.gateway("c", model="gpt-x", effort="high", chosen_at=WHEN)
         self.gateway()
@@ -518,9 +607,10 @@ class UseCliTest(CliCase):
         self.assertEqual(runs(self.tmp), before)  # nothing was fetched
         # The unchosen g made active by hand: switching to it again asks nothing.
         profiles.use(self.data, "g")
-        code, out, err = self.run_cli("use", "g")
-        self.assertEqual((code, err), (0, ""))
-        self.assertEqual(json.loads(out), {"active": "g", "was": "g"})
+        for tty in (False, True):
+            code, out, err = self.run_cli("use", "g", tty=tty)
+            self.assertEqual((code, err), (0, ""))
+            self.assertEqual(json.loads(out), {"active": "g", "was": "g"})
         self.assertEqual(runs(self.tmp), before)
 
 
