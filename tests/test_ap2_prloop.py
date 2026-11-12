@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 from tests.helpers import ROOT  # noqa: F401  (puts lib/ on sys.path)
-from assistant import angles, prloop, sources, workers
+from assistant import angles, prloop, sources, store, workers
 from assistant.config import Config
 from assistant.prloop import PrLoopError
 from assistant.store import Store
@@ -71,6 +71,13 @@ def deep(n):
     for _ in range(n):
         value = [value]
     return value
+
+
+def depth(value):
+    """How deep the dicts and lists in `value` nest, counted as store.check_writable counts (the top one is 1)."""
+    if isinstance(value, dict):
+        value = list(value.values())
+    return 1 + max(map(depth, value), default=0) if isinstance(value, list) else 0
 
 
 def no_findings():
@@ -536,6 +543,19 @@ class ApplyTest(StoreCase):
         self.assertEqual(got["ask"], mine)
         self.assertEqual(got["prloop"], prloop.summary(rec))
 
+    def test_another_prloop_ask_of_the_same_type_is_kept(self):
+        # Two stops ask the same kind of question, from the same loop: the second is a different ask, so it waits.
+        first = record(rnd(1, [R1_FINDING], commit=SHA1, stop="the branch moved without our push"))
+        second = record(rnd(1, [R1_FINDING], commit=SHA1, stop="the fixer could not fix correctness-1"))
+        with NoSubprocess(self):
+            self.assertTrue(prloop.apply(self.store, self.card["id"], first, by="ap2 prloop"))
+            mine = self.store.get(self.card["id"])["ask"]
+            self.assertFalse(prloop.apply(self.store, self.card["id"], second, by="ap2 prloop"))
+        got = self.store.get(self.card["id"])
+        self.assertEqual(got["ask"], mine)
+        self.assertEqual(got["ask"], prloop.ask(first))
+        self.assertEqual(got["prloop"], prloop.summary(second))
+
     def test_text_that_is_not_unicode_is_a_loop_error(self):
         # A JSON escape like \ud800 reads as a str, but the card cannot hold it: the record is refused before any
         # card write, as a PrLoopError naming the field, not a card error.
@@ -703,7 +723,27 @@ class ReadTest(unittest.TestCase):
         unended = at_limit(limit=None)
         unended.pop("limit")
         checked = prloop.record_check(at_limit(), no_findings(), "green")
+        stopped_at_limit = record(rnd(1, [R1_FINDING], commit=SHA1),
+                                  rnd(2, [R2_FINDING], commit=SHA2, stop="the branch moved"), limit=2)
+        stopped_at_limit["fix_check"] = {"commit": SHA2, "ci": "green", "reviewers": [
+            {"angle": "Test value", "answers": [R2_FINDING], "findings": []}]}
+        converged_checked = converged_at_limit()
+        converged_checked["fix_check"] = {"commit": SHA2, "ci": "green", "reviewers": [
+            {"angle": "Correctness", "answers": [finding("c-2", "Correctness", behavior=False)], "findings": []}]}
         cases = [
+            ("a check after a stop at the limit", json.dumps(stopped_at_limit).encode(),
+             r": fix_check: .*the loop ended after round 2"),
+            ("a check after the loop converged at the limit", json.dumps(converged_checked).encode(),
+             r": fix_check: .*the loop ended after round 2"),
+            ("unknown finding key", change(lambda r: r["rounds"][0]["findings"][0].update(severity="nit")),
+             r": rounds\[0\]\.findings\[0\]\.severity: unknown key"),
+            ("unknown check key", change(lambda r: r["fix_check"].update(verdict="ok"), checked),
+             r": fix_check\.verdict: unknown key"),
+            ("unknown check reviewer key", change(lambda r: r["fix_check"]["reviewers"][0].update(notes="x"), checked),
+             r": fix_check\.reviewers\[0\]\.notes: unknown key"),
+            ("unknown check finding key", change(lambda r: r["fix_check"]["reviewers"][0]["findings"].append(
+                {"id": "check-1", "angle": "Correctness", "bucket": "invalid", "severity": "nit"}), checked),
+             r": fix_check\.reviewers\[0\]\.findings\[0\]\.severity: unknown key"),
             ("too large", b" " * (sources.MAX_SOURCE + 1), "larger than"),
             ("not JSON", b"{rounds: [", "not JSON"),
             ("not UTF-8", b'{"rounds": [], "reason": "\xff"}', "UTF-8"),
@@ -847,7 +887,7 @@ class ReadTest(unittest.TestCase):
         self.assertIn("nested too deep", str(cm.exception))
 
     def test_deep_extra_key_on_an_earlier_rounds_angle_is_refused(self):
-        # Only a deep copy of the whole record walks an earlier round's angle extras: read refuses it too.
+        # The depth walk of the whole record reaches an earlier round's angle extras: read refuses it too.
         rec = at_limit()
         rec["rounds"][0]["angles"][1]["extra"] = deep(600)
         path = self.write(rec, "deep-early.json")
@@ -878,6 +918,46 @@ class DeepRecordTest(unittest.TestCase):
                 with self.subTest(f"rounds[{i}].angles[{k}]: {name}"):
                     with self.assertRaisesRegex(PrLoopError, "^the record: nested too deep$"):
                         call()
+
+    def with_depth(self, extra):
+        """at_limit() with rounds[0].angles[1] holding a value that makes the record nest MAX_DEPTH + extra deep."""
+        rec = at_limit()
+        rec["rounds"][0]["angles"][1]["extra"] = deep(0)
+        rec["rounds"][0]["angles"][1]["extra"] = deep(store.MAX_DEPTH - depth(rec) + extra)
+        self.assertEqual(depth(rec), store.MAX_DEPTH + extra)
+        return rec
+
+    def test_the_bound_is_the_stores(self):
+        at = self.with_depth(0)
+        self.assertEqual(prloop.decide(at)["next"], "check")
+        self.assertEqual(prloop.record_check(at, no_findings(), "green")["result"], "clean")
+        past = self.with_depth(1)
+        for name, call in [("decide", lambda: prloop.decide(past)),
+                           ("record_check", lambda: prloop.record_check(past, no_findings(), "green"))]:
+            with self.subTest(name):
+                with self.assertRaisesRegex(PrLoopError, "^the record: nested too deep$"):
+                    call()
+
+    def test_the_answer_is_the_same_at_any_call_depth(self):
+        # A deep copy stops at the recursion limit, so where it stops depends on how deep the caller already is: a
+        # fixed bound gives one answer, called from the top or from 50 frames deeper.
+        def frames(k, call):
+            return call() if k == 0 else frames(k - 1, call)
+
+        def outcome(call):
+            try:
+                return "ok", call()
+            except PrLoopError as e:
+                return "refused", str(e)
+
+        for extra, want in [(0, "ok"), (1, "refused")]:
+            rec = self.with_depth(extra)
+            for name, call in [("decide", lambda: prloop.decide(rec)),
+                               ("record_check", lambda: prloop.record_check(rec, no_findings(), "green"))]:
+                with self.subTest(f"depth {store.MAX_DEPTH + extra}: {name}"):
+                    top = outcome(call)
+                    self.assertEqual(top[0], want)
+                    self.assertEqual(outcome(lambda: frames(50, call)), top)
 
     def test_deep_check_results_are_refused(self):
         # Only a repr walks this value, and some Pythons repr 5000 deep: 100000 is past every one's limit.

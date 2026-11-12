@@ -23,7 +23,7 @@ import os
 import re
 from typing import Optional
 
-from assistant import angles, sources
+from assistant import angles, sources, store
 
 ROUND_LIMIT = 20                                         # the most rounds a loop may run, and the default
 BUCKETS = ("fix", "out_of_scope", "invalid", "owner")   # v1's triage buckets
@@ -312,8 +312,16 @@ def _fix_check(c: _Checker, fc, rounds: list, limit: int) -> None:
                 c.fail(f"{field}.findings[{j}].angle", "missing")
 
 
-def _check(record, c: _Checker, limit=None) -> int:
-    """Check every rule of a record; return its round limit."""
+def _check(record, c: _Checker, limit=None, shared: bool = True) -> int:
+    """Check every rule of a record; return its round limit. `shared=False` is for a record fresh from `json.loads`
+    (see `store.check_writable`)."""
+    # First, before any check can copy, repr or compare a part of it: refuse a record nested more than
+    # store.MAX_DEPTH deep anywhere (an earlier round's angle, say). The walk uses a list, not recursion, so the
+    # answer is the same at any call depth, for every function, and record_check's copy never meets a deeper value.
+    try:
+        store.check_writable(record, "the loop record is", shared=shared)
+    except store.cards.TooDeepError:
+        raise PrLoopError(f"{c.where}: nested too deep") from None
     c.keys("", record, TOP_KEYS, ("rounds",))
     own = record.get("limit")
     if own is not None:
@@ -356,9 +364,6 @@ def _check(record, c: _Checker, limit=None) -> int:
         if record.get(key) is not None and (d["next"] != "end" or d[key] != record[key]):
             said = f"{d[key]}" if d["next"] == "end" else f"not ended (next: {d['next']})"
             c.fail(key, f"is {record[key]!r}, but the recorded rounds say {said}")
-    # Walk the whole record the way record_check copies it, so a value nested too deep anywhere (an earlier
-    # round's angle, say) is refused here, by every function, and never only when record_check writes the check.
-    copy.deepcopy(record)
     return lim
 
 
@@ -388,7 +393,7 @@ def read(path) -> dict:
     if not isinstance(record, dict):
         raise PrLoopError(f"{where}: must be a JSON object, not {type(record).__name__}")
     try:
-        _check(record, _Checker(where))
+        _check(record, _Checker(where), shared=False)
     except RecursionError:
         raise PrLoopError(f"{where}: not JSON a loop record can hold: nested too deep") from None
     return record
