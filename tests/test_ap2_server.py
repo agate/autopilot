@@ -442,6 +442,7 @@ class ListTest(ServerCase):
             with self.subTest(title=title):
                 self.assertIsNone(server.row({"title": title}, langs)["title"])
         self.assertEqual(server.row({"title": {"ja": "J"}}, ("ja", "en"))["title"], {"ja": "J", "en": "J"})
+        self.assertEqual(server.row({"title": {"de": "D", "ja": "J"}}, ("ja", "en"))["title"], {"ja": "J", "en": "J"})
 
     def test_titles_falls_back_to_any_non_blank_slot(self):
         # A title with neither the viewer's nor the primary language (say the primary changed) still shows words.
@@ -1139,7 +1140,7 @@ const out = [
 S.lang = 'en';
 out.push(titleIn({en: 'Retry payments', zh: '重试付款'}), titleIn({zh: '只有中文'}));
 S.state = {primary_language: 'ja', languages: ['ja', 'en']};
-out.push(titleIn({ja: 'J'}));
+out.push(titleIn({ja: 'J'}), titleIn({de: 'D', ja: 'J'}));
 console.log(JSON.stringify(out));
 """
         out = subprocess.run(["node", "-e", js], capture_output=True, text=True, timeout=30)
@@ -1149,7 +1150,7 @@ console.log(JSON.stringify(out));
             "[card.untitled]", "[card.untitled]", "[card.untitled]", "[card.untitled]", "[card.untitled]",
             "x", "[card.untitled]", "c-id", "E", "[card.untitled]", "a", "b",
             "Retry", "c-id", "Retry", "[card.untitled]",
-            "Retry payments", "只有中文", "J"])
+            "Retry payments", "只有中文", "J", "J"])
 
     def test_the_pages_search_caps_match_the_servers(self):
         text = PAGE.read_text(encoding="utf-8")
