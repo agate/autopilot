@@ -195,6 +195,67 @@ class ProfileStoreTest(WorkerCase):
                 call()
         self.assertEqual((elsewhere / "active.json").read_text(), '{"name": "g"}')
 
+    def lock(self, folder: Path) -> None:
+        """Mode 000 on `folder`, put back by a cleanup so the temp folder can be removed."""
+        if os.geteuid() == 0:
+            self.skipTest("root reads a folder with mode 000")
+        folder.chmod(0)
+        self.addCleanup(folder.chmod, 0o755)
+
+    def assert_cannot_read(self, call, where: Path, *more) -> str:
+        """`call` raises a one-line ProfileError (never a bare OSError) that names `where` and says it cannot be
+        read."""
+        with self.assertRaises(ProfileError) as e:
+            call()
+        msg = str(e.exception)
+        self.assertIn(str(where), msg)
+        self.assertIn("cannot read", msg)
+        self.assertNotIn("\n", msg)
+        for text in more:
+            self.assertIn(text, msg)
+        return msg
+
+    def test_an_unreadable_profiles_folder_is_a_profile_error(self):
+        profiles.save(self.data, gateway())
+        folder = self.data / "profiles"
+        self.lock(folder)
+        g = folder / "g.json"
+        for label, call, where in (
+                ("path", lambda: profiles.path(self.data, "g"), g),
+                ("load", lambda: profiles.load(self.data, "g"), g),
+                # Fail closed: never the built-in subscription when the folder cannot be looked into.
+                ("load subscription", lambda: profiles.load(self.data, "subscription"), folder / "subscription.json"),
+                ("page_profile", lambda: profiles.page_profile(self.data), folder / "subscription.json"),
+                ("active", lambda: profiles.active(self.data), folder / "subscription.json"),
+                # Never ["subscription"] as if the folder were empty.
+                ("names", lambda: profiles.names(self.data), folder),
+                ("save", lambda: profiles.save(self.data, gateway("g2")), folder / "g2.json"),
+                ("use", lambda: profiles.use(self.data, "g"), g),
+                ("remove", lambda: profiles.remove(self.data, "g"), g)):
+            with self.subTest(label):
+                self.assert_cannot_read(call, where)
+        self.assertFalse((self.data / "active-profile.json").exists())  # `use` wrote nothing
+
+    def test_an_unreadable_data_folder_is_a_profile_error(self):
+        profiles.save(self.data, gateway())
+        profiles.use(self.data, "g")
+        self.lock(self.data)
+        active = self.data / "active-profile.json"
+        self.assert_cannot_read(lambda: profiles.folder(self.data), self.data / "profiles")
+        self.assert_cannot_read(lambda: profiles.active_file(self.data), active)
+        # The active profile's name: the file and the fix, never `subscription`.
+        for call in (profiles.active_name, profiles.active):
+            with self.subTest(call.__name__):
+                self.assert_cannot_read(lambda: call(self.data), active, profiles.FIX)
+
+    def test_a_profiles_folder_that_is_a_file_holds_no_profiles(self):
+        # Not an unreadable folder: nothing is stored there, as before (`ap2 profile add` then fails to write).
+        (self.data / "profiles").write_text("")
+        self.assertEqual(profiles.names(self.data), ["subscription"])
+        self.assertEqual(profiles.load(self.data, "subscription"), profiles.builtin())
+        with self.assertRaisesRegex(ProfileError, "no profile named 'g'"):
+            profiles.load(self.data, "g")
+
     def test_nothing_is_written_in_v1s_folder(self):
         v1 = self.tmp / "v1-data"
         v1.mkdir()
@@ -432,6 +493,27 @@ class ProfileCliTest(unittest.TestCase):
         self.assertTrue(r.stderr.startswith("ap2: "), r.stderr)
         self.assertNotIn("Traceback", r.stderr)
         self.assertIn("active-profile.json", r.stderr)
+        self.assertFalse((self.data / "active-profile.json").exists())
+
+    def test_an_unreadable_profiles_folder_prints_one_line(self):
+        if os.geteuid() == 0:
+            self.skipTest("root reads a folder with mode 000")
+        self.ok("add", "s2", "--subscription")
+        folder = self.data / "profiles"
+        folder.chmod(0)
+        self.addCleanup(folder.chmod, 0o755)
+        for args in (("list",), ("show", "subscription"), ("show", "s2"), ("add", "s3", "--subscription"),
+                     ("use", "s2"), ("remove", "s2")):
+            with self.subTest(args):
+                r = self.run_ap2(*args)
+                self.assertEqual(r.returncode, 1, r.stdout)
+                self.assertEqual(r.stdout, "")
+                self.assertEqual(len(r.stderr.splitlines()), 1, r.stderr)
+                self.assertTrue(r.stderr.startswith("ap2: "), r.stderr)
+                self.assertNotIn("Traceback", r.stderr)
+                self.assertIn(str(folder), r.stderr)
+        folder.chmod(0o755)
+        self.assertEqual(sorted(f.name for f in folder.iterdir()), ["s2.json"])
         self.assertFalse((self.data / "active-profile.json").exists())
 
     def test_list_and_show_create_nothing(self):
