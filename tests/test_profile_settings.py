@@ -1,0 +1,220 @@
+from __future__ import annotations
+
+import json
+import unittest
+
+from tests.helpers import TempData
+from autopilot import paths, perms, profile
+
+URL = "https://llm-gateway.example.com/anthropic"
+TOOLS = ["mcp__slack__slack_send_message", "mcp__x__read"]
+BLANKED = ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL",
+           "ANTHROPIC_DEFAULT_HAIKU_MODEL")
+
+
+def gateway(key_command="echo SECRET123"):
+    p = profile.load("subscription")
+    p.update(name="g", mode="gateway", label="G", model="big", small_model="small", daily_cap_usd=5,
+             gateway={"base_url": URL, "key_command": key_command, "refresh_command": None,
+                      "rotate_command": None, "models_command": None})
+    return p
+
+
+def read(path):
+    return json.loads(path.read_text())
+
+
+def write_files(ap="a"):
+    """Write worker, dispatcher and one-off files the way write_for would, under the active profile."""
+    d = paths.data_root()
+    perms._write(paths.ap_dir(ap) / "settings.json",
+                 perms.generate(TOOLS, role="worker", profile=profile.active()))
+    perms._write(d / "settings-dispatcher.json",
+                 perms.generate(TOOLS, role="dispatcher", profile=profile.page_profile()))
+    return perms.one_off_settings(ap, "mcp__slack__slack_send_message")
+
+
+class ProfileSettingsTest(unittest.TestCase):
+    def test_gateway_overlay_keeps_floor(self):
+        with TempData():
+            g = gateway()
+            got = perms.generate(TOOLS, role="worker", profile=g)
+            self.assertEqual(got["permissions"], perms.generate(TOOLS, role="worker")["permissions"])
+            self.assertEqual(got["hooks"], perms.generate(TOOLS, role="worker")["hooks"])
+            self.assertEqual(got["env"]["ANTHROPIC_BASE_URL"], URL)
+            self.assertEqual(got["env"]["AUTOPILOT_ROLE"], "worker")
+            self.assertEqual(got["apiKeyHelper"], "echo SECRET123")
+
+    def test_no_key_value_in_settings(self):
+        import os
+        import stat
+        import tempfile
+        from pathlib import Path
+        with TempData() as d, tempfile.TemporaryDirectory() as tools:
+            script = Path(tools) / "key.sh"
+            script.write_text("#!/bin/sh\necho SECRET123\n")
+            script.chmod(script.stat().st_mode | stat.S_IXUSR)
+            profile.save(gateway(str(script)))
+            profile.use("g")
+            write_files()
+            profile.apply()
+            self.assertIn(str(script), (paths.ap_dir("a") / "settings.json").read_text())
+            for f in d.rglob("*"):
+                if f.is_file():
+                    self.assertNotIn("SECRET123", f.read_text(), f)
+
+    def test_gateway_overlay_blanks_competing_auth(self):
+        with TempData():
+            g = gateway()
+            g["env"] = {"ANTHROPIC_API_KEY": "x"}
+            g["settings"] = {"env": {"ANTHROPIC_AUTH_TOKEN": "y"}}
+            ov = profile.overlay(g)
+            self.assertEqual(ov["env"]["ANTHROPIC_AUTH_TOKEN"], "")
+            self.assertEqual(ov["env"]["ANTHROPIC_API_KEY"], "")
+            self.assertEqual(ov["apiKeyHelper"], "echo SECRET123")
+
+    def test_subscription_blanks_win_over_profile_env(self):
+        with TempData():
+            p = profile.load("subscription")
+            p["env"] = {k: "https://x.example.com" for k in BLANKED}
+            p["settings"] = {"env": {k: "https://y.example.com" for k in BLANKED}}
+            ov = profile.overlay(p)
+            for k in BLANKED:
+                self.assertEqual(ov["env"][k], "")
+
+    def test_subscription_overlay_blanks_gateway_env(self):
+        with TempData():
+            ov = profile.overlay(profile.load("subscription"))
+            for k in BLANKED:
+                self.assertEqual(ov["env"][k], "")
+            self.assertEqual(ov["env"]["AUTOPILOT_PROFILE"], "subscription")
+            self.assertNotIn("permissions", ov)
+            self.assertNotIn("hooks", ov)
+
+    def test_subscription_overlay_blanks_api_key(self):
+        with TempData():
+            ov = profile.overlay(profile.load("subscription"))
+            self.assertEqual(ov["env"]["ANTHROPIC_API_KEY"], "")
+
+    def test_apply_swaps_profile(self):
+        with TempData():
+            profile.save(gateway())
+            profile.use("g")
+            one = write_files()
+            w = paths.ap_dir("a") / "settings.json"
+            self.assertIn(URL, w.read_text())
+            before = {f: read(f)["permissions"] for f in (w, one)}
+            profile.use("subscription")
+            self.assertNotIn(URL, w.read_text())
+            self.assertNotIn(URL, one.read_text())
+            self.assertNotIn("apiKeyHelper", read(w))
+            self.assertEqual(before, {f: read(f)["permissions"] for f in (w, one)})
+            self.assertEqual(read(w)["env"]["AUTOPILOT_ROLE"], "worker")
+            self.assertEqual(read(w)["env"]["AUTOPILOT_PROFILE"], "subscription")
+
+    def test_page_files_stay_subscription(self):
+        with TempData() as d:
+            profile.save(gateway())
+            profile.use("g")
+            write_files()
+            profile.apply()
+            for f in (d / "settings-dispatcher.json", profile.light_settings()):
+                self.assertNotIn(URL, f.read_text())
+                self.assertNotIn("apiKeyHelper", read(f))
+                self.assertEqual(read(f)["env"]["AUTOPILOT_PROFILE"], "subscription")
+                self.assertEqual(read(f)["env"]["ANTHROPIC_BASE_URL"], "")
+            self.assertEqual(profile.light_settings(), d / "settings-light.json")
+            self.assertEqual(read(profile.light_settings())["permissions"],
+                             perms.static_settings("light")["permissions"])
+
+    def test_cloud_provider_switches_are_blanked_in_both_modes(self):
+        for prof in (profile.load("subscription"), gateway()):
+            prof["env"] = {"CLAUDE_CODE_USE_BEDROCK": "1"}
+            prof["settings"] = {"env": {"CLAUDE_CODE_USE_VERTEX": "1"}}
+            env = profile.overlay(prof)["env"]
+            for k in ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"):
+                self.assertEqual(env[k], "", (prof["mode"], k))
+
+    def test_a_gateway_profile_without_a_model_blanks_the_model(self):
+        g = gateway()
+        g["model"] = None
+        self.assertEqual(profile.overlay(g)["env"]["ANTHROPIC_MODEL"], "")
+        self.assertEqual(profile.overlay(gateway())["env"]["ANTHROPIC_MODEL"], "big")
+
+    def test_merge_keeps_floor_autopilot_env(self):
+        floor = {"permissions": {"deny": ["x"]}, "hooks": {"h": 1},
+                 "env": {"AUTOPILOT_ROLE": "worker", "AUTOPILOT_PROFILE": "old", "OTHER": "1"}}
+        out = profile.merge(floor, {"env": {"AUTOPILOT_PROFILE": "new", "Z": "2"}, "apiKeyHelper": "k"})
+        self.assertEqual(out["env"], {"AUTOPILOT_ROLE": "worker", "AUTOPILOT_PROFILE": "new", "Z": "2"})
+        self.assertEqual(out["permissions"], {"deny": ["x"]})
+        self.assertEqual(out["hooks"], {"h": 1})
+        self.assertEqual(out["apiKeyHelper"], "k")
+
+    def test_floor_autopilot_env_wins_over_the_overlay(self):
+        floor = {"permissions": {"deny": []}, "env": {"AUTOPILOT_ROLE": "worker", "AUTOPILOT_DATA": "/d"}}
+        out = profile.merge(floor, {"env": {"AUTOPILOT_ROLE": "dispatcher", "AUTOPILOT_DATA": "/x",
+                                            "AUTOPILOT_PROFILE": "g"}})
+        self.assertEqual(out["env"], {"AUTOPILOT_ROLE": "worker", "AUTOPILOT_DATA": "/d", "AUTOPILOT_PROFILE": "g"})
+
+    def test_validate_rejects_names_autopilot_owns(self):
+        for name in ("AUTOPILOT_ROLE", "AUTOPILOT_PROFILE", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL",
+                     "ANTHROPIC_SMALL_FAST_MODEL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_FOUNDRY"):
+            for where in ("env", "settings"):
+                p = gateway()
+                if where == "env":
+                    p["env"] = {name: "x"}
+                else:
+                    p["settings"] = {"env": {name: "x"}}
+                self.assertTrue(any(name in e for e in profile.validate(p)), (where, name))
+        p = gateway()
+        p["settings"] = {"disableAllHooks": True}
+        self.assertTrue(any("disableAllHooks" in e for e in profile.validate(p)))
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class UnreadableSettingsTest(unittest.TestCase):
+    def test_a_corrupt_worker_file_does_not_stop_the_page_files(self):
+        with TempData() as d:
+            write_files()
+            bad = paths.ap_dir("b") / "settings.json"
+            bad.parent.mkdir(parents=True, exist_ok=True)
+            bad.write_text("{nope")
+            profile.save(gateway())
+            with self.assertRaises(RuntimeError) as cm:
+                profile.use("g")
+            self.assertIn(str(bad), str(cm.exception))
+            self.assertIn("ap perms write", str(cm.exception))
+            for f in (d / "settings-dispatcher.json", d / "settings-light.json"):
+                self.assertEqual(read(f)["env"]["AUTOPILOT_PROFILE"], "subscription", f)
+            self.assertEqual(profile.active()["name"], "subscription")   # not switched: a worker file is stale
+            ev = [json.loads(x) for x in (d / "events-global.jsonl").read_text().splitlines()]
+            got = [e["data"] for e in ev if e["type"] == "settings_unreadable"]
+            self.assertEqual((got[0]["path"], got[0]["error"]), (str(bad), "JSONDecodeError"))
+
+    def test_other_shapes_are_skipped_too_and_good_files_are_still_merged(self):
+        with TempData():
+            write_files()
+            good = paths.ap_dir("a") / "settings.json"
+            for name, text in (("c", "[1]"), ("e", "{}")):
+                f = paths.ap_dir(name) / "settings.json"
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_text(text)
+            profile.save(gateway())
+            with self.assertRaises(RuntimeError) as cm:
+                profile.apply(profile.load("g"))
+            for n in ("c", "e"):
+                self.assertIn(str(paths.ap_dir(n) / "settings.json"), str(cm.exception))
+            self.assertEqual(read(good)["env"]["AUTOPILOT_PROFILE"], "g")
+
+    def test_migration_saves_the_profile_when_only_worker_files_were_skipped(self):
+        with TempData() as d:
+            write_files()
+            bad = paths.ap_dir("b") / "settings.json"
+            bad.parent.mkdir(parents=True, exist_ok=True)
+            bad.write_text("{nope")
+            self.assertTrue(profile.migrate_from_config())
+            self.assertTrue(profile.path("subscription").exists())
+            self.assertEqual(read(d / "settings-light.json")["env"]["AUTOPILOT_PROFILE"], "subscription")

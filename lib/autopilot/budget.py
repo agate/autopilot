@@ -48,8 +48,25 @@ def _parse(cache: dict, now_ms: int, stale_min: int) -> dict:
     return out
 
 
-def allowance(b: dict, cfg: dict, now: datetime) -> dict:
-    """How many new workers the budget allows: None = no limit, 0 = none, 1 = numbers unknown."""
+def allowance(b: dict, cfg: dict, now: datetime, p: dict = None, spent: dict = None) -> dict:
+    """How many new workers the budget allows: None = no limit, 0 = none, 1 = numbers unknown.
+    A gateway profile `p` with its `spent` totals replaces the subscription rules (windows, credits and
+    staleness) by the daily dollar cap alone."""
+    if p is not None and p.get("mode") == "gateway":
+        from autopilot import cap, profile
+        key_error = profile.check_key(p, now)
+        if key_error:   # never a silent fallback to the subscription: workers wait until the key works
+            return {"allow": 0, "paused_until": None, "reason": "key", "error": key_error}
+        spent = spent or {}
+        limit = cap.today_limit(p, now)
+        over = (spent.get("today") or 0) >= limit
+        unknown = bool(spent.get("unknown_today")) and not cap.unknown_accepted(now)
+        if unknown or over:
+            cause = "spent" if over else "unknown"
+            cap.open_card(now, limit, cause)
+            return {"allow": 0, "paused_until": None, "reason": "cap", "cause": cause}
+        cap.close_card(now)   # the condition cleared before anyone answered: the card may reopen later today
+        return {"allow": None, "paused_until": None, "reason": "ok"}
     rules = cfg["budget"]
     if not b.get("ok"):
         return {"allow": 1, "paused_until": None, "reason": "unknown"}
@@ -101,9 +118,35 @@ def read_fast(path: Path = None, now_ms: int = None, stale_min: int = 60) -> dic
     return _parse(cache, now_ms, stale_min)
 
 
-def parking(b: dict, cfg: dict):
+def workers_allowance(b: dict, cfg: dict, now: datetime, p: dict = None) -> tuple:
+    """(profile, spend totals or None, what the budget allows new workers) for `p`, default the active
+    profile. Only a gateway profile pays for spend parsing."""
+    from autopilot import profile, spend
+    if p is None:
+        p, err = profile.active_or_error()
+        if err:   # never a guess at which rules apply: no new worker until a profile loads again
+            return p, None, {"allow": 0, "paused_until": None, "reason": "profile", "error": err}
+    if p.get("mode") != "gateway":
+        return p, None, allowance(b, cfg, now)
+    s = spend.totals(now.astimezone())
+    spend.remember(now, s)
+    return p, s, allowance(b, cfg, now, p, s)
+
+
+def current(gcfg: dict, now: datetime) -> dict:
+    """Every budget number in one place. `passes` follows the subscription rules in every mode (dispatcher
+    passes always run on the subscription); `workers` follows the active profile."""
+    b = read()
+    p, s, workers = workers_allowance(b, gcfg, now)
+    return {"budget": b, "passes": allowance(b, gcfg, now), "workers": workers, "profile": p, "spent": s}
+
+
+def parking(b: dict, cfg: dict, p: dict = None):
     """The window that parks running workers: the one at or over `park_pct` that resets last, with when its
-    workers may resume. None when usage is under the line, stale or unreadable (unknown is not over)."""
+    workers may resume. None when usage is under the line, stale or unreadable (unknown is not over).
+    Always None for a gateway profile: subscription windows never park gateway workers."""
+    if p is not None and p.get("mode") == "gateway":
+        return None
     rules = cfg["budget"]
     if not b.get("ok") or b.get("stale") or b.get("age_min", 0) > rules["stale_min"]:
         return None
@@ -126,7 +169,7 @@ def parking(b: dict, cfg: dict):
 
 @cli.command("budget")
 def _cmd(args: list) -> int:
-    b = read()
-    a = allowance(b, config.load_global(), datetime.now(timezone.utc))
-    print(json.dumps({"budget": b, "allowance": a}, indent=1))
+    cur = current(config.load_global(), datetime.now(timezone.utc))
+    print(json.dumps({"budget": cur["budget"], "allowance": cur["workers"], "passes": cur["passes"],
+                      "spent": cur["spent"]}, indent=1))
     return 0

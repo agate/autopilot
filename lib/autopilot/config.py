@@ -27,6 +27,7 @@ DEFAULT_GLOBAL: dict = {
     # once this many pile up, or once the oldest is this many days old. 0 turns that half off.
     "self_review": {"remind_at": 10, "remind_days": 3},
     "permission_mode": "auto",
+    "active_profile": "subscription",
     "page_host": "claude.ai",
     "models": {"dispatcher": None, "worker": None},
     "worker_effort": "xhigh",
@@ -34,6 +35,7 @@ DEFAULT_GLOBAL: dict = {
     "worktree_root": "~/worktrees",
     "reader_lang": "en",
     "tools": {"claude": None, "gh": None, "git": None, "python3": None},
+    "prices": {},
 }
 
 # One line per setting, shown by `ap config list` and in references/config.md (a test keeps both complete).
@@ -47,8 +49,8 @@ DESCRIBE: dict = {
     "forced_pass_min": "Run a dispatcher pass at least this often, in minutes, even when nothing changed.",
     "gate_interval_s": "How often the background gate wakes, in seconds. Takes effect after `ap install`.",
     "reply_check.every_s": "How often to read answers from the page, in seconds. 0 turns it off.",
-    "reply_check.quiet": "No answer reads between these two times (this computer's clock); the forced pass picks answers up then.",
-    "reply_check.model": "Model for the answer read.",
+    "reply_check.quiet": "No answer reads between these two times (this computer's clock), except while the daily-cap card is open; the forced pass picks answers up then.",
+    "reply_check.model": "Model for the answer read; moved to the subscription profile (`ap profile show subscription`).",
     "reply_check.timeout_s": "Give up on one answer read after this many seconds.",
     "page_refresh_min": "Refresh the page at least this often, in minutes, even when nothing changed, so usage numbers and times stay current. A real change refreshes it within a few minutes. 0 turns the periodic refresh off.",
     "report_times": "When reports are written, local time. An autopilot can set its own.",
@@ -57,10 +59,11 @@ DESCRIBE: dict = {
     "self_review.remind_at": "Remind once this many routine decisions the autopilot made by itself are unread: one line in the reports and on the page. 0 turns it off.",
     "self_review.remind_days": "Also remind once the oldest unread routine decision is this many days old. 0 turns it off.",
     "permission_mode": "Claude Code permission mode for the dispatcher and workers.",
+    "active_profile": "Access profile the dispatcher and workers run on; manage them with `ap profile`.",
     "page_host": "Where the page is published.",
-    "models.dispatcher": "Model for dispatcher passes; null uses Claude Code's default.",
-    "models.worker": "Model for workers; null uses Claude Code's default.",
-    "worker_effort": "Effort level for workers.",
+    "models.dispatcher": "Model for dispatcher passes; null uses Claude Code's default; moved to the subscription profile (`ap profile show subscription`).",
+    "models.worker": "Model for workers; null uses Claude Code's default; moved to the subscription profile (`ap profile show subscription`).",
+    "worker_effort": "Effort level for workers; moved to the subscription profile (`ap profile show subscription`).",
     "dispatch_timeout_s": "Stop a dispatcher pass that runs longer than this many seconds.",
     "worktree_root": "Folder where task worktrees are created.",
     "reader_lang": "The reader's language for the page and reports; set at the first init.",
@@ -68,6 +71,7 @@ DESCRIBE: dict = {
     "tools.gh": "Path to gh that the gate uses; `ap install` records it.",
     "tools.git": "Path to git that the gate uses; `ap install` records it.",
     "tools.python3": "Path to python3 that the gate uses; `ap install` records it.",
+    "prices": "Per-model price overrides in USD per million tokens, same shape as `models` in lib/autopilot/prices.json; used to count gateway spend.",
 }
 
 DEFAULT_AP: dict = {

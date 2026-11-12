@@ -8,7 +8,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 
-from autopilot import budget, cli, config, events, paths, sessions, shellenv, state
+from autopilot import budget, cli, config, events, paths, profile, sessions, shellenv, spend, state
 
 AGENTS = {"implement": "autopilot:implementer", "review": "autopilot:reviewer"}
 PROTECTED_ENV = ("AUTOPILOT_", "ANTHROPIC_", "CLAUDE")
@@ -48,10 +48,11 @@ def build_start(gcfg: dict, apcfg: dict, ap: str, task: str, role: str, prompt: 
         argv += ["--agent", AGENTS[role]]
     else:
         prompt = "/autopilot:pr-loop " + prompt
-    if gcfg["models"].get("worker"):
-        argv += ["--model", gcfg["models"]["worker"]]
-    if gcfg.get("worker_effort"):
-        argv += ["--effort", gcfg["worker_effort"]]
+    p = profile.launch_profile(settings)   # the profile the file was written for; refused when out of date
+    if p.get("model"):
+        argv += ["--model", p["model"]]
+    if p.get("effort"):
+        argv += ["--effort", p["effort"]]
     argv.append(prompt)
     return argv, _env("worker")
 
@@ -86,6 +87,52 @@ def _launch(argv: list, cwd: str, env: dict) -> str:
     return m.group(1)
 
 
+def _settle(short: str) -> None:
+    """Price a finished session. Never raises: pricing must not stop a cleanup. A failure is logged."""
+    try:
+        spend.settle(short)
+    except Exception as e:  # noqa: BLE001
+        _spend_failed("settle", short, None, None, None, e)
+
+
+def _record(short: str, kind: str, ap, p: dict) -> None:
+    try:
+        spend.record_launch(short, kind, ap, p)
+    except Exception as e:  # noqa: BLE001 - spend bookkeeping must not undo a started session
+        _spend_failed("record", short, kind, ap, p, e)
+
+
+def _spend_failed(op: str, short, kind, ap, p, err: Exception) -> None:
+    """Log a spend bookkeeping failure. A gateway launch that could not be recorded gets a launch row that never
+    matches a session, so the totals show unknown cost (which holds the daily cap) instead of $0."""
+    try:
+        events.append_global("spend_record_failed", {"op": op, "short": short, "kind": kind, "ap": ap,
+                                                     "error": f"{type(err).__name__}: {err}"[:300]})
+    except Exception:  # noqa: BLE001 - nothing more to do
+        pass
+    if op == "record" and (p or {}).get("mode") == "gateway":
+        try:
+            spend.record_session("", kind if kind in spend.KINDS else "worker", ap, p)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+BLOCKING = ("cap", "key", "profile")
+
+
+def check_allowed() -> None:
+    """Raise RuntimeError (and launch nothing) when the budget allows no new worker for a reason only the user
+    can clear: the gateway's daily cap, a failing key, or an active profile that cannot be loaded. Every worker
+    launch and every one-off action calls this, whatever the pass decided."""
+    w = budget.current(config.load_global(), datetime.now(timezone.utc))["workers"]
+    if w.get("allow") != 0 or w.get("reason") not in BLOCKING:
+        return
+    why = {"cap": f"the gateway's daily cap is reached ({w.get('cause') or 'spent'}); answer the cap card first",
+           "key": f"the gateway key does not work: {w.get('error')}. {profile.KEY_FIX}",
+           "profile": f"{w.get('error')}. {profile.PROFILE_FIX}"}[w["reason"]]
+    raise RuntimeError(f"no session started: {why}")
+
+
 def _saved_session(ap: str, task: str, role: str) -> str:
     t = next((t for t in state.load(ap)["tasks"] if t["id"] == task), {})
     return (t.get("sessions") or {}).get(role) or ""
@@ -93,6 +140,7 @@ def _saved_session(ap: str, task: str, role: str) -> str:
 
 def start(ap: str, task: str, role: str, cwd: str, prompt: str, needs: list = None, resume: bool = False) -> dict:
     """Start a worker. With resume, continue the task's saved session for this role (a fix round)."""
+    check_allowed()
     gcfg, apcfg = config.load_global(), config.load_ap(ap)
     port_range = ports(gcfg["port_base"], next_slot(all_workers(), gcfg["port_base"]))
     old = next((w for w in state.load(ap)["workers"] if w["task"] == task and w["role"] == role), None)
@@ -103,26 +151,35 @@ def start(ap: str, task: str, role: str, cwd: str, prompt: str, needs: list = No
               f"Your port range: {port_range[0]}-{port_range[1]}. "
               f"The autopilot CLI: {paths.package_root() / 'bin' / 'ap'}.")
     argv, env = build_start(gcfg, apcfg, ap, task, role, prompt)
+    p = profile.launch_profile(argv[argv.index("--settings") + 1])
     # A parked worker resumes its own conversation; the saved session of the role is an earlier run's.
     sid = ((parked or {}).get("session_id") or _saved_session(ap, task, role)) if resume else ""
     if resume and not sid:
         raise RuntimeError(f"{ap} {task}: no saved {role} session to resume")
     if sid:
         # Flags on --resume start a copy under a new id; -n keeps the worker's name on that copy.
-        argv = ([argv[0], "--bg", "--resume", sid, "-n", sessions.name_for(ap, task, role)]
-                + argv[argv.index("--permission-mode"):argv.index("--settings") + 2])
+        argv = ([argv[0], "--bg", "--resume", sid, "-n", sessions.name_for(ap, task, role),
+                 "--settings", argv[argv.index("--settings") + 1]]
+                + argv[argv.index("--permission-mode"):argv.index("--permission-mode") + 2])
         argv.append(prompt if role in AGENTS else "/autopilot:pr-loop " + prompt)
     if parked:
         # The parked session sits idle; the copy that continues takes its place.
         subprocess.run([claude_bin(gcfg), "stop", parked["short_id"]], capture_output=True, timeout=60)
     short = _launch(argv, cwd, env)
+    _record(short, "worker", ap, p)
     name = sessions.name_for(ap, task, role)
     listed = sessions.list_all(claude_bin(gcfg))
     found = sessions.find_by_id(short, listed) or sessions.find(name, listed)
     rec = {"task": task, "role": role, "session_name": name,
            "session_id": (found or {}).get("sessionId") or "", "short_id": short,
            "ports": port_range,
-           "needs": list(needs or []), "started_at": events.now_iso(), "resumes": 0, "cwd": str(cwd)}
+           "needs": list(needs or []), "started_at": events.now_iso(), "resumes": 0, "cwd": str(cwd),
+           "profile": p["name"]}
+    if sid and (found or {}).get("sessionId") and found["sessionId"] != sid:
+        # The resumed copy has a new session id; the original stays on disk until the task is cleaned up.
+        rec["replaced_sessions"] = list((old or {}).get("replaced_sessions") or []) + [sid]
+    elif old and old.get("replaced_sessions"):
+        rec["replaced_sessions"] = list(old["replaced_sessions"])
     with state.mutate(ap) as st:
         st["workers"] = [w for w in st["workers"] if not (w["task"] == task and w["role"] == role)] + [rec]
     if parked:
@@ -136,17 +193,30 @@ def start(ap: str, task: str, role: str, cwd: str, prompt: str, needs: list = No
 
 
 def resume(ap: str, worker: dict) -> dict:
+    check_allowed()
     gcfg = config.load_global()
     prompt = ("Your session was interrupted. Continue the task from where you stopped; "
               "check your worktree and run files first.")
-    argv = [claude_bin(gcfg), "--bg", "--resume", worker["session_id"], prompt]
+    settings = paths.ap_dir(ap) / "settings.json"
+    if not settings.exists():
+        raise RuntimeError(f"{ap}: no permission floor yet; run `ap perms write {ap}` first")
+    p = profile.launch_profile(settings)
+    argv = [claude_bin(gcfg), "--bg", "--resume", worker["session_id"],
+            "-n", sessions.name_for(ap, worker["task"], worker["role"]), "--settings", str(settings), prompt]
     short = _launch(argv, worker.get("cwd") or str(paths.ap_dir(ap)), _env("worker"))
+    _record(short, "worker", ap, p)
+    # --settings on --resume starts a copy under a new id (like start's flags do): follow it.
+    found = sessions.find_by_id(short, sessions.list_all(claude_bin(gcfg)))
     with state.mutate(ap) as st:
         for w in st["workers"]:
             if w["task"] == worker["task"] and w["role"] == worker["role"]:
                 w["short_id"] = short
+                if (found or {}).get("sessionId") and found["sessionId"] != w["session_id"]:
+                    w["replaced_sessions"] = list(w.get("replaced_sessions") or []) + [w["session_id"]]
+                    w["session_id"] = found["sessionId"]
                 w["resumes"] = w.get("resumes", 0) + 1
                 w["started_at"] = events.now_iso()
+                w["profile"] = p["name"]
                 worker = w
     events.append(ap, "worker_resumed", {"task": worker["task"], "role": worker["role"], "short_id": short})
     return worker
@@ -157,7 +227,8 @@ def park(ap: str, task: str, role: str, note: str, now: datetime = None, b: dict
     Raises ValueError when usage is under the line (nothing to wait for) or the worker is not on record."""
     gcfg = config.load_global()
     now = now or datetime.now(timezone.utc)
-    p = budget.parking(b if b is not None else budget.read(stale_min=gcfg["budget"]["stale_min"]), gcfg)
+    p = budget.parking(b if b is not None else budget.read(stale_min=gcfg["budget"]["stale_min"]), gcfg,
+                       profile.for_env(os.environ))
     if p is None:
         raise ValueError("usage is under the park line (or unknown): keep working, do not park")
     rec = dict(p, reason="quota", note=note, parked_at=now.isoformat(), role=role)
@@ -182,11 +253,26 @@ def end(ap: str, task: str, role: str) -> None:
         keep, tokens = [], usage.zero()
         for w in st["workers"]:
             if w["task"] == task and w["role"] == role:
-                tokens = usage.session_tokens(w.get("session_id"))
+                # The listing knows the session behind the short id; a resumed copy has a new session id.
+                hit = sessions.find_by_id(w["short_id"], sessions.list_all(claude_bin(gcfg)))
+                sid = (hit or {}).get("sessionId") or w.get("session_id")
+                tokens = usage.session_tokens(sid)
+                try:
+                    profile.note_session_end(sid, w.get("profile") or profile.active()["name"],
+                                             datetime.now(timezone.utc))
+                except Exception:  # noqa: BLE001 - key bookkeeping must not stop a worker from ending
+                    pass
                 subprocess.run([claude_bin(gcfg), "stop", w["short_id"]], capture_output=True, timeout=60)
+                _settle(w["short_id"])
                 for t in st["tasks"]:
-                    if t["id"] == task and w.get("session_id"):
-                        t.setdefault("sessions", {})[role] = w["session_id"]
+                    if t["id"] == task:
+                        if sid:
+                            t.setdefault("sessions", {})[role] = sid
+                        old = [x for x in w.get("replaced_sessions") or [] if x != sid]
+                        if sid and sid != w.get("session_id") and w.get("session_id") not in old:
+                            old.append(w["session_id"])
+                        if old:
+                            t["replaced_sessions"] = sorted(set(t.get("replaced_sessions") or []) | set(old))
             else:
                 keep.append(w)
         st["workers"] = keep
@@ -200,11 +286,20 @@ def cleanup(ap: str, task: str) -> list:
     with state.mutate(ap) as st:
         for t in st["tasks"]:
             if t["id"] == task:
-                for sid in (t.pop("sessions", None) or {}).values():
+                ids = list((t.pop("sessions", None) or {}).values()) + list(t.pop("replaced_sessions", None) or [])
+                for sid in ids:
+                    # `claude rm` takes the full session id; pricing needs the short id of the same session.
+                    hit = next((s for s in sessions.list_all(claude_bin(gcfg)) or [] if s.get("sessionId") == sid), None)
+                    if hit and hit.get("id"):
+                        _settle(hit["id"])
                     subprocess.run([claude_bin(gcfg), "rm", sid], capture_output=True, timeout=60)
                     removed.append(sid)
     events.append(ap, "task_cleaned", {"task": task, "sessions": len(removed)})
     return removed
+
+
+def text_cap_parked() -> str:
+    return "paused at the daily cap; resumes when you resume the autopilot"
 
 
 def listing(ap: str) -> list:
@@ -230,7 +325,10 @@ def _cmd(args: list) -> int:
             print(json.dumps(rows, indent=1, ensure_ascii=False))
         else:
             for w in rows:
-                tail = f", resumes {w['parked']['resume_at']}" if w["state"] == "parked" else ""
+                tail = ""
+                if w["state"] == "parked":
+                    tail = (f", {text_cap_parked()}" if w["parked"].get("kind") == "cap"
+                            else f", resumes {w['parked']['resume_at']}")
                 print(f"{w['session_name']}: {w['state']} (resumes {w['resumes']}{tail})")
         return 0
     if len(args) < 4:
@@ -238,6 +336,14 @@ def _cmd(args: list) -> int:
               " | ap worker park <ap> <task> <role> --note TEXT | ap worker list <ap> [--json]", file=sys.stderr)
         return 2
     sub, ap, task, role = args[:4]
+    try:
+        return _run(sub, ap, task, role, args)
+    except RuntimeError as e:
+        print(f"ap worker {sub}: {e}", file=sys.stderr)
+        return 1
+
+
+def _run(sub: str, ap: str, task: str, role: str, args: list) -> int:
     if sub == "start":
         prompt = open(_opt(args, "--prompt-file")).read()
         needs = [n for n in (_opt(args, "--needs", "") or "").split(",") if n]

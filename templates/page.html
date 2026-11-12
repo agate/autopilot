@@ -73,6 +73,15 @@ h1 { font-size: 16px; font-weight: 700; letter-spacing: -.01em }
 .tfilter .fchip { border: 1px solid var(--line-strong); background: var(--surface); border-radius: 999px }
 .tfilter .fchip[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: var(--bg); box-shadow: none }
 
+/* Access profile: the header line, the switch and the cap card */
+.access { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding-bottom: 8px; font-size: 12.5px; color: var(--muted) }
+.keyerr { color: var(--bad, #b3261e); font-weight: 600 }
+.access:empty { display: none }
+.abadge { display: inline-flex; align-items: center; min-height: 24px; padding: 0 10px; border-radius: 999px; background: var(--surface-2); color: var(--ink); font-weight: 600; overflow-wrap: anywhere }
+.abadge.gw { background: var(--warn-soft); color: var(--warn) }
+.switch { display: flex; flex-wrap: wrap; gap: 6px }
+.capcard { border-left: 5px solid var(--warn) }
+
 /* Layout */
 .shell { padding-bottom: 20px }
 .col-main, .col-rail { display: grid; gap: 22px; min-width: 0; align-content: start }
@@ -254,9 +263,17 @@ details.fold > summary + * { margin-top: 8px }
 .state-line .st.ok { color: var(--ok) } .state-line .st.warn { color: var(--warn) } .state-line .st.crit { color: var(--crit) }
 .state-line .meta, .ps > .meta { font-size: 12px }
 /* Usage: label | bar | value | reset, one row each */
-.urows { display: grid; grid-template-columns: auto minmax(36px, 1fr) auto auto; gap: 7px 10px; align-items: center }
+.urows { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; gap: 7px 10px; align-items: center }
+.urows > * { min-width: 0 }
 .ulabel { color: var(--ink-2); white-space: nowrap }
-.uval { text-align: right; white-space: nowrap; font-size: 12.5px }
+.uval { text-align: right; white-space: nowrap; font-size: 12.5px; font-variant-numeric: tabular-nums; min-width: max-content }
+/* Phone: the bar gives up its column and the value wraps under the label instead of clipping. */
+@media (max-width: 440px) {
+  .urows { grid-template-columns: auto minmax(0, 1fr) auto }
+  .urows .meter { grid-column: 2 / -1 }
+  .uval { grid-column: 1 / 3; text-align: left; white-space: normal }
+  .ureset { grid-column: 3; grid-row: auto }
+}
 .uval.warn { color: var(--warn) } .uval.crit { color: var(--crit) }
 .ureset { color: var(--muted); font-size: 11.5px; white-space: nowrap; text-align: right }
 .meter { height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden }
@@ -322,6 +339,7 @@ details.fold > summary + * { margin-top: 8px }
       <nav id="filters" class="filters" aria-label="autopilot"></nav>
       <button id="lang" class="lang" type="button" hidden></button>
     </div>
+    <div id="access" class="access"></div>
   </div>
 </header>
 
@@ -330,6 +348,7 @@ details.fold > summary + * { margin-top: 8px }
     <div id="banners"></div>
     <p id="status-note" class="note" hidden></p>
     <section class="view" id="v-needs" data-view="needs" aria-labelledby="hero-t">
+      <div id="capcard"></div>
       <div class="sec" id="systems"></div>
       <div class="hero" id="hero"></div>
       <div id="self-remind"></div>
@@ -358,6 +377,7 @@ let lang = "en", langPicked = false, filterAp = "", tab = "needs", ticketFilter 
 // canWrite: only the page's owner answers (the db rules let nobody else write replies). myId goes on each reply.
 let db = null, user = null, downloads = null, canWrite = null, myId = null, loaded = false, unreachable = false;
 const sendErrors = {};
+let pendingSwitch = null, capSent = null;   // pendingSwitch: {name, from, at}
 const VIEWS = ["needs", "tasks", "status"];
 const $ = (id) => document.getElementById(id);
 
@@ -504,7 +524,7 @@ function renderBanners() {
 // When an answer takes effect: the gate reads the page once a minute outside its quiet hours
 // (the machine's time, hence the offset); otherwise at the next forced pass.
 function pickup() {
-  const rc = S.meta.reply_check || {}, a = (S.meta.budget || {}).allowance || {};
+  const rc = S.meta.reply_check || {}, bd = S.meta.budget || {}, a = bd.passes || bd.allowance || {};
   if (a.allow === 0) return L("pickup_paused");
   const later = L("pickup_later", { min: rc.forced_pass_min || 30 });
   if (!rc.every_s) return later;
@@ -950,6 +970,74 @@ function reportCard(r, older) {
     part("done_h", r.done), part("waiting_h", r.waiting), part("next_h", r.next), part("access_h", r.access),
     r.budget ? el("div", { class: "meta" }, L("budget_h") + "：" + T(r.budget)) : null);
 }
+async function sendAccess(body, errKey) {
+  if (!db) return;
+  delete sendErrors[errKey];
+  try {
+    await db.collection("replies").add(Object.assign({ at: new Date().toISOString(), by: myId }, body));
+  } catch (e) {
+    sendErrors[errKey] = L("send_failed", { error: (e && (e.message || e.code)) || e });
+    return false;
+  }
+  return true;
+}
+// When a switch chosen here takes effect: the answer check reads it (not in the quiet hours, machine time),
+// otherwise the next forced pass. The same text as publish.switch_note.
+function switchNote() {
+  const rc = S.meta.reply_check || {}, min = rc.forced_pass_min || 30, q = rc.quiet || [];
+  if (!rc.every_s) return L("access_switch_note_off", { min });
+  return L("access_switch_note") + (q.length === 2 ? " " + L("access_switch_note_quiet", { start: q[0], end: q[1], min }) : "");
+}
+// A cap answer is read within a minute, also in the quiet hours while the card is open; with the check off, by a pass.
+function capPending(answer) {
+  const rc = S.meta.reply_check || {};
+  return rc.every_s ? L("cap_pending", { answer }) : L("cap_pending_off", { answer, min: rc.forced_pass_min || 30 });
+}
+async function sendSwitch(name) {
+  if (await sendAccess({ kind: "profile", option: name }, "profile")) pendingSwitch = { name, from: ((S.meta.access || {}).profile || {}).name, at: Date.now() };
+  render();
+}
+async function sendCap(option, day) {
+  if (await sendAccess({ kind: "cap", option, day }, "cap")) capSent = { option, day };
+  render();
+}
+// The header line: the badge for how workers are paid, and that page sessions always use the subscription.
+function renderAccess() {
+  const a = S.meta.access;
+  if (!a) { fill($("access")); return; }
+  const gw = a.profile.mode === "gateway", p = a.profile;
+  // A profile that cannot be loaded is neither the subscription nor a gateway: say so, and that workers wait.
+  if (a.profile_error) {
+    fill($("access"), el("span", { class: "keyerr" }, L("access_profile_error", { error: a.profile_error.error || "" }) + " " + L("access_profile_fix")),
+      el("span", {}, L("access_page_sessions")));
+    return;
+  }
+  fill($("access"),
+    el("span", { class: "abadge" + (gw ? " gw" : "") }, gw ? L("access_workers", { label: p.label || p.name }) : L("access_subscription")),
+    gw ? el("span", { class: "mono" }, [p.model, p.effort].filter(Boolean).join(" · ")) : null,
+    gw ? el("span", {}, L("access_page_sessions")) : null,
+    a.key_error ? el("span", { class: "keyerr" }, L("access_key_error", { error: a.key_error.error || "" }) + " " + L("access_key_fix")) : null);
+}
+// The daily cap card: open until you answer; the gate applies the answer.
+function renderCapCard() {
+  const a = S.meta.access, c = a && a.cap_card, off = canWrite === false || !db;
+  if (c && capSent && capSent.day !== c.day) capSent = null;
+  if (!c) { capSent = null; fill($("capcard")); return; }
+  const money = (n) => "$" + (n || 0).toFixed(2);
+  // The card lists its own answers: an unpriced cost is accepted for today, never "raised".
+  const names = { raise50: L("cap_raise50"), raise100: L("cap_raise100"), accept_unknown: L("cap_accept_unknown"), pause: L("cap_pause") };
+  const opts = (c.options || (c.cause === "unknown" ? ["accept_unknown", "pause"] : ["raise50", "raise100", "pause"])).map((id) => [id, names[id] || id]);
+  const u = c.unknown || null;
+  fill($("capcard"), el("div", { class: "card dec capcard", role: "group", "aria-label": L("cap_card_title") },
+    el("h2", {}, "▲ " + L("cap_card_title")),
+    el("p", {}, L(c.cause === "unknown" ? "cap_card_body_unknown" : "cap_card_body", { spent: (c.spent || 0).toFixed(2), limit: (c.limit || 0).toFixed(2) })),
+    u && (u.models || []).length ? el("p", {}, L("cap_unknown_models", { models: u.models.join(", ") })) : null,
+    u && u.launches ? el("p", {}, L("cap_unknown_launches", { n: u.launches })) : null,
+    u ? el("p", { class: "meta" }, L("cap_unknown_fix")) : null,
+    capSent ? el("div", { class: "sent", role: "status" }, capPending((opts.find((o) => o[0] === capSent.option) || [0, capSent.option])[1])) :
+      el("div", { class: "switch" }, opts.map(([id, label]) => el("button", { type: "button", class: id === "pause" ? "btn ghost" : "btn", disabled: off, onclick: () => sendCap(id, c.day) }, label))),
+    errNote("cap")));
+}
 function renderStatus() {
   const bud = S.meta.budget || {}, b = bud.budget || {}, a = bud.allowance || {};
   const health = S.meta.health || {}, cap = S.meta.cap || {};
@@ -958,15 +1046,40 @@ function renderStatus() {
   const stateSec = el("div", { class: "ps" },
     el("div", { class: "state-line" }, el("span", { class: "st " + st.cls }, st.glyph + " " + st.text),
       el("span", { class: "meta" }, [health.last_gate_at ? L("gate_checked", { when: rel(health.last_gate_at) }) : null,
-        a.paused_until ? L("paused_until", { when: rel(a.paused_until) }) : null].filter(Boolean).join(" · "))),
+        (bud.passes || a).paused_until ? L("paused_until", { when: rel((bud.passes || a).paused_until) }) : null].filter(Boolean).join(" · "))),
     el("div", { class: "meta" }, L("cap_line", { cap: cap.max_workers, active: cap.active })));
 
   const used = b.credits_used_usd || 0, limit = b.credits_limit_usd || 0;
-  const usageSec = el("div", { class: "ps" }, el("div", { class: "ps-h" }, el("span", {}, L("usage_h")), el("span", {}, L("reset_h"))),
-    el("div", { class: "urows" },
-      (b.windows || []).map((w) => usageRow(windowLabel(w), Math.round(w.percent || 0), "", w.resets_at ? rel(w.resets_at) : "")).flat(),
-      usageRow(L("tile_credits"), limit ? Math.round(used / limit * 100) : 0, "$" + used.toFixed(0) + "/" + limit.toFixed(0), "")),
-    b.stale ? el("div", { class: "note warn" }, "▲ " + L("stale")) : null);
+  const acc = S.meta.access || null, gw = !!acc && acc.profile.mode === "gateway", u = (acc && acc.usage) || {};
+  const money = (n) => "$" + Math.round(n || 0).toLocaleString("en-US");   // whole dollars with a thousands separator
+  const windowRows = (b.windows || []).map((w) => usageRow(windowLabel(w), Math.round(w.percent || 0), "", w.resets_at ? rel(w.resets_at) : "")).flat();
+  // Gateway workers pay by the dollar, so their rows are dollars against today's limit. The page's own sessions
+  // still use the subscription window, so that row stays.
+  const gwRows = gw ? [
+    usageRow(L("usage_today"), u.cap_today ? Math.round((u.today || 0) / u.cap_today * 100) : 0, money(u.today) + " / " + money(u.cap_today), ""),
+    usageRow(L("usage_week"), 0, money(u.week), ""),
+    usageRow(L("usage_month"), 0, money(u.month), ""),
+    usageRow(L("usage_page_session"), u.session_pct == null ? 0 : u.session_pct, u.session_pct == null ? "–" : "", ""),
+  ].flat() : null;
+  const usageSec = el("div", { class: "ps" }, el("div", { class: "ps-h" }, el("span", {}, L("usage_h")), el("span", {}, gw ? "" : L("reset_h"))),
+    el("div", { class: "urows" }, gw ? gwRows : [
+      windowRows,
+      usageRow(L("tile_credits"), limit ? Math.round(used / limit * 100) : 0, "$" + used.toFixed(0) + "/" + limit.toFixed(0), "")].flat()),
+    gw && u.unknown ? el("div", { class: "note warn" }, "▲ " + L("usage_unknown")) : null,
+    !gw && b.stale ? el("div", { class: "note warn" }, "▲ " + L("stale")) : null);
+
+  // Profile switch: one button per profile; switchNote() says when the gate applies the answer.
+  // Done when the active profile changed to anything, or after the forced pass interval and 5 minutes (the longest a switch takes).
+  if (acc && pendingSwitch && (acc.profile.name !== pendingSwitch.from || Date.now() - pendingSwitch.at > ((S.meta.reply_check || {}).forced_pass_min || 30) * 60000 + 5 * 60000)) pendingSwitch = null;
+  const off = canWrite === false || !db;
+  const switchSec = acc && ((acc.profiles || []).length > 1 || (acc.broken_profiles || []).length) ? el("div", { class: "ps" },
+    el("div", { class: "ps-h" }, el("span", {}, L("access_switch"))),
+    el("div", { class: "switch" }, acc.profiles.map((q) => el("button", { type: "button", class: "btn ghost small", disabled: off || q.name === acc.profile.name,
+      "aria-pressed": String(q.name === acc.profile.name), onclick: () => sendSwitch(q.name) },
+      (q.label || q.name) + (q.name === acc.profile.name ? " · " + L("access_current") : "")))),
+    el("div", { class: "note" }, pendingSwitch ? L("access_switch_pending", { name: pendingSwitch.name, note: switchNote() }) : switchNote()),
+    ((acc.broken_profiles || []).length ? el("div", { class: "note warn" }, "▲ " + L("profile_broken", { names: acc.broken_profiles.map((x) => x.name).join(", ") })) : null),
+    errNote("profile")) : null;
 
   const ws = values("workers").sort((x, y) => (x.started_at || "").localeCompare(y.started_at || ""));
   const workerSec = el("div", { class: "ps" }, el("div", { class: "ps-h" }, el("span", {}, L("running_now")), el("span", { class: "n" }, String(ws.length))),
@@ -976,7 +1089,8 @@ function renderStatus() {
         el("span", { class: "wt" }, el("span", { class: "mono" }, w.task), filterAp ? null : el("span", { class: "ap mono" }, w.ap)),
         el("span", { class: "wtime" }, rel(w.started_at) + (w.resumes ? " · ↻" + w.resumes : ""))),
       el("div", { class: "attach mono" }, 'claude attach "' + w.session_name + '"'
-        + (w.resumes ? "  ·  " + L("resumed_n", { n: w.resumes }) : ""))))) :
+        + (w.resumes ? "  ·  " + L("resumed_n", { n: w.resumes }) : "")),
+      w.profile ? el("div", { class: "note" }, L("worker_profile", { profile: w.profile })) : null))) :
       el("div", { class: "note" }, L("no_workers")));
 
   const aps = Object.values(S.autopilots).filter((x) => !filterAp || x.name === filterAp);
@@ -999,7 +1113,7 @@ function renderStatus() {
     reps.length ? reportCard(reps[0]) : el("div", { class: "empty" }, L("no_report")),
     reps.length > 1 ? el("details", { class: "fold" }, el("summary", {}, L("older_reports")), el("div", { class: "sec" }, reps.slice(1).map((r) => reportCard(r, true)))) : null);
 
-  fill($("v-status"), el("div", { class: "panel" }, stateSec, usageSec, progressSec, workerSec), report);
+  fill($("v-status"), el("div", { class: "panel" }, stateSec, usageSec, switchSec, progressSec, workerSec), report);
 }
 
 /* ---------- tabs and render ---------- */
@@ -1019,7 +1133,7 @@ function showTab(name) {
   render();
 }
 function render() {
-  renderHeader(); renderBanners(); renderNeeds(); renderTasks(); renderStatus(); renderTabbar();
+  renderHeader(); renderAccess(); renderBanners(); renderCapCard(); renderNeeds(); renderTasks(); renderStatus(); renderTabbar();
 }
 
 $("lang").addEventListener("click", () => {

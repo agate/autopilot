@@ -9,11 +9,11 @@ from autopilot import config, paths, text
 
 TOP = {"version", "tasks", "workers", "decisions", "last_report"}
 TASK_REQ = {"id", "title", "depends_on", "status", "link", "needs", "critical", "phase", "origin"}
-TASK_OPT = {"pr", "branch", "worktree", "spec", "assignee", "evidence", "sessions"}
+TASK_OPT = {"pr", "branch", "worktree", "spec", "assignee", "evidence", "sessions", "replaced_sessions"}
 TASK_STATUS = {"todo", "in_progress", "in_review", "done", "blocked", "skipped"}
 ORIGINS = {"source", "found"}
 WORKER_REQ = {"task", "role", "session_name", "session_id", "short_id", "ports", "needs", "started_at", "resumes"}
-WORKER_OPT = {"cwd", "parked"}
+WORKER_OPT = {"cwd", "parked", "profile", "replaced_sessions"}
 ROLES = {"implement", "review", "pr"}
 DEC_REQ = {"id", "kind", "title", "body", "options", "links", "status", "created_at"}
 DEC_OPT = {"task", "answer", "action", "answered_at", "access", "handling", "attention", "explain"}

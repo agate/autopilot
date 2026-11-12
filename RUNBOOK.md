@@ -109,8 +109,14 @@ rejects one that does not.
 
 ## The pass
 
-1. **Begin.** Run `ap budget`. Note `allowance.allow`: `0` means start no new workers, `1` means at
-   most one. Read `$AUTOPILOT_DATA/RULES.md`, and for each autopilot its `config.json`, `RULES.md` and
+1. **Begin.** Run `ap budget`. Note `allowance.allow` (the allowance for new workers on the active profile): `0` means start no new
+   workers, `1` means at most one; `allowance.reason` `cap` means the gateway's daily dollar cap is
+   reached (`allowance.cause` says whether the spend or an unknown cost caused it); `key` means the
+   gateway key does not work (`allowance.error` says why); `profile` means the active profile cannot be
+   loaded (`allowance.error`). Treat `cap`, `key` and `profile` like `credits`: start and resume no
+   workers (not even a parked one) and run no `ap oneoff`, but still handle answers and reports; those
+   commands refuse (exit 1) in that state anyway. Never fall back to the subscription for workers. `passes` is the same for dispatcher passes, which always run on the
+   subscription. Read `$AUTOPILOT_DATA/RULES.md`, and for each autopilot its `config.json`, `RULES.md` and
    `state.json`. A line in an autopilot's `RULES.md` wins over a global line it conflicts with. An
    open `self` card with no `attention` field was added before every card had one: judge it by the rule
    under Authority and run `ap decision attention <ap> <D-id> true|false`.
@@ -118,15 +124,21 @@ rejects one that does not.
 2. **Check workers.** For each autopilot run `ap worker list <ap> --json` and handle each worker by
    its `state`:
    - `running` or `unknown` (the session list could not be read): leave it.
-   - `parked` (it stopped itself because a usage window reached `budget.park_pct`; `parked.resume_at`
-     and `parked.note` say when and where): it is not dead and not done. Never `ap worker resume` or
-     `ap worker end` it. Resume it now, before any other step, when `parked.resume_at` has passed and
-     `allowance.allow` is not `0`: write `runs/<task>/brief-<role>.md` (the usual brief fields, then
-     "You were parked for quota. Your note: <note>. Continue from there.") and run
+   - `parked`: it is not dead and not done. Never `ap worker resume` or `ap worker end` it. Two kinds:
+     - A quota park (it stopped itself because a usage window reached `budget.park_pct`; `parked.resume_at`
+       and `parked.note` say when and where). Resume it now, before any other step, when
+       `parked.resume_at` has passed and `allowance.allow` is not `0`, with the brief line
+       "You were parked for quota. Your note: <note>. Continue from there." While usage is still high or
+       `resume_at` is ahead, leave it.
+     - A cap park (`parked.kind` is `cap`, `parked.resume_at` is null: the user chose pause on the daily-cap
+       card, which paused every autopilot and stopped its workers). Resume it only when this autopilot is
+       not paused (the user resumed it) and `allowance.allow` is not `0`, with the brief line
+       "You were paused at the daily cap. Your note: <note>. Continue from there." Otherwise leave it.
+     To resume either: write `runs/<task>/brief-<role>.md` (the usual brief fields, then that line) and run
      `ap worker start <ap> <task> <role> --resume --cwd <its cwd> --prompt-file <brief> --needs <needs>`.
-     That keeps its slot and ports, clears the parked record and logs `worker_resumed`. While usage is
-     still high or `resume_at` is ahead, leave it. A parked worker holds its slot, so it counts toward
-     `max_workers` and resumes before step 8 starts any new task.
+     That keeps its slot and ports, clears the parked record and logs `worker_resumed` (it exits 1 at the
+     cap, with a failing key or a broken profile: leave the worker then). A parked worker holds its slot,
+     so it counts toward `max_workers` and resumes before step 8 starts any new task.
    - `blocked` (waiting for a permission nobody can give): add an `ask` card (title
      `{"key": "worker_blocked", "args": {"session": "<name>"}}`) unless one is open; tell the user they
      can `claude attach "<name>"` to answer it.
@@ -187,6 +199,12 @@ rejects one that does not.
 6. **Replies.** Read the page's `replies` collection with `ArtifactData` (`ap publish url` prints the
    page). Each reply has `decision` (`<ap>:<D-id>`), `option` or `text`, and `by`. First record every
    answer, then tell the page, then act on them:
+   - A reply with a `kind` (`profile` or `cap`: a profile switch or a daily-cap answer) is no card answer:
+     never `ap decision resolve` it. Run `ap reply-kind '<the reply document as JSON>'` with it, one
+     reply at a time, oldest `at` first (the same code the minute check uses; it applies each reply once
+     and prints what it did). When it exits 0,
+     delete that reply document in the same `ArtifactData` batch that tells the page (below). Exit 1: leave
+     the reply for the next pass.
    - `option: "undo"` on a `self` card: `ap decision resolve <ap> <D-id> --answer undo --status undone --handling`.
      It works on a card the user already marked read, too, even once the archive took it.
    - `option: "keep"` on a `self` card (OK: read, it stands), or a reply with a `decisions` list (the
@@ -245,7 +263,8 @@ rejects one that does not.
     `ap decision keep <ap> <D-id> ...` instead, never `--handling`), then
     `ap publish diff --only decisions`, its rows in one `ArtifactData` batch, and
     `ap publish mark --only decisions`. Do not act on it, do not run `ap decision handled`, and leave
-    the reply where it is: the next pass reads it again (`unchanged`) and acts. Run `ap tick <ap>`
+    the reply where it is: the next pass reads it again (`unchanged`) and acts. A new reply with a `kind`
+    gets `ap reply-kind` as in step 6 instead, and is deleted in that same batch once the command exits 0. Run `ap tick <ap>`
     ONLY when this re-read found at least one new answer; otherwise never queue a pass from a pass (an
     unneeded tick makes passes run back to back and spend the budget for nothing).
     Then run `ap archive <ap>` for each autopilot, and:

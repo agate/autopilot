@@ -63,6 +63,24 @@ class DocsTest(unittest.TestCase):
         labels = (ROOT / "templates" / "labels.en.json").read_text()
         self.assertIn('"two_answers"', labels)
 
+    def test_cap_parked_workers_resume_only_when_unpaused_and_allowed(self):
+        rb = (ROOT / "RUNBOOK.md").read_text()
+        step = rb[rb.index("2. **Check workers.**"):rb.index("3. **Implementer done**")]
+        self.assertIn("`parked.kind` is `cap`", step)
+        self.assertIn("not paused", step)
+        self.assertIn("You were paused at the daily cap", step)
+
+    def test_profile_and_cap_replies_go_through_reply_kind(self):
+        rb = (ROOT / "RUNBOOK.md").read_text()
+        step = rb[rb.index("**Replies.**"):rb.index("7. **Sync the source.**")]
+        self.assertIn("ap reply-kind", step)
+        self.assertIn("never `ap decision resolve` it", step)
+        self.assertIn("same `ArtifactData` batch", step)
+        tidy = rb[rb.index("**Tidy and publish.**"):rb.index("11. **End.**")]
+        self.assertIn("ap reply-kind", tidy)
+        for doc in ("README.md", "SKILL.md"):
+            self.assertNotIn("up to 30 minutes", (ROOT / doc).read_text(), doc)
+
     def test_a_task_without_a_pr_gets_evidence(self):
         # Only the PR worker wrote evidence.json, so a research task closed with nothing on the page.
         rb = (ROOT / "RUNBOOK.md").read_text()

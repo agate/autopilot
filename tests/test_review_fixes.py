@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.helpers import ROOT, TempData, write_ap
+from tests.helpers import ROOT, TempData, floor, write_ap
 from autopilot import cli, config, events, guard, mergecheck, ops, paths, perms, publish, sessions, state, workers
 
 FAKE = str(ROOT / "tests" / "bin" / "fake-claude")
@@ -34,7 +34,7 @@ class Env(unittest.TestCase):
         self.agents = self.tmp / "agents.json"
         self.agents.write_text("[]")
         os.environ.update(FAKE_CLAUDE_LOG=str(self.log), FAKE_AGENTS_JSON=str(self.agents))
-        (self.data / "projects" / "checkout" / "settings.json").write_text("{}")
+        (self.data / "projects" / "checkout" / "settings.json").write_text(json.dumps(floor()))
 
     def tearDown(self):
         for k in ("FAKE_CLAUDE_LOG", "FAKE_AGENTS_JSON"):

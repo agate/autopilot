@@ -57,7 +57,11 @@ def _txt(obj) -> str:
 
 def _parked(w: dict) -> str:
     pk = w.get("parked")
-    return f" [parked for quota, resumes {pk.get('resume_at') or 'when usage drops'}]" if pk else ""
+    if not pk:
+        return ""
+    if pk.get("kind") == "cap":
+        return " [paused at the daily cap; resumes when you resume the autopilot]"
+    return f" [parked for quota, resumes {pk.get('resume_at') or 'when usage drops'}]"
 
 
 def _self_line(st: dict) -> str:
@@ -71,7 +75,30 @@ def _self_line(st: dict) -> str:
 
 
 def _budget_line() -> str:
-    b = budget.read()
+    """One line on usage. It runs on every message of a talk session, so it reads only what the gate keeps:
+    no key command, no spend count, nothing that opens or closes the cap card."""
+    from autopilot import cap, profile, spend
+    gcfg, now = config.load_global(), datetime.now().astimezone()
+    p, err = profile.active_or_error()
+    if err:
+        return f"Budget: {err}; no new workers start"
+    if p.get("mode") == "gateway":
+        kept = spend.remembered(now)
+        key = profile.cached_key_error(p)
+        head = f"Budget (gateway profile {p['name']}): "
+        tail = "; dispatcher passes use the subscription"
+        if kept is None:
+            return head + "today's spend is not counted yet (the gate counts it every minute)" + tail
+        t, limit = kept["totals"], cap.today_limit(p, now)
+        if key:
+            state = f"no new workers (key: {key})"
+        elif (t.get("today") or 0) >= limit or (t.get("unknown_today") and not cap.unknown_accepted(now)):
+            state = "no new workers (daily cap)"
+        else:
+            state = "new workers allowed"
+        return (head + f"${t.get('today', 0.0):.2f} of ${limit:.2f} spent today (as of {kept['at'][11:16]})"
+                + (" (some cost unknown)" if t.get("unknown") else "") + f", {state}" + tail)
+    b = budget.read_fast(stale_min=gcfg["budget"]["stale_min"])
     if not b.get("ok"):
         return "Budget: unknown"
     parts = [f"{w.get('kind')}{'/' + w['model'] if w.get('model') else ''} {w.get('percent')}%" for w in b["windows"]]

@@ -19,7 +19,7 @@ import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from autopilot import access, config, lock, paths, publish, replies, sessions, usage, workers
+from autopilot import access, config, lock, paths, profile, publish, replies, sessions, usage, workers
 
 NAME = "autopilot · page refresh"
 LIGHT = ("meta", "autopilots", "tasks", "workers", "decisions", "reports")
@@ -41,13 +41,26 @@ DISALLOWED = ",".join(t for t in replies.DISALLOWED.split(",") if t != "Read")
 
 
 def _volatile_free(cur: dict) -> dict:
-    """The data without numbers that change on their own: usage and spend, the gate's check time, token totals."""
+    """The data without numbers that change on their own: usage and spend (also in meta.access), the gate's check
+    time, token totals."""
     out = copy.deepcopy({c: cur.get(c) or {} for c in LIGHT})
     meta = out["meta"]
     b = meta.get("budget")
     if isinstance(b, dict):
         a = b.get("allowance") if isinstance(b.get("allowance"), dict) else {}
-        meta["budget"] = {"allowance": {"reason": a.get("reason"), "paused_until": a.get("paused_until")}}
+        pa = b.get("passes") if isinstance(b.get("passes"), dict) else {}
+        meta["budget"] = {"allowance": {"reason": a.get("reason"), "paused_until": a.get("paused_until"),
+                                        "cause": a.get("cause")},
+                          "passes": {"reason": pa.get("reason"), "paused_until": pa.get("paused_until")}}
+    acc = meta.get("access")
+    if isinstance(acc, dict):
+        # Spend and usage move every minute; the profile, the cap card opening or closing, its limit and cause,
+        # a key or profile error and whether some cost is unknown are what a refresh is for.
+        if isinstance(acc.get("usage"), dict):
+            for k in ("today", "week", "month", "session_pct", "credits_used_usd"):
+                acc["usage"].pop(k, None)
+        if isinstance(acc.get("cap_card"), dict):
+            acc["cap_card"].pop("spent", None)
     if isinstance(meta.get("health"), dict):
         meta["health"].pop("last_gate_at", None)
     for a in out["autopilots"].values():
@@ -189,16 +202,17 @@ def verify(path, url: str, plan: dict):
 
 def run_session(gcfg: dict, url: str, prompt: str, cwd, poll_s: float = 2) -> dict:
     """Run the prompt in a throwaway Haiku session. {"ok": True, "transcript": path} or {"ok": False, "error"}."""
-    rc = gcfg.get("reply_check") or {}
     claude = workers.claude_bin(gcfg)
     folder = Path(cwd).resolve()   # the plan's file paths are resolved the same way (prepare)
-    argv = [claude, "--bg", "-n", NAME, "--model", rc.get("model") or "haiku", "--strict-mcp-config",
-            "--setting-sources", "project", f"--disallowedTools={DISALLOWED}", "--system-prompt", SYSTEM,
+    s = profile.page_profile()
+    argv = [claude, "--bg", "-n", NAME, "--model", s.get("small_model") or "haiku", "--strict-mcp-config",
+            "--settings", str(profile.ensure_light()), "--setting-sources", "project", f"--disallowedTools={DISALLOWED}", "--system-prompt", SYSTEM,
             f"--allowedTools=ArtifactData,Read(/{folder}/**)", "--", prompt]
     try:
         short = workers._launch(argv, str(folder), workers._env("refresh"))
     except (RuntimeError, OSError, subprocess.SubprocessError) as e:
         return {"ok": False, "error": f"{START_ERROR}: {e}"}
+    workers._record(short, "refresh", None, s)
     try:
         s, why = sessions.wait_turn(claude, short, TIMEOUT_S, poll_s)
         if why:

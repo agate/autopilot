@@ -20,7 +20,7 @@ call. When you have questions, you open one (`/autopilot <name>`).
 
 | Part | What it is | Uses tokens |
 |------|------------|-------------|
-| The check (`ap gate`) | Plain code that a launchd login item runs every minute and after each restart. It fingerprints finished work, dead workers, ready tasks against free slots, CI and reviews on open PRs, and your watch commands | No, except one tiny Haiku read of your page's answers (06:00–22:00, only while a card can be answered) |
+| The check (`ap gate`) | Plain code that a launchd login item runs every minute and after each restart. It fingerprints finished work, dead workers, ready tasks against free slots, CI and reviews on open PRs, and your watch commands | No, except one tiny Haiku read of your page's answers (outside the quiet hours, `reply_check.quiet`, only while a card can be answered; in the quiet hours only while the daily-cap card is open) |
 | A pass | A new background Claude session, started when the fingerprint changed or 30 minutes passed. It reads `RUNBOOK.md`, your rules and the state file, handles finished work, fills free worker slots, writes reports, publishes the page, and exits. One at a time, under a lock | Yes |
 | Workers | Background sessions, one per task and role (implement, review, PR loop), each in its own git worktree. Each writes a report and kicks the check when done | Yes |
 | A talk session | Any Claude Code session where you type `/autopilot <name>`. A hook adds a fresh snapshot to every message | Yes, while you chat |
@@ -118,6 +118,7 @@ as the command.
 | `/autopilot status` | One line per autopilot (running, waiting on you, done), plus the usage budget |
 | `/autopilot doctor` | Health check: login item, recent check runs, logins, settings files, MCP servers, disk space, and that the plugin names nobody |
 | `/autopilot config` | List the settings, the changed ones first; change one on your word |
+| `/autopilot profile ...` | Profiles: list, show, add, switch, rotate (see Profiles); plain words work too |
 | `/autopilot tick [name]` | Queue a pass now; the check starts it within seconds |
 | `/autopilot pause <name>` / `resume <name>` | Pause an autopilot, or let it run again |
 | `/autopilot stop <name>` | Asks first, then ends its workers and marks it stopped |
@@ -127,6 +128,50 @@ as the command.
 To talk to one worker directly, attach to its background session:
 `claude attach "<session name>"` (names look like
 `checkout · PROJ-123 · implement`).
+
+## Profiles
+
+A profile says how workers reach Claude. The built-in `subscription` profile is your
+Claude login (it also holds the model and effort settings that were global before). A gateway
+profile points Claude Code at an LLM gateway with its own key. Only workers and one-off
+actions use the active profile. The dispatcher pass, the answer read and the page refresh always
+use the subscription, because a gateway session cannot use the claude.ai Artifact tools.
+
+```
+ap profile add team-gateway --gateway \
+  --base-url https://llm-gateway.example.com/anthropic \
+  --key-command ~/bin/llm-key \
+  --refresh-command "~/bin/llm-key --refresh" \
+  --rotate-command "~/bin/llm-key --rotate" \
+  --model claude-sonnet-5-5 --effort high --daily-cap 500 \
+  --env API_TIMEOUT_MS=960000
+ap profile list              # * marks the active profile
+ap profile use team-gateway  # switch; ap profile use subscription switches back
+ap profile rotate team-gateway
+```
+
+A gateway profile requires four options: `--base-url`, `--key-command`, `--small-model` and `--daily-cap`.
+Other commands: `ap profile show <name>`, `ap profile remove <name>`. You can say the same in
+`/autopilot` ("create a profile ...", "switch to the subscription", "rotate the key"). Options:
+`--models-command`, `--dispatcher-model`, `--label`, `--settings-file`. A profile stores the
+commands that print a key, never the key.
+
+- **Daily cap.** `--daily-cap` is dollars per local day. At the cap no new worker starts and
+  running ones continue. One card on the page asks you to raise today's limit by 50% or 100%, or to
+  pause. A raise adds to an earlier one, and the card opens again if spend crosses the raised limit.
+  Pause pauses every autopilot and stops running workers; resume by hand. An unanswered
+  card ends at local midnight, when today's spend starts again at $0, and workers start again. If some
+  of today's cost cannot be priced, it counts as over the cap: the card names the unpriced models (or a
+  launch that could not be read) and offers to accept today's unknown cost (it then counts as $0 for
+  the cap until midnight, still shown as unknown) or to pause. To fix it for good, add the model's price
+  under `prices`.
+- **Key health.** If the key command fails, no new worker starts and the page shows the error with its
+  fix. It never falls back to the subscription. Fix the key, or run `ap profile rotate <name>`.
+- **Switching from the page.** The answer check applies the switch. It takes up to about 5 minutes (about 1 when a card
+  is waiting). In the quiet hours (`reply_check.quiet`) the next forced pass applies it, so it can take up to
+  `forced_pass_min` minutes. A cap answer takes effect within a minute, also in the quiet hours: the check keeps
+  reading while the cap card is open. With `reply_check.every_s` at 0, passes apply both.
+  Switching with `ap profile use` is immediate.
 
 ## What it may do on its own
 
@@ -191,11 +236,11 @@ reaches you unless you changed that setting. The full list is in
 | `budget.park_pct` | `90` | Running workers stop and wait once any usage window reaches this percent, and continue after it resets |
 | `forced_pass_min` | `30` | Run a pass at least this often, in minutes, even when nothing changed |
 | `gate_interval_s` | `60` | How often the check wakes, in seconds; takes effect after `ap install` |
-| `reply_check.quiet` | `["22:00", "06:00"]` | No answer reads between these times; the forced pass picks answers up then |
+| `reply_check.quiet` | `["22:00", "06:00"]` | No answer reads between these times, except while the daily-cap card is open; the forced pass picks answers up then |
 | `report_times` | `["09:00", "17:00", "21:00"]` | When reports are written, local time |
 | `worktree_root` | `"~/worktrees"` | Where task worktrees are created |
 | `permission_mode` | `"auto"` | Claude Code permission mode for passes and workers |
-| `worker_effort` | `"xhigh"` | Effort level for workers |
+| `active_profile` | `"subscription"` | Access profile workers run on (see Profiles) |
 
 Each autopilot's own setup (source, repo, branch pattern, resources,
 authority, report times, watches) is written by `init` to

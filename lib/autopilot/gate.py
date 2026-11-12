@@ -8,7 +8,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 
-from autopilot import budget, cli, config, dispatch, events, lock, nextwork, ops, paths, park, refresh, replies, sessions, state, workers
+from autopilot import budget, cap, cli, config, dispatch, events, lock, nextwork, ops, paths, park, profile, refresh, replies, sessions, state, workers
 
 
 def report_due(times: list, last_slot, now: datetime):
@@ -90,7 +90,7 @@ def fingerprint(ap: str, apcfg: dict, st: dict, all_sessions, now: datetime, gh_
         if cls == "parked":
             # Looks like a running worker while it waits, so parking wakes no pass; the entry changes the
             # moment it can continue, which does.
-            cls = "parked_due" if park.resume_due(w, now, gcfg, b) else "running"
+            cls = "parked_due" if park.resume_due(w, now, gcfg, b, ap) else "running"
         if cls == "done" and hide_after is not None:
             rf = runs / w["task"] / sessions.result_file(w["role"])
             if rf.exists() and rf.stat().st_mtime >= hide_after:
@@ -161,7 +161,10 @@ def _move_legacy(gcfg: dict) -> None:
 
 
 def _allowance(gcfg: dict, now: datetime) -> dict:
-    return budget.allowance(budget.read(), gcfg, now.astimezone(timezone.utc))
+    """What the gate's pass rule reads: the dispatcher-pass allowance (subscription rules in every mode),
+    with the allowance for new workers (follows the active profile) under "workers"."""
+    cur = budget.current(gcfg, now.astimezone(timezone.utc))
+    return dict(cur["passes"], workers=cur["workers"])
 
 
 def _gh(gcfg: dict) -> str:
@@ -234,7 +237,8 @@ def _idle(aps: list, begun_at: str, gcfg: dict, now: datetime) -> bool:
     """Checked by the gate itself on fresh state: work could start now, but the pass started none."""
     snaps = nextwork.snapshots(aps)
     live = workers.all_workers()
-    planned = nextwork.plan_starts(snaps, live, gcfg["max_workers"], _allowance(gcfg, now)["allow"])
+    a = _allowance(gcfg, now)
+    planned = nextwork.plan_starts(snaps, live, gcfg["max_workers"], a.get("workers", a)["allow"])
     if not planned:
         return False
     started = 0
@@ -276,6 +280,10 @@ def _epoch(iso: str):
 
 
 def run(now: datetime = None, dispatch_fn=None) -> int:
+    try:
+        profile.migrate_from_config()
+    except Exception as e:  # noqa: BLE001 - a failed migration must not stop the gate; the next run retries
+        print(f"ap gate: could not migrate settings to the subscription profile: {e}", file=sys.stderr)
     gcfg = config.load_global()
     if lock.held(paths.data_root() / "lock"):
         return 0
@@ -293,6 +301,10 @@ def run(now: datetime = None, dispatch_fn=None) -> int:
     tick_file = paths.data_root() / "tick.json"
     ticked = set(_read_json(tick_file).get("aps") or [])
     allow = _allowance(gcfg, now)
+    try:
+        cap.retry_stops(now)   # a worker the cap pause could not stop is stopped again
+    except Exception as e:  # noqa: BLE001 - a retry must never stop the gate
+        notify(f"cap pause: could not retry stopping workers: {str(e)[:100]}")
     ticked |= replies.step(gcfg, gs, now)   # a new answer on the page queues its autopilot
     gs["paused_until"] = allow.get("paused_until") if allow["reason"] == "window" else None
     last = gs.get("last_pass_at") if isinstance(gs.get("last_pass_at"), dict) else {}

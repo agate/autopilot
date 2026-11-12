@@ -102,14 +102,16 @@ class WorkersTest(unittest.TestCase):
         self.assertEqual(argv[argv.index("--resume") + 1], "sid-old")
         self.assertEqual(argv[argv.index("-n") + 1], "checkout · PROJ-1 · implement")
 
-    def test_resume_passes_no_flags(self):
-        # Any flag on --resume starts a copy with a new id; resume() must continue the same session.
+    def test_resume_passes_only_name_and_settings(self):
+        # --resume carries only -n (the worker's name) and --settings (the session must bill the current profile):
+        # no model, effort or permission flags.
         rec = workers.start("checkout", "PROJ-1", "implement", str(self.data), "do it")
         with mock.patch.object(workers, "_launch", return_value="abcd1234") as launch:
             workers.resume("checkout", rec)
         argv = launch.call_args[0][0]
         self.assertEqual(argv[1:3], ["--bg", "--resume"])
-        self.assertEqual(len(argv), 5)
+        self.assertEqual(argv[6:8], ["--settings", str(self.data / "projects" / "checkout" / "settings.json")])
+        self.assertEqual(len(argv), 9)
 
 
 if __name__ == "__main__":

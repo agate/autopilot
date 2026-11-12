@@ -5,10 +5,13 @@ import re
 import shutil
 import subprocess
 import unittest
+from datetime import datetime, timezone
 from html.parser import HTMLParser
 
 from tests.helpers import ROOT, TempData
-from autopilot import publish
+from unittest import mock
+
+from autopilot import cap, config, profile, publish, spend
 
 PAGE = (ROOT / "templates" / "page.html").read_text()
 LABELS = json.loads((ROOT / "templates" / "labels.en.json").read_text())
@@ -305,6 +308,152 @@ console.log(JSON.stringify([
         # A kept card does not keep the reply check running, so its undo waits for the forced pass.
         self.assertIn('L("pickup_later"', js_fn("selfButtons"))
 
+
+
+class AccessTest(unittest.TestCase):
+    def setUp(self):
+        self.td = TempData()
+        self.data = self.td.__enter__()
+
+    def tearDown(self):
+        self.td.__exit__(None, None, None)
+
+    def gateway(self):
+        profile.save({"name": "gw", "mode": "gateway", "label": "Team gateway", "model": "m1", "small_model": "s",
+                      "effort": "high", "daily_cap_usd": 500,
+                      "gateway": {"base_url": "https://llm-gateway.example.com/anthropic", "key_command": "echo SECRET-KEY-VALUE"}})
+
+    def test_collect_access_gateway(self):
+        self.gateway()
+        profile.use("gw")
+        t = {"today": 12.5, "week": 40.0, "month": 90.0, "unknown": True, "unknown_today": False}
+        with mock.patch.object(spend, "totals", return_value=t):
+            acc = publish.collect([])["meta"]["access"]
+        self.assertEqual(acc["profile"], {"name": "gw", "label": "Team gateway", "mode": "gateway", "model": "m1", "effort": "high"})
+        self.assertEqual(acc["page_sessions"], "subscription")
+        self.assertEqual({p["name"] for p in acc["profiles"]}, {"gw", "subscription"})
+        self.assertEqual(set(acc["profiles"][0]), {"name", "label", "mode"})
+        self.assertEqual(acc["usage"], {"today": 12.5, "week": 40.0, "month": 90.0, "cap_today": 500.0, "unknown": True,
+                                        "session_pct": 0})
+        self.assertIsNone(acc["cap_card"])
+        self.assertIn("22:00", acc["switch_note"])
+
+    def test_page_shows_a_profile_error_like_a_key_error(self):
+        body = js_fn("renderAccess")
+        self.assertIn("a.profile_error", body)
+        self.assertIn('L("access_profile_error"', body)
+        self.assertIn("{error}", LABELS["access_profile_error"])
+
+    def test_switch_note_reads_the_quiet_window(self):
+        g = config.load_global()
+        g["reply_check"] = dict(g["reply_check"], quiet=["21:30", "07:15"])
+        config.save_global(g)
+        note = publish.collect([])["meta"]["access"]["switch_note"]
+        self.assertIn("21:30", note)
+        self.assertIn("07:15", note)
+        self.assertNotIn("22:00", note)
+        g["reply_check"] = dict(g["reply_check"], every_s=0)
+        config.save_global(g)
+        self.assertIn("within 30 minutes", publish.collect([])["meta"]["access"]["switch_note"])
+        # The page builds the same text from meta.reply_check, never from fixed hours.
+        for key in ("access_switch_note", "access_switch_note_quiet", "access_switch_note_off", "cap_pending",
+                    "cap_pending_off"):
+            self.assertNotIn("22:00", LABELS[key], key)
+        self.assertIn("S.meta.reply_check", js_fn("switchNote"))
+
+    def test_collect_access_subscription(self):
+        acc = publish.collect([])["meta"]["access"]
+        self.assertEqual(acc["profile"]["mode"], "subscription")
+        self.assertEqual(acc["page_sessions"], "subscription")
+        self.assertEqual(acc["usage"], {"session_pct": 0, "credits_used_usd": 0.0, "credits_limit_usd": 200.0})
+        self.assertIsNone(acc["cap_card"])
+
+    def test_collect_access_cap_card(self):
+        self.gateway()
+        profile.use("gw")
+        now = datetime.now(timezone.utc)
+        t = {"today": 510.0, "week": 510.0, "month": 510.0, "unknown": False, "unknown_today": False}
+        with mock.patch.object(spend, "totals", return_value=t):
+            acc = publish.collect([])["meta"]["access"]
+        self.assertEqual(acc["cap_card"], {"day": cap.state(now)["day"], "spent": 510.0, "limit": 500.0, "cause": "spent",
+                                           "options": ["raise50", "raise100", "pause"]})
+
+    def test_cap_card_buttons_come_from_the_card_and_name_the_unknown(self):
+        body = js_fn("renderCapCard")
+        self.assertIn("c.options", body)
+        self.assertIn('L("cap_accept_unknown")', body)
+        self.assertIn("c.unknown", body)
+        for key in ("cap_accept_unknown", "cap_unknown_models", "cap_unknown_launches", "cap_unknown_fix"):
+            self.assertTrue(LABELS.get(key), key)
+        self.assertNotIn("Raise the limit", LABELS["cap_card_body_unknown"])
+
+    def test_cap_card_cause(self):
+        self.gateway()
+        profile.use("gw")
+        for unknown, cause in ((False, "spent"), (True, "unknown")):
+            t = {"today": 10.0, "week": 10.0, "month": 10.0, "unknown": unknown, "unknown_today": unknown}
+            with mock.patch.object(spend, "totals", return_value=t):
+                if cause == "spent":
+                    t["today"] = 600.0
+                card = publish.collect([])["meta"]["access"]["cap_card"]
+            self.assertEqual(card["cause"], cause)
+            cap._save({"day": cap.state()["day"], "raise_pct": 0, "card": None})
+        self.assertIn("cap_card_body_unknown", LABELS)
+        self.assertIn('"cap_card_body_unknown"', PAGE)
+
+    def test_a_corrupt_profile_file_does_not_break_the_page_data(self):
+        self.gateway()
+        (self.data / "profiles" / "bad.json").write_text("{nope")
+        acc = publish.collect([])["meta"]["access"]
+        self.assertNotIn("bad", [p["name"] for p in acc["profiles"]])
+        self.assertEqual(acc["broken_profiles"], [{"name": "bad", "error": "unreadable"}])
+
+    def test_pending_switch_clears_on_any_change_or_after_the_forced_pass(self):
+        self.assertIn("((S.meta.reply_check || {}).forced_pass_min || 30) * 60000 + 5 * 60000", PAGE)
+        self.assertIn("acc.profile.name !== pendingSwitch.from", PAGE)
+
+    def test_page_has_no_key_text(self):
+        self.gateway()
+        profile.use("gw")
+        t = {"today": 1.0, "week": 1.0, "month": 1.0, "unknown": False, "unknown_today": False}
+        with mock.patch.object(spend, "totals", return_value=t):
+            blob = json.dumps(publish.collect([]))
+        for secret in ("SECRET-KEY-VALUE", "key_command", "echo SECRET", "apiKeyHelper", "llm-gateway.example.com"):
+            self.assertNotIn(secret, blob)
+
+    def test_page_shows_the_access_pieces(self):
+        for k in ("access_subscription", "access_workers", "access_page_sessions", "access_switch", "cap_card_title",
+                  "cap_raise50", "cap_raise100", "cap_pause", "usage_today", "usage_week", "usage_month", "worker_profile"):
+            self.assertIn(k, LABELS)
+            self.assertIn(f'"{k}"', PAGE)
+        self.assertIn('kind: "profile"', PAGE)
+        self.assertIn('kind: "cap"', PAGE)
+
+
+class UsageValueTest(unittest.TestCase):
+    """The usage value is never clipped: it sizes to its content and the bar shrinks instead."""
+
+    def rule(self, selector: str) -> str:
+        start = PAGE.index(selector + " {")
+        return PAGE[start:PAGE.index("}", start)]
+
+    def test_value_has_no_fixed_narrow_width_or_clip(self):
+        uval = self.rule(".uval")
+        self.assertIn("white-space: nowrap", uval)
+        self.assertIn("font-variant-numeric: tabular-nums", uval)
+        for bad in ("overflow", "text-overflow"):
+            self.assertNotIn(bad, uval)
+        self.assertNotRegex(uval, r"(?<![-\w])(max-)?width:")
+        urows = self.rule(".urows")
+        self.assertIn("minmax(0, 1fr)", urows)
+        self.assertNotIn("narrow", PAGE)
+
+    def test_money_formats_whole_dollars_with_separator(self):
+        money = [ln for ln in PAGE.splitlines() if "const money =" in ln and "toLocaleString" in ln][0].split("//")[0].strip().rstrip(";")
+        out = node(money + """
+console.log(money(1234) + '|' + money(512) + ' / ' + money(500) + '|' + money(0));""")
+        self.assertEqual(out, "$1,234|$512 / $500|$0")
+        self.assertIn('money(u.today) + " / " + money(u.cap_today)', PAGE)
 
 
 class ExplainedCardTest(unittest.TestCase):

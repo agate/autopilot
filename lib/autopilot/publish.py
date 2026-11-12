@@ -6,7 +6,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from autopilot import budget, cli, config, nextwork, paths, state, text, usage
+from autopilot import budget, cap, cli, config, nextwork, paths, profile, state, text, usage
 
 COLLECTIONS = ("meta", "autopilots", "tasks", "workers", "decisions", "archive", "reports", "evidence")
 REPORTS_KEPT = 10
@@ -103,12 +103,73 @@ def _evidence(ap: str, task: str, assets: dict):
     return ev
 
 
+def switch_note(gcfg: dict) -> str:
+    """When a switch chosen on the page takes effect, from `reply_check` (the page builds the same text from
+    meta.reply_check with the labels access_switch_note*)."""
+    rc, lab = gcfg.get("reply_check") or {}, text.labels()
+    minutes = gcfg.get("forced_pass_min") or 30
+    if not rc.get("every_s"):
+        return lab["access_switch_note_off"].replace("{min}", str(minutes))
+    out = lab["access_switch_note"]
+    q = rc.get("quiet") or []
+    if len(q) == 2:
+        out += " " + lab["access_switch_note_quiet"].replace("{start}", q[0]).replace("{end}", q[1]) \
+            .replace("{min}", str(minutes))
+    return out
+
+
+def _access(cur: dict, now: datetime, gcfg: dict = None) -> dict:
+    """What the page shows about the access profile: the active one, the choices, usage by mode and the cap
+    card. Never a key, a key command, a gateway address or anything else from the profile's secrets."""
+    p, b, spent = cur["profile"], cur["budget"], cur["spent"]
+    session = next((w.get("percent") for w in b.get("windows") or [] if w.get("kind") == "session"), None)
+    session_pct = None if session is None else int(round(session))
+    acc = {"profile": {k: p.get(k) for k in ("name", "label", "mode", "model", "effort")},
+           "page_sessions": "subscription",
+           "profiles": [], "broken_profiles": [], "cap_card": None,
+           "switch_note": switch_note(gcfg or config.load_global())}
+    if cur["workers"].get("reason") == "profile":
+        acc["profile_error"] = {"error": cur["workers"].get("error"), "fix": profile.PROFILE_FIX}
+    try:
+        listed = profile.names()
+    except OSError:
+        listed = []
+    for n in listed:   # one unreadable profile file must not break the whole page
+        try:
+            q = profile.load(n)
+            acc["profiles"].append({k: q.get(k) for k in ("name", "label", "mode")})
+        except Exception:
+            acc["broken_profiles"].append({"name": n, "error": "unreadable"})
+    if p.get("mode") == "gateway":
+        if cur["workers"].get("reason") == "key":
+            acc["key_error"] = {"error": cur["workers"].get("error"), "fix": profile.KEY_FIX}
+        spent = spent or {}
+        limit = cap.today_limit(p, now)
+        acc["usage"] = {"today": spent.get("today", 0.0), "week": spent.get("week", 0.0), "month": spent.get("month", 0.0),
+                        "cap_today": limit, "unknown": bool(spent.get("unknown")), "session_pct": session_pct}
+        if cap.state(now)["card"] == "open":
+            cause = cur["workers"].get("cause") or ("unknown" if spent.get("unknown_today") else "spent")
+            acc["cap_card"] = {"day": cap.state(now)["day"], "spent": spent.get("today", 0.0), "limit": limit,
+                               "cause": cause,
+                               "options": ["accept_unknown", "pause"] if cause == "unknown" else ["raise50", "raise100", "pause"]}
+            if cause == "unknown":
+                acc["cap_card"]["unknown"] = {"models": list(spent.get("unknown_models") or []),
+                                              "launches": int(spent.get("unknown_launches") or 0),
+                                              "fix": cap.UNKNOWN_FIX}
+    else:
+        acc["usage"] = {"session_pct": session_pct, "credits_used_usd": b.get("credits_used_usd", 0.0),
+                        "credits_limit_usd": b.get("credits_limit_usd", 0.0)}
+    return acc
+
+
 def collect(aps: list) -> dict:
     gcfg = config.load_global()
     assets = _page().get("assets") or {}
     out = {c: {} for c in COLLECTIONS}
-    b = budget.read()
-    out["meta"]["budget"] = {"budget": b, "allowance": budget.allowance(b, gcfg, datetime.now(timezone.utc))}
+    cur = budget.current(gcfg, datetime.now(timezone.utc))
+    out["meta"]["budget"] = {"budget": cur["budget"], "allowance": cur["workers"], "passes": cur["passes"],
+                             "spent": cur["spent"]}
+    out["meta"]["access"] = _access(cur, datetime.now(timezone.utc), gcfg)
     active = config.active_aps()
     out["meta"]["cap"] = {"max_workers": gcfg["max_workers"], "active": len(active),
                           "warning": gcfg["max_workers"] < len(active)}
@@ -145,7 +206,7 @@ def collect(aps: list) -> dict:
         for w in st["workers"]:
             out["workers"][f"{ap}:{w['task']}:{w['role']}"] = {
                 "ap": ap, "task": w["task"], "role": w["role"], "session_name": w["session_name"],
-                "started_at": w["started_at"], "resumes": w["resumes"]}
+                "started_at": w["started_at"], "resumes": w["resumes"], "profile": w.get("profile")}
             if w.get("parked"):
                 out["workers"][f"{ap}:{w['task']}:{w['role']}"]["parked"] = {
                     "resume_at": w["parked"].get("resume_at"), "percent": w["parked"].get("percent")}

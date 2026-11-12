@@ -70,5 +70,16 @@ def write_ap(data: Path, name: str, **cfg) -> Path:
     base.update(cfg)
     (d / "config.json").write_text(json.dumps(base))
     if not (d / "settings.json").exists():
-        (d / "settings.json").write_text("{}")  # init writes the permission floor before any worker starts
+        (d / "settings.json").write_text(json.dumps(floor()))  # init writes the floor before any worker starts
     return d
+
+
+def floor() -> dict:
+    """The least a worker settings file holds: a deny list and the profile it was written for (the active one)."""
+    from autopilot import config
+
+    try:
+        name = config.load_global().get("active_profile") or "subscription"
+    except Exception:  # noqa: BLE001 - a test may have broken the config on purpose
+        name = "subscription"
+    return {"permissions": {"deny": []}, "env": {"AUTOPILOT_PROFILE": name}}

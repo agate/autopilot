@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 from datetime import datetime, timezone
 
-from autopilot import budget, cli, config, events, paths, state, text, workers
+from autopilot import budget, cap, cli, config, events, paths, profile, state, text, workers
 
 
 def cap_warning(gcfg: dict):
@@ -29,10 +29,14 @@ def render(aps: list) -> str:
                      f"{done}/{len(st['tasks'])} done · {config.status_of(n)}")
     if not aps:
         lines.append("No autopilots yet. Start one with /autopilot init.")
-    b = budget.read()
-    a = budget.allowance(b, gcfg, datetime.now(timezone.utc))
+    cur = budget.current(gcfg, datetime.now(timezone.utc))
+    b, a, wa = cur["budget"], cur["passes"], cur["workers"]
     lines.append("Budget: " + ", ".join(f"{w['kind']} {w['percent']}%" for w in b.get("windows") or [])
-                 + f" · new workers: {'no limit' if a['allow'] is None else a['allow']} ({a['reason']})")
+                 + f" · new passes: {'no limit' if a['allow'] is None else a['allow']} ({a['reason']})"
+                 + f" · new workers: {'no limit' if wa['allow'] is None else wa['allow']} ({wa['reason']})")
+    if cur["spent"] is not None:
+        lines.append(f"Gateway spend today: ${cur['spent']['today']:.2f} of ${cap.today_limit(cur['profile'], datetime.now()):.2f}"
+                     + (" (some cost unknown)" if cur["spent"]["unknown"] else ""))
     warn = cap_warning(gcfg)
     if warn:
         lines.append("Warning: " + warn)
@@ -79,6 +83,10 @@ def _stop(args: list) -> int:
     return 0
 
 
+# Settings that moved into the profiles: `ap config` no longer sets them.
+MOVED = dict(profile._MOVED)
+
+
 @cli.command("config")
 def _config(args: list) -> int:
     """Global settings: `ap config list [--json]`, `get [key]`, `set key=value ...`, `reset key ...`.
@@ -110,6 +118,15 @@ def _config(args: list) -> int:
         bad = [k for k, _, _ in pairs if not known(k)]
         if bad:
             print(f"unknown setting {bad[0]!r}; `ap config list` shows them all", file=sys.stderr)
+            return 2
+        if any(k == "active_profile" for k, _, _ in pairs):
+            # The settings files must change with it, which only `ap profile use` does.
+            print("active_profile: use `ap profile use <name>` (it rewrites the settings files too)", file=sys.stderr)
+            return 2
+        moved = [k for k, _, _ in pairs if k in MOVED]
+        if moved:
+            print(f"{moved[0]}: moved into the profile as {MOVED[moved[0]]}; see `ap profile show <name>` "
+                  "(and `ap profile add` to set it)", file=sys.stderr)
             return 2
         for k, _, v in pairs:
             if args[0] == "reset":

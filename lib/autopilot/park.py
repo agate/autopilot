@@ -6,7 +6,7 @@ import shlex
 import sys
 from datetime import datetime, timezone
 
-from autopilot import budget, cli, config, paths
+from autopilot import budget, cli, config, paths, profile
 
 # A park hook runs before every tool call of every worker, so this module imports only what it needs.
 PUNCT = set("();<>|&")
@@ -49,7 +49,8 @@ def decide(payload: dict, env, b: dict = None, cfg: dict = None):
     if env.get("AUTOPILOT_ROLE") != "worker":
         return None
     cfg = cfg or config.load_global()
-    p = budget.parking(b if b is not None else budget.read_fast(stale_min=cfg["budget"]["stale_min"]), cfg)
+    p = budget.parking(b if b is not None else budget.read_fast(stale_min=cfg["budget"]["stale_min"]), cfg,
+                       profile.for_env(env))
     if p is None:
         return None
     if payload.get("tool_name") == "Bash" and is_park_command((payload.get("tool_input") or {}).get("command") or ""):
@@ -58,9 +59,10 @@ def decide(payload: dict, env, b: dict = None, cfg: dict = None):
                                    "permissionDecisionReason": reason(p, bool(payload.get("agent_id")))}}
 
 
-def resume_due(worker: dict, now: datetime, cfg: dict, b: dict) -> bool:
+def resume_due(worker: dict, now: datetime, cfg: dict, b: dict, ap: str = None) -> bool:
     """A parked worker can continue: its resume time has passed, no window is at the line, and the budget
-    allows new work. `b` is `budget.read()`."""
+    allows new work. `b` is `budget.read()`. The rules are the active profile's, whatever profile the worker
+    ran on before: a resumed worker runs on the active profile's settings."""
     pk = worker.get("parked")
     if not pk:
         return False
@@ -70,7 +72,10 @@ def resume_due(worker: dict, now: datetime, cfg: dict, b: dict) -> bool:
         at = None  # no usable resume time: wait for the numbers to drop
     if at is not None and (at.tzinfo is None or now < at):
         return False
-    return budget.parking(b, cfg) is None and budget.allowance(b, cfg, now)["allow"] != 0
+    if ap is not None and (paths.ap_dir(ap) / "paused").exists():
+        return False   # a pause lasts until the user resumes, also past midnight
+    p, _, workers = budget.workers_allowance(b, cfg, now)
+    return budget.parking(b, cfg, p) is None and workers["allow"] != 0
 
 
 @cli.command("hook-park")

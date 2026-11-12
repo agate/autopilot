@@ -28,6 +28,7 @@ The first word after `/autopilot` decides:
 | `doctor` | Run `ap doctor`. For each failure, give the fix line it prints. If `launchd job` fails, offer to install it as in `references/init.md` step 6. |
 | `config` | Run `ap config list` and explain the settings in plain words, the changed ones (`*`) first. Change one only on the user's word: `ap config set key=value` (dotted keys for nested settings), `ap config reset key` for the default. `gate_interval_s` takes effect after `ap install`. All settings: `references/config.md`. |
 | `pause <name>` / `resume <name>` | Run `ap pause <name>` / `ap resume <name>`, confirm. |
+| `profile ...` or plain words | Access profiles; see "Profiles" below. |
 | `tick [name]` | Run `ap tick <name>`. It queues a pass that the gate starts within seconds; say the pass itself takes a few minutes. |
 | `stop <name>` | Ask first. On yes, run `ap stop <name> --yes`. |
 | `uninstall` | Ask first. On yes, run `ap uninstall`; if that is blocked, give the user the line to run with `!`. |
@@ -63,6 +64,27 @@ Follow `references/talk.md`. In short:
   `ap pause`), never by editing `state.json`.
 - A new rule from the user: ask its scope first (this autopilot or all), show the exact line, and
   write it only after they say yes.
+
+## Profiles
+
+A profile says how workers reach Claude: the `subscription` profile, or a gateway with its own key.
+Map the user's words to `ap profile` and confirm in one line:
+
+| The user says | Run |
+|---|---|
+| "show profiles", "which profile is on" | `ap profile list` (`*` marks the active one); `ap profile show <name>` for one |
+| "create a profile ...", "add a gateway" | `ap profile add <name> --gateway ...`. Required: `--base-url`, `--key-command`, `--small-model`, `--daily-cap` (dollars per day, above 0). Ask for what is missing. Offer `--refresh-command`, `--rotate-command`, `--models-command`, `--model`, `--effort`, `--label`, `--env KEY=VALUE`, `--settings-file`. |
+| "switch to X", "use the subscription" | `ap profile use <name>` (the subscription profile is named `subscription`) |
+| "rotate the key" | `ap profile rotate <name>` |
+| "remove X" | Ask first, then `ap profile remove <name>` (the active one is refused) |
+
+- Only workers and one-off actions use the active profile. Passes, answer reads and page refreshes
+  always use the subscription.
+- Never print what a key command prints. Pass the command line as the user gave it, and show only
+  `ap profile show` output, which holds commands, never keys.
+- A switch made from the page takes up to about 5 minutes (about 1 when a card is waiting); in the quiet hours (`reply_check.quiet`) up to `forced_pass_min` minutes. A cap answer takes effect within a minute. `ap profile use` is immediate.
+- A key problem shows as `key_error` on the page with its fix. Do not work around it by switching
+  profiles unless the user asks.
 
 ## Never
 
