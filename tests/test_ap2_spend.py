@@ -1392,6 +1392,49 @@ class SpendCliTest(unittest.TestCase):
         self.assertEqual(max(t["today"], t["week"], t["month"]), sys.float_info.max)  # local time: one of them
         self.assertIs(t["unknown"], True)
 
+    def totals_seen(self):
+        """Patch `spend.totals` to keep what it returned, so a test can compare the text with the totals."""
+        seen, real = {}, spend.totals
+
+        def keep(*a, **kw):
+            seen.update(real(*a, **kw))
+            return dict(seen)
+        return seen, mock.patch.object(spend, "totals", side_effect=keep)
+
+    def test_spend_text_with_a_sum_too_big_for_a_number_says_too_large(self):
+        self.session()
+        line = dict(NEW, requestId="req_d", timestamp=(datetime.now(self.tz) - timedelta(seconds=4)).isoformat())
+        with open(self.projects / "-tmp-x" / f"{SID}.jsonl", "a") as f:
+            f.write(json.dumps(line) + "\n")
+        seen, keep = self.totals_seen()
+        with mock.patch.object(spend, "_cost", return_value=sys.float_info.max), keep:
+            code, out, err = self.main()
+        self.assertEqual((code, err), (0, ""))
+        lines = out.splitlines()
+        self.assertEqual(lines[0], "gateway spend (local time):")
+        clamped = [k for k in ("today", "week", "month") if seen[k] == sys.float_info.max]
+        self.assertTrue(clamped, seen)  # local time: one of them holds both requests
+        for i, k in enumerate(("today", "week", "month"), 1):
+            want = f"  {k:<6} too large to show" if k in clamped else f"  {k:<6} ${seen[k]:,.2f}"
+            self.assertEqual(lines[i], want)
+        for ln in lines:
+            self.assertLessEqual(len(ln), 120, ln)
+            self.assertLessEqual(sum(ch.isdigit() for ch in ln), 40, ln)
+        self.assertTrue(any(ln.startswith("  unknown: some spend is not counted") for ln in lines), out)
+
+    def test_spend_text_prints_a_large_finite_total_in_full(self):
+        self.session()
+        for cost, today in ((1e20, "  today  $100,000,000,000,000,000,000.00"), (1e300, f"  today  ${1e300:,.2f}")):
+            with self.subTest(cost=cost):
+                spend.folder(self.data).joinpath(spend.CACHE).unlink(missing_ok=True)  # cost each request again
+                seen, keep = self.totals_seen()
+                with mock.patch.object(spend, "_cost", return_value=cost), keep:
+                    code, out, err = self.main()
+                self.assertEqual((code, err), (0, ""))
+                self.assertEqual(seen["today"], cost)
+                self.assertIn(today, out.splitlines())
+                self.assertNotIn("too large", out)
+
     def test_usage_lists_spend(self):
         r = subprocess.run([sys.executable, str(ROOT / "bin" / "ap2"), "--help"], capture_output=True, text=True,
                            env=dict(os.environ, HOME=str(self.home)), timeout=60)
