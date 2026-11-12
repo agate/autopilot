@@ -150,7 +150,7 @@ class DecideTest(unittest.TestCase):
                             ("$'\\x41BC'", "ABC"), ("$'\\1050'", "E0"), ("$'\\cA\\ca\\c1'", None),
                             ("$'\\a\\b\\e\\E\\f\\n\\r\\t\\v\\\\\\\"\\?'", "\a\b\x1b\x1b\f\n\r\t\v\\\"?"),
                             ("$'\\q'", None), ("$'\\8'", None), ("$'\\xg'", None), ("$'\\C-a'", None),
-                            ("$'\\M-a'", None), ("$$'\\'", "$$\\"), ('$$"x"', "$$x"),
+                            ("$'E\\.F'", None), ("$'\\M-a'", None), ("$$'\\'", "$$\\"), ('$$"x"', "$$x"),
                             ("$'E\\x00'", None), ("$'\\u0045'", None), ("$'\\777'", None), ("$'\\c'", None),
                             ("$'\\c?'", None), ("$'\\cé'", None),
                             ("$'abc", None)):
@@ -1510,7 +1510,9 @@ class DecideTest(unittest.TestCase):
         tail = "ap2() { cp \"$@\"; }\n"
         self.check(["cat <<$'E\\OF'\nEOF\n" + tail + "E\\OF\nap2 /tmp/src $AP2_DATA/config.yaml\n",
                     "cat <<$\"EOF\"\n$EOF\n" + tail + "EOF\nap2 /tmp/src $AP2_DATA/config.yaml\n",
-                    "cat <<$'E\\cAOF'\nEcAOF\n" + tail + "E\\x01OF\nap2 /tmp/src $AP2_DATA/config.yaml\n"], deny=True)
+                    "cat <<$'E\\cAOF'\nEcAOF\n" + tail + "E\\x01OF\nap2 /tmp/src $AP2_DATA/config.yaml\n",
+                    # `\\.` is no shared escape (bash keeps the backslash, zsh drops it): no body, `E.F` ends none.
+                    "cat <<$'E\\.F'\nE\\.F\n" + tail + "E.F\nap2 /tmp/src $AP2_DATA/config.yaml\n"], deny=True)
         for cmd in ("cat <<$\"EOF\"\nb\nEOF\n", "cat <<$'E\\OF'\nb\n", "cat <<$'\\cA'\nb\n"):
             with self.subTest(cmd=cmd):
                 seen = set()
@@ -1536,6 +1538,40 @@ class DecideTest(unittest.TestCase):
         self.check([f"{PKG}/bin/ap2 card note C1 --text $'caf\\u00e9 done' --file $AP2_RUN_DIR/n.md",
                     'echo "Saved to..$AP2_RUN_DIR now" >> $AP2_RUN_DIR/journal.md', "echo $=AP2_DATA2 > /tmp/x"],
                    deny=False)
+
+    def test_a_trap_action_is_code_that_may_rebind_a_name(self):
+        """`trap` runs its action text as code in the current shell, as `eval` does: it is a rebinding word, so `ap2`
+        is not trusted after it and a segment that names the data folder or the package is denied. A command whose
+        only guarded mentions are run-directory paths stays allowed."""
+        cp = "'ap2 (){ cp \"$@\"; }'"
+        self.check([f"trap {cp} DEBUG; ap2 /tmp/src $AP2_DATA/config.yaml",
+                    "trap 'ap2 () { cp \"$@\"; }' DEBUG\nap2 /tmp/src $AP2_DATA/config.yaml",
+                    f"trap {cp} ERR; false; ap2 /tmp/src {DATA}/config.yaml",
+                    f"trap {cp} DEBUG; ap2 /tmp/src $AP2_RUN_DIR/settings-implement.json",
+                    "trap 'hash -p /bin/cp ap2' DEBUG; ap2 /tmp/src $AP2_DATA/config.yaml",
+                    "trap 'ap2() { cp \"$@\"; }' RETURN; ap2 /tmp/src $AP2_DATA/config.yaml",
+                    f"command trap {cp} EXIT; ap2 /tmp/src $AP2_DATA/config.yaml"], deny=True)
+        self.check(["set -E; trap 'echo err' ERR; make > $AP2_RUN_DIR/m.log",
+                    "trap 'rm -f /tmp/x' EXIT; python3 run.py > $AP2_RUN_DIR/y", "trap - EXIT",
+                    "grep -rn trap lib > $AP2_RUN_DIR/t.txt", f"{PKG}/bin/ap2 card note C1 --text 'trap fixed'"],
+                   deny=False)
+        # `ap2` and blanks before a `(` is a function definition's name.
+        for word in ("ap2 (){", "ap2  ()", "ap2\t()", "ap2()"):
+            with self.subTest(word=word):
+                self.assertTrue(guard._ap2_bound(word))
+        for word in ("ap2 card", "ap2x (", "fix ap2 guard"):
+            with self.subTest(word=word):
+                self.assertFalse(guard._ap2_bound(word))
+
+    def test_finding_rows_of_the_fourteenth_round_pin_their_rules(self):
+        """Rows that fail when the rule they name is taken out."""
+        # zsh's and bash's readings are searched with their quotes taken out (`"ant"` after a `$'...'`).
+        self.check(["cp /tmp/src ~/Documents/Assis$'t\\0x'\"ant\"/config.yaml",
+                    "cp /tmp/src ~/Documents/\"Assis\"$'t\\0x'ant/config.yaml",
+                    # zsh's `\\u` reads four hex digits (`\\u006e` is `n`, then `\\C` at the end is nothing),
+                    # `\\U` eight.
+                    "cp /tmp/src ~/Documents/Assista$'\\u006e\\C't/config.yaml",
+                    "cp /tmp/src ~/Documents/Assista$'\\U0000006e\\C't/config.yaml"], deny=True)
 
     def test_each_run_directory_mention_in_a_word_is_judged_on_its_own(self):
         """A quoted journal line can name the run directory twice: each mention that stays inside it is fine, and a

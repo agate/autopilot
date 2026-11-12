@@ -2140,7 +2140,9 @@ Calls the author made without asking (check them):
       `cp x =ap2` copies over the `ap2` that `PATH` finds).
     - A name rebound in the same command: a function definition (`name()`, `name ()`, `function name`, which
       covers bash's `command_not_found_handle` and zsh's `command_not_found_handler`), a word `alias`, `unalias`,
-      `hash`, `enable`, `builtin`, `function`, `functions`, `eval`, `source` or zsh's `autoload` as a command word
+      `hash`, `enable`, `builtin`, `function`, `functions`, `eval`, `source`, `trap` (its action text runs as code
+      in this shell on `DEBUG`, `ERR`, `EXIT`, `RETURN` or a signal, as `eval`'s does: `trap 'ap2 (){ cp "$@"; }'
+      DEBUG; ap2 src <data>/config.yaml` writes) or zsh's `autoload` as a command word
       (after a runner, an assignment, a zsh precommand modifier or a backslash too: `command hash ...`, `x=1 hash
       ...`, `noglob hash ...`, `\hash`; after redirects, `>/dev/null hash ...`, `2>&1 hash ...`, `<<<x hash ...`;
       after `x+=1`, `a[1]=1`, `x=$(true)` and `f=$(pwd)/x`, where the word glued after a `)` is still the
@@ -2174,8 +2176,11 @@ Calls the author made without asking (check them):
       "$AP2_RUN_DIR/media/shot-$(date +%s).png"` are allowed; best effort there: `alias ls=cp; ls a
       $AP2_RUN_DIR/$f` is allowed (a path built at run time, and a verb the rebinding changed). Accepted false
       deny: `source .venv/bin/activate && ls <data>/items`, and so is `set -a; source .env; set +a; cat
-      <data>/config.yaml` (while `set -a; source .env; set +a; python3 app.py > $AP2_RUN_DIR/app.log` and a journal
-      line `"source of truth: $AP2_RUN_DIR/x"` name only the run directory and stay allowed). zsh's
+      <data>/config.yaml`, and so are `trap 'rm -f /tmp/x' EXIT; <pkg>/bin/ap2 card note C1 --file
+      $AP2_RUN_DIR/n.md` and `trap 'rm -f /tmp/x' EXIT; ls <data>/items`, whose action is not read (while `set -a;
+      source .env; set +a; python3 app.py > $AP2_RUN_DIR/app.log`, `set -E; trap 'echo err' ERR; make >
+      $AP2_RUN_DIR/m.log` and a journal line `"source of truth: $AP2_RUN_DIR/x"` name only the run directory and
+      stay allowed, and so do `trap - EXIT` and `ap2 card note C1 ...` after a cleanup trap). zsh's
       `functions -c f ap2`, `path=(...)`, `commands+=(...)`, `functions+=(...)` and `fpath=(/tmp/fn); autoload -U
       ap2` (a function file found on `fpath`) rebind too.
     - **[decided by the loop]** Whether `ap2` is trusted, by class rather than by position: rounds of review kept
@@ -2187,15 +2192,16 @@ Calls the author made without asking (check them):
       or not, in any position, is one of the rebinding words above, a `.` that is a segment's first word, a
       command word or follows a keyword or a closer, `ap2` as a name being bound: the word `ap2` itself after
       quote removal (`hash -p /bin/cp ap2`, `autoload -U ap2`, `typeset -fu ap2`, `functions -c f ap2`), a path to
-      a file named `ap2` (`/tmp/b/ap2`), or a word holding `ap2=`, `ap2+=`, `ap2(` or `[ap2]` (`alias ap2=cp`,
-      `hash ap2=/bin/cp`, `commands[ap2]`); not the command word of an `ap2` segment, nor its arguments after it
-      when the segment runs nothing else (`ap2 card note C1 --text "ap2"` stays trusted), and not `ap2` inside a
-      longer word, so a commit message `git commit -m 'fix(v2): ap2 guard ...'` or `echo 'posting via ap2'`
-      before an `ap2` call keeps it trusted (it was counted before, which denied them); a name table found
-      anywhere in a word (`functions[`, `commands[`, `aliases[`, ..., not after a name character, `-` or `.`; and
-      zsh's `${PATH::=...}`, also inside `"..."`); a search-path setting (an unquoted `PATH=`, `path+=(`,
-      `path[1]=`, `FPATH=`, `fpath=`, ..., not after a name character, `-` or `.`, so `PYTHONPATH=src`, `--path=x`
-      and `sys.path=` are none; or the search path's name, plain or in an assignment quoted or not, in a segment
+      a file named `ap2` (`/tmp/b/ap2`), or a word holding `ap2=`, `ap2+=`, `ap2(` (also with blanks before the
+      `(`: `ap2 () { ... }` in a quoted action) or `[ap2]` (`alias ap2=cp`, `hash ap2=/bin/cp`, `commands[ap2]`);
+      not the command word of an `ap2` segment, nor its arguments after it when the segment runs nothing else
+      (`ap2 card note C1 --text "ap2"` stays trusted), and not `ap2` inside a longer word, so a commit message
+      `git commit -m 'fix(v2): ap2 guard ...'` or `echo 'posting via ap2'` before an `ap2` call keeps it trusted
+      (it was counted before, which denied them); a name table found anywhere in a word (`functions[`,
+      `commands[`, `aliases[`, ..., not after a name character, `-` or `.`; and zsh's `${PATH::=...}`, also inside
+      `"..."`); a search-path setting (an unquoted `PATH=`, `path+=(`, `path[1]=`, `FPATH=`, `fpath=`, ..., not
+      after a name character, `-` or `.`, so `PYTHONPATH=src`, `--path=x` and `sys.path=` are none; or the search
+      path's name, plain or in an assignment quoted or not, in a segment
       where one of the setter commands above runs: `for PATH in ./b`, `read PATH <<< ./b`, `export "PATH=..."`; a plain
       `path` argument, as in `git log -- path`, and a quoted pattern, `rg -n "path=" <pkg>/lib`, are none); a
       `$'...'` it cannot decode; or a function definition. A heredoc body line is data, but in an unquoted body

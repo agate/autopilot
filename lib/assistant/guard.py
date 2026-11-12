@@ -1229,9 +1229,10 @@ _ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=")
 _TIME_POSIX = "-p"
 # Words that can make a name run something else in the same shell: an alias, a `hash` entry, a builtin turned
 # off, a function (`function name`, zsh's `autoload` of one found on `fpath`), and the ways to run text that does
-# one of those (`eval`, `source`; `.` too, but only as a command, `_rebinds`).
+# one of those (`eval`, `source`, `trap`, whose action text runs in this shell on a signal, `DEBUG`, `ERR`,
+# `EXIT` or `RETURN`; `.` too, but only as a command, `_rebinds`).
 _REBIND = frozenset(("alias", "unalias", "hash", "enable", "builtin", "function", "functions", "eval", "source",
-                     "autoload"))
+                     "autoload", "trap"))
 # A word that runs a quoted script as code (`bash -c '...'`, `eval '...'`): a shell's name or `eval`, alone or after
 # a character no name holds (`/bin/sh`, zsh's `=sh`, `$@eval` with `$@` empty), so `ssh` and `run.sh` are none.
 _SHELL = re.compile(r"(?<![A-Za-z0-9_.])(?:sh|bash|zsh|ksh|dash|eval)\Z")
@@ -1802,10 +1803,11 @@ def _sets_path(p, w) -> bool:
 
 
 # `ap2` as a name being bound, in a word with its quotes removed: the word `ap2` (`hash -p /bin/cp ap2`, `autoload
-# -U ap2`, `typeset -fu ap2`), a path to a file named `ap2` (`/tmp/b/ap2`), or `ap2=`, `ap2+=`, `ap2(` (`ap2()`) and
-# `[ap2]` inside a word (`alias ap2=cp`, `hash ap2=/bin/cp`, `commands[ap2]`); not `ap2` inside prose (`'fix: ap2
-# guard'`), `AP2_DATA`, `test_ap2_x` or `ap2x`.
-_AP2_BOUND = re.compile(r"(?<![A-Za-z0-9_])ap2(?:\+?=|\()|\[ap2\]")
+# -U ap2`, `typeset -fu ap2`), a path to a file named `ap2` (`/tmp/b/ap2`), or `ap2=`, `ap2+=`, `ap2(` with or
+# without blanks before the `(` (`ap2()`, `ap2 () { ... }` in a quoted action) and `[ap2]` inside a word (`alias
+# ap2=cp`, `hash ap2=/bin/cp`, `commands[ap2]`); not `ap2` inside prose (`'fix: ap2 guard'`), `AP2_DATA`,
+# `test_ap2_x` or `ap2x`.
+_AP2_BOUND = re.compile(r"(?<![A-Za-z0-9_])ap2(?:\+?=|[ \t]*\()|\[ap2\]")
 
 
 def _ap2_bound(w: str) -> bool:
