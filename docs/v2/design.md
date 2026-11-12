@@ -77,6 +77,12 @@ Anti-goals (failure even if it "works"):
   key order (`cards.title_for`, and the page's `titleIn`): a stored title's words beat "Untitled" after the
   primary language changes. The local page shows only one title, never two languages side by side. Translating
   quotes is the proposed line below (open question 4), not part of this rule.
+- **[decided by the builder]** One rule says when a title slot is blank, for Python and the page alike: it is not
+  a text, or it holds only characters that either side treats as white space, which is what Python's `str.strip()`
+  removes plus U+FEFF (JavaScript's `trim()` keeps U+001C-U+001F and U+0085, Python keeps U+FEFF). `cards.blank`
+  holds it for `title_problems`, `cards.title_for` and the server's titles; the page's `blankText` holds it for
+  `titleIn`, and a test checks the two give the same answer for every character up to U+FFFF. A zero-width
+  space is words.
 - **[proposed]** A reply drafted for someone else stays in the language that person wrote in. On the
   other-language page its meaning is shown separately, and Copy leaves the meaning out. A quote shows the
   translation first and the original behind a collapsed "Original" toggle.

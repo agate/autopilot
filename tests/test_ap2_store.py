@@ -344,7 +344,9 @@ class TitleLanguagesTest(StoreCase):
                                ({"en": "", "zh": "重试"}, "title.en is empty"),
                                ({"en": "Retry", "zh": "  \n"}, "title.zh is empty"),
                                ({"ja": "再試行"}, "title.en missing; title.zh missing"),
-                               ({"en": " ", "ja": "x"}, "title.en is empty; title.zh missing")):
+                               ({"en": " ", "ja": "x"}, "title.en is empty; title.zh missing"),
+                               ({"en": "\ufeff", "zh": "重试"}, "title.en is empty"),
+                               ({"en": "Retry", "zh": "\ufeff \x1c"}, "title.zh is empty")):
             with self.subTest(title=title):
                 with self.assertRaises(CardError) as e:
                     self.store.add(self.zh_card(title=title), by="w")
@@ -396,6 +398,28 @@ class TitleLanguagesTest(StoreCase):
         self.assertEqual([c["id"] for c in self.store.search("别的")], [other["id"]])
 
 
+# One rule for a blank title slot on both sides (cards.blank, the page's blankText): criterion strings shared with
+# the agreement test in test_ap2_server.
+BLANK_SLOTS = (None, 3, "", "  ", "\x1c", "\x1d", "\x1e", "\x1f", "\x85", "\ufeff", "\ufeff \x1c")
+NOT_BLANK_SLOTS = ("a", " a ", "\ufeffa", "\u200b")
+
+
+class BlankTest(unittest.TestCase):
+    """cards.blank: a title slot is blank when it is not a text or holds only white space either side strips."""
+
+    def test_the_table(self):
+        for text in BLANK_SLOTS:
+            with self.subTest(text=text):
+                self.assertTrue(cards.blank(text))
+        for text in NOT_BLANK_SLOTS:  # a zero-width space is neither Python's nor the page's white space
+            with self.subTest(text=text):
+                self.assertFalse(cards.blank(text))
+
+    def test_title_problems_calls_a_bom_only_slot_empty(self):
+        self.assertEqual(cards.title_problems({"en": "\ufeff", "zh": "  "}, ("en", "zh")),
+                         ["title.en is empty", "title.zh is empty"])
+
+
 class TitleForTest(unittest.TestCase):
     """cards.title_for: the title in one language, the primary one when that language has none."""
 
@@ -409,6 +433,12 @@ class TitleForTest(unittest.TestCase):
                       {"en": "Retry", "zh": None}, {"en": "Retry", "zh": 3}):
             with self.subTest(title=title):
                 self.assertEqual(cards.title_for({"title": title}, "zh", "en"), "Retry")
+
+    def test_an_invisible_slot_falls_back_like_a_blank_one(self):
+        for text in ("\ufeff", "\x1c", "\x85", "\ufeff \x1f"):
+            with self.subTest(text=text):
+                self.assertEqual(cards.title_for({"title": {"en": text, "zh": "中文"}}, "en", "en"), "中文")
+                self.assertIsNone(cards.title_for({"title": {"en": text}}, "en", "en"))
 
     def test_no_non_blank_slot_gives_null(self):
         for title in ({"en": "", "zh": " "}, {}, {"ja": 3}, {"ja": None}, {"ja": "  ", "ko": ""}):
