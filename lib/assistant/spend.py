@@ -216,7 +216,7 @@ def _parse_file(path: Path, table: dict) -> list:
         rid = str(d.get("requestId") or msg.get("id") or f"~{n}")
         try:
             cost = _cost(table, model, u) if ts is not None else None
-        except (TypeError, ValueError):  # a count that is not a number: unknown, never $0
+        except (TypeError, ValueError, OverflowError):  # a count that is not a number: unknown, never $0
             cost = None
         per_req[rid] = {"id": rid, "ts": ts, "model": _model_key(model if isinstance(model, str) else ""),
                         "usd": cost}
@@ -252,11 +252,15 @@ def request_costs(data, path, tz=None) -> list:
 
 # -- cache -----------------------------------------------------------------------------------------------------------
 
-def _price_key(table: dict, now: datetime) -> str:
-    return hashlib.sha1((json.dumps(table, sort_keys=True) + now.strftime("%z")).encode()).hexdigest()
+def _price_key(table: dict, zone: str) -> str:
+    """The cache's key: the prices and how the month is cut (`zone`: a fixed offset, or "local" and the offset this
+    month starts at)."""
+    return hashlib.sha1((json.dumps(table, sort_keys=True) + zone).encode()).hexdigest()
 
 
-def _load_cache(data, key: str) -> dict:
+def _load_cache(data, key: Optional[str]) -> dict:
+    """The cache as saved; under another `key` its files' requests are dropped. A None key keeps them (for a caller
+    that only reads and writes the short ids)."""
     f = _file(data, CACHE)
     try:
         c = json.loads(f.read_text(encoding="utf-8"))
@@ -264,7 +268,7 @@ def _load_cache(data, key: str) -> dict:
         c = {}
     if not isinstance(c, dict):
         c = {}
-    if c.get("key") != key:  # new prices or timezone offset: the requests are priced again, short ids stay valid
+    if key is not None and c.get("key") != key:  # new prices or zone: the requests are priced again, short ids stay
         c = {"key": key, "shorts": c.get("shorts"), "tries": c.get("tries")}
     for k in ("shorts", "tries", "files"):
         if not isinstance(c.get(k), dict):
@@ -374,8 +378,7 @@ def settle(data, projects, short: str = "", session_id: str = "", listing: Listi
         sid = next((r["session"] for r in reversed(_read_lines(data, LAUNCHES))
                     if r.get("short") == short and isinstance(r.get("session"), str) and r["session"]), "")
     if not sid:
-        table = prices(data)
-        c = _load_cache(data, _price_key(table, now))
+        c = _load_cache(data, None)  # only its short ids: the priced files stay as `totals` keyed them
         _resolve(c, {short: now.timestamp()}, now.timestamp(), listing, force=True)
         if c.pop("dirty", False):
             _save_cache(data, c)
@@ -394,7 +397,9 @@ def settle(data, projects, short: str = "", session_id: str = "", listing: Listi
 
 def totals(data, projects, now: Optional[datetime] = None, mode: str = "gateway", listing: Listing = None) -> dict:
     """Dollars spent today, this week (from Monday) and this calendar month on sessions launched in `mode`. `now`'s
-    timezone decides where the days begin (a naive `now` is local time). Keys:
+    timezone decides where the days begin. A naive (or no) `now` is local time, and then each moment is put on its
+    day by this computer's local rules at that moment, so a daylight saving change keeps every request on its local
+    day. Keys:
 
     - today, week, month: dollars.
     - unknown: a request this month had no price, or a launch this month cannot be matched to its session (its spend
@@ -407,8 +412,14 @@ def totals(data, projects, now: Optional[datetime] = None, mode: str = "gateway"
     sessions hold (a resumed copy repeats its original's) counts once, for the session that has it first. A request
     older than its session's first launch minus COPY_SLACK_S is a copy of an older session's history: not counted
     for it, and not unknown."""
-    now = _local(now) if now is None or now.tzinfo is None else now
-    tz, now_ts = now.tzinfo, now.timestamp()
+    if now is None or now.tzinfo is None:  # local rules per moment: tz None buckets by the local time of each one
+        now = now or datetime.now()
+        tz, since = None, datetime(now.year, now.month, 1).timestamp()
+        zone = "local" + datetime(now.year, now.month, 1).astimezone().strftime("%z")
+    else:  # the caller's fixed zone
+        tz, zone = now.tzinfo, now.strftime("%z")
+        since = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp()
+    now_ts = now.timestamp()
     today = now.strftime("%Y-%m-%d")
     week_start = (now - timedelta(days=now.weekday())).strftime("%Y-%m-%d")
     month_start = now.strftime("%Y-%m-01")
@@ -418,19 +429,28 @@ def totals(data, projects, now: Optional[datetime] = None, mode: str = "gateway"
     for ln in rows:
         last_launch[ln["short"]] = ln
     table = prices(data)
-    c = _load_cache(data, _price_key(table, now))
+    c = _load_cache(data, _price_key(table, zone))
 
     def own_sid(ln: dict) -> str:
         s = ln.get("session")
         return s if isinstance(s, str) and s else ""
 
+    # A settled row names its session and its short id: that matches a launch row written before the session was
+    # listed, also once the listing no longer shows it and whatever the cache holds.
+    settled, settled_sid = {}, {}
+    for ln in _read_lines(data, SETTLED):
+        if isinstance(ln.get("short"), str) and ln["short"] and own_sid(ln):
+            settled_sid[ln["short"]] = ln["session"]
+        if own_sid(ln) and not ln.get("unsettled") and isinstance(ln.get("reqs"), dict):
+            settled.setdefault(ln["session"], {}).setdefault(str(ln.get("batch", "")), []).append(ln)
+
     mine = {s: ln for s, ln in last_launch.items() if ln.get("mode") == mode}
     workers_any = {s: ln for s, ln in last_launch.items() if ln.get("kind") == "worker"}
-    _resolve(c, {s: _epoch(ln.get("at")) for s, ln in {**workers_any, **mine}.items() if not own_sid(ln)}, now_ts,
-             listing)
+    _resolve(c, {s: _epoch(ln.get("at")) for s, ln in {**workers_any, **mine}.items()
+                 if not own_sid(ln) and s not in settled_sid}, now_ts, listing)
 
     def sid_of(ln: dict) -> str:
-        return own_sid(ln) or c["shorts"].get(ln["short"]) or ""
+        return own_sid(ln) or settled_sid.get(ln["short"]) or c["shorts"].get(ln["short"]) or ""
 
     out = {"today": 0.0, "week": 0.0, "month": 0.0, "unknown": False, "unknown_today": False}
     models, launches = set(), 0  # what today's unknown is: unpriced model ids, launches that could not be priced
@@ -461,12 +481,6 @@ def totals(data, projects, now: Optional[datetime] = None, mode: str = "gateway"
             session_mode[sid] = (ln.get("mode"), launch_day(ln) >= month_start, launch_day(ln) == today, at,
                                  ln.get("kind"))
 
-    settled = {}
-    for ln in _read_lines(data, SETTLED):
-        if isinstance(ln.get("session"), str) and ln["session"] and not ln.get("unsettled") \
-                and isinstance(ln.get("reqs"), dict):
-            settled.setdefault(ln["session"], {}).setdefault(str(ln.get("batch", "")), []).append(ln)
-
     def add(day: str, usd, unknown) -> None:
         if not (month_start <= day <= today):
             return
@@ -483,7 +497,7 @@ def totals(data, projects, now: Optional[datetime] = None, mode: str = "gateway"
 
     # The requests of every session that can share them with one of this mode: its own sessions, and every worker
     # (a resumed copy repeats its original's requests, also across a profile switch).
-    since, seen, per_session = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp(), set(), {}
+    seen, per_session = set(), {}
     for sid, (m, recent, launched_today, at, kind) in session_mode.items():
         if m != mode and kind != "worker":
             continue

@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -156,6 +157,16 @@ class RequestCostsTest(SpendCase):
         t = self.totals()
         self.assertEqual((t["unknown"], t["unknown_today"]), (True, True))
 
+    def test_a_count_too_big_for_a_number_is_unknown_not_an_error(self):
+        self.transcript.parent.mkdir(parents=True)
+        line = json.dumps(dict(NEW, requestId="r_inf")).replace('"input_tokens": 1000000', '"input_tokens": 1e400')
+        big = json.dumps(dict(NEW, requestId="r_big")).replace("1000000", "9" * 400)
+        self.transcript.write_text(line + "\n" + big + "\n")
+        self.launch()
+        t = self.totals()
+        self.assertEqual(t["month"], 0.0)
+        self.assertEqual((t["unknown"], t["unknown_today"]), (True, True))
+
     def test_model_keys_drop_the_context_tag_and_the_date(self):
         self.assertEqual(spend._model_key("claude-haiku-4-5[1m]"), "claude-haiku-4-5")
         self.assertEqual(spend._model_key("claude-haiku-4-5-20251001"), "claude-haiku-4-5")
@@ -219,11 +230,14 @@ class TotalsTest(SpendCase):
         self.assertEqual(set(t), TOTALS_KEYS)
 
     def test_week_starts_monday_and_month_is_calendar(self):
-        self.put()
+        sunday = dict(NEW, requestId="req_sun", timestamp="2026-11-15T20:00:00Z")  # Sunday 15:00 here, $1.00
+        self.put(extra=[sunday])
         self.launch()
-        t = self.totals(datetime(2026, 11, 16, 9, 0, tzinfo=TZ))  # next Monday
+        t = self.totals(datetime(2026, 11, 15, 18, 0, tzinfo=TZ))  # that Sunday: still the week of Monday the 9th
+        self.assertAlmostEqual(t["week"], STREAMING_USD + 1.0)
+        t = self.totals(datetime(2026, 11, 16, 9, 0, tzinfo=TZ))  # next Monday: a new week, without the Sunday
         self.assertEqual(t["week"], 0.0)
-        self.assertAlmostEqual(t["month"], STREAMING_USD)
+        self.assertAlmostEqual(t["month"], STREAMING_USD + 1.0)
         self.assertEqual(self.totals(datetime(2026, 12, 1, 9, 0, tzinfo=TZ))["month"], 0.0)
 
     def test_unknown_model_marks_unknown(self):
@@ -248,9 +262,10 @@ class TotalsTest(SpendCase):
 
     def test_resumed_session_counts_once(self):
         self.put()
-        self.launch()
-        self.launch("zzzz9999", at=L0 + timedelta(minutes=1))
-        self.assertAlmostEqual(self.totals()["month"], STREAMING_USD)
+        self.launch(p=profile("sub", "subscription"))
+        self.launch("zzzz9999", at=L0 + timedelta(minutes=1))  # the same session, resumed under a gateway
+        self.assertAlmostEqual(self.totals()["month"], STREAMING_USD)  # in the mode of its latest launch
+        self.assertEqual(self.totals(mode="subscription")["month"], 0.0)
 
     def test_resumed_copy_counts_shared_requests_once(self):
         self.put("days.jsonl")
@@ -300,6 +315,30 @@ class TotalsTest(SpendCase):
         self.launch()
         self.assertEqual(set(spend.totals(self.data, self.projects, datetime(2026, 11, 11, 12, 0),
                                           listing=self.lister)), TOTALS_KEYS)
+
+    def test_a_naive_now_buckets_each_moment_by_the_local_rules_of_its_time(self):
+        if not hasattr(time, "tzset"):
+            self.skipTest("time.tzset is not available")
+        patch = mock.patch.dict(os.environ, {"TZ": "America/Los_Angeles"})
+        patch.start()
+        self.addCleanup(time.tzset)  # runs last: after the zone is restored
+        self.addCleanup(patch.stop)
+        time.tzset()
+        # Daylight saving time ends at 02:00 on 2026-11-01. 07:30Z is 00:30 that day (PDT), not 23:30 the day
+        # before (PST, the offset at `now`); 06:50Z is 23:50 on October 31 (PDT).
+        early = dict(NEW, requestId="req_oct", timestamp="2026-11-01T06:50:00Z")
+        self.put(extra=[dict(NEW, timestamp="2026-11-01T07:30:00Z"), early])
+        self.launch(at=datetime(2026, 11, 1, 6, 40, tzinfo=timezone.utc))
+        now = datetime(2026, 11, 1, 10, 0)  # naive: local time, PST
+        t = self.totals(now)
+        self.assertAlmostEqual(t["today"], 1.0)
+        self.assertAlmostEqual(t["month"], 1.0)
+        self.assertIs(t["unknown"], False)
+        # A launch at 00:20 PDT that cannot be matched is a launch of today, not of October.
+        self.listing.clear()
+        self.launch("efgh5678", session="", at=datetime(2026, 11, 1, 7, 20, tzinfo=timezone.utc))
+        t = self.totals(now)
+        self.assertEqual((t["unknown"], t["unknown_today"], t["unknown_launches"]), (True, True, 1))
 
 
 class ResolveTest(SpendCase):
@@ -365,10 +404,10 @@ class ResolveTest(SpendCase):
 
     def test_an_unresolved_launch_past_the_grace_is_unknown(self):
         self.listing.clear()
-        self.launch(session="", at=NOW - timedelta(seconds=spend.GRACE_S + 60))
+        self.launch(session="", at=NOW - timedelta(seconds=960))  # the grace is 900 s
         t = self.totals()
         self.assertEqual((t["unknown"], t["unknown_today"], t["unknown_launches"]), (True, True, 1))
-        self.launch("efgh5678", session=SID_B, at=NOW - timedelta(seconds=spend.GRACE_S + 60))
+        self.launch("efgh5678", session=SID_B, at=NOW - timedelta(seconds=960))
         t = self.totals()
         self.assertEqual((t["unknown"], t["unknown_today"], t["unknown_launches"]), (True, True, 2))
 
@@ -466,6 +505,17 @@ class SettleTest(SpendCase):
         self.settle(short=SHORT)
         self.transcript.unlink()
         self.assertAlmostEqual(self.totals()["month"], 3.0)
+
+    def test_a_launch_resolved_only_by_its_settle_keeps_its_cost(self):
+        self.put()
+        self.listing.clear()
+        self.launch(session="")  # not listed yet when it started
+        self.settle(short=SHORT, session_id=SID)  # the stop found its session id
+        self.transcript.unlink()  # removed, and no longer listed
+        (self.data / "spend" / "cache.json").unlink(missing_ok=True)
+        t = spend.totals(self.data, self.projects, NOW, listing=lambda: [])
+        self.assertAlmostEqual(t["month"], STREAMING_USD)
+        self.assertEqual((t["unknown"], t["unknown_launches"]), (False, 0))
 
     def test_settle_by_session_id(self):
         self.put()
@@ -640,7 +690,15 @@ class WorkerSpendTest(WorkerCase):
     def test_stop_settles_the_session(self):
         a = self.start()
         self.assertEqual(self.settled(), [])
-        self.workers().end(a["card"], "implement")
+        real, at_stop = subprocess.run, []
+
+        def run(argv, *args, **kw):
+            if argv[1:2] == ["stop"]:
+                at_stop.append(len(self.settled()))
+            return real(argv, *args, **kw)
+        with mock.patch("assistant.workers.subprocess.run", side_effect=run):
+            self.workers().end(a["card"], "implement")
+        self.assertEqual(at_stop, [0])  # settled after the stop returned, not before
         rows = self.settled()
         self.assertEqual(len(rows), 1)
         self.assertEqual((rows[0]["session"], rows[0]["short"]), (a["session_id"], a["short_id"]))
@@ -675,16 +733,17 @@ class WorkerSpendTest(WorkerCase):
         self.assertEqual(seen, [(a["session_id"], [a["session_id"]])])
 
     def test_a_failing_ledger_never_fails_a_start(self):
-        err = io.StringIO()
-        with mock.patch.object(spend, "record_launch", side_effect=OSError("disk full")), \
-                contextlib.redirect_stderr(err):
-            rec = self.start()
-        self.assertTrue(rec["short_id"])
-        lines = err.getvalue().splitlines()
-        self.assertEqual(len(lines), 1, lines)
-        self.assertTrue(lines[0].startswith(f"ap2: spend ledger: record failed for {rec['short_id']}: "), lines[0])
-        self.assertIn("disk full", lines[0])
-        self.assertLessEqual(len(lines[0]), 300)
+        for exc in (OSError("disk full"), spend.SpendError("disk full")):
+            err = io.StringIO()
+            with mock.patch.object(spend, "record_launch", side_effect=exc), contextlib.redirect_stderr(err):
+                rec = self.start()
+            self.assertTrue(rec["short_id"])
+            lines = err.getvalue().splitlines()
+            self.assertEqual(len(lines), 1, lines)
+            self.assertTrue(lines[0].startswith(f"ap2: spend ledger: record failed for {rec['short_id']}: "),
+                            lines[0])
+            self.assertIn("disk full", lines[0])
+            self.assertLessEqual(len(lines[0]), 300)
         err = io.StringIO()
         with mock.patch.object(spend, "settle", side_effect=ValueError("x" * 1000)), contextlib.redirect_stderr(err):
             self.workers().end(rec["card"], "implement")

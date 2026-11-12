@@ -1915,7 +1915,9 @@ Calls the author made without asking (check them):
      (`<transcript dir>/<session id>/subagents/agent-*.jsonl`) count with it. It keeps v1's per-file cache keyed by
      `(mtime_ns, size)`, the request-owner dedupe across resumed copies (a request belongs to the session that has
      it first), settle, and `totals(data, projects, now, mode, listing)` with exactly the keys `today`, `week` (from
-     Monday), `month` (calendar), `unknown`, `unknown_today`, `unknown_models`, `unknown_launches`. It drops v1's
+     Monday), `month` (calendar), `unknown`, `unknown_today`, `unknown_models`, `unknown_launches`. An aware `now`
+     cuts the days at its fixed offset; a naive or missing one (`ap2 spend`) puts each moment on its day by this
+     computer's local rules at that moment, so a daylight saving change keeps a request on its local day. It drops v1's
      `remember` / `remembered` (no prompt hook reads totals yet), v1's `record_session` for `-p` runs and its
      legacy per-day settled lines (v2 records no `-p` run and has no old ledger). Every function takes the data
      folder (and the transcripts folder where it reads transcripts) and the time (`now`, `at`), so tests use temp
@@ -1947,7 +1949,9 @@ Calls the author made without asking (check them):
      `finish()` settles each session id right before its `transcripts.remove_original` call, in live mode (where
      the rm runs), so a removed transcript's spend is already kept. `settle(data, projects, short="", session_id="")`
      keys by the session id when it has one, else the launch rows', the cache's, then the listing's; it writes the
-     session's requests as one `settled.jsonl` row, and the latest settle of a session wins.
+     session's requests as one `settled.jsonl` row, and the latest settle of a session wins. A settled row names
+     its short id and its session, so `totals` matches a launch row written without the session id to it, also
+     once the listing no longer shows the session and whatever the cache holds.
   7. Bookkeeping never breaks a worker. Recording and settling never raise into `start`, `_resume_dead`, `_kill`
      or `finish`: a failure prints one line to stderr (`ap2: spend ledger: <op> failed for <id>: <error>`, at most
      300 characters, the exception's own text, never a key or an env value). A launch whose row could not be written
