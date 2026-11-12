@@ -720,7 +720,11 @@ class SettleTest(SpendCase):
         self.launch()
         row = self.settle(session_id=SID)
         self.assertIn("req_1", row["reqs"])
+        self.assertIn("\ud800", row["reqs"])  # the surrogate-id request itself is settled
+        self.assertIn("\ud800", self.rows("settled.jsonl")[-1]["reqs"])
         self.assertEqual(self.rows("settled.jsonl")[-1]["reqs"], row["reqs"])
+        self.transcript.unlink()
+        self.assertAlmostEqual(self.totals()["month"], STREAMING_USD + 1.0)
 
     def test_settle_by_session_id(self):
         self.put()
