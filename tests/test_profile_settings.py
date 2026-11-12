@@ -63,6 +63,16 @@ class ProfileSettingsTest(unittest.TestCase):
                 if f.is_file():
                     self.assertNotIn("SECRET123", f.read_text(), f)
 
+    def test_gateway_overlay_blanks_competing_auth(self):
+        with TempData():
+            g = gateway()
+            g["env"] = {"ANTHROPIC_API_KEY": "x"}
+            g["settings"] = {"env": {"ANTHROPIC_AUTH_TOKEN": "y"}}
+            ov = profile.overlay(g)
+            self.assertEqual(ov["env"]["ANTHROPIC_AUTH_TOKEN"], "")
+            self.assertEqual(ov["env"]["ANTHROPIC_API_KEY"], "")
+            self.assertEqual(ov["apiKeyHelper"], "echo SECRET123")
+
     def test_subscription_blanks_win_over_profile_env(self):
         with TempData():
             p = profile.load("subscription")

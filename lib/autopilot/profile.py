@@ -166,7 +166,10 @@ def overlay(p: dict) -> dict:
         env = {"AUTOPILOT_PROFILE": p["name"], **{k: "" for k in _BLANKED_ENV}}
         out = {}
     out["env"] = {**env, **(p.get("env") or {}), **extra_env}
-    if p.get("mode") != "gateway":
+    if p.get("mode") == "gateway":
+        # A token or key in the shared daemon's env outranks apiKeyHelper, so blank both: the helper's key wins.
+        out["env"].update({"ANTHROPIC_AUTH_TOKEN": "", "ANTHROPIC_API_KEY": ""})
+    else:
         out["env"].update({k: "" for k in _BLANKED_ENV})   # the blanks win: no silent fallback to a gateway
     out.update(extra)
     return out
