@@ -332,6 +332,12 @@ class ParkCommandRulesTest(Base):
                 self.assertFalse(park.is_park_command(cmd))
                 self.assertTrue(self.denied(cmd))
 
+    def test_a_hash_token_does_not_hide_a_chain_after_it(self):
+        # A quoted "#x" is plain text to bash, so the `;` after it chains a real command: the check must not drop
+        # what follows a `#` token, which is why a word-start comment with punctuation is refused.
+        self.refused(self.OWN + ' --note "#x" ; touch /tmp/pwned', was_allowed=False)
+        self.refused(self.OWN + " --note x #c ; later")
+
     def test_the_command_the_instruction_names_passes(self):
         text = park.reason({"kind": "session", "model": None, "percent": 95}, subagent=False)
         m = re.search(r'(\S+ worker park <ap> <task> <role> --note "<[^"]*>")', text)
