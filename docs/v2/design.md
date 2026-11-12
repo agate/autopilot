@@ -1877,7 +1877,11 @@ Calls the author made without asking (check them):
     `$HOME/` and `${HOME}/` forms when it is under HOME, `$AP2_DATA`, `${AP2_DATA}`, `$AP2_RUN_DIR`, and an
     expansion such as `${AP2_DATA:?}`) or the package, and writes (v1's `_WRITE` forms, after v1's `_HARMLESS`
     redirects `2>&1` and `>/dev/null` are
-    removed). It is best effort: it reads the command text, so a path built at run time (a variable, `$(...)`, a
+    removed; looked for in the segment as written and in its words with quotes and backslashes removed, as the shell
+    removes them before it runs a word, so `c\p`, `c''p`, `c\<newline>p` and `sed '-i'` are `cp` and `sed -i`; and
+    v1's `sed -x ... -i` widened to an in-place flag anywhere after the `sed` in its segment, `-i`, a cluster with an
+    `i` or `I` such as `-ni` or `-i.bak`, or `--in-place`, so `sed -e 's/a/b/' -i '' <data>/x` is one too,
+    fail-closed: a quoted word that only looks like such a flag counts). It is best effort: it reads the command text, so a path built at run time (a variable, `$(...)`, a
     `cd` into the folder and a relative path after it) can get past it, and a write-shaped command that only reads
     the folder (`cp <data>/config.yaml /tmp/`) is denied too; the floor's `Edit` deny rules stay the main guard.
     Choices the task left open:
@@ -1916,7 +1920,10 @@ Calls the author made without asking (check them):
       `${AP2_DATA[0]}` or `${AP2_DATA[@]}`) is a data-folder mention that is never the own run directory, so
       `rm -rf "${AP2_DATA:?}/items"` and `echo x > "${AP2_RUN_DIR%/*}/C2/x"` are denied. `${AP2_RUN_DIR:?}/x` and
       `${AP2_RUN_DIR[0]}/x` are denied too, accepted false denies (a brace is never trusted in the run directory
-      exemption); write `$AP2_RUN_DIR/x`.
+      exemption); write `$AP2_RUN_DIR/x`. Likewise `${HOME` with an operator (`${HOME:?}`, `${HOME%/}`,
+      `${HOME:-/x}`, up to its `}`, past no other `{` or `}`) and then `/<the data folder's or package's path under
+      HOME>` is a mention of that folder that is never the own run directory (`cp src ${HOME:?}/<rel>/config.yaml`
+      is denied; a run-directory write so spelled is an accepted false deny).
     - A path mention ends where the path part ends (`<data>2/` and `<data>-old` are not the data folder). A
       `$AP2_DATA` or `$AP2_RUN_DIR` ends where bash ends the name, at the first character that is not a letter,
       digit or `_` (`$AP2_DATA_OLD` and `$AP2_RUN_DIRX` are other variables), and a `${AP2_DATA}` or
@@ -2027,19 +2034,37 @@ Calls the author made without asking (check them):
       (`"${x:-'}"; <cmd>; : "'}"` runs `<cmd>`, where bash reads one word), so a command with a `'` and a `${` is
       also judged in that reading, as the `$$(` readings are, and denied when one of them writes. A `${(` is a
       flag group (`"${(e)x:-\$(cmd)}"` runs `cmd`): an `ap2` segment with one outside single quotes loses its
-      exemption, and a command that holds one and names a guarded path anywhere is denied. Options change how
+      exemption, and a command that holds one and names a guarded path anywhere is denied; only a `${(` outside
+      single quotes and backslashes (inside `"${...}"` it counts) and outside the body of a heredoc whose delimiter
+      is quoted counts there (zsh expands neither), so JavaScript's template literal `` `${(ms/1000).toFixed(2)}` ``
+      in `node -e '...'` or in a `<<'EOF'` body is text; a shell's or `eval`'s script is read again as a command of
+      its own, where its `${(` is unquoted. Options change how
       words read (`setopt bareglobqual` makes `/(e:'cmd':)` run `cmd`, `setopt extendedglob` makes `(#qe:...)`
       do so): like `extglob`, a command whose text (quotes and continuations taken out) holds `setopt`,
-      `unsetopt`, `emulate` or zsh's `options[...]`, or a `set` with a flag other than `-e`, `-u`, `-x`, `-v` and
-      `-o`/`+o` with an option other than `pipefail`, `errexit`, `nounset`, `xtrace` or `verbose`
-      (`set -euo pipefail` is fine), is denied when it names a guarded path anywhere; a quoted `'setopt'` in a
-      journal line next to a run-directory write is an accepted false deny. zsh syntax beyond these is best
-      effort (for one, `cp x =ap2` copies over the `ap2` that `PATH` finds).
+      `unsetopt`, `emulate` or zsh's `options[...]` (or `options=(...)`), or a `set` with a flag other than `-e`,
+      `-u`, `-x`, `-v`, `-E`, `-a`, `-C`, `-T` and `-o`/`+o` with an option other than `pipefail`, `errexit`,
+      `nounset`, `xtrace`, `verbose`, `errtrace`, `noclobber`, `allexport` or `functrace` (none of these changes
+      how a word reads in bash or zsh: `set -Eeuo pipefail` and `set -o noclobber` are fine), is denied when it
+      names a guarded path anywhere; a quoted `'setopt'` in a journal line next to a run-directory write is an
+      accepted false deny. A fresh zsh has bare glob qualifiers on, so a script run by zsh (a `zsh` word, by name,
+      path or `=zsh`, its `-c` script, or words piped into a `zsh` with no `-c`) that holds a `(` anywhere and names
+      a guarded path is a write (`zsh -c "ap2 card list /(e:'cp src \$AP2_DATA/c':)"`; fail-closed, so a `zsh -c`
+      script with a `(` next to a run-directory write is an accepted false deny; `zsh -c 'echo hi >
+      $AP2_RUN_DIR/x'` is allowed). zsh reads a `}` that ends a word as the end of a `{ ... }` list and then runs
+      the next `{ ... }` as a short loop's body (`while { ap2 card list } { cp src <data>/c; break }`): an unquoted
+      top-level `}` that ends a word (not that of a `${`) with a command after it, past any redirects, ends an
+      `ap2` segment's exemption, as a case pattern's `)` does. zsh's precommand modifiers `noglob`, `nocorrect` and
+      `-`, and `repeat N` (a number), run the next word, as the runners do (`noglob ap2 card list ...` is an `ap2`
+      call; `repeat $n ap2 ...` is none, fail-closed). zsh syntax beyond these is best effort (for one,
+      `cp x =ap2` copies over the `ap2` that `PATH` finds).
     - A name rebound in the same command: a function definition (`name()`, `name ()`, `function name`, which
-      covers bash's `command_not_found_handle` and zsh's `command_not_found_handler`), a command word `alias`,
-      `unalias`, `hash`, `enable`, `builtin`, `functions`, `eval`, `source` or `.`, or a word that sets the search
-      path or one of zsh's name tables (`PATH=...`, `path=...`, `functions[...]`, `aliases[...]`,
-      `commands[...]`) can make `ap2`, `<pkg>/bin/ap2` (bash allows `function <pkg>/bin/ap2 { ... }`) or any
+      covers bash's `command_not_found_handle` and zsh's `command_not_found_handler`), a word `alias`, `unalias`,
+      `hash`, `enable`, `builtin`, `function`, `functions`, `eval`, `source` or zsh's `autoload` anywhere in a
+      segment (not only where it is the command: after a case pattern, `case x in x) hash ap2=/bin/cp;; esac`, a
+      zsh precommand modifier, `noglob hash ...`, or a zsh short loop, `for x (1) hash ...`; fail-closed, so
+      `grep -rw hash <data>/items` is a false deny), a command word `.` (only there: `find .` is common), or a word
+      that sets the search path, zsh's function path or one of zsh's name tables (`PATH=...`, `path=...`,
+      `FPATH=...`, `fpath=(...)`, `functions[...]`, `aliases[...]`, `commands[...]`) can make `ap2`, `<pkg>/bin/ap2` (bash allows `function <pkg>/bin/ap2 { ... }`) or any
       other name run a write (`ap2() { cp "$@"; }; ap2 src <data>/config.yaml`, `hash -p /bin/cp ap2`). In a
       command that holds one (heredoc body lines aside: they are data), no segment keeps the `ap2` exemption and
       every segment that names the data folder or the package outside the own run directory is denied, whatever
@@ -2049,8 +2074,11 @@ Calls the author made without asking (check them):
       <url>/$p $AP2_RUN_DIR/media/$p.png; done` and `source .venv/bin/activate && python shot.py --out
       "$AP2_RUN_DIR/media/shot-$(date +%s).png"` are allowed; best effort there: `alias ls=cp; ls a
       $AP2_RUN_DIR/$f` is allowed (a path built at run time, and a verb the rebinding changed). Accepted false
-      deny: `source .venv/bin/activate && ls <data>/items`. zsh's `functions -c f ap2`, `path=(...)`,
-      `commands+=(...)` and `functions+=(...)` rebind too.
+      deny: `source .venv/bin/activate && ls <data>/items`, and so is `set -a; source .env; set +a; cat
+      <data>/config.yaml` (while `set -a; source .env; set +a; python3 app.py > $AP2_RUN_DIR/app.log` and a journal
+      line `"source of truth: $AP2_RUN_DIR/x"` name only the run directory and stay allowed). zsh's
+      `functions -c f ap2`, `path=(...)`, `commands+=(...)`, `functions+=(...)` and `fpath=(/tmp/fn); autoload -U
+      ap2` (a function file found on `fpath`) rebind too.
     - A script a shell runs: in a segment with a word that is `sh`, `bash`, `zsh`, `ksh`, `dash` or `eval` (by
       name, by path, or after a character no name holds: zsh's `=sh`, `$@eval`), each later word that names a
       guarded path, and all of them joined by blanks (as `eval` joins them), is read again as a command of its own
@@ -2061,7 +2089,16 @@ Calls the author made without asking (check them):
       `c`) reads its script from its input, so when a segment holds one, the words of every segment piped (`|` or
       `|&`) before it in the command are read as a script the same way (`echo 'tee
       $AP2_RUN_DIR/settings-implement.json < f' | sh` is denied; `cat $AP2_RUN_DIR/x | sh -c 'wc -l'` and
-      `echo hi | bash` are allowed). A file a shell reads (`sh run.sh`, `cat f | sh`) is best effort.
+      `echo hi | bash` are allowed). A file a shell reads (`sh run.sh`, `cat f | sh`) is best effort. When the shell
+      word is one of the segment's command words and its script writes nothing, the words after it are left out of
+      the outer segment's own reading (they were judged as the script; the outer segment's redirect targets still
+      count), and so are the words of a segment piped into a shell once they read as a script that writes nothing:
+      otherwise the script, one word to the outer segment, names the run directory with a later `$?`, `$f` or
+      `$(date)` in the same word, and `bash -c 'make > "$AP2_RUN_DIR/m.log"; echo "exit $?"'` or `echo '...' | sh`
+      were denied. That holds only where each word was also read on its own (the top level, or a single word),
+      and not in a command that may rebind a name (there `bash -c 'ap2 src <data>/c'` after `export PATH=...` is
+      still denied outright). `cp bash <data>/x` (`bash` is no command word there) and `bash -c 'cp a <data>/c'`
+      stay denied.
     - Other bash 3.2 rules added with these: inside `"${...}"` bash 3.2 ends the quote at an inner `"`, so a `{`
       there brace-expands (`x=; echo "${x:-"{a,b}"}"` prints `a b`): any `{` inside a `"${...}"`, quoted inside it
       or not, counts as an unquoted `{` for the run-directory rule. Python's `fnmatch` reads `[^x]` as "`^` or
@@ -2120,8 +2157,13 @@ Calls the author made without asking (check them):
       it names a guarded path anywhere. That budget (four times the command's length plus 16 KiB) is shared by
       everything one judgement reads again: each reading past the first (the `$$(` and zsh readings) spends the
       command's length, and each shell's or piped script read again spends its own length, once per depth (a
-      script already judged is not read again by another reading); a shell's quoted script inside a quoted
-      script with many `$$(` took 2 s at 63 KiB before. Accepted: a `bash -c` script past about 16 KiB that holds
+      script already judged is not read again by another reading, nor a script word found to name nothing); a
+      shell's quoted script inside a quoted script with many `$$(` took 2 s at 63 KiB before. A backtick read again
+      with one backslash level taken out also spends 16 per segment it yields (`SEGMENT_COST`), and a later
+      reading takes the segments every reading reads alike (no `$$(` and no `'` in them) from the earlier one,
+      parsed and judged once: a fan-out of tiny segments (`$(a|)` thousands of times, in a backtick inside
+      `"${...}"` with a backslash, in a command with a `$$(`, a `'` and a `${`) took 1.4 s at 64 KiB before, and
+      each such shape now takes well under 0.5 s. Accepted: a `bash -c` script past about 16 KiB that holds
       a `$$(` or a `'` and a `${` and names a guarded path can be denied for the budget alone. Each segment is
       read as words once per reading. A glob longer than 64 characters
       at the run directory's top level is denied outright (fnmatch reads a pattern in quadratic time, 4 s on

@@ -399,6 +399,12 @@ class DecideTest(unittest.TestCase):
             guard._segments(deep)
         self.check([deep], deny=True)
         self.check(["(( " * 12 + "x" + " )" * 24 + "; ls /tmp"], deny=False)
+        # The same past `decide`'s own budget: `_command_writes` runs out of it, and `decide` denies.
+        deeper = "(( " * 80 + "x; cp src $AP2_DATA/c\n" + " )" * 160
+        with self.assertRaises(guard._Deep):
+            guard._command_writes(deeper, guard._Marks(WORKER), 0,
+                                  guard._Budget(guard.BUDGET * len(deeper) + guard.BUDGET_EXTRA))
+        self.check([deeper], deny=True)
 
     def test_a_background_ampersand_splits_but_a_redirect_does_not(self):
         self.check([f"ap2 card list & cp y {DATA}/config.yaml",
@@ -494,8 +500,13 @@ class DecideTest(unittest.TestCase):
                     'rm -rf "${AP2_DATA//x/x}/items"',
                     # An array subscript of the variable is the variable too.
                     'rm -rf "${AP2_DATA[0]}/victim"', "rm -rf ${AP2_DATA[@]}", 'rm -rf "${AP2_DATA[*]}/x"',
-                    'echo pwned > "${AP2_RUN_DIR[0]}/../../victim/f"'], deny=True)
-        self.check(["echo ${AP2_DATA_OLD:-x} > /tmp/x"], deny=False)
+                    'echo pwned > "${AP2_RUN_DIR[0]}/../../victim/f"',
+                    # `${HOME` with an operator before the data folder's path under HOME is the data folder too.
+                    "cp src ${HOME:?}/Documents/Assistant/config.yaml", "cp src ${HOME%/}/Documents/Assistant/c",
+                    'cp src "${HOME:-/x}/Documents/Assistant/config.yaml"',
+                    "echo x > ${HOME:?}/Documents/Assistant/sessions/C1/x.txt"], deny=True)
+        self.check(["echo ${AP2_DATA_OLD:-x} > /tmp/x", "cp src ${HOME:?}/Documents/Assistant2/x",
+                    "cp src ${HOME:?}/x"], deny=False)
 
     def test_reads_and_writes_elsewhere_are_allowed(self):
         self.check([f"cat {DATA}/config.yaml",
@@ -770,18 +781,51 @@ class DecideTest(unittest.TestCase):
                     "set +o nobareglobqual; ap2 card list /(e:'cp src $AP2_DATA/config.yaml':)",
                     "set -eo extendedglob; ap2 card list /(#qe:'cp src $AP2_DATA/config.yaml':)",
                     "options[bareglobqual]=on; ap2 card list /(e:'cp src $AP2_DATA/config.yaml':)",
+                    "options=(bareglobqual on); ap2 card list /(e:'cp src $AP2_DATA/config.yaml':)",
+                    "set -euo pipefail; set -o bareglobqual; ap2 card list /(e:'cp src $AP2_DATA/config.yaml':)",
                     "emulate ksh; ap2 card list --data $AP2_DATA", "s\\etopt x; ap2 card list --data $AP2_DATA",
+                    # A `${(` with a line continuation in it, or in an unquoted heredoc body (zsh expands it).
+                    f"ap2 card list \"${{\\\n(e)x:-\\$(cp src {DATA}/config.yaml)}}\"",
+                    f"cat > /tmp/x <<EOF\n${{(e)x}}\nEOF\nls {DATA}",
+                    # The zsh reading of a `'` inside `"${...}"`.
+                    "ap2 card list \"a${x:-'}\"; cp src $AP2_DATA/config.yaml; : \"'}\"",
+                    # A fresh zsh has bare glob qualifiers on: its script with a `(` and a guarded path is a write.
+                    "zsh -c \"ap2 card list /(e:'c\\\"\\\"p src \\$AP2_DATA/config.yaml':)\"",
+                    "/bin/zsh -c \"ap2 card list /(e:'cp src \\$AP2_DATA/config.yaml':)\"",
+                    "echo \"ap2 card list /(e:'cp src \\$AP2_DATA/config.yaml':)\" | zsh",
                     # Accepted false deny: the words are looked for in the text, quoted or not, as `extglob` is.
                     "echo 'setopt' > $AP2_RUN_DIR/n.txt"], deny=True)
         self.check(["set -euo pipefail; echo x >> $AP2_RUN_DIR/journal.md", "set -x; ap2 card list --data $AP2_DATA",
                     "set +e; set -o errexit -o nounset; ls $AP2_DATA",
-                    "git config set x; ls $AP2_DATA"], deny=False)
-        for cmd in ("setopt x", "set -o x", "set -G", "a=${(e)b}", "options+=(x on)"):
+                    "git config set x; ls $AP2_DATA",
+                    # `set` flags that change no word's reading.
+                    "set -Eeuo pipefail; make test > $AP2_RUN_DIR/test.txt 2>&1",
+                    f"set -Eeuo pipefail; {PKG}/bin/ap2 card show C1", f"set -Eeuo pipefail; cat {DATA}/config.yaml",
+                    "set -o noclobber; echo hi > $AP2_RUN_DIR/x.txt", "set -C; echo hi > $AP2_RUN_DIR/x.txt",
+                    "set -o errtrace; echo hi > $AP2_RUN_DIR/x.txt", "set -E; trap 'echo err' ERR; make > $AP2_RUN_DIR/m.log",
+                    "set -T -o functrace -o allexport; echo hi > $AP2_RUN_DIR/x.txt",
+                    # A `${(` in single quotes or in a quoted-delimiter heredoc body is text (JavaScript here).
+                    "node -e 'const ms=1234; console.log(`took ${(ms/1000).toFixed(2)}s`)' > \"$AP2_RUN_DIR/timing.txt\"",
+                    "cat > \"$AP2_RUN_DIR/r.js\" <<'EOF'\nconsole.log(`${(p*100).toFixed(1)}%`)\nEOF",
+                    "cat > \"$AP2_RUN_DIR/r.js\" <<\\EOF\nconst s = `${(p*100).toFixed(1)}%`;\nEOF",
+                    "zsh -c 'echo hi > $AP2_RUN_DIR/x'"], deny=False)
+        for cmd in ("setopt x", "set -o x", "set -G", "options+=(x on)", "options=(x on)", "set -o extendedglob"):
             with self.subTest(cmd=cmd):
                 self.assertTrue(guard._options(cmd))
-        for cmd in ("set -euo pipefail", "set -- a b", "reset -o x", "echo set", "offset -x"):
+        for cmd in ("set -euo pipefail", "set -- a b", "reset -o x", "echo set", "offset -x", "set -Eeuo pipefail",
+                    "set -aCT", "set -o noclobber -o errtrace -o allexport -o functrace"):
             with self.subTest(cmd=cmd):
                 self.assertFalse(guard._options(cmd))
+        # zsh's `${(` counts outside single quotes and quoted-delimiter heredoc bodies only.
+        def flag_group(cmd):
+            return any(guard._flag_group(guard._Parsed(seg, True, True)) for seg in guard._joined(guard._segments(cmd)))
+        for cmd in ("a=${(e)b}", 'echo "${(e)b}"', "echo ${\\\n(e)b}", "cat <<E\n${(e)x}\nE", "cat <<E\n${(e)x}\\\nE"):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(flag_group(cmd))
+        for cmd in ("echo '${(e)b}'", "echo $'${(e)b}'", "cat <<'E'\n${(e)x}\nE", 'cat <<"E"\n${(e)x}\nE',
+                    "cat <<\\E\n${(e)x}\nE", "echo ${x}(y)"):
+            with self.subTest(cmd=cmd):
+                self.assertFalse(flag_group(cmd))
 
     def test_a_zsh_ampersand_noclobber_redirect_is_a_write_not_a_pipe(self):
         """zsh's `>&|`, `>>&|`, `>&!` and `>>&!` redirect both outputs into the next word."""
@@ -799,12 +843,74 @@ class DecideTest(unittest.TestCase):
         self.check(["echo 'tee $AP2_RUN_DIR/settings-implement.json < f' | sh",
                     "printf '%s\\n' 'cp src $AP2_\\\nDATA/config.yaml' | bash -e",
                     "echo 'cp src $AP2_\\\nDATA/config.yaml' | tr a a | /bin/zsh",
-                    "echo 'ap2 card list > $AP2_DATA/config.yaml' |& sh -s"], deny=True)
+                    # `|&` pipes too, and a shell after a runner still reads its input.
+                    "printf '%s\\n' 'cp src $AP2_\\\nDATA/config.yaml' |& sh",
+                    "printf '%s\\n' 'cp src $AP2_\\\nDATA/config.yaml' | env sh",
+                    "printf '%s\\n' 'cp src $AP2_\\\nDATA/config.yaml' | command bash"], deny=True)
         self.check(["cat $AP2_RUN_DIR/x | sh -c 'wc -l'", "echo hi | bash", "cat $AP2_RUN_DIR/x | sh",
                     "echo 'cp src $AP2_\\\nDATA/config.yaml' || sh", "echo 'cp src $AP2_\\\nDATA/c' | eval wc"],
                    deny=False)
         self.assertIs(type(guard._segments("a | b")[0]), guard._Pipe)
         self.assertIs(type(guard._segments("a || b")[0]), str)
+
+    def test_a_shell_script_that_writes_only_the_run_directory_is_judged_on_its_own(self):
+        """A shell's script (or the words piped into a shell) that writes nothing guarded once read as a command of
+        its own is left out of the outer segment's reading, where one word held its run-directory path and a later
+        `$?`, `$f` or `$(date)`; the outer segment's redirects still count."""
+        self.check(["bash -c 'make > \"$AP2_RUN_DIR/m.log\"; echo \"exit $?\"'",
+                    "bash -c 'cp a.png \"$AP2_RUN_DIR/media/\"; echo $?'",
+                    "sh -c 'echo started >> \"$AP2_RUN_DIR/journal.md\"; make; echo \"done $(date)\" >> "
+                    "\"$AP2_RUN_DIR/journal.md\"'",
+                    "bash -c 'for f in \"$AP2_RUN_DIR\"/media/*.png; do echo \"$f\"; done' > $AP2_RUN_DIR/list.txt",
+                    "echo 'make > \"$AP2_RUN_DIR/m.log\"; echo \"exit $?\"' | sh",
+                    "echo 'cp a.png \"$AP2_RUN_DIR/media/\"; echo $?' | bash",
+                    "printf '%s\\n' 'echo \"done $(date)\" >> \"$AP2_RUN_DIR/journal.md\"' | sh",
+                    # The zsh reading (a `'` and a `${`) and the budget: a `bash -c` heredoc into the run directory.
+                    "bash -c \"echo 'it is ${HOME}' > $AP2_RUN_DIR/x.txt\"",
+                    "bash -c \"cat > $AP2_RUN_DIR/notes.md <<'EOF'\n" + "it's ${HOME} and more text here\n" * 480
+                    + "EOF\""], deny=False)
+        self.check(["cp bash $AP2_DATA/x", "bash -c 'cp a $AP2_DATA/c'", "bash -c 'echo hi' > $AP2_DATA/c",
+                    "bash -c 'make > \"$AP2_RUN_DIR/m.log\"' > \"$AP2_RUN_DIR/$f\"",
+                    "export PATH=/tmp/b:$PATH; bash -c 'ap2 src $AP2_DATA/config.yaml'",
+                    "echo 'echo hi' > $AP2_DATA/c | sh", "cp a $AP2_DATA/c | sh"], deny=True)
+        self.assertGreater(len("bash -c \"cat > $AP2_RUN_DIR/notes.md <<'EOF'\n"
+                               + "it's ${HOME} and more text here\n" * 480 + "EOF\""), 15 << 10)
+
+    def test_a_quoted_or_escaped_verb_is_still_its_verb(self):
+        """The shell removes quotes and backslashes before it runs a word: `c\\p` and `c''p` are `cp`."""
+        rm = "r" + "m"
+        self.check(["c\\p src $AP2_DATA/config.yaml", "c''p src $AP2_DATA/config.yaml",
+                    "m\\v src $AP2_DATA/config.yaml", "t\\ee $AP2_DATA/config.yaml < src",
+                    "c\\\np src $AP2_DATA/config.yaml", "sed '-i' '' 's/orig/NEW/' $AP2_DATA/config.yaml",
+                    "c''p src $AP2_RUN_DIR/settings-implement.json", f"\\{rm} {DATA}/config.yaml",
+                    "export PATH=/tmp/b:$PATH; c\\p src $AP2_RUN_DIR/$f"], deny=True)
+        self.check(["c\\at $AP2_DATA/config.yaml", "'ls' $AP2_DATA"], deny=False)
+
+    def test_sed_in_place_is_found_anywhere_after_sed(self):
+        """`sed -e expr -i f` edits `f` in place too: `-i`, a flag cluster with an `i` (`-ni`) or `--in-place` after
+        the `sed`, in its segment, is a write."""
+        self.check(["sed -e 's/orig/NEW/' -i '' $AP2_DATA/config.yaml", f"sed -E -e 's/a/b/' -i.bak {DATA}/x",
+                    f"sed --in-place 's/a/b/' {DATA}/x", f"sed --in-place=.bak 's/a/b/' {DATA}/x",
+                    f"sed -ni 's/a/b/p' {DATA}/x", f"sed -n 's/a/b/p' {DATA}/x -i"], deny=True)
+        self.check([f"sed -n 's/a/b/p' {DATA}/config.yaml", f"sed -e 's/a/b/' {DATA}/config.yaml | head",
+                    f"sed --expression='s/i/x/' {DATA}/config.yaml"], deny=False)
+
+    def test_a_zsh_short_loop_after_an_ap2_brace_list_is_no_ap2_call(self):
+        """zsh reads a `}` that ends a word as the end of a `{ ... }` list, and runs the next `{ ... }` as the loop's
+        body: `while { ap2 card list } { cmd }` runs `cmd`."""
+        rm = "r" + "m"
+        self.check(["while { ap2 card list } { cp src $AP2_DATA/config.yaml; break }",
+                    "while { ap2 card list} { cp src $AP2_DATA/config.yaml; break}",
+                    "while { ap2 card list } { tee $AP2_DATA/config.yaml < src; break }",
+                    "while { ap2 card list } { " + rm + " $AP2_DATA/config.yaml; break }",
+                    "while { ap2 card list } { cp src $AP2_RUN_DIR/settings-implement.json; break }",
+                    "until { ap2 card list } { cp src $AP2_DATA/config.yaml; break }",
+                    "until { ap2 card list} { cp src $AP2_DATA/config.yaml; break}",
+                    "while { ap2 card list } 2>/dev/null { cp src $AP2_DATA/config.yaml; break }"], deny=True)
+        self.check(["{ ap2 card list --data $AP2_DATA }", "{ ap2 card list --data $AP2_DATA } > /tmp/x",
+                    "{ ap2 card list --data $AP2_DATA; } 2>&1", "ap2 card show ${C} --data $AP2_DATA",
+                    "for c in C1; do { ap2 card show $c --data $AP2_DATA } ; done",
+                    "ap2 card note C1 --data $AP2_DATA --text 'a} b'"], deny=False)
 
     def test_a_rebound_name_keeps_run_directory_paths_built_at_run_time_judged_by_their_verb(self):
         """After `export PATH=...` or `source`, a data-folder or package mention is still denied outright, but a
@@ -850,17 +956,46 @@ class DecideTest(unittest.TestCase):
                     "functions+=(ap2 'cp \"$@\"'); ap2 src $AP2_DATA/config.yaml",
                     # Blanks inside a definition's `()`.
                     'ap2(  ) { cp "$@"; }; ap2 src $AP2_DATA/config.yaml',
-                    'ap2 (\t) { cp "$@"; }; ap2 src $AP2_DATA/config.yaml'],
+                    'ap2 (\t) { cp "$@"; }; ap2 src $AP2_DATA/config.yaml',
+                    # A rebinding word anywhere in a segment: after a case pattern, a zsh precommand modifier, a
+                    # zsh short loop.
+                    'case x in x) function ap2 { cp "$@"; };; esac; ap2 src $AP2_DATA/config.yaml',
+                    "case x in x) hash -p /bin/cp ap2;; esac; ap2 src $AP2_DATA/config.yaml",
+                    "case x in x) hash ap2=/bin/cp;; esac; ap2 src $AP2_DATA/config.yaml",
+                    "noglob hash ap2=/bin/cp; ap2 src $AP2_DATA/config.yaml",
+                    "nocorrect hash ap2=/bin/cp; ap2 src $AP2_DATA/config.yaml",
+                    "- hash ap2=/bin/cp; ap2 src $AP2_DATA/config.yaml",
+                    "repeat 1 hash ap2=/bin/cp; ap2 src $AP2_DATA/config.yaml",
+                    "for x (1) hash ap2=/bin/cp; ap2 src $AP2_DATA/config.yaml",
+                    "noglob builtin hash ap2=/bin/cp; ap2 src $AP2_DATA/config.yaml",
+                    # zsh's autoload: a function file found on `fpath`.
+                    "fpath=(/tmp/fn); autoload -U ap2; ap2 src $AP2_DATA/config.yaml",
+                    "FPATH=/tmp/fn; autoload -U ap2; ap2 src $AP2_DATA/config.yaml",
+                    "noglob autoload -U ap2; ap2 src $AP2_DATA/config.yaml",
+                    "case x in x) autoload -U ap2;; esac; ap2 src $AP2_DATA/config.yaml",
+                    # Accepted false deny: in a command that may rebind, a data-folder read is denied too.
+                    f"set -a; source .env; set +a; cat {DATA}/config.yaml"],
                    deny=True)
         # `functions -c f ap2` on its own (`f` defined elsewhere, such as in the shell's startup files) rebinds too.
-        for seg in ("functions -c f ap2", "source x", ". x", "path+=(/tmp/b)"):
+        for seg in ("functions -c f ap2", "source x", ". x", "path+=(/tmp/b)", "fpath+=(/tmp/fn)", "autoload -U ap2",
+                    "case x in x) hash ap2=/bin/cp", "noglob source x"):
             with self.subTest(seg=seg):
                 self.assertTrue(guard._rebinds([guard._Parsed(seg, True, True)]))
+        for seg in ("find . -name x", "echo . ok", 'echo "source of truth"'):
+            with self.subTest(seg=seg):
+                self.assertFalse(guard._rebinds([guard._Parsed(seg, True, True)]))
         self.check(["ap2 card list > /tmp/x", 'f() { echo hi; }; f > "$AP2_RUN_DIR/x"',
                     'echo "f() and alias" > /tmp/x; ap2 card list --data $AP2_DATA',
                     "ap2 card note C1 --text 'see hash()' --data $AP2_DATA",
                     'x=$(date); ap2 card list --data $AP2_DATA',
-                    "cp \"$()\" /tmp/x; ap2 card list --data $AP2_DATA"], deny=False)
+                    "cp \"$()\" /tmp/x; ap2 card list --data $AP2_DATA",
+                    'echo "source of truth: $AP2_RUN_DIR/x" >> $AP2_RUN_DIR/journal.md',
+                    "echo source of truth: $AP2_RUN_DIR/x >> $AP2_RUN_DIR/journal.md",
+                    "set -a; source .env; set +a; python3 app.py > $AP2_RUN_DIR/app.log",
+                    # zsh's precommand modifiers and `repeat N` run the next word: still an ap2 call.
+                    "noglob ap2 card list --data $AP2_DATA > /tmp/x", "nocorrect ap2 card list --data $AP2_DATA",
+                    "- ap2 card list --data $AP2_DATA", "repeat 2 ap2 card list --data $AP2_DATA > /tmp/x"],
+                   deny=False)
 
     def test_a_final_lone_backslash_adds_nothing(self):
         self.check(["cp ./src $AP2_RUN_DIR/settings-implement.json\\"], deny=True)
@@ -1043,7 +1178,18 @@ class DecideTest(unittest.TestCase):
                   "| sh": fill("echo 'tee $AP2_RUN_DIR/a' | sh | "), "| into sh": fill("echo 'a' | ") + "| sh",
                   "quoted globs": fill("[x]{a,b}*?(y) $AP2_RUN_DIR/", "echo '"),
                   "${ ` \\": fill("`a \\* b` ", '"${x:-'), "rebound run dir $": fill("ls $AP2_RUN_DIR/$f ", "source x; "),
-                  "all readings": fill("\"${x:-'$(a)'}\" $$(x)$AP2_RUN_DIR ", 'sh "$$(x)" "${x:-\'}" ')}
+                  "all readings": fill("\"${x:-'$(a)'}\" $$(x)$AP2_RUN_DIR ", 'sh "$$(x)" "${x:-\'}" '),
+                  # Many tiny segments, read in all three readings, a backtick read again with a level taken out.
+                  "all readings tiny": ((('sh "$$(x)" "${x:-\'}" ' + '"${x:-`sh '
+                                          + ('$(a|)' * size)[:int(0.66 * size)] + '\\x`}" ') + "$(a)" * size)
+                                        [:guard.MAX_COMMAND]),
+                  "c\\p": fill("c\\p '' "), "sed -e": fill("-e x ", "sed "), "sed sed": fill("sed "),
+                  "} cmd": fill("} 2>a} ", "ap2 { "), "}}": fill("a} ", "ap2 "),
+                  "rebind words": fill("hash x "), "${HOME:": fill("${HOME:-${HOME:?"),
+                  "${HOME: rel": fill("${HOME:?}/Documents/Assistant/ "), "set -E": fill("-Eeua ", "set "),
+                  "zsh (": fill("(a) ", "zsh -c '"), "${( quoted": fill("'${(a)' "),
+                  "heredoc ${(": fill("${(a)\n", "cat <<'E'\n"), "bash -c $?": fill("echo $? ", "bash -c '$AP2_RUN_DIR "),
+                  "| sh $?": fill("echo $AP2_RUN_DIR/a $? ", "echo '") + "' | sh"}
         for name, cmd in shapes.items():
             with self.subTest(name):
                 self.assertLessEqual(len(cmd), guard.MAX_COMMAND)
@@ -1087,23 +1233,34 @@ class DecideTest(unittest.TestCase):
                 self.assertEqual(guard._harmless(text), v1.sub(" ", text))
 
     def test_the_write_forms_match_v1(self):
-        """`_writes` finds what v1's one `_WRITE` regex finds, for the forms it splits out and the near misses."""
+        """`_writes` finds what v1's one `_WRITE` regex finds, for the forms it splits out and the near misses. The
+        sed form is a superset of v1's: v1 stops at the first word after `sed` that is no `-x` flag (`sed -e x -i f`
+        is no match there), while `_writes` finds an in-place flag anywhere after the `sed` in its segment, so for
+        sed only v1's matches are pinned (each one is found), plus the forms only `_writes` finds."""
         v1 = re.compile(r"(>>?|\btee\b|\bsed\s+(-[a-zA-Z]*\s+)*-i|\bperl\s+-[a-zA-Z]*i|\bcp\b|\bmv\b|\brm\b|"
                         r"\btruncate\b|\bln\b|\binstall\b|\bdd\b[^|;&]*\bof=|\bopen\([^)]*,\s*['\"][wax+]|\.write\(|"
                         r"write_text|\bchmod\b|\btouch\b)")
         for text in ("dd if=a of=b", "dd if=a & of=b", "of=b dd", "ddx of=b", "dd dd of=b", "x dd y of=z",
                      "open('f', 'w')", "open('f')", "open(f) , 'w'", "open(f, \"a\")", "open(f,  '+')",
                      "open(open(f), 'w')", "f.write(x)", "sed -n -i s/a/b/ f", "perl -pi -e x f", "cat f", "",
-                     "sed -in f", "sed  -n\t-i f", "sed -n f -i", "xsed -i f", "sed -sed -i", "a-sed -i", "sed -1 -i"):
+                     "sed -in f", "sed  -n\t-i f", "xsed -i f", "sed -sed -i", "a-sed -i", "sed -n f"):
             with self.subTest(text=text):
                 self.assertEqual(guard._writes(text), bool(v1.search(text)))
-        # The sed form, which `_writes` checks token by token, on random text.
+        for text in ("sed -n f -i", "sed -1 -i", "sed -e x -i f", "sed -ni f", "sed --in-place f", "sed -E -e x -i.b f",
+                     "sed -I '' f"):
+            with self.subTest(text=text):
+                self.assertTrue(guard._writes(text))
+        for text in ("sed --expression=s/i/x/ f", "sed -e -x f", "sed", "sed-i f", "cat -i f"):
+            with self.subTest(text=text):
+                self.assertFalse(guard._writes(text))
+        # The sed form, which `_writes` checks token by token, on random text: every v1 match is found.
         sed = re.compile(r"\bsed\s+(-[a-zA-Z]*\s+)*-i")
         rnd = random.Random(11)
         for _ in range(5000):
             text = "".join(rnd.choice(["sed", " ", "-", "i", "n", "x", "\t", "-i", "_", "1"]) for _ in range(10))
             with self.subTest(text=text):
-                self.assertEqual(guard._writes(text), bool(v1.search(text)), sed.search(text))
+                if v1.search(text):
+                    self.assertTrue(guard._writes(text), sed.search(text))
 
     def test_the_package_root_is_the_one_workers_uses(self):
         self.assertEqual(guard.package_root(), workers_mod.package_root())
