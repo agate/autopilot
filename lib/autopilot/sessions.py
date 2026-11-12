@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 RESULT_FILES = {"implement": "handback.json", "review": "review.json", "pr": "prloop.json"}
 
@@ -92,3 +94,70 @@ def classify(worker: dict, all_sessions, run_dir: Path) -> str:
     if s.get("state") == "done" or (s.get("pid") is not None and not pid_alive(s.get("pid"))):
         return "dead"
     return "running"
+
+
+# How a worker's last turn can end on an API error that autopilot acts on.
+_LIMIT_TEXT = re.compile(r"\b(spend|usage|session|weekly|5-hour|hourly|daily|monthly)\s+limit\b|\bhit your\b.*\blimit\b"
+                         r"|\blimit\b.*\bresets\b", re.IGNORECASE)
+_REFUSED_TEXT = re.compile(r"safety guard", re.IGNORECASE)
+_RESET = re.compile(r"\bresets\s+(?:(?P<mon>[A-Za-z]{3,9})\.?\s+(?P<day>\d{1,2})(?:st|nd|rd|th)?,?\s+(?:at\s+)?)?"
+                    r"(?P<h>\d{1,2})(?::(?P<m>\d{2}))?\s*(?P<ap>[ap]\.?m\.?)?\s*\((?P<tz>[^()\s]+)\)", re.IGNORECASE)
+_MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
+
+
+def api_stop(tail, since: datetime):
+    """What the API error a session's transcript ends on means for its worker: {"kind": "limit" (a usage or
+    spend limit: wait for the reset) or "gateway_refused" (a gateway rejects this conversation's content), "text",
+    "at"}, or None. `tail` is `usage.transcript_tail`. Only an error dated at or after `since` counts: a resumed
+    copy repeats the old conversation, its last error included, with the old times."""
+    errors = (tail or {}).get("errors") or []
+    if not errors:
+        return None
+    e = errors[-1]
+    if e["at"] is None or e["at"] < since:
+        return None
+    if e["status"] == 429 or e["error"] == "rate_limit" or _LIMIT_TEXT.search(e["text"]):
+        kind = "limit"
+    elif (e["status"] == 400 or re.search(r"\b400\b", e["text"])) and _REFUSED_TEXT.search(e["text"]):
+        kind = "gateway_refused"
+    else:
+        return None
+    return {"kind": kind, "text": e["text"], "at": e["at"]}
+
+
+def reset_time(text: str, after: datetime):
+    """The reset a limit message names ("resets 8:40pm (America/Los_Angeles)", "resets Nov 14, 9am (UTC)"): the
+    first such wall time in that zone after `after`, or None when the text names no time and zone it can read."""
+    m = _RESET.search(text or "")
+    if not m:
+        return None
+    try:
+        zone = ZoneInfo(m["tz"])
+    except (ValueError, KeyError, OSError):   # ZoneInfoNotFoundError is a KeyError
+        return None
+    h, mi = int(m["h"]), int(m["m"] or 0)
+    if m["ap"]:
+        if not 1 <= h <= 12:
+            return None
+        h = h % 12 + (12 if m["ap"][0].lower() == "p" else 0)
+    if h > 23 or mi > 59:
+        return None
+    base = after.astimezone(zone)
+    try:
+        if m["mon"]:
+            mon = m["mon"][:3].lower()
+            if mon not in _MONTHS:
+                return None
+            for year in (base.year, base.year + 1):
+                at = datetime(year, _MONTHS.index(mon) + 1, int(m["day"]), h, mi, tzinfo=zone)
+                if at > base - timedelta(days=1):   # a date already past is next year's
+                    return at
+            return None
+        day = base.date()
+        at = datetime(day.year, day.month, day.day, h, mi, tzinfo=zone)
+        if at <= base:
+            day += timedelta(days=1)
+            at = datetime(day.year, day.month, day.day, h, mi, tzinfo=zone)
+        return at
+    except ValueError:
+        return None

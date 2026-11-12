@@ -2,6 +2,8 @@
   "dispatcher_stuck": "The dispatcher is stuck: there is free capacity and ready work, but two passes in a row started nothing.",
   "worker_blocked": "A worker is waiting for a permission nobody can give: {session}.",
   "worker_died_twice": "A worker stopped twice without finishing: {session}.",
+  "worker_gateway_refused": "The gateway refuses the conversation of a worker: {session}.",
+  "worker_gateway_refused_body": "The gateway rejects this worker's conversation every time, so resuming it on the gateway will not help. Resume this one worker on the subscription: run `ap profile use subscription`, then `ap worker resume {ap} {task} {role}`, then `ap profile use {profile}` to switch back.",
   "state_broken": "The state file of {ap} is broken: {error}",
   "two_answers": "Two different answers arrived for {id}. Which one counts?",
   "cap_warning": "{active} autopilots are running but at most {cap} workers can run at once, so at least {waiting} has to wait.",

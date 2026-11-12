@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 
 from autopilot import events
@@ -45,6 +46,66 @@ def find_transcript(session_id: str):
         return None
     hits = list((Path.home() / ".claude" / "projects").glob(f"*/{session_id}.jsonl"))
     return hits[0] if hits else None
+
+
+TAIL_BYTES = 65536
+
+
+def _when(text):
+    try:
+        at = datetime.fromisoformat(str(text).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return at if at.tzinfo else at.astimezone()
+
+
+def _api_error(e: dict):
+    """An API error line as {"at", "text", "error", "status"}, or None for any other line. Claude Code writes an
+    API error as an assistant line flagged isApiErrorMessage (model <synthetic>), with an `error` field; any of
+    the three counts, so a change to one of them is still read."""
+    msg = e.get("message") if isinstance(e.get("message"), dict) else {}
+    err = e.get("error") if isinstance(e.get("error"), str) and e.get("error") else None
+    if not (e.get("isApiErrorMessage") is True or msg.get("model") == "<synthetic>" or err):
+        return None
+    content = msg.get("content")
+    parts = [c.get("text", "") for c in content if isinstance(c, dict)] if isinstance(content, list) else [str(content or "")]
+    status = e.get("apiErrorStatus")
+    return {"at": _when(e.get("timestamp")) if e.get("timestamp") else None,
+            "text": " ".join(x for x in parts + [str(e.get("content") or "")] if x).strip(),
+            "error": err, "status": status if isinstance(status, int) and not isinstance(status, bool) else None}
+
+
+def transcript_tail(session_id: str):
+    """How a session's transcript ends: {"errors": the API errors after its last normal reply, oldest first;
+    "reply_at": when that reply was written, or None}. None when the session has no transcript. Only the last
+    TAIL_BYTES are read, and a line that does not parse is skipped."""
+    f = find_transcript(session_id)
+    if not f:
+        return None
+    try:
+        with open(f, "rb") as h:
+            h.seek(0, 2)
+            start = max(0, h.tell() - TAIL_BYTES)
+            h.seek(start)
+            lines = h.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return None
+    if start:
+        lines = lines[1:]   # the first line read is cut off
+    errors, reply_at = [], None
+    for line in lines:
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(e, dict) or e.get("type") not in ("assistant", "system"):
+            continue
+        err = _api_error(e)
+        if err:
+            errors.append(err)
+        elif e.get("type") == "assistant":
+            errors, reply_at = [], _when(e.get("timestamp"))   # a normal reply after an error: recovered
+    return {"errors": errors, "reply_at": reply_at}
 
 
 def session_tokens(session_id: str) -> dict:

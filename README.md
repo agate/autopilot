@@ -179,9 +179,14 @@ commands that print a key, never the key.
   of today's cost cannot be priced, it counts as over the cap: the card names the unpriced models (or a
   launch that could not be read) and offers to accept today's unknown cost (it then counts as $0 for
   the cap until midnight, still shown as unknown) or to pause. To fix it for good, add the model's price
-  under `prices`.
+  under `prices`. A launch in its first 15 minutes that is not listed yet, or has no transcript yet, is
+  not unknown cost. A resumed conversation is a new session that starts with a copy of the old one; the
+  copied requests (dated before the session's first launch) are not counted again.
 - **Key health.** If the key command fails, no new worker starts and the page shows the error with its
   fix. It never falls back to the subscription. Fix the key, or run `ap profile rotate <name>`.
+- **Refused conversations.** When a gateway rejects a worker's conversation itself (an HTTP 400 from its
+  safety guard), resuming it on the gateway never helps. The worker shows as blocked, and a card tells
+  you to resume that one worker on the subscription and switch back.
 - **Switching from the page.** The answer check applies the switch. It takes up to about 5 minutes (about 1 when a card
   is waiting). In the quiet hours (`reply_check.quiet`) the next forced pass applies it, so it can take up to
   `forced_pass_min` minutes. A cap answer takes effect within a minute, also in the quiet hours: the check keeps
@@ -248,7 +253,7 @@ reaches you unless you changed that setting. The full list is in
 | `max_workers` | `5` | Most workers running at once, across all autopilots |
 | `budget.window_pct` | `85` | Start no new work once a usage window reaches this percent |
 | `budget.credit_pct` | `90` | Start no new work once extra credits reach this percent of the monthly limit |
-| `budget.park_pct` | `90` | Running workers stop and wait once any usage window reaches this percent, and continue after it resets |
+| `budget.park_pct` | `90` | Running workers stop and wait once any usage window reaches this percent, and continue after it resets. A worker the API stopped at a usage or spend limit anyway is parked too, until the reset its error names (or a back-off from 30 minutes to 4 hours) |
 | `forced_pass_min` | `30` | Run a pass at least this often, in minutes, even when nothing changed |
 | `gate_interval_s` | `60` | How often the check wakes, in seconds; takes effect after `ap install` |
 | `reply_check.quiet` | `["22:00", "06:00"]` | No answer reads between these times, except while the daily-cap card is open; the forced pass picks answers up then |
