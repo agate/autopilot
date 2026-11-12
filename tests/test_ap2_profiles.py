@@ -237,6 +237,52 @@ class ProfileStoreTest(WorkerCase):
                 self.assert_cannot_read(call, where)
         self.assertFalse((self.data / "active-profile.json").exists())  # `use` wrote nothing
 
+    def test_remove_refuses_while_the_active_profile_cannot_be_read(self):
+        """active-profile.json is there but names no profile it can read: `remove` cannot tell which one is in use,
+        so it removes nothing (it would otherwise delete the active profile)."""
+        profiles.save(self.data, gateway())
+        active = self.data / "active-profile.json"
+        g = self.data / "profiles" / "g.json"
+        for label, body in (("mode 000", None), ("bad JSON", "{nope"), ("a list", '["g"]'), ("no name", "{}")):
+            with self.subTest(label):
+                profiles.save(self.data, gateway())  # each case on its own, even when an earlier one removed g
+                active.write_text('{"name": "g"}' if body is None else body)
+                if body is None:
+                    if os.geteuid() == 0:
+                        continue  # root reads a file with mode 000
+                    active.chmod(0)
+                    self.addCleanup(active.chmod, 0o644)
+                with self.assertRaises(ProfileError) as cm:
+                    profiles.remove(self.data, "g")
+                msg = str(cm.exception)
+                self.assertIn(str(active), msg)
+                self.assertIn(profiles.FIX, msg)
+                self.assertNotIn("\n", msg)
+                self.assertTrue(g.exists())
+                active.chmod(0o644)
+        # `ap2 profile use` rewrites the file, and the same remove then works.
+        profiles.use(self.data, "subscription")
+        self.assertEqual(profiles.remove(self.data, "g"), {"removed": "g"})
+        self.assertFalse(g.exists())
+
+    def test_remove_still_refuses_the_name_a_broken_active_file_holds(self):
+        profiles.save(self.data, gateway())
+        profiles.save(self.data, gateway("h"))
+        active = self.data / "active-profile.json"
+        # A name that is not a profile name: that name is refused, another stored profile can go.
+        active.write_text('{"name": "Bad/Name"}')
+        with self.assertRaises(ProfileError):
+            profiles.remove(self.data, "Bad/Name")
+        self.assertEqual(profiles.remove(self.data, "h"), {"removed": "h"})
+        # The active profile's own file is broken: it is still the active one, so it is refused.
+        profiles.save(self.data, gateway("h"))
+        (self.data / "profiles" / "g.json").write_text("{nope")
+        active.write_text('{"name": "g"}')
+        with self.assertRaisesRegex(ProfileError, "g is the active profile"):
+            profiles.remove(self.data, "g")
+        self.assertTrue((self.data / "profiles" / "g.json").exists())
+        self.assertEqual(profiles.remove(self.data, "h"), {"removed": "h"})
+
     def test_an_unreadable_data_folder_is_a_profile_error(self):
         profiles.save(self.data, gateway())
         profiles.use(self.data, "g")
@@ -548,6 +594,7 @@ class ProfileCliTest(unittest.TestCase):
                          {"pluginConfigs": {"p": {}}})
         self.assertEqual(json.loads((self.data / "profiles" / "s.json").read_text())["settings"],
                          {"pluginConfigs": {"p": {}}})
+        self.assertFalse((self.data / "active-profile.json").exists())  # no file: the active one is subscription
         self.assertEqual(self.ok("remove", "s"), {"removed": "s"})
         self.assertEqual(self.ok("use", "g"), {"active": "g", "was": "subscription"})
         listed = self.ok("list")
@@ -620,6 +667,27 @@ class ProfileCliTest(unittest.TestCase):
         self.assertNotIn("Traceback", r.stderr)
         self.assertIn("active-profile.json", r.stderr)
         self.assertFalse((self.data / "active-profile.json").exists())
+
+    def test_remove_with_an_unreadable_active_file_prints_one_line(self):
+        if os.geteuid() == 0:
+            self.skipTest("root reads a file with mode 000")
+        self.add_gateway()
+        self.ok("use", "g")
+        active = self.data / "active-profile.json"
+        active.chmod(0)
+        self.addCleanup(active.chmod, 0o644)
+        r = self.run_ap2("remove", "g")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertEqual(len(r.stderr.splitlines()), 1, r.stderr)
+        self.assertTrue(r.stderr.startswith("ap2: "), r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertIn("active-profile.json", r.stderr)
+        self.assertIn("ap2 profile use <name>", r.stderr)
+        self.assertTrue((self.data / "profiles" / "g.json").exists())
+        # The fix the message names: `use` replaces the unreadable file, and the same remove then works.
+        self.assertEqual(self.ok("use", "subscription"), {"active": "subscription", "was": None})
+        self.assertEqual(self.ok("remove", "g"), {"removed": "g"})
+        self.assertFalse((self.data / "profiles" / "g.json").exists())
 
     def test_an_unreadable_profiles_folder_prints_one_line(self):
         if os.geteuid() == 0:

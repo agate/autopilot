@@ -1909,8 +1909,9 @@ Calls the author made without asking (check them):
     [--key-command C] [--refresh-command C] [--rotate-command C] [--models-command C] [--daily-cap N] [--label L]
     [--model M] [--dispatcher-model M] [--small-model M] [--effort E] [--env K=V ...] [--settings-file F]`,
     `use NAME` (prints `{"active": new, "was": old}`, so `ap2 profile use <was>` undoes it) and `remove NAME`
-    (refuses `subscription` and the active profile). `add` refuses a name that exists (`subscription` included)
-    and the gateway flags on a `--subscription` profile, and prints the saved profile. `list` and `show` create
+    (refuses `subscription` and the active profile, and refuses any name while active-profile.json exists but names
+    no profile it can read). `add` refuses a name that exists (`subscription` included) and the gateway flags on a
+    `--subscription` profile, and prints the saved profile. `list` and `show` create
     nothing; `add`, `use` and `remove` write only inside the data folder, so they work in shadow mode.
   - Not in this slice: the spend ledger, the daily cap and its card, key health, refresh and rotation (`rotate`),
     and the page's badge and switch. Until the cap lands, a gateway worker has no daily cap: acceptable because v2
