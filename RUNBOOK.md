@@ -200,8 +200,9 @@ rejects one that does not.
    page). Each reply has `decision` (`<ap>:<D-id>`), `option` or `text`, and `by`. First record every
    answer, then tell the page, then act on them:
    - A reply with a `kind` (`profile` or `cap`: a profile switch or a daily-cap answer) is no card answer:
-     never `ap decision resolve` it. Run `ap reply-kind '<the reply document as JSON>'` with it (the
-     same code the minute check uses; it applies each reply once and prints what it did). When it exits 0,
+     never `ap decision resolve` it. Run `ap reply-kind '<the reply document as JSON>'` with it, one
+     reply at a time, oldest `at` first (the same code the minute check uses; it applies each reply once
+     and prints what it did). When it exits 0,
      delete that reply document in the same `ArtifactData` batch that tells the page (below). Exit 1: leave
      the reply for the next pass.
    - `option: "undo"` on a `self` card: `ap decision resolve <ap> <D-id> --answer undo --status undone --handling`.
