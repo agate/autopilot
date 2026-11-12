@@ -80,6 +80,7 @@ def _parser() -> argparse.ArgumentParser:
     _gate_parser(sub)
     _template_parser(sub)
     _worker_parser(sub)
+    _profile_parser(sub)
     _serve_parser(sub)
     _phone_parser(sub)
     sub.add_parser("hook-park", help="a worker's PreToolUse hook: at the usage line, deny all but its park")
@@ -286,8 +287,92 @@ def cmd_restore(args) -> int:
     return 0
 
 
+# -- ap2 profile (access profiles, design section 12) -----------------------------------------------------------------
+# A profile says how workers reach Claude: the subscription, or a gateway through a key command. `use` writes only
+# <data>/active-profile.json, so it works in shadow mode; `list` and `show` create nothing.
+
+def _profile_parser(sub) -> None:
+    pr = sub.add_parser("profile", help="list, show, add, use or remove access profiles",
+                        description="Access profiles: how workers reach Claude (the subscription, or a gateway "
+                                    "reached with a key command). Every worker start or resume runs on the active "
+                                    "one; a running worker keeps its own.")
+    ps = pr.add_subparsers(dest="profile_command", metavar="<profile command>", title="profile commands")
+    ps.required = True
+    li = ps.add_parser("list", help="print every profile and which one is active",
+                       description="Print {active, active_error, profiles} as JSON. Reads only.")
+    li.add_argument("--data", metavar="PATH", help=DATA_HELP)
+    for name, help_ in (("show", "print one profile as JSON (its commands, never a key)"),
+                        ("use", "make NAME the active profile; prints {active, was}"),
+                        ("remove", "delete a stored profile (not the subscription, not the active one)")):
+        c = ps.add_parser(name, help=help_, description=help_[0].upper() + help_[1:] + ".")
+        c.add_argument("name", metavar="NAME")
+        c.add_argument("--data", metavar="PATH", help=DATA_HELP)
+    add = ps.add_parser("add", help="save a new profile and print it",
+                        description="Save a new profile NAME and print it. A gateway profile needs --base-url, "
+                                    "--key-command (a command that prints the key; the key is never stored), "
+                                    "--small-model and --daily-cap. With --models-command, the models are checked "
+                                    "against the JSON list it prints.")
+    add.add_argument("name", metavar="NAME")
+    mode = add.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--subscription", action="store_true", help="the Claude subscription")
+    mode.add_argument("--gateway", action="store_true", help="a Claude-compatible gateway")
+    for flag, help_ in (("base-url", "the gateway's base URL"), ("key-command", "a command that prints the key"),
+                        ("refresh-command", "a command that refreshes the key"),
+                        ("rotate-command", "a command that mints a new key"),
+                        ("models-command", "a command that prints the gateway's models as a JSON list"),
+                        ("daily-cap", "the gateway profile's daily dollar cap"), ("label", "the name shown"),
+                        ("model", "the workers' model (--model on a fresh start)"),
+                        ("dispatcher-model", "the dispatcher's model"), ("small-model", "the small model"),
+                        ("effort", "the workers' effort (--effort on a fresh start)"),
+                        ("settings-file", "extra settings, as a JSON file")):
+        add.add_argument("--" + flag, metavar=flag.split("-")[0].upper(), help=help_)
+    add.add_argument("--env", action="append", default=[], metavar="K=V", help="an extra variable (repeatable)")
+    add.add_argument("--data", metavar="PATH", help=DATA_HELP)
+
+
+def cmd_profile(args) -> int:
+    from assistant import profiles
+
+    sub = args.profile_command
+    data = datadir.resolve(args.data)
+    if sub == "list":
+        try:
+            current, error = profiles.active(data)["name"], None
+        except profiles.ProfileError as e:
+            current, error = None, str(e)
+            try:
+                current = profiles.active_name(data)
+            except profiles.ProfileError:
+                pass
+        rows = []
+        for name in profiles.names(data):
+            row = {"name": name, "active": name == current}
+            try:
+                p = profiles.load(data, name)
+                row.update({k: p[k] for k in ("mode", "label", "model", "effort", "daily_cap_usd")})
+            except profiles.ProfileError as e:
+                row["error"] = str(e)
+            rows.append(row)
+        out = {"active": current, "active_error": error, "profiles": rows}
+    elif sub == "show":
+        out = profiles.load(data, args.name)
+    else:
+        datadir.ensure(data)
+        if sub == "add":
+            if args.name == profiles.SUBSCRIPTION or profiles.path(data, args.name).exists():
+                raise profiles.ProfileError(f"{args.name} already exists")
+            out = profiles.save(data, profiles.from_args(args))
+        elif sub == "use":
+            out = profiles.use(data, args.name)
+        else:
+            out = profiles.remove(data, args.name)
+    _print_json(out)
+    return 0
+
+
 COMMANDS = {"config": cmd_config, "card": cmd_card, "search": cmd_search, "restore": cmd_restore}
 COMMANDS["worker"] = cmd_worker
+COMMANDS["profile"] = cmd_profile
 
 
 # -- ap2 source (the source engine, design 5) ---------------------------------------------------------------------

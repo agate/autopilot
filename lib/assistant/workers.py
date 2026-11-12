@@ -14,6 +14,11 @@ acts on what it sees, so no process ever waits for a human:
 - idle (its turn ended with no result file): after IDLE_MIN minutes stop it and mark it paused, can resume.
 - parked (stopped itself at the usage line): keeps its slot and ports; resumes once usage allows.
 
+Every start and resume runs on the active access profile (`profiles.py`), read once before it is planned: its
+overlay is merged under the permission floor in the worker's `--settings`, its model and effort go on a fresh start,
+and its name is kept on the worker record and the card (`profile`). A missing or broken active profile starts
+nothing. Switching profiles rewrites no settings file: a running worker keeps the profile it started with.
+
 Starting (or resuming) a session can make branches and PRs, so it needs live mode; listing, classifying, ending
 and archiving work in shadow mode. v1 is reused by import (`lib/autopilot/workers.py`, `sessions.py`,
 `budget.py`, `park.py`, `perms.py`) and never changed.
@@ -38,7 +43,7 @@ from autopilot import perms as v1_perms
 from autopilot import sessions as v1_sessions
 from autopilot import workers as v1_workers
 
-from assistant import cards, config, projects, transcripts
+from assistant import cards, config, profiles, projects, transcripts
 from assistant.cards import CardError
 from assistant.resources import MAX_WORKERS, PORT_BASE, Registry, WorkerError, check_start, next_ports
 from assistant.store import Store, write_json
@@ -49,7 +54,7 @@ AGENTS = dict(v1_workers.AGENTS)  # the pr role runs the PR loop command instead
 PR_COMMAND = "/autopilot:pr-loop "
 QUESTION = "question.json"
 PERMISSION_MODE = "auto"  # v1's default `permission_mode`
-EFFORT = "xhigh"  # v1's default `worker_effort`
+EFFORT = "xhigh"  # v1's default `worker_effort`: the built-in subscription profile's effort (`profiles.builtin`)
 IDLE_MIN = 60  # a worker idle this long with no result file is stopped and marked paused, can resume
 BLOCKED_MIN = 30  # a worker waiting at a permission prompt this long is stopped, kept resumable
 PARK_RULES = dict(v1_config.DEFAULT_GLOBAL["budget"])  # park at 90%, resume 5 minutes after the reset
@@ -77,9 +82,10 @@ CLOSES = {"end": ("ended", "ended", True), "done": ("ended", "ended", False),
           "parked_failed": ("stopped", "stopped", False)}
 # Files a worker may not edit in the data folder. Every card's run directory stays writable except its settings
 # files: a deny rule cannot keep one worker out of another card's result files. The user's templates and sources
-# are here as well (the worker floor in roles.py).
+# are here as well (the worker floor in roles.py), and the access profiles with the active one's name.
 PROTECTED = ("config.yaml", "workers.json", ".workers.lock", ".store.lock", "index.sqlite", "items/**",
-             "restore/**", "projects/**", "templates/**", "sources/**", "sessions/**/settings-*.json")
+             "restore/**", "projects/**", "templates/**", "sources/**", "sessions/**/settings-*.json",
+             f"{profiles.FOLDER}/**", profiles.ACTIVE)
 
 
 def package_root() -> Path:
@@ -145,11 +151,12 @@ def require_literal(data: Path) -> None:
                               "edits in it; use a folder name without those characters")
 
 
-def floor(role: str, project: dict, data: Path, env: dict) -> dict:
+def floor(role: str, project: dict, data: Path, env: dict, profile: Optional[dict] = None) -> dict:
     """The worker's permission floor (`--settings`): v1's outward-tool denials (`perms.denied_tools`, from the
     project's `tools`; `Workers._tools` fills them in when it lists none, with `deny_servers`, the whole-server
-    rules) and Bash denials, the data folder's own files and the package, and the worker's env. Refused for a path
-    a gitignore pattern cannot name literally (`require_literal`)."""
+    rules) and Bash denials, the data folder's own files and the package, and the worker's env. With `profile`, its
+    overlay is merged under it (`profiles.merge`): the deny and allow lists, the hooks and the AP2_* env stay
+    exactly as they are. Refused for a path a gitignore pattern cannot name literally (`require_literal`)."""
     if role not in ROLES:
         raise WorkerError(f"role must be one of {', '.join(ROLES)}, not {role!r}")
     require_literal(data)
@@ -164,7 +171,8 @@ def floor(role: str, project: dict, data: Path, env: dict) -> dict:
     # denies all but that command while usage is at the park line (v1's `perms.park_hook` shape).
     hooks = {"PreToolUse": [{"matcher": "*", "hooks": [
         {"type": "command", "command": f"\"{package_root() / 'bin' / 'ap2'}\" hook-park", "timeout": 5}]}]}
-    return {"permissions": {"deny": deny, "allow": allow}, "env": dict(env), "hooks": hooks}
+    out = {"permissions": {"deny": deny, "allow": allow}, "env": dict(env), "hooks": hooks}
+    return profiles.merge(out, profiles.overlay(profile)) if profile is not None else out
 
 
 class Workers:
@@ -217,10 +225,11 @@ class Workers:
         self._kill(short)
         self._close_worker_asks(card_id, role, by, kinds=("attach",))
 
-    def _env(self, card: dict, role: str, project: dict, port_range: list, branch: str) -> dict:
+    def _env(self, card: dict, role: str, project: dict, port_range: list, branch: str, profile: dict) -> dict:
+        """The worker's AP2_* variables, for its process env and its settings env alike (AP2_PROFILE included)."""
         checks = [{"name": c["name"], "command": c["command"], "fix": c.get("fix") or c["command"]}
                   for c in project.get("health_checks") or []]
-        return {"AP2_ROLE": role, "AP2_DATA": str(self.data), "AP2_CARD": card["id"],
+        return {"AP2_ROLE": role, "AP2_DATA": str(self.data), "AP2_CARD": card["id"], "AP2_PROFILE": profile["name"],
                 "AP2_PROJECT": project.get("name") or "", "AP2_RUN_DIR": str(self.run_dir(card["id"])),
                 "AP2_PORTS": f"{port_range[0]}-{port_range[1]}", "AP2_BRANCH": branch,
                 "AP2_EXTRA_HOSTS": ",".join(project.get("extra_hosts") or []),
@@ -255,12 +264,14 @@ class Workers:
         text = "\n".join(lines)
         return PR_COMMAND + text if role not in AGENTS else text
 
-    def _discover(self, cwd: str, env: dict) -> tuple:
-        """(tools, whole-server deny rules) of a session in `cwd` with `env`: one `claude -p ... --output-format
-        stream-json`, read line by line and killed at its first init event, before the model runs, so nothing in
-        the folder can make it call a tool. It runs in its own process group, and every kill ends the whole group.
-        Raises RuntimeError (no init event, also past DISCOVER_TIMEOUT) or OSError."""
-        argv = [self.claude, "-p", DISCOVER_PROMPT, "--output-format", "stream-json", "--verbose"]
+    def _discover(self, cwd: str, env: dict, settings: Path) -> tuple:
+        """(tools, whole-server deny rules) of a session in `cwd` with `env` and the `settings` file (a profile's
+        overlay, no floor): one `claude -p ... --output-format stream-json`, read line by line and killed at its
+        first init event, before the model runs, so nothing in the folder can make it call a tool. It runs in its
+        own process group, and every kill ends the whole group. Raises RuntimeError (no init event, also past
+        DISCOVER_TIMEOUT) or OSError."""
+        argv = [self.claude, "-p", DISCOVER_PROMPT, "--output-format", "stream-json", "--verbose",
+                "--settings", str(settings)]
         proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=subprocess.DEVNULL, text=True, env=self._process_env(env),
                                 start_new_session=True)
@@ -295,20 +306,35 @@ class Workers:
             proc.wait()
             proc.stdout.close()
 
-    def _tools(self, project: dict, cwd: str, env: dict) -> dict:
+    def _tools(self, project: dict, cwd: str, env: dict, profile: dict, card_id: str, role: str) -> dict:
         """The project with the exact tools the worker's own session will load, for the permission floor. The
         tools the project file lists (`projects/**` is Edit-denied) are used as they are, always first. Otherwise
         they are found on every floor written, in the worker's own folder `cwd` with its env (so the folder's
         local-scope and `.mcp.json` servers and the plugins are seen), by a session killed at its init event
         (`_discover`), with `deny_servers`: every MCP server not connected at that init event, denied whole. Never
-        from a card. A worker never starts without its outward tools denied: no list, no start."""
+        from a card. A worker never starts without its outward tools denied: no list, no start.
+
+        The probe runs with the worker's `profile` (`settings-discover-<role>.json` in the run directory: its overlay
+        only, since a probe under the deny floor would not list the denied tools). When that is not the page profile
+        (a gateway), a second probe runs with the page profile (`settings-discover-<role>-page.json`): a gateway
+        session never sees the claude.ai connectors, so the floor denies what either probe found."""
         if project.get("tools"):
             return project
         name = project.get("name")
         where = f"projects/{name}.yaml `tools`" if name else "its projects/<name>.yaml `tools`"
         ask = "" if name else "give the card a project and "
+        run = self.run_dir(card_id)
+        probes = [(run / f"settings-discover-{role}.json", profile)]
+        page = profiles.page_profile(self.data)
+        if page["name"] != profile["name"]:
+            probes.append((run / f"settings-discover-{role}-page.json", page))
+        tools, servers = [], []
         try:
-            tools, servers = self._discover(cwd, env)
+            for settings, prof in probes:
+                write_json(settings, profiles.overlay(prof))
+                found, off = self._discover(cwd, env, settings)
+                tools += [t for t in found if t not in tools]
+                servers += [s for s in off if s not in servers]
         except (OSError, RuntimeError, subprocess.SubprocessError) as e:
             raise WorkerError(f"cannot list the session's tools for the permission floor: {e}; {ask}list them in "
                               f"{where}") from e
@@ -326,7 +352,10 @@ class Workers:
         """The session id of the session with this short id, or "" when the listing does not show it yet."""
         return (v1_sessions.find_by_id(short, v1_sessions.list_all(self.claude)) or {}).get("sessionId") or ""
 
-    def _argv(self, role: str, name: str, settings: Path, prompt: str, resume_id: str = "") -> list:
+    def _argv(self, role: str, name: str, settings: Path, prompt: str, profile: dict, resume_id: str = "") -> list:
+        """The `claude --bg` command. A fresh start takes the profile's model (`--model`, when it has one) and effort
+        (`--effort`, when set); a resume takes neither (design 8.2): a resumed gateway session gets its model from
+        the overlay's ANTHROPIC_MODEL."""
         argv = [self.claude, "--bg"]
         if resume_id and not transcripts.SESSION_ID.match(resume_id):
             # It comes from the card or the worker list; one starting with "-" would become a claude flag.
@@ -337,8 +366,10 @@ class Workers:
         argv += ["-n", name, "--permission-mode", PERMISSION_MODE, "--settings", str(settings)]
         if not resume_id and role in AGENTS:
             argv += ["--agent", AGENTS[role]]
-        if not resume_id and EFFORT:
-            argv += ["--effort", EFFORT]
+        if not resume_id and profile.get("model"):
+            argv += ["--model", profile["model"]]
+        if not resume_id and profile.get("effort"):
+            argv += ["--effort", profile["effort"]]
         return argv + [prompt]
 
     def _save_session(self, card_id: str, role: str, by: str, **fields) -> dict:
@@ -408,7 +439,7 @@ class Workers:
     # -- start -----------------------------------------------------------------------------------------------------
 
     def _plan_start(self, records: list, card: dict, role: str, project: dict, saved: dict, cwd, needs,
-                    resume: bool) -> dict:
+                    resume: bool, profile: dict) -> dict:
         """Everything a start decides from the worker list: no other worker on the card, the slot and `needs`, the
         ports, the session to resume and the folder. Raises WorkerError when the start may not go ahead. `start()`
         runs it on a read of the list before the tool discovery, and again under the lock before it launches."""
@@ -435,7 +466,7 @@ class Workers:
         branch = card.get("branch") or projects.branch(project, card.get("key") or card_id,
                                                        _slug(cards.title_for(card, primary, primary)))
         return {"old": old, "parked": parked, "needs": needs, "ports": port_range, "sid": sid, "cwd": cwd,
-                "branch": branch, "env": self._env(card, role, project, port_range, branch)}
+                "branch": branch, "env": self._env(card, role, project, port_range, branch, profile)}
 
     def start(self, card_id: str, role: str, cwd=None, prompt: str = "", needs=None, resume: bool = False,
               by: str = BY) -> dict:
@@ -453,12 +484,14 @@ class Workers:
         project = self._project(card)
         saved = (card.get("sessions") or {}).get(role) or {}
         now = self.clock()
+        # Read once, before anything is planned: a missing or broken one starts nothing (ProfileError).
+        prof = profiles.active(self.data)
         # A start the list already refuses fails here, before any discovery runs.
-        planned = self._plan_start(self.registry.read(), card, role, project, saved, cwd, needs, resume)
+        planned = self._plan_start(self.registry.read(), card, role, project, saved, cwd, needs, resume, prof)
         require_literal(self.data)  # before the tool discovery runs a session
-        found = self._tools(project, planned["cwd"], planned["env"])
+        found = self._tools(project, planned["cwd"], planned["env"], prof, card_id, role)
         with self.registry.locked() as records:
-            plan = self._plan_start(records, card, role, project, saved, cwd, needs, resume)
+            plan = self._plan_start(records, card, role, project, saved, cwd, needs, resume, prof)
             if plan["cwd"] != planned["cwd"]:
                 # The tools were found in another folder (the parked record changed meanwhile): they may not be
                 # the ones this session loads.
@@ -469,22 +502,22 @@ class Workers:
             name = session_name(card_id, role)
             settings = self.run_dir(card_id) / f"settings-{role}.json"
             argv = self._argv(role, name, settings, self._prompt(prompt, card, role, project, port_range, branch),
-                              sid)
-            write_json(settings, floor(role, found, self.data, env))
+                              prof, sid)
+            write_json(settings, floor(role, found, self.data, env, prof))
             if parked:
                 self._stop(card_id, role, parked.get("short_id"), by)  # the parked session sits idle; the copy
                 # takes its place
             short = self._launch(argv, cwd, env)
             rec = {"card": card_id, "role": role, "project": project.get("name"), "session_name": name,
                    "session_id": "", "short_id": short, "ports": port_range, "needs": needs, "cwd": cwd,
-                   "branch": branch, "started_at": cards.stamp(now), "resumes": 0, "parked": None,
-                   "idle_since": None, "blocked_since": None}
+                   "branch": branch, "profile": prof["name"], "started_at": cards.stamp(now), "resumes": 0,
+                   "parked": None, "idle_since": None, "blocked_since": None}
             # On record before the listing is asked for its id: a Ctrl-C or an error there still leaves a record
             # that points at the running session (the next check fills the id in, `_fill_session_id`).
             records[:] = [r for r in records if r is not old] + [rec]
             rec["session_id"] = new_sid = self._session_id(short)
         self._save_session(card_id, role, by, id=new_sid or sid, cwd=cwd, needs=needs, state="running", why=None,
-                           question=None)
+                           question=None, profile=prof["name"])
         self._close_worker_asks(card_id, role, by)  # a new session: its old prompt, pause or question is over
         return rec
 
@@ -657,20 +690,23 @@ class Workers:
 
     def _plan_resume(self, rec: dict, why: str, prompt: str) -> dict:
         """Step 1, under the lock: what an in-place resume needs (`why` is "dead" or "parked"); nothing is started
-        or written. Live mode only: a shadow-mode refusal comes first, so it runs no discovery."""
+        or written. Live mode only: a shadow-mode refusal comes first, so it runs no discovery. The active profile is
+        read here, once: the resume runs on it, whatever profile the worker started with (ProfileError when it
+        cannot be loaded: nothing resumes)."""
         config.require_live(self.cfg, f"resume the {rec['role']} worker on card {rec['card']}")
         card = self._card(rec["card"])
         project = self._project(card)
+        prof = profiles.active(self.data)
         return {"card": rec["card"], "role": rec["role"], "short_id": rec.get("short_id"), "cwd": rec.get("cwd"),
-                "why": why, "prompt": prompt, "project": project,
-                "env": self._env(card, rec["role"], project, rec["ports"], rec.get("branch") or "")}
+                "why": why, "prompt": prompt, "project": project, "profile": prof,
+                "env": self._env(card, rec["role"], project, rec["ports"], rec.get("branch") or "", prof)}
 
     def _resume_tools(self, plan: dict) -> dict:
         """Step 2, with the lock free: the tools the resumed session will load (`_tools`). Raises WorkerError."""
         if not (plan["cwd"] and Path(plan["cwd"]).is_dir()):  # checked first, so a gone worktree says so
             raise WorkerError(f"cannot start the session: the worker's folder {plan['cwd'] or '(none)'} is gone")
         require_literal(self.data)  # before the tool discovery runs a session
-        return self._tools(plan["project"], plan["cwd"], plan["env"])
+        return self._tools(plan["project"], plan["cwd"], plan["env"], plan["profile"], plan["card"], plan["role"])
 
     def _still_due(self, rec: Optional[dict], plan: dict, listing, b, now: datetime) -> bool:
         """Step 3, under the lock: the planned resume still applies to `rec` (the card and role's record on the
@@ -693,8 +729,8 @@ class Workers:
         process): the copy that continues takes its place, as in `start()`. `by` (the check's caller) is the name
         on the card's audit."""
         settings = self.run_dir(rec["card"]) / f"settings-{rec['role']}.json"
-        write_json(settings, floor(rec["role"], found, self.data, plan["env"]))
-        argv = self._argv(rec["role"], rec["session_name"], settings, plan["prompt"],
+        write_json(settings, floor(rec["role"], found, self.data, plan["env"], plan["profile"]))
+        argv = self._argv(rec["role"], rec["session_name"], settings, plan["prompt"], plan["profile"],
                           rec["session_id"] or rec["short_id"])
         # Whatever its state (parked, failed with its process alive, or gone: a stop of a gone session is harmless),
         # the old session is stopped first, so it never runs on untracked next to the copy. A stop that raises
@@ -704,12 +740,13 @@ class Workers:
         # The new session runs now: record it before anything else can fail (the listing below included), so the
         # registry never points at the old one. Its id is the copy's, or "" when the listing does not show the copy
         # yet: the next check fills it in (`_fill_session_id`), as for `start()`.
-        rec.update(short_id=short, session_id="", started_at=cards.stamp(self.clock()),
+        rec.update(short_id=short, session_id="", started_at=cards.stamp(self.clock()), profile=plan["profile"]["name"],
                    idle_since=None, blocked_since=None, parked=None,
                    resumes=rec.get("resumes", 0) + (1 if plan["why"] == "dead" else 0))
         rec["session_id"] = self._session_id(short)
         # A resume runs under a new id; keep it on the card now, so no id is lost if the worker resumes again.
-        self._save_session(rec["card"], rec["role"], by, id=rec["session_id"], state="running", why=None)
+        self._save_session(rec["card"], rec["role"], by, id=rec["session_id"], state="running", why=None,
+                           profile=plan["profile"]["name"])
         self._close_worker_asks(rec["card"], rec["role"], by)  # a new session: its old prompt or pause is over
         return rec
 

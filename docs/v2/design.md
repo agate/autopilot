@@ -124,6 +124,26 @@ found and first set up is in section 12.
 └── attachments/
 ```
 
+The data folder itself may be reached through a symlink (it is resolved when it is found), but the card store
+refuses a symlink inside it where it keeps its own files: `items/`, a month folder, a card file, `restore/`, a
+point file, `.store.lock`, `index.sqlite` (and its `-journal`, `-wal`, `-shm`) and `.index.stale`. The call fails
+with one line naming the link, so a link into v1's folder cannot carry a store write out of the v2 folder.
+
+- **[decided by the builder]** A link is refused, never followed to write and never replaced (pruning reads a
+  linked point, below): removing it is the user's choice. A link at a name right under the data folder (`items/`,
+  `restore/`, `.store.lock`, `index.sqlite` and its `-journal`, `-wal`, `-shm`, `.index.stale`) refuses every
+  store call, a read too, not only the calls that would touch it, so the check is one short list of `lstat` calls
+  per call. A linked month folder, card file or point file is refused by the calls that open it. The lock and
+  `.index.stale` are also opened with `O_NOFOLLOW` where the platform has it, for a link swapped in after the check.
+- **[decided by the builder]** Inside `items/`, any link is refused when listing or rebuilding the index meets it
+  (the store reads every folder there); in a month folder only a link with a card's file name is refused (other
+  names are skipped as before). Inside `restore/`, a linked point file is refused when it is put back; pruning
+  reads one but only ever removes the link itself, so it is left as it is.
+- **[decided by the builder]** The index's temp file `.index.sqlite.<pid>.tmp` is not checked: it is removed
+  before it is made, so a link there is dropped, not followed. The other folders the store never writes (`chat/`,
+  `sessions/`, `sources/`, `routines/`, `templates/`, `attachments/`) get the same guard in a later task, from the
+  code that writes them.
+
 v1's data is in `~/.claude/autopilot-data`. Moving it is part of the migration (section 10).
 
 ### 3.5 Conversations (transcripts)
@@ -816,7 +836,8 @@ Calls the author made without asking (check them):
   `engine.py` (read, fill, check, link and key, sort, card); scan sessions: `scan.py` (the plan, the brief, the
   save-raw hook and the take); review angles: `angles.py` (the three layers, kinds, globs and the picker,
   design 6.1) with the built-in table in `review/angles.yaml` at the plugin root; for workers, `workers.py`,
-  `resources.py`, `transcripts.py` and `projects.py` (see the workers entry below); the local page:
+  `resources.py`, `transcripts.py` and `projects.py` (see the workers entry below); access profiles:
+  `profiles.py` (the store, the overlay and merge, `ap2 profile`; see the access profiles entry below); the local page:
   `server.py` (the server, its JSON routes and the request guard, run by `ap2 serve`) and
   `builtin/page/local.html` (the one page, inline CSS and JS, found from `server.py`'s own path); and the
   phone page's data: `phone.py` (`build`, run by `ap2 phone build`). `ap2 config [--data PATH]` prints the
@@ -1591,7 +1612,7 @@ Calls the author made without asking (check them):
     instructions to follow." A user template may fill a card field from a source into a brief (6), so the worker
     is told once, in its own instructions, how to read it. Each filled value is not quoted or fenced: the brief
     keeps the raw value, as the design's template example fills it.
-  - Session: `claude --bg -n "<card> · <role>" --permission-mode auto --settings ... [--agent ...] --effort xhigh`
+  - Session: `claude --bg -n "<card> · <role>" --permission-mode auto --settings ... [--agent ...] [--model <profile model>] --effort xhigh`
     (v1's defaults; the `pr` role runs `/autopilot:pr-loop` instead of an agent, until templates and roles define
     v2's own). A resume is `claude --bg --resume <id> -n ... --permission-mode ... --settings ... <prompt>`.
     The resume id comes from the card or the worker list, so it is checked first: letters, digits and `-`, not
@@ -1724,6 +1745,84 @@ Calls the author made without asking (check them):
     `ap2 worker list`, `start CARD ROLE [--cwd P] [--prompt-file F] [--needs A,B] [--resume]`,
     `end CARD ROLE [--transcripts P]`, `check [--transcripts P] [--usage P]`,
     `park CARD ROLE [--note T] [--usage P]`, `answer CARD TEXT...`, `finish CARD [--transcripts P]`.
+- **[decided by the builder]** Access profiles (slice 1 of the port of v1's access profiles): the store,
+  `ap2 profile`, and every worker start and resume on the active profile. Ported from v1's `lib/autopilot/profile.py`
+  into `lib/assistant/profiles.py`, never imported (v1's version writes v1's data folder). v1 and v2 keep separate
+  profiles, and later separate caps: v2 replaces v1.
+  - What a profile is. How a worker reaches Claude: the Claude subscription, or a Claude-compatible gateway reached
+    with a key command (`apiKeyHelper`), so a key is never written in any file. Fields (v1's schema): `name`,
+    `mode` (`subscription | gateway`), `label`, `model`, `dispatcher_model`, `small_model`, `effort`,
+    `daily_cap_usd`, `gateway {base_url, key_command, refresh_command, rotate_command, models_command}`, `env`,
+    `settings`. Names follow the project name rule (`projects.NAME`).
+  - Where it is kept. Each profile is `<data>/profiles/<name>.json`, written with `store.write_json` (JSON, not
+    YAML, because code writes it, as with routines). The active name is `<data>/active-profile.json`
+    `{"name": ...}`; with no such file it is `subscription`. It is not a `config.yaml` key (those keys are pinned).
+    `profiles/` is made on the first save, so the data folder's layout (`datadir.FOLDERS`) is unchanged. A symlink
+    at `profiles/`, at a profile file or at `active-profile.json` is refused (an lstat check), with one line naming
+    the link (3.4). Nothing reads or writes v1's data folder.
+  - The built-in `subscription` profile always exists: `label: Subscription`, `model: null`, `effort: xhigh`
+    (`workers.EFFORT`). With no profiles stored, a worker's argv is exactly as before. A stored
+    `profiles/subscription.json` replaces it. There is no migration.
+  - No silent fallback. A missing or broken active profile (its file gone, unreadable, or failing the checks
+    below, or a broken `active-profile.json`) raises `ProfileError`, a `ConfigError`, so `ap2` prints one line and
+    exits 1. The line names the file and the fix: `ap2 profile list`, then `ap2 profile use <name>`. No worker
+    starts or resumes: a `check` notes it on the worker's line and resumes nothing (a dead worker's one resume is
+    not used up).
+  - Checks (v1's): a gateway needs `base_url` (http or https), `key_command`, `small_model` and
+    `daily_cap_usd > 0`; `settings` may not hold `permissions`, `hooks`, `apiKeyHelper` or `disableAllHooks`; `env`
+    and `settings.env` may not hold a credential-looking name (`KEY`, `TOKEN`, `SECRET`, `PASSWORD`), a name the
+    overlay sets or blanks, a cloud-provider switch, or (v2's addition) any `AP2_*` or `AUTOPILOT_*` name. On save,
+    `gateway.models_command` runs (`shell=True`, 30 s) and every model the profile names must be in the JSON list it
+    prints; its output is only parsed, never printed or kept.
+  - Overlay and merge (v1's, with `AP2_PROFILE` for `AUTOPILOT_PROFILE`). `overlay(p)` is the settings a profile
+    owns, never `permissions` or `hooks`. The subscription blanks `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`,
+    `ANTHROPIC_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL` and `ANTHROPIC_API_KEY`, and
+    these blanks win over the profile's own env, so a worker bills the subscription even when the shared
+    background daemon carries gateway variables. A gateway sets `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL` (`""` with
+    no model), `ANTHROPIC_SMALL_FAST_MODEL` and `ANTHROPIC_DEFAULT_HAIKU_MODEL` to `small_model`,
+    `ENABLE_TOOL_SEARCH=true` and `apiKeyHelper = key_command`, and blanks `ANTHROPIC_AUTH_TOKEN` and
+    `ANTHROPIC_API_KEY` (they outrank the helper). Both modes blank `CLAUDE_CODE_USE_BEDROCK`,
+    `CLAUDE_CODE_USE_VERTEX` and `CLAUDE_CODE_USE_FOUNDRY` last. `merge(floor, overlay)` keeps the floor's
+    `permissions`, `hooks` and `AP2_*` variables (all but `AP2_PROFILE`), which win; the rest comes from the
+    overlay. `workers.floor(..., profile)` returns that merge, so the deny list, the allow list and the hooks are
+    exactly what a subscription start gets. `AP2_PROFILE` is in `_env`, so it is in the process env and the
+    settings env alike.
+  - When a profile is read. Once per start or resume, before it is planned: `start` (a fresh start, `--resume`,
+    `answer`) and an in-place resume of a dead or parked worker (`_plan_resume`) each take the active profile at
+    that moment. Its name is kept on the worker record (`profile`) and on the card's `sessions.<role>.profile`.
+    `ap2 profile use` rewrites no settings file: v2 writes each worker's floor at its own launch, so a running
+    worker keeps its profile (design of the access profiles, 7) and only its next start or resume moves.
+  - Model and effort. A fresh start gets `--model <profile model>` when the profile has one and
+    `--effort <profile effort>` when it has one, after `--agent`. A resume gets neither (8.2): a resumed gateway
+    session takes its model from the overlay's `ANTHROPIC_MODEL`.
+  - Tool discovery runs with the profile's settings. `_discover(cwd, env, settings)` passes
+    `--settings <run dir>/settings-discover-<role>.json`, which holds the overlay only, no `permissions` or
+    `hooks`: a probe under the deny floor would not list the denied tools. When the active profile is not the page
+    profile (by name; a gateway always), a second probe runs with the page profile's overlay
+    (`settings-discover-<role>-page.json`), and the floor denies the outward tools and not-connected servers either
+    probe found: a gateway session never sees the claude.ai connectors. On the subscription, one probe. Both run
+    outside the worker list's lock; either failing fails the start. A project that lists `tools` runs no probe.
+    The discovery files are covered by the existing `sessions/**/settings-*.json` Edit denial.
+  - Page sessions. `profiles.page_profile()` is always the subscription profile: claude.ai tools cannot be used
+    through a gateway (the access profiles design, 11). This slice uses it for the second probe; every later
+    dispatcher, scan, answer-read or refresh launch uses it too, with a generated `--settings`. No launch point
+    may skip `--settings`: a test walks every function in `lib/assistant/` and fails one that holds `--bg` or `-p`
+    without `--settings`.
+  - Workers cannot edit the profiles: `profiles/**` and `active-profile.json` are in `PROTECTED`, so every worker
+    floor Edit-denies them.
+  - Commands, each with `--data PATH`, JSON on stdout, one `ap2: ...` line and exit 1 on an error:
+    `ap2 profile list` (`{active, active_error, profiles}`; it works with a broken active profile, since it is the
+    fix), `show NAME` (the profile: its commands, never a key), `add NAME --subscription|--gateway [--base-url U]
+    [--key-command C] [--refresh-command C] [--rotate-command C] [--models-command C] [--daily-cap N] [--label L]
+    [--model M] [--dispatcher-model M] [--small-model M] [--effort E] [--env K=V ...] [--settings-file F]`,
+    `use NAME` (prints `{"active": new, "was": old}`, so `ap2 profile use <was>` undoes it) and `remove NAME`
+    (refuses `subscription` and the active profile). `add` refuses a name that exists (`subscription` included)
+    and the gateway flags on a `--subscription` profile, and prints the saved profile. `list` and `show` create
+    nothing; `add`, `use` and `remove` write only inside the data folder, so they work in shadow mode.
+  - Not in this slice: the spend ledger, the daily cap and its card, key health, refresh and rotation (`rotate`),
+    and the page's badge and switch. Until the cap lands, a gateway worker has no daily cap: acceptable because v2
+    is not installed and runs no unattended loop, and workers start only in live mode, by hand. Until then a
+    gateway worker still parks at the subscription's park line (it stops work, never spends more).
 - **[decided by the builder]** v1 import (10, 11 question 5), read-only, in `importv1.py`.
   - Command: `ap2 import-v1 [--data PATH] [--from DIR] [--project NAME ...] [--dry-run]`. `--from` defaults to
     v1's own data root (`AUTOPILOT_DATA`, else `~/.claude/autopilot-data`, v1's `paths.data_root()`). A project is

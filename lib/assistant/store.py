@@ -3,12 +3,16 @@
 Every add, update and restore appends `{at, by, did, restore}` to the card's `audit`; every change to an existing
 card first saves its file as a restore point (`restore.py`); the search index (`index.py`) follows each write.
 Writes are atomic (a temp file, then `os.replace`) and hold `<data>/.store.lock`, so two processes never lose
-each other's change. Nothing here writes outside the data folder.
+each other's change. Nothing here writes outside the data folder: a symlink where the store keeps its own files
+(`items/`, a month folder, a card file, `restore/`, a point file, the lock, the index and its marker) is refused,
+never followed to write and never replaced (pruning reads a linked point and removes only the link), so a link into
+another folder (v1's data, for one) cannot carry a write out.
 """
 from __future__ import annotations
 
 import contextlib
 import copy
+import errno
 import itertools
 import json
 import os
@@ -18,7 +22,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
-from assistant import cards, config, restore
+from assistant import cards, config, index, restore
 from assistant.cards import CardError
 from assistant.index import Index
 
@@ -29,6 +33,10 @@ except ImportError:  # not POSIX: one process at a time is then the caller's job
 
 ITEMS = "items"
 LOCK = ".store.lock"
+# The store's own names right under the data folder, checked for links once per call (`_guard`). The lock is
+# checked before it is opened; month folders and card files where they are opened, point files where they are put back.
+OWN = (ITEMS, restore.FOLDER, index.STALE, *(index.FILE + s for s in index.SUFFIXES))
+NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)  # 0 where the platform has none: the lstat check alone then
 
 
 class _Refused(Exception):
@@ -113,13 +121,33 @@ class Store:
     def path(self, card_id: str) -> Path:
         return self.data / ITEMS / cards.month(card_id) / f"{card_id}.json"
 
+    def _refuse_link(self, path: Path) -> Path:
+        """Return `path`, or raise CardError when it is a symlink (dangling or not). Missing is fine."""
+        if path.is_symlink():
+            raise CardError(f"{path} is a symlink; the card store never follows a link inside its data folder "
+                            f"{self.data} (move the link away)")
+        return path
+
+    def _card_path(self, card_id: str) -> Path:
+        """`path(card_id)`, its month folder and file checked for links; use it wherever the file is opened."""
+        p = self.path(card_id)
+        self._refuse_link(p.parent)
+        return self._refuse_link(p)
+
     @contextlib.contextmanager
     def _locked(self):
         if fcntl is None:
             yield
             return
         self.data.mkdir(parents=True, exist_ok=True)
-        fd = os.open(str(self.data / LOCK), os.O_CREAT | os.O_RDWR, 0o644)
+        lock = self.data / LOCK
+        try:
+            # O_NOFOLLOW: a link swapped in after _guard's check is still refused, not opened
+            fd = os.open(str(lock), os.O_CREAT | os.O_RDWR | NOFOLLOW, 0o644)
+        except OSError as e:
+            if e.errno in (errno.ELOOP, errno.EMLINK) and lock.is_symlink():  # EMLINK: FreeBSD's O_NOFOLLOW
+                self._refuse_link(lock)
+            raise
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
             yield
@@ -144,7 +172,7 @@ class Store:
         return card
 
     def _load(self, card_id: str) -> dict:
-        p = self.path(card_id)
+        p = self._card_path(card_id)
         if not p.exists():
             raise CardError(f"no card {card_id}")
         return self._read(p)
@@ -156,15 +184,15 @@ class Store:
         # iterdir(), not glob(): glob skips a folder it cannot read, and a rebuild would then drop its cards for
         # good. iterdir() raises, and _guard() turns that into one CardError.
         for sub in sorted(folder.iterdir()):
-            if not sub.is_dir():
+            if not self._refuse_link(sub).is_dir():
                 continue
             for p in sorted(sub.iterdir()):
                 if p.suffix == ".json" and cards.CARD_ID.match(p.stem) and sub.name == cards.month(p.stem):
-                    yield self._read(p)
+                    yield self._read(self._refuse_link(p))
 
     def _write(self, card: dict) -> None:
         behind = self.index.mark_stale()  # before the card file, so a stop in between is caught up later
-        write_json(self.path(card["id"]), card)
+        write_json(self._card_path(card["id"]), card)
         self.index.put(card, behind=behind)
 
     def _entry(self, at: datetime, by: str, did: str, point: Optional[str]) -> dict:
@@ -203,7 +231,7 @@ class Store:
             at = self.clock()
             new = copy.deepcopy(card)
             new["id"] = cards.new_id("c", at)
-            while self.path(new["id"]).exists():
+            while self._card_path(new["id"]).exists():
                 new["id"] = cards.new_id("c", at)
             new["created_at"] = new["updated_at"] = cards.stamp(at)
             new["audit"] = [self._entry(at, by, "add", None)]
@@ -288,6 +316,7 @@ class Store:
         point first, so this restore can be restored too. The audit keeps every entry and adds this one."""
         by = self._by(by)
         with self._guard():
+            self._refuse_link(restore.path(self.data, point_id))
             point = restore.load(self.data, point_id)
             old = point["card"]
             card_id = cards.check_id(old.get("id"))
@@ -300,7 +329,7 @@ class Store:
                 raise (cards.TooDeepError if isinstance(e, cards.TooDeepError) else CardError)(
                     f"{restore.path(self.data, point_id)}: not a card restore point: {e}") from None
             at = self.clock()
-            current = self._read(self.path(card_id)) if self.path(card_id).exists() else None
+            current = self._read(self._card_path(card_id)) if self._card_path(card_id).exists() else None
             saved = restore.save(self.data, current, at, write_json) if current is not None else None
             back = copy.deepcopy(old)
             back["updated_at"] = cards.stamp(at)
@@ -359,15 +388,19 @@ class Store:
         with self._guard():
             # The index is never the truth: skip a row that is not a card id, and a duplicate row.
             ids = [i for i in dict.fromkeys(self.index.search(text)) if isinstance(i, str) and cards.CARD_ID.match(i)]
-            found = [self._read(self.path(i)) for i in ids if self.path(i).exists()]
+            found = [self._read(self._card_path(i)) for i in ids if self._card_path(i).exists()]
         # A row can be behind its file (a hand edit); keep only the cards whose file holds every word.
         return [c for c in found if all(t in cards.search_text(c).casefold() for t in terms)]
 
     @contextlib.contextmanager
     def _guard(self):
-        """The store lock, with file and database errors turned into one CardError."""
+        """The store lock, with file and database errors turned into one CardError. A symlink at one of the
+        store's own names is refused first (a few lstat calls; the lock before it is opened, the rest under it)."""
         try:
+            self._refuse_link(self.data / LOCK)
             with self._locked():
+                for name in OWN:
+                    self._refuse_link(self.data / name)
                 yield
         except OSError as e:
             raise CardError(f"cannot use the card store in {self.data}: {e}") from e

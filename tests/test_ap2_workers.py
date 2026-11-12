@@ -367,7 +367,7 @@ class ProjectSetupTest(WorkerCase):
             {"type": "command", "command": f"\"{ROOT / 'bin' / 'ap2'}\" hook-park", "timeout": 5}]}]}
         self.assertEqual(settings["hooks"], hooks)
         self.assertEqual(workers_mod.floor("implement", {}, self.data, {})["hooks"], hooks)
-        self.assertEqual(settings["env"], {k: v for k, v in env.items() if k.startswith("AP2_")})
+        self.assertEqual({k: v for k, v in settings["env"].items() if k.startswith("AP2_")}, {k: v for k, v in env.items() if k.startswith("AP2_")})
         self.assertIn("Hosts you may reach besides the usual ones: api.example.com, cdn.example.com.", argv[-1])
         # The per-card instructions: the run directory, the result file and the park command the allow rule names.
         run = transcripts.run_dir(self.data, cid)
@@ -1060,10 +1060,10 @@ class LifecycleTest(WorkerCase):
         self.set_agent(d["short_id"], status="idle")  # its idle clock starts in the first locked step
         real = Workers._discover
 
-        def discover(self_, cwd, env):
+        def discover(self_, cwd, env, settings):
             if Path(cwd) == b_wt:
                 raise KeyboardInterrupt
-            return real(self_, cwd, env)
+            return real(self_, cwd, env, settings)
         with mock.patch.object(Workers, "_discover", discover):
             with self.assertRaises(KeyboardInterrupt):
                 w.check()
@@ -2084,7 +2084,7 @@ class TranscriptsTest(WorkerCase):
         out = w.check()[0]
         self.assertIsNone(out["archive"])
         self.assertEqual(sorted(p.name for p in (self.data / "sessions" / a["card"]).iterdir()),
-                         ["handback.json", "settings-implement.json"])
+                         ["handback.json", "settings-discover-implement.json", "settings-implement.json"])
 
     def test_days_prune_archives_older_than_n_days(self):
         cfg = Config(mode="live", keep_transcripts="90d")
@@ -2367,7 +2367,7 @@ class DiscoveryOutsideTheLockTest(WorkerCase):
         cid = self.add_card()  # no project: its tools are discovered
         seen = []
 
-        def discover(cwd, env):
+        def discover(cwd, env, _settings):
             seen.append(self.lock_is_free())
             return ["mcp__Tracker__send_message"], []
 
@@ -2390,7 +2390,7 @@ class DiscoveryOutsideTheLockTest(WorkerCase):
         cid = self.add_card()
         settings = transcripts.run_dir(self.data, cid) / "settings-implement.json"
 
-        def discover(cwd, env):
+        def discover(cwd, env, _settings):
             self.assertTrue(self.lock_is_free())  # else the lock below would wait forever
             with resources.Registry(self.data).locked() as records:
                 records.append({"card": cid, "role": "review", "session_name": f"{cid} · review",
@@ -2407,7 +2407,7 @@ class DiscoveryOutsideTheLockTest(WorkerCase):
         w = self.workers()
         cid = self.add_card()
 
-        def discover(cwd, env):
+        def discover(cwd, env, _settings):
             self.assertTrue(self.lock_is_free())  # else the lock below would wait forever
             with resources.Registry(self.data).locked() as records:
                 records.append({"card": "c-other", "role": "implement", "session_name": "c-other · implement",
@@ -2423,7 +2423,7 @@ class DiscoveryOutsideTheLockTest(WorkerCase):
         w = self.workers()
         cid = self.add_card()
 
-        def discover(cwd, env):
+        def discover(cwd, env, _settings):
             self.assertEqual(env["AP2_PORTS"], "7200-7209")  # the range planned before the lock
             self.assertTrue(self.lock_is_free())
             with resources.Registry(self.data).locked() as records:
@@ -2457,7 +2457,7 @@ class DiscoveryOutsideTheLockTest(WorkerCase):
         a = self.dead(w)
         seen = []
 
-        def discover(cwd, env):
+        def discover(cwd, env, _settings):
             seen.append(self.lock_is_free())
             return ["mcp__Tracker__send_message"], []
 
@@ -2475,7 +2475,7 @@ class DiscoveryOutsideTheLockTest(WorkerCase):
         a, fresh = self.parked_and_due(w)
         seen = []
 
-        def discover(cwd, env):
+        def discover(cwd, env, _settings):
             seen.append(self.lock_is_free())
             return ["mcp__Tracker__send_message"], []
 
@@ -2494,7 +2494,7 @@ class DiscoveryOutsideTheLockTest(WorkerCase):
         settings = transcripts.run_dir(self.data, a["card"]) / "settings-implement.json"
         theirs = {}
 
-        def discover(cwd, env):
+        def discover(cwd, env, _settings):
             self.assertTrue(self.lock_is_free())  # else the lock below would wait forever
             with resources.Registry(self.data).locked() as records:
                 rec = next(r for r in records if r["card"] == a["card"])
@@ -2537,7 +2537,7 @@ class DiscoveryOutsideTheLockTest(WorkerCase):
         w = self.workers()
         a = self.dead(w)
 
-        def discover(cwd, env):
+        def discover(cwd, env, _settings):
             self.assertTrue(self.lock_is_free())
             w.end(a["card"], "implement")  # another process ends the worker meanwhile
             return [], []
@@ -2554,7 +2554,7 @@ class DiscoveryOutsideTheLockTest(WorkerCase):
     def changed_in_place_during_the_discovery(self, w, a, **fields):
         """Another writer sets `fields` on `a`'s record (same session, same folder) while `check()` lists the
         resume's tools; check that no resume starts and return the record as it is after."""
-        def discover(cwd, env):
+        def discover(cwd, env, _settings):
             self.assertTrue(self.lock_is_free())  # else the lock below would wait forever
             with resources.Registry(self.data).locked() as records:
                 next(r for r in records if r["card"] == a["card"]).update(fields)
@@ -2590,7 +2590,7 @@ class DiscoveryOutsideTheLockTest(WorkerCase):
         other = self.add_card()
         started = {}
 
-        def discover(cwd, env):
+        def discover(cwd, env, _settings):
             self.assertTrue(self.lock_is_free())
             if not started:
                 started["rec"] = None
@@ -2614,7 +2614,7 @@ class DiscoveryOutsideTheLockTest(WorkerCase):
         a, b = self.dead(w), self.start(w)
         self.set_agent(b["short_id"], status="idle")  # its idle clock starts in the first locked step
 
-        def discover(cwd, env):
+        def discover(cwd, env, _settings):
             raise KeyboardInterrupt
 
         n = len(self.bg_calls())
