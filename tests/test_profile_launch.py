@@ -7,9 +7,10 @@ import unittest
 from unittest import mock
 
 from tests.helpers import ROOT, TempData, write_ap
-FAKE = str(ROOT / "tests" / "bin" / "fake-claude")
 from tests.test_profile_settings import URL, gateway, read, write_files
 from autopilot import config, dispatch, paths, perms, profile, replies, refresh, spend, state, workers
+
+FAKE = str(ROOT / "tests" / "bin" / "fake-claude")
 
 
 def opt(argv, flag):
@@ -234,6 +235,21 @@ class LaunchTest(LaunchBase):
         self.assertEqual(out, "sent")
         self.assertEqual(opt(seen["argv"], "--output-format"), "json")
         self.assertEqual([(r[0], r[1], r[2], r[3]["name"]) for r in rec], [("sess-o", "oneoff", "a", "g")])
+
+    def test_one_off_error_subtype_keeps_text(self):
+        body = json.dumps({"type": "result", "subtype": "error_max_turns", "session_id": "sess-e"})
+
+        def run(argv, **kw):
+            return subprocess.CompletedProcess(argv, 1, body, "")
+
+        self._decision({"tool": "mcp__slack__slack_send_message", "prompt": "p", "option": "yes"})
+        with mock.patch.object(subprocess, "run", run), mock.patch.object(perms.spend, "record_session"):
+            with self.assertRaises(RuntimeError) as cm:
+                perms.run_one_off("a", "D1")
+        self.assertIn("error_max_turns", str(cm.exception))
+        lines = (self.data / "projects" / "a" / "events.jsonl").read_text().splitlines()
+        done = [json.loads(x) for x in lines if '"oneoff_done"' in x][-1]["data"]
+        self.assertIn("error_max_turns", done["output"])
 
     def _decision(self, act):
         with state.mutate("a") as st:

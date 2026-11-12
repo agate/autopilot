@@ -271,7 +271,11 @@ def _json_result(stdout: str) -> tuple:
         return stdout, ""
     if not isinstance(d, dict):
         return stdout, ""
-    return str(d.get("result") if d.get("result") is not None else ""), str(d.get("session_id") or "")
+    sid = str(d.get("session_id") or "")
+    if d.get("result"):
+        return str(d["result"]), sid
+    # An error run (error_max_turns, error_during_execution) has no result: keep what it did say.
+    return f"{d.get('subtype') or 'no result'}: {stdout.strip()}", sid
 
 
 def _set_action(ap: str, decision_id: str, **fields) -> None:

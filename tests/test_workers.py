@@ -102,8 +102,9 @@ class WorkersTest(unittest.TestCase):
         self.assertEqual(argv[argv.index("--resume") + 1], "sid-old")
         self.assertEqual(argv[argv.index("-n") + 1], "checkout · PROJ-1 · implement")
 
-    def test_resume_passes_no_flags(self):
-        # Only --settings rides on --resume (the session must bill the current profile); no model, name or prompt flags.
+    def test_resume_passes_only_name_and_settings(self):
+        # --resume carries only -n (the worker's name) and --settings (the session must bill the current profile):
+        # no model, effort or permission flags.
         rec = workers.start("checkout", "PROJ-1", "implement", str(self.data), "do it")
         with mock.patch.object(workers, "_launch", return_value="abcd1234") as launch:
             workers.resume("checkout", rec)
