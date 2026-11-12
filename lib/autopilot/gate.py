@@ -90,7 +90,7 @@ def fingerprint(ap: str, apcfg: dict, st: dict, all_sessions, now: datetime, gh_
         if cls == "parked":
             # Looks like a running worker while it waits, so parking wakes no pass; the entry changes the
             # moment it can continue, which does.
-            cls = "parked_due" if park.resume_due(w, now, gcfg, b) else "running"
+            cls = "parked_due" if park.resume_due(w, now, gcfg, b, ap) else "running"
         if cls == "done" and hide_after is not None:
             rf = runs / w["task"] / sessions.result_file(w["role"])
             if rf.exists() and rf.stat().st_mtime >= hide_after:
@@ -161,7 +161,10 @@ def _move_legacy(gcfg: dict) -> None:
 
 
 def _allowance(gcfg: dict, now: datetime) -> dict:
-    return budget.allowance(budget.read(), gcfg, now.astimezone(timezone.utc))
+    """What the gate's pass rule reads: the dispatcher-pass allowance (subscription rules in every mode),
+    with the allowance for new workers (follows the active profile) under "workers"."""
+    cur = budget.current(gcfg, now.astimezone(timezone.utc))
+    return dict(cur["passes"], workers=cur["workers"])
 
 
 def _gh(gcfg: dict) -> str:
@@ -234,7 +237,8 @@ def _idle(aps: list, begun_at: str, gcfg: dict, now: datetime) -> bool:
     """Checked by the gate itself on fresh state: work could start now, but the pass started none."""
     snaps = nextwork.snapshots(aps)
     live = workers.all_workers()
-    planned = nextwork.plan_starts(snaps, live, gcfg["max_workers"], _allowance(gcfg, now)["allow"])
+    a = _allowance(gcfg, now)
+    planned = nextwork.plan_starts(snaps, live, gcfg["max_workers"], a.get("workers", a)["allow"])
     if not planned:
         return False
     started = 0

@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 from datetime import datetime, timezone
 
-from autopilot import budget, cli, config, events, paths, state, text, workers
+from autopilot import budget, cap, cli, config, events, paths, state, text, workers
 
 
 def cap_warning(gcfg: dict):
@@ -29,10 +29,14 @@ def render(aps: list) -> str:
                      f"{done}/{len(st['tasks'])} done · {config.status_of(n)}")
     if not aps:
         lines.append("No autopilots yet. Start one with /autopilot init.")
-    b = budget.read()
-    a = budget.allowance(b, gcfg, datetime.now(timezone.utc))
+    cur = budget.current(gcfg, datetime.now(timezone.utc))
+    b, a, wa = cur["budget"], cur["passes"], cur["workers"]
     lines.append("Budget: " + ", ".join(f"{w['kind']} {w['percent']}%" for w in b.get("windows") or [])
-                 + f" · new workers: {'no limit' if a['allow'] is None else a['allow']} ({a['reason']})")
+                 + f" · new passes: {'no limit' if a['allow'] is None else a['allow']} ({a['reason']})"
+                 + f" · new workers: {'no limit' if wa['allow'] is None else wa['allow']} ({wa['reason']})")
+    if cur["spent"] is not None:
+        lines.append(f"Gateway spend today: ${cur['spent']['today']:.2f} of ${cap.today_limit(cur['profile'], datetime.now()):.2f}"
+                     + (" (some cost unknown)" if cur["spent"]["unknown"] else ""))
     warn = cap_warning(gcfg)
     if warn:
         lines.append("Warning: " + warn)

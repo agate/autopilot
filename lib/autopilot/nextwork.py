@@ -69,7 +69,7 @@ def _cmd(args: list) -> int:
     snaps = snapshots(sorted(set(active) | set(names)))
     g = config.load_global()
     live = [w for _, _, st in snapshots(config.list_aps()) for w in st.get("workers", [])]
-    allow = budget.allowance(budget.read(), g, datetime.now(timezone.utc))["allow"]
+    allow = budget.current(g, datetime.now(timezone.utc))["workers"]["allow"]
     ready_map = {n: [t["id"] for t in ready(st)] for n, _, st in snaps if n in names}
     # Plan across every active autopilot so round-robin stays fair, then hand back only the named ones:
     # a pass runs in one repo and must not start another repo's tasks.

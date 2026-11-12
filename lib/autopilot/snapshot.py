@@ -71,7 +71,14 @@ def _self_line(st: dict) -> str:
 
 
 def _budget_line() -> str:
-    b = budget.read()
+    cur = budget.current(config.load_global(), datetime.now().astimezone())
+    b = cur["budget"]
+    if cur["spent"] is not None:
+        wa = cur["workers"]
+        return (f"Budget (gateway profile {cur['profile']['name']}): ${cur['spent']['today']:.2f} spent today"
+                f"{' (some cost unknown)' if cur['spent']['unknown'] else ''}, new workers "
+                f"{'no limit' if wa['allow'] is None else wa['allow']} ({wa['reason']}); dispatcher passes use the "
+                "subscription")
     if not b.get("ok"):
         return "Budget: unknown"
     parts = [f"{w.get('kind')}{'/' + w['model'] if w.get('model') else ''} {w.get('percent')}%" for w in b["windows"]]

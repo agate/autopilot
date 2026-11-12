@@ -193,7 +193,8 @@ def park(ap: str, task: str, role: str, note: str, now: datetime = None, b: dict
     Raises ValueError when usage is under the line (nothing to wait for) or the worker is not on record."""
     gcfg = config.load_global()
     now = now or datetime.now(timezone.utc)
-    p = budget.parking(b if b is not None else budget.read(stale_min=gcfg["budget"]["stale_min"]), gcfg)
+    p = budget.parking(b if b is not None else budget.read(stale_min=gcfg["budget"]["stale_min"]), gcfg,
+                       profile.active())
     if p is None:
         raise ValueError("usage is under the park line (or unknown): keep working, do not park")
     rec = dict(p, reason="quota", note=note, parked_at=now.isoformat(), role=role)
