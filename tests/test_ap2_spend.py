@@ -1086,6 +1086,14 @@ class HardeningTest(SpendCase):
                 self.assertEqual(spend._cached_reqs(c, self.transcript, table, 0.0, seen), unknown)
                 self.assertNotIn(str(self.transcript), seen)  # not seen: the save drops it
 
+    def test_a_file_that_is_gone_before_the_cache_checks_it_is_nothing(self):
+        # It vanished between the listing and the check: a race with a deletion, not a hidden file.
+        self.assertFalse(self.transcript.exists())
+        c, seen = {"files": {}}, set()
+        self.assertEqual(spend._cached_reqs(c, self.transcript, spend.prices(self.data), 0.0, seen), {})
+        self.assertEqual(c["files"], {})
+        self.assertNotIn(str(self.transcript), seen)
+
     def test_a_transcript_file_whose_open_fails_with_another_error_is_one_unknown_request(self):
         self.put()
         real = os.open
@@ -1177,6 +1185,17 @@ class HardeningTest(SpendCase):
         with mock.patch.object(Path, "stat", stat_):
             self.assertEqual(spend._files(self.transcript), [self.transcript])
         self.assertTrue(sub.exists())
+
+    def test_a_subagent_link_to_a_regular_file_is_followed(self):
+        self.put(sub="subagent.jsonl")
+        d = self.transcript.parent / SID / "subagents"
+        real = d.parent / "agent-1.real"  # outside the folder, so only the link is listed
+        (d / "agent-1.jsonl").rename(real)
+        (d / "agent-1.jsonl").symlink_to(real)
+        self.assertEqual(spend._files(self.transcript), [self.transcript, d / "agent-1.jsonl"])
+        self.unenterable(d)  # 0o600: the link lists, but it cannot be followed to check it
+        self.assertEqual(spend._files(self.transcript),
+                         [self.transcript, spend._Unreadable(d / "agent-1.jsonl")])
 
     def test_a_sum_too_big_for_a_number_is_clamped_and_unknown(self):
         self.write(self.line("req_a"), self.line("req_b"))
