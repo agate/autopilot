@@ -8,12 +8,15 @@ it). A missing or broken active profile is refused (ProfileError), never replace
 
 `overlay(p)` is the settings a profile owns (never `permissions` or `hooks`); `merge(floor, overlay)` lays it under
 a worker's permission floor, which keeps its deny and allow lists, hooks and `AP2_*` variables. Nothing here reads
-or writes v1's data folder, and a symlink at `profiles/`, a profile file or `active-profile.json` is refused.
+or writes v1's data folder, and a symlink at `profiles/`, a profile file or `active-profile.json` is refused. A
+folder on the way that cannot be read (mode 000) is a one-line ProfileError naming the path, never read as empty.
 """
 from __future__ import annotations
 
 import json
 import math
+import os
+import stat
 import subprocess
 from pathlib import Path
 
@@ -58,11 +61,30 @@ def builtin() -> dict:
 
 # -- where things are kept -----------------------------------------------------------------------------------------
 
-def _no_link(path: Path) -> Path:
-    if path.is_symlink():  # lstat: a dangling link counts too
+def _lstat(path: Path, fix: str = ""):
+    """`os.lstat(path)`, or None when nothing is there (a missing file, or a folder on the way that is a file). Any
+    other OSError, e.g. a folder on the way with mode 000, is a one-line ProfileError naming the path (and `fix`):
+    never "nothing there", so an unreadable folder never reads as empty and nothing falls back."""
+    try:
+        return os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError as e:
+        raise ProfileError(f"cannot read {path}: {e.strerror or type(e).__name__}"
+                           + (f"; {fix}" if fix else "")) from e
+
+
+def _no_link(path: Path, fix: str = "") -> Path:
+    st = _lstat(path, fix)  # lstat: a dangling link counts too
+    if st is not None and stat.S_ISLNK(st.st_mode):
         raise ProfileError(f"{path} is a symlink; ap2 never follows a link where it keeps its profiles. Remove the "
                            "link and save the profile again")
     return path
+
+
+def _exists(path: Path) -> bool:
+    """A path `_no_link` passed is there. Raises ProfileError when it cannot be looked at (`_lstat`)."""
+    return _lstat(path) is not None
 
 
 def folder(data) -> Path:
@@ -75,8 +97,8 @@ def path(data, name) -> Path:
     return _no_link(folder(data) / f"{name}.json")
 
 
-def active_file(data) -> Path:
-    return _no_link(Path(data) / ACTIVE)
+def active_file(data, fix: str = "") -> Path:
+    return _no_link(Path(data) / ACTIVE, fix)
 
 
 # -- validation ------------------------------------------------------------------------------------------------------
@@ -206,7 +228,7 @@ def save(data, p: dict) -> dict:
 def load(data, name) -> dict:
     """The profile `name`, checked. Raises ProfileError when it is unknown, unreadable or not valid."""
     f = path(data, name)
-    if not f.exists():
+    if not _exists(f):  # an unreadable folder raises here: never the built-in subscription
         if name == SUBSCRIPTION:
             return builtin()
         raise ProfileError(f"no profile named {name!r} ({f} does not exist)")
@@ -228,15 +250,21 @@ def load(data, name) -> dict:
 def names(data) -> list:
     """Every profile name, the built-in subscription included, sorted."""
     d = folder(data)
-    stored = [f.stem for f in d.glob("*.json") if NAME.match(f.stem)] if d.is_dir() else []
+    try:
+        entries = os.listdir(d)  # not glob(): it reads an unreadable folder as empty
+    except (FileNotFoundError, NotADirectoryError):
+        entries = []
+    except OSError as e:
+        raise ProfileError(f"cannot read {d}: {e.strerror or type(e).__name__}") from e
+    stored = [n[:-len(".json")] for n in entries if n.endswith(".json") and NAME.match(n[:-len(".json")])]
     return sorted(set(stored) | {SUBSCRIPTION})
 
 
 def active_name(data) -> str:
     """The active profile's name (`subscription` with no active-profile.json). Raises ProfileError when the file
     cannot be read or names no valid name."""
-    f = active_file(data)
-    if not f.exists():
+    f = active_file(data, FIX)
+    if _lstat(f, FIX) is None:  # an unreadable data folder raises here: never `subscription`
         return SUBSCRIPTION
     try:
         raw = json.loads(f.read_text(encoding="utf-8"))
@@ -295,7 +323,7 @@ def remove(data, name: str) -> dict:
         current = _raw_active(active_file(data))
     if name == current:
         raise ProfileError(f"{name} is the active profile; `ap2 profile use` another one first")
-    if not f.exists():
+    if not _exists(f):
         raise ProfileError(f"no profile named {name!r}")
     try:
         f.unlink()
