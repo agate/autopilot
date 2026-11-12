@@ -428,6 +428,9 @@ class KeyForTest(SourceCase):
              "line 14: key_for.review_request: '{pr': a brace that is not a {field}"),
             ('key_for: { review_request: "{pr}" }', "key_for: [review_request]",
              "line 14: key_for must map a category of sort to a {field} pattern, not ['review_request']"),
+            # Block style: the entry's own line, not the key_for line above it.
+            ('key_for: { review_request: "{pr}" }', 'key_for:\n  other: "{pr}"',
+             "line 15: key_for.other: 'other' is not one of sort's categories (all, review_request)"),
         ]
         for old, new, reason in cases:
             with self.subTest(new):

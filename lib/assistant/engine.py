@@ -34,7 +34,7 @@ from pathlib import Path, PurePosixPath
 from typing import Callable, Optional
 
 from assistant import cards, config, form, sources
-from assistant.prreview import KEY as PR_KEY, KIND as PR_REVIEW, plain_for as pr_review_words
+from assistant.prreview import KEY as PR_KEY, KIND as PR_REVIEW, OWN_FEED, plain_for as pr_review_words
 from assistant.cards import CardError
 from assistant.sources import SourceError
 from assistant.store import Store, write_json
@@ -45,6 +45,7 @@ SNIPPET = 120
 TITLE = 80
 LANE = {"messages": "needs", "work": "planned"}
 PRI = "P2"
+REVIEW_REQUESTS = "github-review-requests"  # the other GitHub source that sorts into pr-review (design 6.2)
 # Seconds a read waits for the rest of its output after its timeout kill.
 DRAIN = 5
 # The most stdout a read keeps; past it the command is stopped. Only the end of its stderr is kept.
@@ -517,6 +518,8 @@ class Engine:
                     existing[key] = added
             else:
                 changes = {k: new[k] for k in ("plain", "title", "source", "status") if k in new}
+                if becomes == PR_REVIEW and _takes_own_feed(src, old):
+                    changes["feed"] = OWN_FEED  # the user's own PR, though another source made its card
                 same = all(_same(k, old.get(k), v) for k, v in changes.items())
                 out["action"] = "unchanged" if same else "update"
                 out["card"] = old.get("id")
@@ -566,9 +569,11 @@ class Engine:
         """The card a record makes. A PR review card's words come from its review too (design 6.2), so a same-key
         re-read passes the card it has (`old`) and keeps its TL;DR. The words follow the card's own feed (this
         source for a new card), so the user's own PRs (github-my-prs) get their own words, and a re-read by the
-        other GitHub source keeps them, as `prreview.apply` does."""
+        other GitHub source keeps them, as `prreview.apply` does. Every PR github-my-prs lists is the user's own, so
+        its read makes the feed github-my-prs on a card a non-GitHub source made (a Slack ask read first)."""
         if kind == PR_REVIEW:
-            plain = pr_review_words(record, {"feed": src.name, **(old or {}), "key": key}, self.languages)
+            feed = {"feed": OWN_FEED} if _takes_own_feed(src, old) else {}
+            plain = pr_review_words(record, {"feed": src.name, **(old or {}), **feed, "key": key}, self.languages)
         else:
             plain = plain_words(src, record, link, self.languages)
         card = {"kind": kind, "lane": LANE[src.brings], "feed": src.name, "links": [], "pri": PRI,
@@ -698,6 +703,13 @@ def word_for_word(value: str, text: str) -> bool:
             return True
         start = text.find(value, start + 1)
     return False
+
+
+def _takes_own_feed(src: sources.Source, old: Optional[dict]) -> bool:
+    """Whether a github-my-prs read moves a PR review card's feed to github-my-prs: every PR it lists is the user's
+    own, so a card a Slack ask made reads as the user's own PR from then on. A card github-review-requests made
+    keeps its feed, so the words of the two GitHub sources never flip from read to read (design 6.2)."""
+    return src.name == OWN_FEED and (old or {}).get("feed") != REVIEW_REQUESTS
 
 
 def pr_in_raw(pr: str, text: str) -> bool:

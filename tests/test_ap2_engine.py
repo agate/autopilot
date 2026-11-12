@@ -1123,6 +1123,47 @@ class PrKeyTest(EngineCase):
         self.assertEqual(by_key[thread]["kind"], "question")
         self.assertEqual(by_key[thread]["source"]["record"]["id"], "1730000200.000300")  # the thread's latest
 
+    def my_prs(self):
+        raw = self.tmp / "gh-search-prs.json"
+        shutil.copy(ROOT / "tests" / "fixtures" / "ap2" / "scan" / "gh-search-prs.json", raw)
+        return self.engine().read_saved("github-my-prs", raw)
+
+    def test_slack_first_then_my_prs_gives_the_users_own_pr_its_words(self):
+        """Every PR github-my-prs lists is the user's own, so its read moves the feed of a card a Slack ask made
+        to github-my-prs, and the card reads as the user's own PR."""
+        self.assertEqual(self.item(self.slack(), self.KEY)["action"], "add")
+        [card] = self.pr_cards()
+        self.assertEqual(card["feed"], "slack-mentions")
+        mine = self.item(self.my_prs(), self.KEY)
+        self.assertEqual((mine["action"], mine["card"]), ("update", card["id"]))
+        [after] = self.pr_cards()
+        self.assertEqual((after["id"], after["feed"], after["source"]["name"]),
+                         (card["id"], "github-my-prs", "github-my-prs"))
+        self.assertTrue(after["plain"]["what"]["en"].startswith("Your PR #42:"), after["plain"]["what"]["en"])
+        self.assertEqual(self.item(self.my_prs(), self.KEY)["action"], "unchanged")
+
+    def test_a_key_for_pattern_can_name_a_setting(self):
+        self.user_source("slack-mentions", "extends: slack-mentions\nsettings: { me: U0EXAMPLE1, org: acme }\n"
+                                           "key_for: { review_request: \"{org}/{pr}\" }\n")
+        result = self.slack()
+        self.assertEqual(result["dropped"], [])
+        [item] = result["items"]
+        self.assertEqual((item["key"], item["category"], item["action"]),
+                         ("acme/example/widgets#42", "review_request", "add"))
+
+    def test_a_card_with_no_source_name_is_left_alone_by_a_slack_ask(self):
+        """A card no source made (no source block) is not the Slack source's either, so a key_for record leaves
+        it alone."""
+        made = self.store().add({"kind": "pr-review", "lane": "needs", "feed": "by-hand", "links": [], "pri": "P2",
+                                 "origin": "found", "key": self.KEY,
+                                 "plain": {"what": {"en": "Review PR 42"}, "where": {"en": "Not reviewed yet."},
+                                           "do": {"en": "Wait."}}}, by="test")
+        before = self.store().get(made["id"])
+        item = self.item(self.slack(), self.KEY)
+        self.assertEqual((item["action"], item["card"]), ("unchanged", made["id"]))
+        self.assertIn("not a source", item["reason"])
+        self.assertEqual(self.store().get(made["id"]), before)
+
     def check(self, raw_text, *records):
         src = self.engine().source("slack-mentions")
         return Engine.check_records(src, list(records), raw_text)
@@ -1158,6 +1199,11 @@ class PrKeyTest(EngineCase):
         with self.subTest("a pr on another category is checked too"):
             entries, dropped = self.check(raw, dict(base, pr="example/widgets#4", category="question"))
             self.assertEqual(dropped, [{"item": 0, "reason": "form.pr 'example/widgets#4' is not in the raw output"}])
+        with self.subTest("a dot in the repo name is a dot, not any character"):
+            dotted = "Message_ts: 1730000000.123456 Channel: C0123ABCD Text: PTAL github.com/acme/myXrepo/pull/3\n"
+            entries, dropped = self.check(dotted, dict(base, pr="acme/my.repo#3"))
+            self.assertEqual((entries, dropped),
+                             ([], [{"item": 0, "reason": "form.pr 'acme/my.repo#3' is not in the raw output"}]))
 
     def test_a_review_request_without_its_pr_is_dropped_naming_the_field(self):
         raw = "Message_ts: 1730000000.123456 Channel: C0123ABCD Text: PTAL\n"
@@ -1171,6 +1217,28 @@ class PrKeyTest(EngineCase):
             entries, dropped = self.check(raw, dict(base, category="question", pr=""))
             self.assertEqual(dropped, [])
             self.assertNotIn("pr", entries[0]["record"])
+
+
+class KeyForDefaultCategoryTest(EngineCase):
+    def test_a_one_category_source_keys_an_uncategorised_entry_on_its_key_for(self):
+        """A fill: paths entry has no category; with one sort category it is that one, for key_for too."""
+        self.user_source("one", """\
+            source: one
+            brings: messages
+            read: { via: command, run: "echo []" }
+            fill: paths
+            form: { id: .id, at: .at, text: .text }
+            link: none
+            key: "{id}"
+            key_for: { all: "x-{id}" }
+            sort: { all: alert }
+            """)
+        engine = self.engine()
+        entry = {"item": 0, "record": {"id": "7", "at": "2026-11-10T14:00:00Z", "text": "it is down"}, "link": None}
+        result = engine.build(engine.source("one"), [entry], dry_run=True)
+        self.assertEqual(result["dropped"], [])
+        [item] = result["items"]
+        self.assertEqual((item["key"], item["category"], item["action"]), ("x-7", "all", "add"))
 
 
 class SortToCardTest(EngineCase):

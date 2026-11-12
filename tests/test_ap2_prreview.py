@@ -452,11 +452,20 @@ class PrOfTest(unittest.TestCase):
             (f"https://github.com/{REPO}/issues/42", github),
             (f"http://github.com/{REPO}/pull/42", github),
             (f"https://github.com/{REPO}/pull/42 x", github),
+            (f"https://evil.example/x/{REPO}/pull/42", github),  # checkpkg: ignore
+            (f"https://a b/{REPO}/pull/42", github),  # checkpkg: ignore
+            (github + "/ x", github),
             (None, github),
         ]
         for link, url in cases:
             with self.subTest(link=link):
                 self.assertEqual(self.pr(link), {"repo": REPO, "number": 42, "url": url})
+
+    def test_a_dot_in_the_repo_name_is_a_dot_not_any_character(self):
+        card = {"id": "c1", "kind": "pr-review", "key": "acme/my.repo#3",
+                "source": {"name": "s", "link": "https://github.com/acme/myXrepo/pull/3"}}
+        self.assertEqual(prreview.pr_of(card),
+                         {"repo": "acme/my.repo", "number": 3, "url": "https://github.com/acme/my.repo/pull/3"})
 
 # --- criterion 3: the plan ---------------------------------------------------------------------------------------
 
@@ -1543,6 +1552,27 @@ class SyncTest(Case):
             out = self.sync(cid, "open_head_b")
             self.assertEqual((out["state"], out["changed"]), ("new_commits", False))
             self.assertEqual(self.store().get(cid), before)
+
+    def test_a_card_a_slack_ask_made_is_never_request_removed(self):
+        """A Slack ask's card (its link is the message, not the PR's page) was never asked on GitHub, so no review
+        request there does not close it; merged, closed and the user's own review still do."""
+        base = {k: v for k, v in self.card().items() if k not in ("id", "created_at", "updated_at", "audit")}
+        ask = {"id": "1730000000.123456", "author": "U0EXAMPLE2", "at": "1730000000.123456",
+               "text": "PTAL <https://github.com/example/widgets/pull/42>", "pr": KEY}
+        base["source"] = {"name": "slack-mentions", "record": ask, "raw": None,
+                          "link": "https://slack.com/archives/C0123ABCD/p1730000000123456"}  # checkpkg: ignore
+        base["feed"] = "slack-mentions"
+        nobody = own_view(author="octo-dev")
+        for name, view, state, lane in (
+                ("no request, no review", nobody, "not_reviewed", "needs"),
+                ("the user's review", own_view(author="octo-dev", reviews=[("octo-me", "APPROVED")]), "reviewed",
+                 "done"),
+                ("merged", own_view(author="octo-dev", state="MERGED"), "merged", "done")):
+            with self.subTest(name):
+                cid = self.store().add(base, by="test")["id"]
+                out = self.sync(cid, view)
+                self.assertEqual((out["state"], out["lane"]), (state, lane))
+                self.assertEqual(self.store().get(cid)["lane"], lane)
 
 
 def own_view(head=A, state="OPEN", reviews=(), requests=(), author="octo-me"):

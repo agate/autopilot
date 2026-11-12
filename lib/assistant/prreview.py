@@ -315,12 +315,22 @@ def pr_of(card: dict) -> dict:
     if not m:
         raise ReviewError(f"card {cid}: key {str(key)[:80]!r} is not <owner>/<repo>#<number>")
     repo, number = m.group(1), int(m.group(2))
-    link = (card.get("source") or {}).get("link") if isinstance(card.get("source"), dict) else None
+    link = _source_link(card)
     # The source's link is the PR only when it is this PR's page (GitHub or another host); a Slack ask's link is the
     # message, so the URL is then made from the key.
-    own = re.compile(r"https://[^\s/]+/" + re.escape(repo) + f"/pull/{number}" + r"(?:[/?#]\S*)?\Z")
-    url = link if isinstance(link, str) and own.match(link) else f"https://github.com/{repo}/pull/{number}"
+    url = link if _is_pr_page(link, repo, number) else f"https://github.com/{repo}/pull/{number}"
     return {"repo": repo, "number": number, "url": url}
+
+
+def _source_link(card: dict):
+    return (card.get("source") or {}).get("link") if isinstance(card.get("source"), dict) else None
+
+
+def _is_pr_page(link, repo: str, number: int) -> bool:
+    """True when `link` is this PR's own page, `https://<host>/<repo>/pull/<number>` (then `/`, `?...` or `#...`
+    allowed). A card whose source link is not (a Slack ask's message link) was not asked for on GitHub."""
+    own = re.compile(r"https://[^\s/]+/" + re.escape(repo) + f"/pull/{number}" + r"(?:[/?#]\S*)?\Z")
+    return isinstance(link, str) and bool(own.match(link))
 
 
 def run_dir(data, card_id: str) -> Path:
@@ -804,7 +814,9 @@ def sync(data, card_id: str, by: str = "ap2 review", cfg=None, run=None) -> dict
     """Where the PR stands on GitHub (design 6.2 points 5-6): merged, closed, reviewed (the user has a review),
     request_removed (neither the user nor a team is asked any more), not_reviewed, new_commits (a delta is due) or
     current. The first four move the card to done; every state records the head. Only the card changes. The user's
-    own PR (its author's login is the user's) is never reviewed or request_removed: only merged and closed end it."""
+    own PR (its author's login is the user's) is never reviewed or request_removed: only merged and closed end it. A
+    card whose source link is not this PR's page (a Slack ask) was never asked on GitHub, so it is never
+    request_removed."""
     data = Path(data)
     cfg = cfg if cfg is not None else config.load(data)
     store = Store(data, cfg=cfg)
@@ -835,7 +847,8 @@ def sync(data, card_id: str, by: str = "ap2 review", cfg=None, run=None) -> dict
         out = "not_reviewed" if reviewed is None else "new_commits" if head != reviewed else "current"
     elif mine:
         out = "reviewed"
-    elif not asked and not team:
+    elif not asked and not team and _is_pr_page(_source_link(card), pr["repo"], pr["number"]):
+        # Only a card GitHub made can lose its request: a Slack ask's card (its link is the message) never had one.
         out = "request_removed"
     elif reviewed is None:
         out = "not_reviewed"

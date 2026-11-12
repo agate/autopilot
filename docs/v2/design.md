@@ -641,7 +641,9 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   <repo> --json state,headRefOid,reviewRequests,latestReviews,author` and `gh api user --jq .login`, and prints `state`:
   `merged`, `closed`, `reviewed` (the user has a review in `latestReviews`), `request_removed` (no review, and
   neither the user nor any team is in `reviewRequests`; a team request keeps the card open, since its members are
-  not read), then `not_reviewed`, `new_commits` (the head is not `pr.reviewed_sha`: a delta is due) or `current`.
+  not read; a card whose `source.link` is not this PR's own page, `https://<host>/<repo>/pull/<number>` with an
+  optional `/`, `?...` or `#...` tail as for the PR's URL, was made by a Slack ask and never asked on GitHub, so it
+  is never given `request_removed`), then `not_reviewed`, `new_commits` (the head is not `pr.reviewed_sha`: a delta is due) or `current`.
   The first four move the card to lane `done` with the reason as `did` (a card already in `done` is left alone);
   every other state writes `pr.head_sha`. Only the card changes, in the data folder, so shadow mode allows it.
 - **[decided by the builder]** The user's own PRs (`github-my-prs` sorts them into `pr-review` too) are told apart
@@ -650,7 +652,8 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   the same wait, and after one is "Read the <n> findings, then fix the ones you agree with on your branch.", "Read
   the 1 finding, then fix it on your branch if you agree." or, with none open, "Read the review; nothing needs
   fixing." (`prreview.OWN_PHRASES`, in `en` and `zh`). The words follow the card's own `feed` (the source that
-  made it); a re-read by the other GitHub source keeps it, so the words do not flip. For `sync`, by the PR's author: when the reply's `author.login` is the
+  made it, or `github-my-prs` once it reads a card a Slack ask made, as "Who wins a shared card" says); a re-read
+  by the other GitHub source keeps it, so the words do not flip. For `sync`, by the PR's author: when the reply's `author.login` is the
   `gh api user` login, the user is never in their own `reviewRequests` and a comment they leave shows in
   `latestReviews`, so `reviewed` and `request_removed` are never given; only `merged` and `closed` move the card to
   `done`, else it is `not_reviewed`, `new_commits` or `current`. A reply with no author (an older recording, or a
@@ -679,7 +682,10 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   `source.name` is another source: the item is `unchanged`, with a reason naming that source. A record keyed by
   its source's plain `key` (the GitHub review request) updates a card a `key_for` record made, as any same-key read
   does (words, title, source block). So whichever is read first, the card ends up holding the GitHub record, and
-  later reads of both are `unchanged`. The card's `feed` stays the source that made it. The Slack ask is not kept
+  later reads of both are `unchanged`. The card's `feed` stays the source that made it, except that a
+  `github-my-prs` read moves it to `github-my-prs` on a card `github-review-requests` did not make: every PR that
+  source lists is the user's own, so a card a Slack ask made for the user's own PR gets the own words once
+  `github-my-prs` reads it. The Slack ask is not kept
   on the card once the GitHub record takes it over (no second link or source block): the card shows the GitHub
   record only.
 - **[decided by the builder]** Threads still group. In one `fill: ai` read, a `key_for` record groups by its own
