@@ -105,6 +105,38 @@ class ProfileStoreTest(WorkerCase):
         profiles.save(self.data, p)
         self.assertEqual(profiles.names(self.data), ["g", "subscription"])
 
+    def test_a_dispatcher_model_the_gateway_does_not_offer_is_refused(self):
+        """dispatcher_model is checked like model and small_model: one the gateway does not list is refused and
+        nothing is written; one it lists saves and loads back as written."""
+        p = gateway(model="claude-opus-5-5", dispatcher_model="claude-sonnet-9", small_model="claude-haiku-4-5")
+        p["gateway"]["models_command"] = "printf '[\"claude-opus-5-5\", \"claude-haiku-4-5\", \"claude-sonnet-4-6\"]'"
+        with self.assertRaises(ProfileError) as cm:
+            profiles.save(self.data, p)
+        self.assertEqual(str(cm.exception), "dispatcher_model: claude-sonnet-9 is not offered by the gateway")
+        self.assertEqual(profiles.names(self.data), ["subscription"])
+        self.assertFalse((self.data / "profiles" / "g.json").exists())
+        p["dispatcher_model"] = "claude-sonnet-4-6"
+        self.assertEqual(profiles.save(self.data, p), p)
+        self.assertEqual(profiles.load(self.data, "g"), p)
+        self.assertEqual(profiles.names(self.data), ["g", "subscription"])
+
+    def test_names_lists_only_valid_profile_names(self):
+        """names() lists a stored file only when its stem is a valid profile name: never one `load` would refuse
+        by name (an upper-case letter, a space, a leading digit, a trailing newline) or a file that is not .json."""
+        profiles.save(self.data, gateway())
+        folder = self.data / "profiles"
+        others = ["Bad.json", "a b.json", "1x.json", "x.json.bak", "notes.txt"]
+        for n in others:
+            (folder / n).write_text("{}")
+        try:
+            (folder / "h\n.json").write_text("{}")
+        except OSError:  # a filesystem that refuses a newline in a name: that one entry is skipped
+            pass
+        else:
+            others.append("h\n.json")
+        self.assertEqual(sorted(os.listdir(folder)), sorted(["g.json", *others]))
+        self.assertEqual(profiles.names(self.data), ["g", "subscription"])
+
     def test_a_models_command_printing_bad_bytes_is_named(self):
         """Output that is not UTF-8 (a models endpoint answering in gzip) is not a list of model names: the same
         one error, never a traceback."""
