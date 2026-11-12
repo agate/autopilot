@@ -1766,12 +1766,12 @@ Calls the author made without asking (check them):
   - **[decided by the builder]** The project card's title is the project name in every configured language's
     slot (`{en: shop, zh: shop}`), the same words in each slot as code-made titles (not one text), so every card
     the import writes has the same title shape.
-  - **[decided by the builder]** A closed question card's title is its old words, one slot per language: each slot
-    is the old card's `plain.what` text in that language, else its old title in that language (`cards.title_for`,
-    so an old one-text title and an old object title both work), else the decision id. It equals the closed
-    card's `plain.what`. In a language no longer configured, a closed question card keeps the old card's `what` (so
-    its title) and `where` words (they cannot be made again from v1), so adding that language back finds them; its
-    `do` there is the closed phrase, not the old one.
+  - **[decided by the builder]** A closed question card's title is its old words, one slot per language: each slot is
+    the old card's `plain.what` text in that language, else its old title in that language, else in the primary
+    language (`cards.title_for`, so an old one-text title and an old object title both work), else the decision id. It
+    equals the closed card's `plain.what`. In a language no longer configured, a closed question card keeps the old
+    card's `what` (so its title) and `where` words (they cannot be made again from v1), so adding that language back
+    finds them; its `do` there is the closed phrase, not the old one.
   - **[decided by the builder]** A card an older import wrote with a one-text title is moved to the per-language
     title by the next run, when that run still makes or closes it (`title` is one of the fields a re-run updates:
     `action: update`, its `id`, `parent` and audit history kept), and is `unchanged` on the run after that. A
