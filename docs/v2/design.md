@@ -1835,7 +1835,13 @@ Calls the author made without asking (check them):
     with a key command (`apiKeyHelper`), so a key is never written in any file. Fields (v1's schema): `name`,
     `mode` (`subscription | gateway`), `label`, `model`, `dispatcher_model`, `small_model`, `effort`,
     `daily_cap_usd`, `gateway {base_url, key_command, refresh_command, rotate_command, models_command}`, `env`,
-    `settings`. Names follow the project name rule (`projects.NAME`).
+    `settings`. Names follow the profile rule (`profiles.PROFILE_NAME`: like a project name, plus `_`, 40 at most,
+    because a profile is often named after a gateway project such as `team_project`), not the project rule
+    (`projects.NAME`, unchanged). One rule serves `path`, `validate`, `names` and `active_name`, so a name `save`
+    accepts always loads, lists and becomes active (v1 once saved one it could not load).
+    - **[decided by the builder]** The error text is "lowercase letters, digits, - and _, starting with a letter
+      (40 at most)", the same in `validate` (`name: ...`) and `path` (`not a profile name: ...`), kept in
+      `profiles.NAME_RULE`.
   - Where it is kept. Each profile is `<data>/profiles/<name>.json`, written with `store.write_json` (JSON, not
     YAML, because code writes it, as with routines). The active name is `<data>/active-profile.json`
     `{"name": ...}`; with no such file it is `subscription`. It is not a `config.yaml` key (those keys are pinned).
@@ -1855,7 +1861,16 @@ Calls the author made without asking (check them):
     and `settings.env` may not hold a credential-looking name (`KEY`, `TOKEN`, `SECRET`, `PASSWORD`), a name the
     overlay sets or blanks, a cloud-provider switch, or (v2's addition) any `AP2_*` or `AUTOPILOT_*` name. On save,
     `gateway.models_command` runs (`shell=True`, 30 s) and every model the profile names must be in the JSON list it
-    prints; its output is only parsed, never printed or kept.
+    prints; its output is only parsed, never printed or kept. A list holding anything but texts is refused with the
+    same "must print a JSON list of model names" line. A model (`model`, `dispatcher_model` or `small_model`) may
+    end in `[1m]` (`profiles.LONG_CONTEXT`, Claude Code's marker for the 1M context window): it is checked without
+    the marker (`profiles.base_model` strips one trailing `[1m]`, nothing else), and stored and passed with it, to
+    `--model` and `ANTHROPIC_MODEL` alike.
+    - **[decided by the builder]** `small_model` may end in `[1m]` too (the same check for all three fields, as in
+      v1), and only the exact lowercase `[1m]` is stripped: `[2m]` or `[1M]` must be listed as written.
+    - **[decided by the builder]** The `[1m]` launch check sits in `tests/test_ap2_profiles.py` and imports `opt`
+      from `tests.test_ap2_profile_launch` inside the test (a top-level import would be circular: that module imports
+      this one).
   - Overlay and merge (v1's, with `AP2_PROFILE` for `AUTOPILOT_PROFILE`). `overlay(p)` is the settings a profile
     owns, never `permissions` or `hooks`. The subscription blanks `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`,
     `ANTHROPIC_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL` and `ANTHROPIC_API_KEY`, and
@@ -1898,7 +1913,8 @@ Calls the author made without asking (check them):
     [--key-command C] [--refresh-command C] [--rotate-command C] [--models-command C] [--daily-cap N] [--label L]
     [--model M] [--dispatcher-model M] [--small-model M] [--effort E] [--env K=V ...] [--settings-file F]`,
     `use NAME` (prints `{"active": new, "was": old}`, so `ap2 profile use <was>` undoes it) and `remove NAME`
-    (refuses `subscription` and the active profile). `add` refuses a name that exists (`subscription` included)
+    (refuses `subscription` and the active profile, and refuses any name while active-profile.json exists but holds no
+    name at all: unreadable, bad JSON or no string `name`). `add` refuses a name that exists (`subscription` included)
     and the gateway flags on a `--subscription` profile, and prints the saved profile. `list` and `show` create
     nothing; `add`, `use` and `remove` write only inside the data folder, so they work in shadow mode.
   - Not in this slice: the spend ledger, the daily cap and its card, key health, refresh and rotation (`rotate`),

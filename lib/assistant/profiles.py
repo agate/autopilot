@@ -16,12 +16,12 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import stat
 import subprocess
 from pathlib import Path
 
 from assistant.config import ConfigError
-from assistant.projects import NAME
 from assistant.store import write_json
 
 SUBSCRIPTION = "subscription"
@@ -43,6 +43,11 @@ _BLANKED_ENV = ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL",
 # A cloud-provider switch in the daemon's env would send any session to that provider instead: blanked in both modes.
 _PROVIDER_ENV = ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY")
 _OWN_PREFIXES = ("AP2_", "AUTOPILOT_")  # variables v2 (and v1) set themselves
+# A profile is often named after a gateway project (`team_project`), so `_` is allowed: unlike a project name
+# (`projects.NAME`, which stays as it is). v1's rule, with \Z so a trailing newline never matches.
+PROFILE_NAME = re.compile(r"[a-z][a-z0-9_-]{0,39}\Z")
+NAME_RULE = "lowercase letters, digits, - and _, starting with a letter (40 at most)"
+LONG_CONTEXT = "[1m]"  # Claude Code's marker for the 1M context window; the gateway lists the name without it
 
 
 class ProfileError(ConfigError):
@@ -92,8 +97,8 @@ def folder(data) -> Path:
 
 
 def path(data, name) -> Path:
-    if not (isinstance(name, str) and NAME.match(name)):
-        raise ProfileError(f"not a profile name: {name!r} (lowercase letters, digits and -, starting with a letter)")
+    if not (isinstance(name, str) and PROFILE_NAME.match(name)):
+        raise ProfileError(f"not a profile name: {name!r} ({NAME_RULE})")
     return _no_link(folder(data) / f"{name}.json")
 
 
@@ -131,8 +136,8 @@ def validate(p) -> list:
         return ["a profile must be a JSON object"]
     errs = []
     name = p.get("name")
-    if not (isinstance(name, str) and NAME.match(name)):
-        errs.append("name: lowercase letters, digits and -, starting with a letter")
+    if not (isinstance(name, str) and PROFILE_NAME.match(name)):
+        errs.append(f"name: {NAME_RULE}")
     mode = p.get("mode")
     if mode not in MODES:
         errs.append("mode: must be subscription or gateway")
@@ -183,9 +188,15 @@ def validate(p) -> list:
     return errs
 
 
+def base_model(name: str) -> str:
+    """`name` without one trailing `[1m]` (LONG_CONTEXT); any other name as it is."""
+    return name[:-len(LONG_CONTEXT)] if name.endswith(LONG_CONTEXT) else name
+
+
 def _model_errors(p: dict) -> list:
-    """The models the profile names that `gateway.models_command` does not list. The command's output is only
-    parsed, never shown: it may hold more than model names."""
+    """The models the profile names that `gateway.models_command` does not list. A name ending in `[1m]` counts as
+    listed when its base name is; it is stored and passed with the marker. The command's output is only parsed,
+    never shown: it may hold more than model names."""
     cmd = (p.get("gateway") or {}).get("models_command")
     if not cmd:
         return []
@@ -200,12 +211,12 @@ def _model_errors(p: dict) -> list:
         return [f"gateway.models_command: failed (exit {r.returncode})"]
     try:
         known = json.loads(r.stdout)
-    except ValueError:
+    except (ValueError, RecursionError):
         known = None
-    if not isinstance(known, list):
+    if not (isinstance(known, list) and all(isinstance(m, str) for m in known)):
         return ["gateway.models_command: must print a JSON list of model names"]
     return [f"{f}: {p[f]} is not offered by the gateway" for f in ("model", "dispatcher_model", "small_model")
-            if p.get(f) and p[f] not in known]
+            if p.get(f) and p[f] not in known and base_model(p[f]) not in known]
 
 
 # -- the store -------------------------------------------------------------------------------------------------------
@@ -256,7 +267,7 @@ def names(data) -> list:
         entries = []
     except OSError as e:
         raise ProfileError(f"cannot read {d}: {e.strerror or type(e).__name__}") from e
-    stored = [n[:-len(".json")] for n in entries if n.endswith(".json") and NAME.match(n[:-len(".json")])]
+    stored = [n[:-len(".json")] for n in entries if n.endswith(".json") and PROFILE_NAME.match(n[:-len(".json")])]
     return sorted(set(stored) | {SUBSCRIPTION})
 
 
@@ -271,7 +282,7 @@ def active_name(data) -> str:
     except (OSError, UnicodeDecodeError, ValueError) as e:
         raise ProfileError(f"{f}: cannot read: {e}; {FIX}") from e
     name = raw.get("name") if isinstance(raw, dict) else None
-    if not (isinstance(name, str) and NAME.match(name)):
+    if not (isinstance(name, str) and PROFILE_NAME.match(name)):
         raise ProfileError(f"{f}: must be {{\"name\": <profile name>}}; {FIX}")
     return name
 
@@ -313,14 +324,19 @@ def _raw_active(f: Path):
 
 
 def remove(data, name: str) -> dict:
-    """Delete a stored profile. The subscription and the active profile cannot be removed."""
+    """Delete a stored profile. The subscription and the active profile cannot be removed, and nothing is removed
+    while active-profile.json is there but holds no name at all (unreadable, bad JSON, no string `name`): the active
+    one is then unknown."""
     f = path(data, name)
     if name == SUBSCRIPTION:
         raise ProfileError("the subscription profile cannot be removed")
     try:
         current = active_name(data)
-    except ProfileError:
-        current = _raw_active(active_file(data))
+    except ProfileError as e:
+        af = active_file(data)
+        current = _raw_active(af)
+        if current is None and _exists(af):  # unreadable, bad JSON, no name: it may be `name`, so fail closed
+            raise ProfileError(f"cannot remove {name!r}: the active profile is unknown, since {e}") from None
     if name == current:
         raise ProfileError(f"{name} is the active profile; `ap2 profile use` another one first")
     if not _exists(f):
