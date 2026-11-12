@@ -305,14 +305,24 @@ class Workers:
         except Exception:  # noqa: BLE001 - any broken profile keeps the subscription's rule
             return False
 
+    def _dead(self, rec: dict, listing) -> bool:
+        try:
+            return self.classify(rec, listing) == "dead"
+        except Exception:  # noqa: BLE001 - a run folder that cannot be read: stopped and parked as before
+            return False
+
     def cap_stop(self, by: str = BY) -> dict:
-        """The cap pause: stop every worker on the list that is not parked (its spend settled first, `_kill`),
-        outside the lock, then park the ones that stopped (`kind: cap`, no `resume_at`) and mark their card's
-        session `parked`. A worker whose stop failed stays unparked, so it still shows as running, and the next
-        `check` while paused tries again. One stop that fails never blocks the rest.
+        """The cap pause: stop every worker on the list that is not parked (`_kill`: `claude stop`, then its spend
+        settled), outside the lock, then park the ones that stopped (`kind: cap`, no `resume_at`) and mark their
+        card's session `parked`. A worker whose stop failed stays unparked, so it still shows as running, and the
+        next `check` while paused tries again. One stop that fails never blocks the rest. A dead worker (by one
+        listing; a listing that failed says unknown, so it is stopped) is left to `check`: it closes one that died
+        twice and refuses the resume while paused, so the pause never hands it an uncounted run.
         Returns `{"stopped": [...], "failed": [...]}`."""
         now = self.clock()
-        running = [r for r in self.registry.read() if not r.get("parked") and not r.get("closing")]
+        listing = self._listing()
+        running = [r for r in self.registry.read() if not r.get("parked") and not r.get("closing")
+                   and not self._dead(r, listing)]
         done, failed = [], []
         for r in running:  # outside the lock: a stop can take up to a minute
             try:
@@ -607,6 +617,11 @@ class Workers:
         require_literal(self.data)  # before the tool discovery runs a session
         found = self._tools(project, planned["cwd"], planned["env"], prof, card_id, role)
         with self.registry.locked() as records:
+            # A pause written while the tools were listed: `cap_stop` reads the list after it writes paused.json,
+            # so a launch that commits here either sees the pause or is on the list it stops.
+            pz = cap.paused(self.data)
+            if pz is not None:
+                raise cap.CapError(cap.refusal({"reason": "paused", "paused": pz}))
             plan = self._plan_start(records, card, role, project, saved, cwd, needs, resume, prof)
             if plan["cwd"] != planned["cwd"]:
                 # The tools were found in another folder (the parked record changed meanwhile): they may not be
@@ -868,8 +883,8 @@ class Workers:
                                                                                         plan["cwd"]):
             return False
         state = self.classify(rec, listing)
-        if plan["why"] == "dead":
-            return state == "dead" and rec.get("resumes", 0) < 1
+        if plan["why"] == "dead":  # a pause written while its tools were listed refuses it too
+            return state == "dead" and rec.get("resumes", 0) < 1 and cap.paused(self.data) is None
         return state == "parked" and self._parked_due(rec, now, b, allow or self._pass_allowance(now))
 
     def _resume_dead(self, rec: dict, plan: dict, found: dict, by: str = BY) -> dict:

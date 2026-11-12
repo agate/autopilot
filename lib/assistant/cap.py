@@ -323,15 +323,21 @@ def close_card(data, now, store: Optional[Store] = None) -> None:
 def allowance(data, projects, now, p: dict, listing=None, store: Optional[Store] = None) -> dict:
     """May a worker start or resume now on profile `p`? `{"allow": 0 | None, "reason": REASONS, "cause"?, "limit"?,
     "spent"?}`. Paused (any mode): `allow 0`, `reason paused`. A subscription profile: `allow None`, `reason ok`,
-    with no spend parsed. A gateway profile: today's gateway spend (every gateway profile together) at or over
-    today's limit, or today's cost that cannot be priced (unless accepted), opens the card and is `allow 0`,
-    `reason cap`; otherwise an unanswered card is taken back and it is `allow None`, `reason ok`. A card that cannot
-    be written never lets work start: the refusal stands, with `card_error`."""
+    with no spend parsed, and an unanswered card is taken back. A gateway profile: today's gateway spend (every
+    gateway profile together) at or over today's limit, or today's cost that cannot be priced (unless accepted),
+    opens the card and is `allow 0`, `reason cap`; otherwise an unanswered card is taken back and it is `allow
+    None`, `reason ok`. A card that cannot be written never lets work start: the refusal stands, with
+    `card_error`."""
     pz = paused(data)
     if pz is not None:
         return {"allow": 0, "reason": "paused", "paused": pz}
     if p.get("mode") != "gateway":
-        return {"allow": None, "reason": "ok"}
+        out = {"allow": None, "reason": "ok"}
+        try:
+            close_card(data, now, store)  # no cap on this profile: a card the gateway opened is taken back
+        except (CardError, OSError) as e:
+            out["card_error"] = str(e) or type(e).__name__
+        return out
     limit = today_limit(data, p, now)
     try:
         t = spend.totals(data, projects, now, "gateway", listing)

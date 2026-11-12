@@ -2139,8 +2139,10 @@ Calls the author made without asking (check them):
   3. The allowance. `allowance(data, projects, now, p, listing=None, store=None)` returns `{"allow": 0 | None,
      "reason": "ok" | "cap" | "paused", "cause"?: "spent" | "unknown", "limit"?, "spent"?}` (`cap.REASONS`, a small
      closed set the key-health slice extends). Paused, in any mode: `allow 0`, `reason paused`. A subscription
-     profile: `allow None`, `reason ok`, with no spend parsed (its usage windows stay the park hook's). A gateway
-     profile: `spend.totals(..., "gateway", ...)`; over = `today >= today_limit`; unknown = `unknown_today` and not
+     profile: `allow None`, `reason ok`, with no spend parsed (its usage windows stay the park hook's); an
+     unanswered card a gateway profile opened is taken back (`close_card`, which reads no spend), so switching to the
+     subscription never leaves a P0 card saying no worker starts. A gateway profile: `spend.totals(..., "gateway",
+     ...)`; over = `today >= today_limit`; unknown = `unknown_today` and not
      accepted; either opens the card and is `allow 0`, `reason cap`; neither takes back an unanswered card (it may
      open again later today) and is `allow None`, `reason ok`. "Spent today" sums every gateway profile used today
      (switching keys does not reset it); subscription spend is not counted. A card that cannot be written never lets
@@ -2166,19 +2168,26 @@ Calls the author made without asking (check them):
   6. Every start and resume is refused at the cap or while paused. `Workers.start` (fresh, `--resume`, and `answer`,
      which calls it) checks the allowance right after `profiles.active` and before `_plan_start`, so nothing is
      planned, discovered or launched; `allow 0` raises `CapError` naming the reason, today's spend, the limit and the
-     fix (`ap2 cap answer ...` or `ap2 cap resume`). `_plan_resume` (an in-place resume in `check`) checks the same,
+     fix (`ap2 cap answer ...` or `ap2 cap resume`). The pause is read again under the worker list's lock, before
+     anything is written or launched (a `CapError` again), and so is it in `_still_due` for a dead worker's resume:
+     a pause written while the tools were listed refuses the launch. That suffices because `pause` writes
+     `paused.json` before `cap_stop` reads the list, so a launch that commits under the lock either sees the pause
+     or is on the list `cap_stop` stops. `_plan_resume` (an in-place resume in `check`) checks the same,
      after its own `profiles.active`. A dead worker refused this way keeps its one resume (as for a ProfileError:
      the line names the cap, nothing resumes); a parked worker stays parked, never stopped as `parked_failed`: a
      CapError is no WorkerError in `_resume_step`. The allowance is computed at most once per profile per `check`
      pass, and only when a resume asks (`_pass_allowance`): one `spend.totals` call per pass. Running workers are
      never stopped by the cap itself: only the `pause` answer stops them.
   7. Pause stops and parks; a failed stop is retried. `Workers.cap_stop()`: for every worker on the list that is
-     not parked (and no close started), `_kill` (settle, then `claude stop`) outside the lock; then, under the lock,
+     not parked (and no close started) and not dead, `_kill` (`claude stop`, then settle its spend) outside the lock; then, under the lock,
      a record whose session is still the one stopped gets `parked` `{"kind": "cap", "reason": "cap", "model": null,
      "percent": null, "resets_at": null, "resume_at": null, "note": PAUSE_NOTE, "parked_at": <stamp>}`, and its card's
      session state becomes `parked`. A worker whose stop failed stays unparked (it still shows as running); every
      live `check` while `paused.json` holds `reason: cap` runs `cap_stop` again first, and the line of a stop that
-     failed again says so. One failed stop never blocks the rest; `paused.json` is written before any stop. In shadow
+     failed again says so. One failed stop never blocks the rest; `paused.json` is written before any stop. A worker that one listing
+     shows dead is not stopped or parked: it is left to `check`, which closes one that died twice (`died`, its fix
+     ask) and refuses a dead worker's one resume while paused, so the pause never gives it an uncounted run (a
+     listing that failed says unknown, and that worker is stopped and parked as before). In shadow
      mode nothing is stopped (`ap2 cap answer pause` writes `paused.json` and says so; `check` does not retry).
   8. Parked workers resume by the active profile's rules (`Workers._parked_due`): never while paused; not before
      `resume_at` (a missing or null one is no time to wait for); then on a subscription profile v1's

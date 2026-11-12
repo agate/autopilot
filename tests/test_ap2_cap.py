@@ -19,8 +19,10 @@ from unittest import mock
 
 from tests.helpers import ROOT
 from tests.test_ap2_profiles import gateway
+from tests.test_ap2_store import card
 from tests.test_ap2_workers import FAKE, WorkerCase, usage_file
-from assistant import cap, cards, parkhook, profiles, resources, spend
+from assistant import cap, cards, config, parkhook, profiles, resources, spend
+from assistant.cards import CardError
 from assistant import workers as workers_mod
 from assistant.config import Config, ConfigError
 from assistant.resources import WorkerError
@@ -86,6 +88,7 @@ class AllowanceTest(CapCase):
         self.assertEqual(cap.state(self.data, self.now)["card"], "open")
         self.allow()  # still at the cap: the card is not opened again
         self.assertEqual(len(self.cap_cards()), 1)
+        self.assertFalse(cap.open_card(self.data, self.now, 500.0, "spent", self.spent, "g", self.store))
         self.assertEqual(self.cap_cards()[0]["ask"]["type"], "approve")
 
     def test_unknown_cost_counts_as_over(self):
@@ -106,6 +109,27 @@ class AllowanceTest(CapCase):
         self.assertEqual((a["allow"], a["reason"]), (None, "ok"))
         self.assertEqual(self.totals_calls, 0)  # no spend is parsed for a subscription profile
         self.assertEqual(self.cap_cards(), [])
+
+    def test_switching_to_the_subscription_closes_the_cap_card(self):
+        self.spent = totals(500.0)
+        self.allow()
+        cid = cap.state(self.data, self.now)["card_id"]
+        profiles.use(self.data, profiles.SUBSCRIPTION)
+        a = self.allow(p=profiles.active(self.data))
+        self.assertEqual((a["allow"], a["reason"]), (None, "ok"))
+        self.assertNotIn("card_error", a)
+        self.assertEqual(self.totals_calls, 1)  # the gateway call only: closing the card reads no spend
+        c = self.store.get(cid)
+        self.assertIsNone(c["ask"])
+        self.assertEqual(c["lane"], "done")
+        self.assertIsNone(cap.state(self.data, self.now)["card"])
+
+    def test_card_write_failure_still_refuses(self):
+        self.spent = totals(500.0)
+        with mock.patch.object(cap, "open_card", side_effect=CardError("the store is locked")):
+            a = self.allow()
+        self.assertEqual((a["allow"], a["reason"]), (0, "cap"))
+        self.assertIn("the store is locked", a["card_error"])
 
     def test_switching_gateway_profiles_sums_for_the_cap(self):
         profiles.save(self.data, gateway("g2", daily_cap_usd=1.5))
@@ -198,6 +222,9 @@ class RaiseTest(CapCase):
         self.assertEqual(self.allow()["reason"], "ok")
         self.spent = totals(500.0, unknown_today=True)  # the priced part still counts
         self.assertEqual(self.allow()["cause"], "spent")
+        s = cap.state(self.data, self.now)  # the same limit, another cause: the answered card opens again
+        self.assertEqual(s["card"], "open")
+        self.assertEqual(self.store.get(s["card_id"])["ask"]["cause"], "spent")
         tomorrow = datetime(2026, 11, 12, 0, 1, tzinfo=TZ)
         self.assertFalse(cap.unknown_accepted(self.data, tomorrow))
         self.spent = totals(10.0, unknown_today=True)
@@ -278,6 +305,17 @@ class CardTest(CapCase):
         [c] = [c for c in store.list() if c.get("feed") == "cap"]
         cards.validate(c, ("en",))
         self.assertEqual(set(c["plain"]["what"]), {"en"})
+
+    def test_yesterdays_open_card_is_closed_on_a_new_day(self):
+        self.spent = totals(500.0)
+        self.allow()
+        cid = cap.state(self.data, self.now)["card_id"]
+        self.spent = totals(10.0)
+        tomorrow = datetime(2026, 11, 12, 9, 0, tzinfo=TZ)
+        self.assertEqual(self.allow(now=tomorrow)["reason"], "ok")
+        c = self.store.get(cid)
+        self.assertIsNone(c["ask"])
+        self.assertEqual(c["lane"], "done")
 
 
 # -- 4. the pause file and the state file --------------------------------------------------------------------------------
@@ -388,6 +426,32 @@ class WorkerCapTest(CapWorkerCase):
             w.start(a["card"], "implement", prompt="Continue.", resume=True)
         self.assertEqual(len(self.bg_calls()), 1)
         self.assertEqual(self.records(), [])
+
+    def pause_while_tools_are_listed(self):
+        """Patch `Workers._tools` so a pause lands between the plan and the lock."""
+        real = workers_mod.Workers._tools
+
+        def tools(w, *args, **kw):
+            cap.pause(self.data, self.clock())
+            return real(w, *args, **kw)
+        return mock.patch.object(workers_mod.Workers, "_tools", autospec=True, side_effect=tools)
+
+    def test_pause_while_tools_are_listed_refuses_the_start(self):
+        cid = self.add_card()
+        with self.pause_while_tools_are_listed():
+            with self.assertRaisesRegex(cap.CapError, "paused"):
+                self.workers().start(cid, "implement", cwd=self.wt, prompt="Do the work.")
+        self.assertEqual(self.bg_calls(), [])
+        self.assertEqual(self.records(), [])
+
+    def test_pause_while_tools_are_listed_refuses_a_dead_workers_resume(self):
+        a = self.start()
+        self.drop_agent(a["short_id"])
+        with self.pause_while_tools_are_listed():
+            out = self.workers().check()[0]
+        self.assertEqual((out["state"], out["did"]), ("dead", "nothing"))
+        self.assertEqual(len(self.bg_calls()), 1)
+        self.assertEqual(self.records()[0]["resumes"], 0)
 
     def test_answer_refused_while_paused(self):
         a = self.start()
@@ -567,6 +631,54 @@ class PauseTest(CapWorkerCase):
         self.assertEqual([c for c in self.calls() if c["argv"][:1] == ["stop"]], [])
         self.assertIsNone(self.records()[0]["parked"])
         self.assertEqual(self.records()[0]["short_id"], a["short_id"])
+
+    def stops(self) -> list:
+        return [c["argv"][1] for c in self.calls() if c["argv"][:1] == ["stop"]]
+
+    def test_shadow_check_while_paused_stops_nothing(self):
+        self.start()
+        cap.pause(self.data, self.clock())
+        self.workers(cfg=Config()).check()
+        self.assertEqual(self.stops(), [])
+        self.assertIsNone(self.records()[0]["parked"])
+
+    def test_pause_leaves_a_worker_that_died_twice_to_check(self):
+        a = self.start()
+        with resources.Registry(self.data).locked() as records:
+            records[0]["resumes"] = 1
+        self.drop_agent(a["short_id"])
+        out = self.pause()
+        self.assertEqual(out["stopped"], [])
+        self.assertEqual(self.stops(), [])
+        self.assertIsNone(self.records()[0]["parked"])
+        entry = self.workers().check()[0]
+        self.assertEqual((entry["state"], entry["did"]), ("dead", "stopped"))
+        self.assertEqual(self.records(), [])
+        ask = self.get(a["card"])["ask"]
+        self.assertEqual((ask["type"], ask["reason"]), ("fix", workers_mod.DIED))
+
+    def test_check_while_paused_never_stops_a_dead_worker(self):
+        a = self.start()
+        self.drop_agent(a["short_id"])
+        self.pause()
+        for _ in range(2):
+            out = self.workers().check()[0]
+            self.assertEqual((out["state"], out["did"]), ("dead", "nothing"))
+            self.assertIn("paused", out["note"])
+        self.assertEqual(self.stops(), [])
+        rec = self.records()[0]
+        self.assertEqual((rec["parked"], rec["resumes"]), (None, 0))
+
+
+class LedgerTest(WorkerCase):
+    def test_unreadable_ledger_refuses_the_start(self):
+        profiles.save(self.data, gateway("g", daily_cap_usd=500))
+        profiles.use(self.data, "g")
+        (self.data / spend.FOLDER / spend.LAUNCHES).mkdir(parents=True)  # a folder: cannot be read as the ledger
+        with self.assertRaises(ConfigError):
+            self.start()
+        self.assertEqual(self.calls(), [])  # no discovery, no launch
+        self.assertEqual(resources.Registry(self.data).read(), [])
 
 
 # -- 7. parked workers resume by the active profile ------------------------------------------------------------------------
@@ -802,6 +914,27 @@ class CapCliTest(unittest.TestCase):
         self.assertIsNone(resources.Registry(self.data).read()[0]["parked"])
         state = self.json_of(self.ap2("--json", "--transcripts", str(self.projects)))
         self.assertTrue(state["paused"])
+
+    def test_cap_answer_pause_in_live_mode_stops_and_parks(self):
+        (self.data / "config.yaml").write_text("mode: live\n")
+        cid = Store(self.data, config.load(self.data)).add(card(), by="test")["id"]
+        (self.tmp / "fake" / "agents.json").write_text(json.dumps([
+            {"id": "s0009", "sessionId": "", "name": "x · implement", "kind": "background", "state": "working",
+             "status": "busy", "cwd": str(self.tmp), "startedAt": 1}]))
+        with resources.Registry(self.data).locked() as records:
+            records.append({"card": cid, "role": "implement", "project": None,
+                            "session_name": "x · implement", "session_id": "", "short_id": "s0009",
+                            "ports": [7200, 7209], "needs": [], "cwd": str(self.tmp), "branch": "b",
+                            "profile": "g", "started_at": "2026-01-05T09:00:00Z", "resumes": 0, "parked": None,
+                            "idle_since": None, "blocked_since": None})
+        out = self.json_of(self.ap2("answer", "pause"))
+        self.assertTrue(out["paused"])
+        self.assertNotIn("note", out)
+        self.assertEqual(out["stopped"], [{"card": cid, "role": "implement"}])
+        self.assertEqual(out["failed"], [])
+        calls = [json.loads(x)["argv"] for x in self.log.read_text().splitlines()]
+        self.assertIn(["stop", "s0009"], calls)
+        self.assertEqual(resources.Registry(self.data).read()[0]["parked"]["kind"], "cap")
 
     def test_cap_resume_prints_was(self):
         self.assertEqual(self.json_of(self.ap2("resume")), {"paused": False, "was": False})
