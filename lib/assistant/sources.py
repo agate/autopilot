@@ -369,13 +369,15 @@ def validate(src: Source, lines: Optional[dict] = None) -> Source:
         if not isinstance(kf, dict):
             fail(f"key_for must map a category of sort to a {{field}} pattern, not {kf!r}", ("key_for",))
         for cat, pattern in kf.items():
+            at = ("key_for", cat) if ("key_for", cat) in lines else ("key_for",)
+            # Checked before a null too: a merge never drops a sort category, so a null for one sort lacks is a
+            # misspelled opt-out that would leave the real category keyed.
+            if cat not in sort:
+                fail(f"key_for.{cat}: '{cat}' is not one of sort's categories ({', '.join(map(str, sort))})", at)
             # A user's `review_request: null` keys that category on `key` again; they also sort it elsewhere
             # (`sort: { review_request: question }`), since a pr-review card needs a PR key.
             if pattern is None:
                 continue
-            at = ("key_for", cat) if ("key_for", cat) in lines else ("key_for",)
-            if cat not in sort:
-                fail(f"key_for.{cat}: '{cat}' is not one of sort's categories ({', '.join(map(str, sort))})", at)
             if not _text(pattern) or pattern.startswith("."):
                 fail(f"key_for.{cat} must be a {{field}} pattern such as \"{{pr}}\", not {pattern!r}", at)
             try:

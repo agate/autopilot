@@ -458,6 +458,17 @@ class KeyForTest(SourceCase):
         src = Loader(self.data, plugin_dir=sources.PLUGIN_DIR).load("slack-mentions")
         self.assertEqual(src.key_for, {})  # a review ask keys on `key`, its thread, again
 
+    def test_a_null_for_a_category_sort_lacks_is_refused(self):
+        # A misspelled opt-out must not load silently and leave the PR keying on.
+        p = self.user("slack-mentions", "extends: slack-mentions\nsettings: { me: U1 }\n"
+                                        "key_for: { review_requests: null }\n")
+        with self.assertRaises(SourceError) as cm:
+            Loader(self.data, plugin_dir=sources.PLUGIN_DIR).load("slack-mentions")
+        self.assertEqual(str(cm.exception),
+                         f"{p} (merged over {sources.PLUGIN_DIR / 'slack-mentions.yaml'}): line 3: "
+                         "key_for.review_requests: 'review_requests' is not one of sort's categories "
+                         "(question, ask_to_do, alert, fyi, review_request)")
+
     def test_re_sorting_a_key_for_category_without_its_key_for_is_refused(self):
         # Else a Slack ask would make a `question` card keyed on the PR, and the GitHub review request would land
         # on it, so no pr-review card is ever made for that PR.
@@ -511,6 +522,13 @@ class KeyForTest(SourceCase):
         src = Loader(self.data, plugin_dir=sources.PLUGIN_DIR).load("slack-mentions")
         self.assertEqual(src.key_for, {})
         self.assertEqual(src.sort["review_request"], "question")
+
+    def test_re_sorting_with_its_own_key_for_loads(self):
+        self.user("slack-mentions", "extends: slack-mentions\nsettings: { me: U0EXAMPLE1 }\n"
+                                    "sort: { review_request: question }\nkey_for: { review_request: \"{pr}\" }\n")
+        src = Loader(self.data, plugin_dir=sources.PLUGIN_DIR).load("slack-mentions")
+        self.assertEqual(src.sort["review_request"], "question")
+        self.assertEqual(src.key_for, {"review_request": form.parse_pattern("{pr}")})
 
     def test_re_sorting_a_category_not_in_key_for_loads(self):
         self.user("slack-mentions", "extends: slack-mentions\nsettings: { me: U0EXAMPLE1 }\n"
