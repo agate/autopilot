@@ -998,6 +998,12 @@ function renderAccess() {
   const a = S.meta.access;
   if (!a) { fill($("access")); return; }
   const gw = a.profile.mode === "gateway", p = a.profile;
+  // A profile that cannot be loaded is neither the subscription nor a gateway: say so, and that workers wait.
+  if (a.profile_error) {
+    fill($("access"), el("span", { class: "keyerr" }, L("access_profile_error", { error: a.profile_error.error || "" }) + " " + L("access_profile_fix")),
+      el("span", {}, L("access_page_sessions")));
+    return;
+  }
   fill($("access"),
     el("span", { class: "abadge" + (gw ? " gw" : "") }, gw ? L("access_workers", { label: p.label || p.name }) : L("access_subscription")),
     gw ? el("span", { class: "mono" }, [p.model, p.effort].filter(Boolean).join(" · ")) : null,

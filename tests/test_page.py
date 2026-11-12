@@ -338,6 +338,12 @@ class AccessTest(unittest.TestCase):
         self.assertIsNone(acc["cap_card"])
         self.assertIn("22:00", acc["switch_note"])
 
+    def test_page_shows_a_profile_error_like_a_key_error(self):
+        body = js_fn("renderAccess")
+        self.assertIn("a.profile_error", body)
+        self.assertIn('L("access_profile_error"', body)
+        self.assertIn("{error}", LABELS["access_profile_error"])
+
     def test_switch_note_reads_the_quiet_window(self):
         g = config.load_global()
         g["reply_check"] = dict(g["reply_check"], quiet=["21:30", "07:15"])
