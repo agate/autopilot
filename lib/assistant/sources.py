@@ -11,7 +11,8 @@
 - `key_for: {<category>: <pattern>}` (design 6.2): a record of a listed category keys on that pattern instead of
   `key` (a Slack review ask keys on its PR, `{pr}`, so it lands on the GitHub review request's card). Each category
   is one of `sort`'s; a user's `<category>: null` turns that one off. To turn the PR keying off, also sort that
-  category elsewhere (`sort: { review_request: question }`), since a `pr-review` card needs a PR key.
+  category elsewhere (`sort: { review_request: question }`), since a `pr-review` card needs a PR key. A user file
+  that re-sorts a `key_for` category without setting that category's `key_for` is refused.
 - Every problem raises `SourceError`, whose message starts with the file it is about.
 """
 from __future__ import annotations
@@ -359,6 +360,10 @@ def validate(src: Source, lines: Optional[dict] = None) -> Source:
             if not any(kind == "field" for kind, _ in parts):
                 fail(f"key_for.{cat} must name at least one {{field}}, or every such item would be one card: "
                      f"{pattern!r}", at)
+            # `lines` holds only this file's own keys, so an entry missing there came from the file it extends.
+            if ("sort", cat) in lines and ("key_for", cat) not in lines:
+                fail(f"sort.{cat}: re-sorted here while key_for.{cat} still keys it on {pattern} (from the file "
+                     f"this extends); set key_for.{cat} too (null keys it on key again)", ("sort", cat))
             src.key_for[cat] = parts
 
     if "instructions" in d and not _text(d["instructions"]):

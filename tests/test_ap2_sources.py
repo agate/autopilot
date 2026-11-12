@@ -458,6 +458,33 @@ class KeyForTest(SourceCase):
         src = Loader(self.data, plugin_dir=sources.PLUGIN_DIR).load("slack-mentions")
         self.assertEqual(src.key_for, {})  # a review ask keys on `key`, its thread, again
 
+    def test_re_sorting_a_key_for_category_without_its_key_for_is_refused(self):
+        # Else a Slack ask would make a `question` card keyed on the PR, and the GitHub review request would land
+        # on it, so no pr-review card is ever made for that PR.
+        p = self.user("slack-mentions", "extends: slack-mentions\nsettings: { me: U0EXAMPLE1 }\n"
+                                        "sort: { review_request: question }\n")
+        with self.assertRaises(SourceError) as cm:
+            Loader(self.data, plugin_dir=sources.PLUGIN_DIR).load("slack-mentions")
+        base = sources.PLUGIN_DIR / "slack-mentions.yaml"
+        self.assertEqual(str(cm.exception),
+                         f"{p} (merged over {base}): line 3: sort.review_request: re-sorted here while "
+                         "key_for.review_request still keys it on {pr} (from the file this extends); set "
+                         "key_for.review_request too (null keys it on key again)")
+
+    def test_re_sorting_a_key_for_category_with_its_key_for_loads(self):
+        self.user("slack-mentions", "extends: slack-mentions\nsettings: { me: U0EXAMPLE1 }\n"
+                                    "sort: { review_request: question }\nkey_for: { review_request: null }\n")
+        src = Loader(self.data, plugin_dir=sources.PLUGIN_DIR).load("slack-mentions")
+        self.assertEqual(src.key_for, {})
+        self.assertEqual(src.sort["review_request"], "question")
+
+    def test_re_sorting_a_category_not_in_key_for_loads(self):
+        self.user("slack-mentions", "extends: slack-mentions\nsettings: { me: U0EXAMPLE1 }\n"
+                                    "sort: { fyi: question }\n")
+        src = Loader(self.data, plugin_dir=sources.PLUGIN_DIR).load("slack-mentions")
+        self.assertEqual(src.sort["fyi"], "question")
+        self.assertEqual(src.key_for, {"review_request": form.parse_pattern("{pr}")})
+
     def test_an_empty_setting_named_in_key_for_refuses_the_source(self):
         p = self.user("slack-mentions", "extends: slack-mentions\nsettings: { me: U1, org: '' }\n"
                                         "key_for: { review_request: \"{org}/{pr}\" }\n")

@@ -670,7 +670,8 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   on `key` as before. Each category must be one of `sort`'s, and each pattern is checked as `key` is (a `{field}`
   pattern naming at least one field, not a path); a user's `<category>: null` turns one off. To turn the PR
   keying off, also sort that category elsewhere (`sort: { review_request: question }`), since a `pr-review` card
-  needs a PR key. The form gains one
+  needs a PR key. A user file that re-sorts a `key_for` category without setting that category's `key_for` is
+  refused. The form gains one
   optional field, `pr`: `<owner>/<repo>#<number>`. The built-in `slack-mentions` adds the form hint `pr`, `sort:
   review_request: pr-review`, `key_for: {review_request: "{pr}"}` and an `instructions` line saying when a message
   is a `review_request` ("PTAL", "take a look", "can you review", a review-assignment bot) and that it needs the PR
