@@ -19,6 +19,10 @@ overlay is merged under the permission floor in the worker's `--settings`, its m
 and its name is kept on the worker record and the card (`profile`). A missing or broken active profile starts
 nothing. Switching profiles rewrites no settings file: a running worker keeps the profile it started with.
 
+Every start and resume also writes a row to the spend ledger (`spend.py`, `<data>/spend/`), and every `claude stop`
+and every `claude rm` first prices that session from its transcript and keeps the result; a ledger failure prints
+one line and never fails the worker.
+
 Starting (or resuming) a session can make branches and PRs, so it needs live mode; listing, classifying, ending
 and archiving work in shadow mode. v1 is reused by import (`lib/autopilot/workers.py`, `sessions.py`,
 `budget.py`, `park.py`, `perms.py`) and never changed.
@@ -31,6 +35,7 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -43,7 +48,7 @@ from autopilot import perms as v1_perms
 from autopilot import sessions as v1_sessions
 from autopilot import workers as v1_workers
 
-from assistant import cards, config, profiles, projects, transcripts
+from assistant import cards, config, profiles, projects, spend, transcripts
 from assistant.cards import CardError
 from assistant.resources import MAX_WORKERS, PORT_BASE, Registry, WorkerError, check_start, next_ports
 from assistant.store import Store, write_json
@@ -82,10 +87,12 @@ CLOSES = {"end": ("ended", "ended", True), "done": ("ended", "ended", False),
           "parked_failed": ("stopped", "stopped", False)}
 # Files a worker may not edit in the data folder. Every card's run directory stays writable except its settings
 # files: a deny rule cannot keep one worker out of another card's result files. The user's templates and sources
-# are here as well (the worker floor in roles.py), and the access profiles with the active one's name.
+# are here as well (the worker floor in roles.py), the access profiles with the active one's name, and the spend
+# ledger with the data folder's price override.
 PROTECTED = ("config.yaml", "workers.json", ".workers.lock", ".store.lock", "index.sqlite", "items/**",
              "restore/**", "projects/**", "templates/**", "sources/**", "sessions/**/settings-*.json",
-             f"{profiles.FOLDER}/**", profiles.ACTIVE)
+             f"{profiles.FOLDER}/**", profiles.ACTIVE, f"{spend.FOLDER}/**", spend.PRICES)
+SPEND_LINE = 300  # the longest stderr line a failed ledger step prints
 
 
 def package_root() -> Path:
@@ -212,17 +219,55 @@ class Workers:
     def _find(records: list, card_id: str, role: str):
         return next((r for r in records if r["card"] == card_id and r["role"] == role), None)
 
-    def _kill(self, short: str) -> None:
+    def _kill(self, short: str, session_id: str = "") -> None:
         """Run `claude stop` on a worker's session. Every stop goes through here; it raises when the call timed
         out or could not run. A timeout kills only the `claude stop` client: the stop it sent may still land, so
-        after a raise the session may be stopped or still running."""
+        after a raise the session may be stopped or still running. Either way the session is then settled in the
+        spend ledger (`_settle`): its transcript is final once the stop lands."""
         if short:
-            subprocess.run([self.claude, "stop", short], capture_output=True, timeout=60, stdin=subprocess.DEVNULL)
+            try:
+                subprocess.run([self.claude, "stop", short], capture_output=True, timeout=60,
+                               stdin=subprocess.DEVNULL)
+            finally:
+                self._settle(short, session_id)
 
-    def _stop(self, card_id: str, role: str, short: str, by: str) -> None:
+    # -- the spend ledger (spend.py): bookkeeping that never breaks a worker -------------------------------------------
+
+    def _listing(self):
+        return v1_sessions.list_all(self.claude)
+
+    @staticmethod
+    def _spend_failed(op: str, ident: str, err: BaseException) -> None:
+        """One stderr line for a ledger step that failed. The error text is the exception's own (a path or a
+        message, never an env value), cut so the line is at most SPEND_LINE characters."""
+        line = f"ap2: spend ledger: {op} failed for {ident}: {type(err).__name__}: {err}"
+        line = " ".join(line.split())[:SPEND_LINE]
+        try:
+            print(line, file=sys.stderr)
+        except (OSError, ValueError, AttributeError):
+            pass  # stderr is closed or full: nothing more to do
+
+    def _record(self, short: str, project, profile: dict, session_id: str) -> None:
+        """Write the launch row of a worker start or resume. Never raises: the session runs already."""
+        try:
+            spend.record_launch(self.data, short, "worker", project, profile, session_id=session_id,
+                                at=self.clock())
+        except Exception as e:  # noqa: BLE001 - bookkeeping must not undo a started session
+            self._spend_failed("record", short, e)
+
+    def _settle(self, short: str = "", session_id: str = "") -> None:
+        """Price a session before its stop or removal makes its transcript final or gone. Never raises; a session
+        it cannot find is kept as unsettled (unknown spend) by `spend.settle` itself."""
+        try:
+            spend.settle(self.data, self.transcripts_dir, short=short, session_id=session_id,
+                         listing=self._listing, now=self.clock())
+        except Exception as e:  # noqa: BLE001 - bookkeeping must not stop a cleanup
+            self._spend_failed("settle", session_id or short, e)
+
+    def _stop(self, card_id: str, role: str, short: str, by: str, session_id: str = "") -> None:
         """Stop a worker's session, and the worker's own attach ask goes with it: the session it names is gone (a
-        pause sets its resume hint after this)."""
-        self._kill(short)
+        pause sets its resume hint after this). `session_id` (when known) is what the stop's settle keys by."""
+        self._kill(short, session_id or "")
         self._close_worker_asks(card_id, role, by, kinds=("attach",))
 
     def _env(self, card: dict, role: str, project: dict, port_range: list, branch: str, profile: dict) -> dict:
@@ -505,8 +550,8 @@ class Workers:
                               prof, sid)
             write_json(settings, floor(role, found, self.data, env, prof))
             if parked:
-                self._stop(card_id, role, parked.get("short_id"), by)  # the parked session sits idle; the copy
-                # takes its place
+                # The parked session sits idle; the copy takes its place.
+                self._stop(card_id, role, parked.get("short_id"), by, parked.get("session_id"))
             short = self._launch(argv, cwd, env)
             rec = {"card": card_id, "role": role, "project": project.get("name"), "session_name": name,
                    "session_id": "", "short_id": short, "ports": port_range, "needs": needs, "cwd": cwd,
@@ -515,7 +560,10 @@ class Workers:
             # On record before the listing is asked for its id: a Ctrl-C or an error there still leaves a record
             # that points at the running session (the next check fills the id in, `_fill_session_id`).
             records[:] = [r for r in records if r is not old] + [rec]
-            rec["session_id"] = new_sid = self._session_id(short)
+            try:
+                rec["session_id"] = new_sid = self._session_id(short)
+            finally:
+                self._record(short, project.get("name"), prof, rec["session_id"])
         self._save_session(card_id, role, by, id=new_sid or sid, cwd=cwd, needs=needs, state="running", why=None,
                            question=None, profile=prof["name"])
         self._close_worker_asks(card_id, role, by)  # a new session: its old prompt, pause or question is over
@@ -540,7 +588,7 @@ class Workers:
         `archive_error`): `finish` copies every id again."""
         sid = rec.get("session_id") or ""
         rec["closing"] = mark
-        self._kill(rec.get("short_id"))  # outside the try: a stop that raised keeps the record on every path
+        self._kill(rec.get("short_id"), sid)  # outside the try: a stop that raised keeps the record on every path
         saved = False
         try:
             self._close_worker_asks(rec["card"], rec["role"], by, kinds=("attach",))
@@ -735,7 +783,7 @@ class Workers:
         # Whatever its state (parked, failed with its process alive, or gone: a stop of a gone session is harmless),
         # the old session is stopped first, so it never runs on untracked next to the copy. A stop that raises
         # leaves the record as it is.
-        self._stop(rec["card"], rec["role"], rec.get("short_id"), by)
+        self._stop(rec["card"], rec["role"], rec.get("short_id"), by, rec.get("session_id"))
         short = self._launch(argv, rec["cwd"], plan["env"])
         # The new session runs now: record it before anything else can fail (the listing below included), so the
         # registry never points at the old one. Its id is the copy's, or "" when the listing does not show the copy
@@ -743,7 +791,10 @@ class Workers:
         rec.update(short_id=short, session_id="", started_at=cards.stamp(self.clock()), profile=plan["profile"]["name"],
                    idle_since=None, blocked_since=None, parked=None,
                    resumes=rec.get("resumes", 0) + (1 if plan["why"] == "dead" else 0))
-        rec["session_id"] = self._session_id(short)
+        try:
+            rec["session_id"] = self._session_id(short)
+        finally:
+            self._record(short, plan["project"].get("name"), plan["profile"], rec["session_id"])
         # A resume runs under a new id; keep it on the card now, so no id is lost if the worker resumes again.
         self._save_session(rec["card"], rec["role"], by, id=rec["session_id"], state="running", why=None,
                            profile=plan["profile"]["name"])
@@ -984,6 +1035,8 @@ class Workers:
         failed = []
         try:
             for role, sid in todo:
+                if self.cfg.mode == "live":  # where the rm runs: its spend is kept before the transcript goes
+                    self._settle(session_id=sid)
                 try:
                     transcripts.remove_original(self.cfg, self.claude, sid)  # refuses in shadow mode, before running
                 except WorkerError as e:  # claude rm failed: the original stays, the next finish tries again

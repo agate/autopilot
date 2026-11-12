@@ -81,6 +81,7 @@ def _parser() -> argparse.ArgumentParser:
     _template_parser(sub)
     _worker_parser(sub)
     _profile_parser(sub)
+    _spend_parser(sub)
     _serve_parser(sub)
     _phone_parser(sub)
     sub.add_parser("hook-park", help="a worker's PreToolUse hook: at the usage line, deny all but its park")
@@ -370,9 +371,55 @@ def cmd_profile(args) -> int:
     return 0
 
 
+# -- ap2 spend (the spend ledger, design section 12) ------------------------------------------------------------------
+# What the workers launched in one mode cost, priced from their transcripts. Reads only, apart from the ledger's cache.
+
+def _spend_parser(sub) -> None:
+    sp = sub.add_parser("spend", help="print what workers cost today, this week and this month",
+                        description="Print the dollars spent today, this week (from Monday) and this calendar month "
+                                    "by workers launched in MODE, priced from their transcripts, and what could not "
+                                    "be priced. Reads only, apart from the ledger's cache.")
+    sp.add_argument("--mode", choices=("gateway", "subscription"), default="gateway",
+                    help="the launches to count (default: gateway)")
+    sp.add_argument("--json", action="store_true", help="print the totals as JSON")
+    sp.add_argument("--transcripts", metavar="PATH", help=TRANSCRIPTS_HELP)
+    sp.add_argument("--data", metavar="PATH", help=DATA_HELP)
+
+
+def cmd_spend(args) -> int:
+    import shutil
+
+    from assistant import spend, transcripts
+    from autopilot import sessions as v1_sessions
+
+    data = datadir.resolve(args.data)
+    projects = Path(args.transcripts) if args.transcripts else transcripts.default_projects()
+    claude = shutil.which("claude")
+    listing = (lambda: v1_sessions.list_all(claude)) if claude else None
+    try:
+        t = spend.totals(data, projects, mode=args.mode, listing=listing)
+    except OSError as e:
+        raise spend.SpendError(f"cannot read or update the spend ledger in {data / spend.FOLDER}: {e}") from e
+    if args.json:
+        _print_json(t)
+        return 0
+    lines = [f"{args.mode} spend (local time):"]
+    lines += [f"  {k:<6} ${t[k]:,.2f}" for k in ("today", "week", "month")]
+    if t["unknown"]:
+        lines.append("  unknown: some spend is not counted (an unpriced model, or a launch not matched to its "
+                     "session)")
+        if t["unknown_models"]:
+            lines.append(f"  unpriced models today: {', '.join(t['unknown_models'])}")
+        if t["unknown_launches"]:
+            lines.append(f"  launches not matched today: {t['unknown_launches']}")
+    _write_out("\n".join(lines))
+    return 0
+
+
 COMMANDS = {"config": cmd_config, "card": cmd_card, "search": cmd_search, "restore": cmd_restore}
 COMMANDS["worker"] = cmd_worker
 COMMANDS["profile"] = cmd_profile
+COMMANDS["spend"] = cmd_spend
 
 
 # -- ap2 source (the source engine, design 5) ---------------------------------------------------------------------
