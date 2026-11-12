@@ -240,7 +240,7 @@ class RoleTest(Case):
         sentence = re.search(r"`whole_pr` is set when (.*?);", text)
         self.assertIsNotNone(sentence, "no `whole_pr` is set when ... sentence in step 2")
         sentence = sentence.group(1)
-        for reason in ("merge commit", f"({prreview.COMPARE_LISTS})", "rewritten"):
+        for reason in ("new commits include a merge commit", f"({prreview.COMPARE_LISTS})", "rewritten"):
             with self.subTest(reason=reason):
                 self.assertIn(reason, sentence)
         # Step 3 points back at the list rather than naming fewer reasons.
