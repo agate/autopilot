@@ -1040,7 +1040,7 @@ Calls the author made without asking (check them):
   for workers, `workers.py`, `resources.py`, `transcripts.py` and `projects.py` (see the workers entry below);
   access profiles: `profiles.py` (the store, the overlay and merge, `ap2 profile`; see the access profiles entry
   below); the spend ledger: `spend.py` with the shipped `prices.json` next to it (`ap2 spend`; see the spend
-  ledger entry below); the local page:
+  ledger entry below); the daily cap: `cap.py` (`ap2 cap`; see the daily cap entry below); the local page:
   `server.py` (the server, its JSON routes and the request guard, run by `ap2 serve`) and
   `builtin/page/local.html` (the one page, inline CSS and JS, found from `server.py`'s own path); and the
   phone page's data: `phone.py` (`build`, run by `ap2 phone build`). `ap2 config [--data PATH]` prints the
@@ -1953,7 +1953,8 @@ Calls the author made without asking (check them):
     `end CARD ROLE [--transcripts P]`, `check [--transcripts P] [--usage P]`,
     `park CARD ROLE [--note T] [--usage P]`, `answer CARD TEXT...`, `finish CARD [--transcripts P]`.
     `ap2 spend [--mode M] [--json] [--transcripts P] [--data PATH]` prints what workers cost (see the spend ledger
-    entry below).
+    entry below). `ap2 cap [--json] [--transcripts P] [--data PATH]`, `ap2 cap answer OPTION` and `ap2 cap resume`
+    show and answer the daily cap (see the daily cap entry below).
 - **[decided by the builder]** Access profiles (slice 1 of the port of v1's access profiles): the store,
   `ap2 profile`, and every worker start and resume on the active profile. Ported from v1's `lib/autopilot/profile.py`
   into `lib/assistant/profiles.py`, never imported (v1's version writes v1's data folder). v1 and v2 keep separate
@@ -2044,10 +2045,9 @@ Calls the author made without asking (check them):
     name at all: unreadable, bad JSON or no string `name`). `add` refuses a name that exists (`subscription` included)
     and the gateway flags on a `--subscription` profile, and prints the saved profile. `list` and `show` create
     nothing; `add`, `use` and `remove` write only inside the data folder, so they work in shadow mode.
-  - Not in this slice: the spend ledger (its own entry below), the daily cap and its card, key health, refresh and
-    rotation (`rotate`), and the page's badge and switch. Until the cap lands, a gateway worker has no daily cap: acceptable because v2
-    is not installed and runs no unattended loop, and workers start only in live mode, by hand. Until then a
-    gateway worker still parks at the subscription's park line (it stops work, never spends more).
+  - Not in this slice: the spend ledger and the daily cap (their own entries below), key health, refresh and
+    rotation (`rotate`), and the page's badge and switch. The daily cap entry below says how a gateway worker is
+    held at its cap and why the subscription's park line no longer parks it.
 - **[decided by the builder]** Spend ledger (slice 2 of the port of v1's access profiles): a gateway shows no
   dollars, so v2 adds up what its own workers cost. Ported from v1's `lib/autopilot/spend.py` into
   `lib/assistant/spend.py`, never imported (v1's version keeps v1's ledger). v1 and v2 totals are separate: v2
@@ -2117,6 +2117,95 @@ Calls the author made without asking (check them):
       timestamp is earlier than the first launch of the session holding it, minus 300 s, is a copy: it is not
       counted for that session and does not make spend unknown (the same for settled requests). The first launch
       decides, not the last, so a session launched twice keeps its own requests. The request-owner dedupe stays.
+- **[decided by the builder]** Daily cap (slice 3 of the port of v1's access profiles): the spend ledger's number
+  now matters. When today's gateway spend reaches the active profile's `daily_cap_usd`, no new worker starts or
+  resumes; running workers keep going. Ported from v1's `lib/autopilot/cap.py` (with v1's fixes: every launch is
+  refused at the cap, a parked worker's resume is decided by the active profile, a raise reopens the card at the new
+  limit, unknown cost can be accepted, a failing stop never aborts the pause and is tried again) into
+  `lib/assistant/cap.py`, never imported. v1 and v2 caps are separate: v2 replaces v1.
+  1. Own module. `cap.py` has `state(data, now)`, `today_limit(data, p, now)`, `unknown_accepted(data, now)`,
+     `open_card`, `close_card`, `allowance`, `refusal`, `answer(data, option, now, workers=None)`, `pause`,
+     `paused`, `resume`, `OPTIONS = {"raise50": 50, "raise100": 100}`, `ACCEPT_UNKNOWN`, `PAUSE_NOTE`. "Today" is
+     the calendar day of `now`: an aware `now` at its own offset, a naive one by this computer's local rules, as in
+     `spend.totals`. Every function takes the data folder and the time; there is no module clock. The workers pass
+     their clock's time as a local aware time (`now.astimezone()`), so the cap's day is the computer's local day.
+  2. Where it is kept. `<data>/cap-state.json` `{"day", "raise_pct", "card", "opened"?, "accept_unknown"?,
+     "card_id"?}`: a new local day reads as blank (`raise_pct: 0`, `card: null`), so a raise ends at local midnight.
+     The pause is a separate file, `<data>/paused.json` `{"reason": "cap", "at": <stamp>}`, because a pause lasts
+     past midnight until the user lifts it. Both are written by `store.write_json` (a temp file of this process, then
+     `os.replace`); a symlink at either is refused on every write (lstat). An unreadable or malformed
+     `cap-state.json` reads as blank for today; a `paused.json` that exists but cannot be read, or is a symlink
+     (never followed), counts as paused (fail closed: never start work by accident). `datadir.FOLDERS` is unchanged.
+  3. The allowance. `allowance(data, projects, now, p, listing=None, store=None)` returns `{"allow": 0 | None,
+     "reason": "ok" | "cap" | "paused", "cause"?: "spent" | "unknown", "limit"?, "spent"?}` (`cap.REASONS`, a small
+     closed set the key-health slice extends). Paused, in any mode: `allow 0`, `reason paused`. A subscription
+     profile: `allow None`, `reason ok`, with no spend parsed (its usage windows stay the park hook's). A gateway
+     profile: `spend.totals(..., "gateway", ...)`; over = `today >= today_limit`; unknown = `unknown_today` and not
+     accepted; either opens the card and is `allow 0`, `reason cap`; neither takes back an unanswered card (it may
+     open again later today) and is `allow None`, `reason ok`. "Spent today" sums every gateway profile used today
+     (switching keys does not reset it); subscription spend is not counted. A card that cannot be written never lets
+     work start: the refusal stands, with `card_error`. A ledger that cannot be read refuses the start too (its
+     SpendError, or a CapError for an OSError).
+  4. One card per day, opened again only for a new limit or cause. The card is a v2 card made through the store:
+     kind and feed `cap`, `key: cap:<day>`, lane `needs`, `pri: P0`, `origin: found`, a title and the plain lines in
+     every configured language (Chinese words for `zh`, English for any other language) naming today's spend, the
+     limit, the cause, and for `unknown` the unpriced model ids, the unmatched launches and how to add a price to
+     `<data>/prices.json`. Its ask is `{"type": "approve", "from": "cap", "reason": "cap", "options", "limit",
+     "cause", "text"}`: `approve` because spending more is a risky step (4.1), `options` `raise50`, `raise100`,
+     `pause`, and `accept_unknown` only when the cause is `unknown`. Its id is kept as `card_id`; opened again the
+     same day, the same card is updated (back to `needs` with a new ask). `close_card` and every answer close the
+     card's ask (only an ask `from: cap`, so a user's own ask stays) and move it to `done`. A card left open on an
+     earlier day is closed the next time the cap state is written. The page's buttons are the page slice's; this
+     slice makes and answers the card from the command line.
+  5. Answers. `answer(data, option, now, workers=None)`: `raise50` / `raise100` add to today's `raise_pct` (a second
+     raise adds to the first); `accept_unknown` counts today's unknown cost as $0 for the cap until local midnight
+     (it still shows as unknown in `ap2 spend`); `pause` writes `paused.json` first, then `workers.cap_stop()`. Any
+     other option raises `CapError` (a `ConfigError`, so `ap2` exits 1). The answer records `card: "answered"`, and
+     an answered card does not open again for the same limit and cause. `ap2 cap resume` removes `paused.json`
+     (no-op when not paused) and prints `{"paused": false, "was": true|false}`.
+  6. Every start and resume is refused at the cap or while paused. `Workers.start` (fresh, `--resume`, and `answer`,
+     which calls it) checks the allowance right after `profiles.active` and before `_plan_start`, so nothing is
+     planned, discovered or launched; `allow 0` raises `CapError` naming the reason, today's spend, the limit and the
+     fix (`ap2 cap answer ...` or `ap2 cap resume`). `_plan_resume` (an in-place resume in `check`) checks the same,
+     after its own `profiles.active`. A dead worker refused this way keeps its one resume (as for a ProfileError:
+     the line names the cap, nothing resumes); a parked worker stays parked, never stopped as `parked_failed`: a
+     CapError is no WorkerError in `_resume_step`. The allowance is computed at most once per profile per `check`
+     pass, and only when a resume asks (`_pass_allowance`): one `spend.totals` call per pass. Running workers are
+     never stopped by the cap itself: only the `pause` answer stops them.
+  7. Pause stops and parks; a failed stop is retried. `Workers.cap_stop()`: for every worker on the list that is
+     not parked (and no close started), `_kill` (settle, then `claude stop`) outside the lock; then, under the lock,
+     a record whose session is still the one stopped gets `parked` `{"kind": "cap", "reason": "cap", "model": null,
+     "percent": null, "resets_at": null, "resume_at": null, "note": PAUSE_NOTE, "parked_at": <stamp>}`, and its card's
+     session state becomes `parked`. A worker whose stop failed stays unparked (it still shows as running); every
+     live `check` while `paused.json` holds `reason: cap` runs `cap_stop` again first, and the line of a stop that
+     failed again says so. One failed stop never blocks the rest; `paused.json` is written before any stop. In shadow
+     mode nothing is stopped (`ap2 cap answer pause` writes `paused.json` and says so; `check` does not retry).
+  8. Parked workers resume by the active profile's rules (`Workers._parked_due`): never while paused; not before
+     `resume_at` (a missing or null one is no time to wait for); then on a subscription profile v1's
+     `park.resume_due` with the usage file (no `--usage`: not due), on a gateway profile the allowance (`allow != 0`;
+     no usage file needed, the subscription's windows ignored). So a worker parked for quota on the subscription
+     resumes on a gateway profile once its `resume_at` passed, and a cap-parked worker resumes only after `ap2 cap
+     resume` and while the cap allows. The resume prompt follows the record's `reason`: `PARKED_RESUME` (quota),
+     `CAP_RESUME` (the pause was lifted), `LIMIT_RESUME` (below).
+  9. A limit park resumes like a quota park. A record with `reason: "limit"` (written by the slice that detects API
+     limit errors) resumes by 8 once its `resume_at` has passed, with `LIMIT_RESUME`: "You were parked at a usage
+     limit. Continue from where you stopped; check your worktree and run files first." This slice does not detect
+     limit errors.
+  10. Parking split by mode. `parkhook.decide` has no opinion for a worker whose own profile (`AP2_PROFILE` in
+      `AP2_DATA`, both in the worker env) loads as a gateway profile; `profiles` is imported only at the park line,
+      so the hook's common path stays light, and it never imports `spend`, `workers` or `cap`. A profile that cannot
+      be read keeps the subscription's rule (parking stops work, it never spends more). `Workers.park` refuses
+      ("a gateway worker is never parked by the subscription's usage windows: keep working") when the record's
+      `profile` loads as a gateway profile. The park hook looks only at the 5-hour and weekly windows, not at extra
+      credits (left open in v1 too); the transcript check of the API-stops slice is the safety net.
+  11. `ap2 cap [--json] [--transcripts P] [--data PATH]` prints today's state: the day, the active profile and its
+      mode and cap, `raise_pct`, today's limit, today's gateway spend (and what is unknown), the card's state and
+      id, `accept_unknown` and the pause; `--json` prints it as JSON, else a few plain lines. It reads only, apart
+      from the ledger's cache. `ap2 cap answer OPTION` and `ap2 cap resume` print JSON. Exit 0; an error is one
+      `ap2: ...` line and exit 1. All write only inside the data folder, so they work in shadow mode, except that
+      `answer pause` stops workers only in live mode.
+  12. Workers cannot edit the cap: `cap-state.json` and `paused.json` are in `PROTECTED`, so every worker floor
+      Edit-denies them.
 - **[decided by the builder]** v1 import (10, 11 question 5), read-only, in `importv1.py`.
   - Command: `ap2 import-v1 [--data PATH] [--from DIR] [--project NAME ...] [--dry-run]`. `--from` defaults to
     v1's own data root (`AUTOPILOT_DATA`, else `~/.claude/autopilot-data`, v1's `paths.data_root()`). A project is

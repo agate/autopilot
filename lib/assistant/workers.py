@@ -23,6 +23,14 @@ Every start and resume also writes a row to the spend ledger (`spend.py`, `<data
 and every `claude rm` first prices that session from its transcript and keeps the result; a ledger failure prints
 one line and never fails the worker.
 
+A gateway profile has a daily cap (`cap.py`, `<data>/cap-state.json`): when today's gateway spend reaches the active
+profile's `daily_cap_usd` (raised for today on the cap card), or some of today's cost cannot be priced, every start
+and resume (`start`, `--resume`, `answer`, and the in-place resumes of `check`) is refused with a CapError and the
+card asks the user; running workers keep going. `paused.json` (the card's `pause` answer) refuses them in any mode
+until `ap2 cap resume`; `cap_stop` stops and parks every running worker, and every live `check` while paused tries a
+failed stop again. A parked worker resumes by the active profile's rules: the subscription's usage windows (needs
+`--usage`), or the gateway's cap (no usage file). A gateway worker is never parked by the subscription's windows.
+
 Starting (or resuming) a session can make branches and PRs, so it needs live mode; listing, classifying, ending
 and archiving work in shadow mode. v1 is reused by import (`lib/autopilot/workers.py`, `sessions.py`,
 `budget.py`, `park.py`, `perms.py`) and never changed.
@@ -48,7 +56,7 @@ from autopilot import perms as v1_perms
 from autopilot import sessions as v1_sessions
 from autopilot import workers as v1_workers
 
-from assistant import cards, config, profiles, projects, spend, transcripts
+from assistant import cap, cards, config, profiles, projects, spend, transcripts
 from assistant.cards import CardError
 from assistant.resources import MAX_WORKERS, PORT_BASE, Registry, WorkerError, check_start, next_ports
 from assistant.store import Store, write_json
@@ -64,6 +72,13 @@ IDLE_MIN = 60  # a worker idle this long with no result file is stopped and mark
 BLOCKED_MIN = 30  # a worker waiting at a permission prompt this long is stopped, kept resumable
 PARK_RULES = dict(v1_config.DEFAULT_GLOBAL["budget"])  # park at 90%, resume 5 minutes after the reset
 PARKED_RESUME = "Usage is under the line again. Continue the task from where you parked."
+# A record parked for an API limit (`reason: limit`) resumes like a quota park once its `resume_at` has passed.
+LIMIT_RESUME = ("You were parked at a usage limit. Continue from where you stopped; check your worktree and run files "
+                "first.")
+CAP_RESUME = ("The daily cap pause was lifted. Continue from where you stopped; check your worktree and run files "
+              "first.")
+RESUME_PROMPTS = {"limit": LIMIT_RESUME, "cap": CAP_RESUME}  # by the parked record's `reason`; else PARKED_RESUME
+GATEWAY_PARK = "a gateway worker is never parked by the subscription's usage windows: keep working"
 INTERRUPTED = ("You were interrupted. Check your worktree and run files first, then continue the task from where "
                "you stopped.")
 BY = "ap2 worker"
@@ -88,10 +103,10 @@ CLOSES = {"end": ("ended", "ended", True), "done": ("ended", "ended", False),
 # Files a worker may not edit in the data folder. Every card's run directory stays writable except its settings
 # files: a deny rule cannot keep one worker out of another card's result files. The user's templates and sources
 # are here as well (the worker floor in roles.py), the access profiles with the active one's name, and the spend
-# ledger with the data folder's price override.
+# ledger with the data folder's price override, and the daily cap's state and pause.
 PROTECTED = ("config.yaml", "workers.json", ".workers.lock", ".store.lock", "index.sqlite", "items/**",
              "restore/**", "projects/**", "templates/**", "sources/**", "sessions/**/settings-*.json",
-             f"{profiles.FOLDER}/**", profiles.ACTIVE, f"{spend.FOLDER}/**", spend.PRICES)
+             f"{profiles.FOLDER}/**", profiles.ACTIVE, f"{spend.FOLDER}/**", spend.PRICES, cap.STATE, cap.PAUSED)
 SPEND_LINE = 300  # the longest stderr line a failed ledger step prints
 
 
@@ -269,6 +284,60 @@ class Workers:
         pause sets its resume hint after this). `session_id` (when known) is what the stop's settle keys by."""
         self._kill(short, session_id or "")
         self._close_worker_asks(card_id, role, by, kinds=("attach",))
+
+    # -- the daily cap (cap.py) ----------------------------------------------------------------------------------------
+
+    def _allowance(self, prof: dict, now: datetime) -> dict:
+        """`cap.allowance` on the active profile `prof`, today being the local day of `now`."""
+        return cap.allowance(self.data, self.transcripts_dir, now.astimezone(), prof, listing=self._listing,
+                             store=self.store)
+
+    @staticmethod
+    def _refuse_at_cap(a: dict) -> None:
+        if a.get("allow") == 0:
+            raise cap.CapError(cap.refusal(a))
+
+    def _is_gateway(self, rec: dict) -> bool:
+        """The worker's own profile (on its record) loads as a gateway profile. One that cannot be loaded is not:
+        the subscription's rule (parking stops work, it never spends more) stays."""
+        try:
+            return profiles.load(self.data, rec.get("profile") or profiles.SUBSCRIPTION).get("mode") == "gateway"
+        except Exception:  # noqa: BLE001 - any broken profile keeps the subscription's rule
+            return False
+
+    def cap_stop(self, by: str = BY) -> dict:
+        """The cap pause: stop every worker on the list that is not parked (its spend settled first, `_kill`),
+        outside the lock, then park the ones that stopped (`kind: cap`, no `resume_at`) and mark their card's
+        session `parked`. A worker whose stop failed stays unparked, so it still shows as running, and the next
+        `check` while paused tries again. One stop that fails never blocks the rest.
+        Returns `{"stopped": [...], "failed": [...]}`."""
+        now = self.clock()
+        running = [r for r in self.registry.read() if not r.get("parked") and not r.get("closing")]
+        done, failed = [], []
+        for r in running:  # outside the lock: a stop can take up to a minute
+            try:
+                self._kill(r.get("short_id"), r.get("session_id") or "")
+                done.append(r)
+            except (OSError, subprocess.SubprocessError) as e:
+                failed.append({"card": r["card"], "role": r["role"],
+                               "note": f"the cap pause could not stop it ({str(e) or type(e).__name__}); the next "
+                                       "`ap2 worker check` tries again"})
+        rec = {"kind": "cap", "reason": "cap", "model": None, "percent": None, "resets_at": None, "resume_at": None,
+               "note": cap.PAUSE_NOTE, "parked_at": cards.stamp(now)}
+        keys = {(r["card"], r["role"], r.get("short_id")) for r in done}
+        parked = []
+        with self.registry.locked() as records:
+            for w in records:
+                if (w["card"], w["role"], w.get("short_id")) in keys and not w.get("parked") and not w.get("closing"):
+                    w["parked"] = dict(rec)
+                    parked.append({"card": w["card"], "role": w["role"]})
+        for w in parked:
+            try:
+                self._close_worker_asks(w["card"], w["role"], by, kinds=("attach",))
+                self._save_session(w["card"], w["role"], by, state="parked", why=cap.PAUSE_NOTE)
+            except Exception as e:  # noqa: BLE001 - the worker is parked; its card line is bookkeeping
+                w["note"] = f"parked, but its card could not be updated: {str(e) or type(e).__name__}"
+        return {"stopped": parked, "failed": failed}
 
     def _env(self, card: dict, role: str, project: dict, port_range: list, branch: str, profile: dict) -> dict:
         """The worker's AP2_* variables, for its process env and its settings env alike (AP2_PROFILE included)."""
@@ -531,6 +600,8 @@ class Workers:
         now = self.clock()
         # Read once, before anything is planned: a missing or broken one starts nothing (ProfileError).
         prof = profiles.active(self.data)
+        # At the daily cap or while paused nothing is planned, discovered or launched (CapError).
+        self._refuse_at_cap(self._allowance(prof, now))
         # A start the list already refuses fails here, before any discovery runs.
         planned = self._plan_start(self.registry.read(), card, role, project, saved, cwd, needs, resume, prof)
         require_literal(self.data)  # before the tool discovery runs a session
@@ -662,7 +733,12 @@ class Workers:
 
     def park(self, card_id: str, role: str, note: str = "", usage_file=None) -> dict:
         """The worker stops itself because a usage window is at the park line (v1's `budget.parking`): it keeps
-        its slot and ports. Raises WorkerError when usage is under the line or the worker is not on record."""
+        its slot and ports. Raises WorkerError when usage is under the line, the worker is not on record, or the
+        worker runs on a gateway profile (its own, on its record): the subscription's windows never park a gateway
+        worker."""
+        mine = self._find(self.registry.read(), card_id, role)
+        if mine is not None and self._is_gateway(mine):
+            raise WorkerError(GATEWAY_PARK)
         now = self.clock()
         b = v1_budget.read(Path(usage_file) if usage_file else Path.home() / ".claude.json",
                            now_ms=int(now.timestamp() * 1000), stale_min=PARK_RULES["stale_min"])
@@ -674,6 +750,8 @@ class Workers:
             w = self._find(records, card_id, role)
             if w is None:
                 raise WorkerError(f"no {role} worker on card {card_id}")
+            if self._is_gateway(w):
+                raise WorkerError(GATEWAY_PARK)
             w["parked"] = rec
         return rec
 
@@ -736,15 +814,18 @@ class Workers:
     # (what it needs, nothing started), `_resume_tools` with the lock free, then `_resume_dead` under the lock again
     # once `_still_due` has checked the record on the list as it is then.
 
-    def _plan_resume(self, rec: dict, why: str, prompt: str) -> dict:
+    def _plan_resume(self, rec: dict, why: str, prompt: str, allow: Optional[Callable] = None) -> dict:
         """Step 1, under the lock: what an in-place resume needs (`why` is "dead" or "parked"); nothing is started
         or written. Live mode only: a shadow-mode refusal comes first, so it runs no discovery. The active profile is
         read here, once: the resume runs on it, whatever profile the worker started with (ProfileError when it
-        cannot be loaded: nothing resumes)."""
+        cannot be loaded: nothing resumes). At the daily cap or while paused it raises CapError (`allow(prof)`, the
+        check's one allowance per pass): like a ProfileError it is no WorkerError, so a dead worker keeps its one
+        resume and a parked one stays parked."""
         config.require_live(self.cfg, f"resume the {rec['role']} worker on card {rec['card']}")
         card = self._card(rec["card"])
         project = self._project(card)
         prof = profiles.active(self.data)
+        self._refuse_at_cap(allow(prof) if allow is not None else self._allowance(prof, self.clock()))
         return {"card": rec["card"], "role": rec["role"], "short_id": rec.get("short_id"), "cwd": rec.get("cwd"),
                 "why": why, "prompt": prompt, "project": project, "profile": prof,
                 "env": self._env(card, rec["role"], project, rec["ports"], rec.get("branch") or "", prof)}
@@ -756,7 +837,29 @@ class Workers:
         require_literal(self.data)  # before the tool discovery runs a session
         return self._tools(plan["project"], plan["cwd"], plan["env"], plan["profile"], plan["card"], plan["role"])
 
-    def _still_due(self, rec: Optional[dict], plan: dict, listing, b, now: datetime) -> bool:
+    def _parked_due(self, rec: dict, now: datetime, b, allow: Callable) -> bool:
+        """A parked worker may resume now, by the active profile's rules: never while paused (`paused.json`); not
+        before its `resume_at` (a missing or null one is no time to wait for); then on a subscription profile v1's
+        `park.resume_due` with the usage file (none given: not due), and on a gateway profile the daily cap
+        (`allow(prof)`, no usage file needed, the subscription's windows ignored). A record parked for an API limit
+        (`reason: limit`) and one parked by the cap pause resume the same way."""
+        if cap.paused(self.data) is not None:
+            return False
+        at = (rec.get("parked") or {}).get("resume_at")
+        if at is not None:
+            try:
+                at = datetime.fromisoformat(at)
+            except (TypeError, ValueError):
+                at = None  # no usable resume time: nothing to wait for
+            if at is not None and (at.tzinfo is None or now < at):
+                return False
+        prof = profiles.active(self.data)
+        if prof.get("mode") == "gateway":
+            return allow(prof).get("allow") != 0
+        return b is not None and v1_park.resume_due(rec, now, {"budget": PARK_RULES}, b)
+
+    def _still_due(self, rec: Optional[dict], plan: dict, listing, b, now: datetime,
+                   allow: Optional[Callable] = None) -> bool:
         """Step 3, under the lock: the planned resume still applies to `rec` (the card and role's record on the
         list as it is now): the same session in the same folder, no close started, and a classification of the
         record as it is now (with step 1's `listing`) that says the same state (dead with its one resume left, or
@@ -767,7 +870,7 @@ class Workers:
         state = self.classify(rec, listing)
         if plan["why"] == "dead":
             return state == "dead" and rec.get("resumes", 0) < 1
-        return state == "parked" and b is not None and v1_park.resume_due(rec, now, {"budget": PARK_RULES}, b)
+        return state == "parked" and self._parked_due(rec, now, b, allow or self._pass_allowance(now))
 
     def _resume_dead(self, rec: dict, plan: dict, found: dict, by: str = BY) -> dict:
         """Step 3, under the lock: resume a worker's own session in place (same slot, same ports) with the tools
@@ -806,7 +909,8 @@ class Workers:
         (the resume cannot start, e.g. its worktree is gone or its tools cannot be listed) on a dead worker counts
         as its one resume, so the next check stops it as died twice instead of holding its slot forever, and is
         raised for its line; on a parked worker it stops the worker as one that died twice (and returns None). A
-        shadow-mode refusal is not a WorkerError: it is not counted, and a parked worker waits."""
+        shadow-mode refusal, a ProfileError and the daily cap's CapError are not WorkerErrors: they are not counted,
+        and a parked worker waits."""
         try:
             return step()
         except WorkerError as e:
@@ -840,6 +944,11 @@ class Workers:
         b = None
         if usage_file:
             b = v1_budget.read(Path(usage_file), now_ms=int(now.timestamp() * 1000), stale_min=PARK_RULES["stale_min"])
+        retry = {}
+        if self.cfg.mode == "live" and (cap.paused(self.data) or {}).get("reason") == "cap":
+            # Paused at the daily cap: a worker whose stop failed gets the stop again, until it works.
+            retry = {(f["card"], f["role"]): f["note"] for f in self.cap_stop(by)["failed"]}
+        allow = self._pass_allowance(now)  # one allowance (one `spend.totals`) per pass, only when a resume asks
         out, planned = [], []
         stopped = None
         with self.registry.locked() as records:
@@ -859,7 +968,7 @@ class Workers:
                         state = "unknown"  # its mark says what to do: `_act` finishes that close
                     if not rec.get("session_id"):
                         self._fill_session_id(rec, listing, by)
-                    plan = self._act(rec, state, records, entry, by, b, now)
+                    plan = self._act(rec, state, records, entry, by, b, now, allow)
                     if plan is not None:
                         planned.append(dict(plan, entry=entry))
                 except Exception as e:  # noqa: BLE001 - one worker's error must not cost the others their changes
@@ -869,6 +978,8 @@ class Workers:
                     # already made (an earlier worker's close, its new session id) are written back either way.
                     stopped = e
                     break
+                if (rec["card"], rec["role"]) in retry and "note" not in entry:
+                    entry["note"] = retry[(rec["card"], rec["role"])]
                 out.append(entry)
         if stopped is not None:
             raise stopped
@@ -889,7 +1000,7 @@ class Workers:
                 entry = plan["entry"]
                 try:
                     rec = self._find(records, plan["card"], plan["role"])
-                    if not self._still_due(rec, plan, listing, b, now):
+                    if not self._still_due(rec, plan, listing, b, now, allow):
                         entry["note"] = ("its record changed while its tools were listed, so it was not resumed; "
                                          "the next check looks at it again")
                         continue
@@ -910,6 +1021,24 @@ class Workers:
             raise stopped
         return out
 
+    def _pass_allowance(self, now: datetime) -> Callable:
+        """`allow(prof)`: the daily cap's allowance for `prof`, computed at most once per profile (one
+        `spend.totals` call) for one `check` pass. An error is kept and raised again for every worker that asks."""
+        memo = {}
+
+        def allow(prof: dict) -> dict:
+            name = prof.get("name")
+            if name not in memo:
+                try:
+                    memo[name] = (True, self._allowance(prof, now))
+                except Exception as e:  # noqa: BLE001 - raised for each worker that asks, noted on its line
+                    memo[name] = (False, e)
+            ok, value = memo[name]
+            if not ok:
+                raise value
+            return value
+        return allow
+
     def _fill_session_id(self, rec: dict, listing, by: str) -> None:
         """The listing did not show the worker's session when it started: take its id from this listing, on the
         record and the card, so a later stop saves and archives it and a later resume continues it."""
@@ -918,10 +1047,12 @@ class Workers:
             self._save_session(rec["card"], rec["role"], by, id=sid)
             rec["session_id"] = sid
 
-    def _act(self, rec: dict, state: str, records: list, entry: dict, by: str, b, now: datetime) -> Optional[dict]:
+    def _act(self, rec: dict, state: str, records: list, entry: dict, by: str, b, now: datetime,
+             allow: Optional[Callable] = None) -> Optional[dict]:
         """Act on one worker's state under the lock (`check`'s step 1). An in-place resume is only planned: its
         plan (`_plan_resume`) is returned, and `check` runs it once its tools are listed; otherwise None."""
         card_id, role = rec["card"], rec["role"]
+        allow = allow or self._pass_allowance(now)
         if rec.get("closing"):
             # A close that was started is finished before anything else: its stop may have landed after it timed
             # out, so the session's state now (dead, most likely) says nothing about what to do.
@@ -945,7 +1076,7 @@ class Workers:
             if rec.get("resumes", 0) < 1:
                 # Planned only: `check` lists its tools with the lock free, then resumes it (`_resume_step`).
                 return self._resume_step(rec, "dead", records, entry, by,
-                                         lambda: self._plan_resume(rec, "dead", INTERRUPTED))
+                                         lambda: self._plan_resume(rec, "dead", INTERRUPTED, allow))
             else:
                 why = "the worker died twice; look at its run files and its worktree, then start it again"
                 entry.update(self._finish_close(rec, records, self._mark("died", why), by))
@@ -973,10 +1104,11 @@ class Workers:
                 why = f"idle {IDLE_MIN} minutes with no result file; paused, can resume"
                 entry.update(self._finish_close(rec, records, self._mark("idle", why), by))
         elif state == "parked":
-            if b is not None and v1_park.resume_due(rec, now, {"budget": PARK_RULES}, b):
+            if self._parked_due(rec, now, b, allow):
                 # Planned only, as for a dead worker; a parked worker that cannot resume is stopped.
+                prompt = RESUME_PROMPTS.get((rec.get("parked") or {}).get("reason"), PARKED_RESUME)
                 return self._resume_step(rec, "parked", records, entry, by,
-                                         lambda: self._plan_resume(rec, "parked", PARKED_RESUME))
+                                         lambda: self._plan_resume(rec, "parked", prompt, allow))
         return None
 
     # -- answer, finish ------------------------------------------------------------------------------------------
