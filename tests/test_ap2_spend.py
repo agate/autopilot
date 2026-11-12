@@ -906,6 +906,9 @@ class HardeningTest(SpendCase):
         f = io.BytesIO(b"x" * 100)  # one long line: skipping it stops once the cap is passed
         self.assertEqual(list(spend._lines(f, 8, 20)), [(None, None)])
         self.assertEqual(f.tell(), 24)
+        f = io.BytesIO(b"x" * 100)  # the skip reaches the cap exactly at a chunk's end: still one unknown
+        self.assertEqual(list(spend._lines(f, 8, 16)), [(None, None)])
+        self.assertEqual(f.tell(), 24)
         # exactly the cap is still read
         self.assertEqual(list(spend._lines(io.BytesIO(b"a\n" * 4), 8, 8)), [(i, b"a\n") for i in range(4)])
 
@@ -1348,7 +1351,7 @@ class SpendCliTest(unittest.TestCase):
 
     def test_a_ledger_error_names_the_ledger_and_an_unnamed_error_names_both(self):
         for name, says, not_says in ((str(self.data / "spend" / "cache.json"), "spend ledger", "transcripts"),
-                                     (None, "transcripts", None)):
+                                     (None, "transcripts", None), ("/elsewhere/x.jsonl", "transcripts", None)):
             bad = OSError(5, "Input/output error", name) if name else OSError("disk gone")
             with mock.patch.object(spend, "totals", side_effect=bad):
                 code, out, err = self.main()
