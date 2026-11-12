@@ -141,8 +141,10 @@ def _has_tokens(u: dict) -> bool:
 
 
 def _parse_file(path: Path, table: dict | None = None) -> list:
-    """One file's requests as {"ts", "model", "usd"}; streaming writes several lines per requestId with growing
-    counts, so only the last usage seen for each counts."""
+    """One file's requests as {"id", "ts", "model", "usd"}; streaming writes several lines per requestId with
+    growing counts, so only the last usage seen for each counts. `id` is the requestId (or message id) that a
+    resumed copy repeats, or a "~<line>" key local to this file. A line without a usable timestamp keeps
+    ts None and usd None: unknown spend, never dropped."""
     table = prices() if table is None else table
     per_req = {}
     try:
@@ -156,14 +158,16 @@ def _parse_file(path: Path, table: dict | None = None) -> list:
             continue
         msg = d.get("message") if isinstance(d, dict) else None
         u = msg.get("usage") if isinstance(msg, dict) else None
-        if not u or d.get("type") != "assistant" or not _has_tokens(u):
+        if not isinstance(u, dict) or not u or d.get("type") != "assistant" or not _has_tokens(u):
             continue  # e.g. "<synthetic>" lines Claude Code writes for API errors: all counts 0
         try:
             ts = datetime.fromisoformat(str(d.get("timestamp")).replace("Z", "+00:00")).timestamp()
         except ValueError:
-            continue
+            ts = None
         model = msg.get("model")
-        per_req[d.get("requestId") or msg.get("id") or f"line-{n}"] = {"ts": ts, "model": _model_key(model), "usd": _cost(table, model, u)}
+        rid = str(d.get("requestId") or msg.get("id") or f"~{n}")
+        per_req[rid] = {"id": rid, "ts": ts, "model": _model_key(model),
+                        "usd": _cost(table, model, u) if ts is not None else None}
     return list(per_req.values())
 
 
@@ -183,7 +187,8 @@ def request_costs(path: Path, tz=None) -> list:
     out = []
     for f in _files(Path(path)):
         for it in _parse_file(f, table):
-            out.append({"day": _day(it["ts"], tz), "model": it["model"], "usd": it["usd"]})
+            out.append({"day": _day(it["ts"], tz) if it["ts"] is not None else None, "model": it["model"],
+                        "usd": it["usd"]})
     return out
 
 
@@ -209,13 +214,13 @@ def _load_cache(key: str) -> dict:
 
 def _save_cache(c: dict) -> None:
     _dir().mkdir(parents=True, exist_ok=True)
-    tmp = _cache_path().with_suffix(".tmp")
+    tmp = _cache_path().with_suffix(f".{os.getpid()}.tmp")   # the gate and a hook may save at the same time
     tmp.write_text(json.dumps(c))
     os.replace(tmp, _cache_path())
 
 
 def _aggregate(items: list, tz, month_start: str) -> dict:
-    """Per-day {"usd", "unknown"} of one file's requests, from the first day of the current month on."""
+    """Per-day {"usd", "unknown"} of requests from the first day of the current month on (legacy settled lines)."""
     days = {}
     for it in items:
         day = _day(it["ts"], tz)
@@ -229,22 +234,40 @@ def _aggregate(items: list, tz, month_start: str) -> dict:
     return days
 
 
-def _cached_days(c: dict, f: Path, table: dict, tz, month_start: str, seen: set) -> dict:
+def _month_ts(now: datetime) -> float:
+    return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp()
+
+
+def _reqs(items: list, since: float) -> dict:
+    """{request id: [ts, usd]} of one file's requests from `since` on; an undated one is always kept."""
+    return {it["id"]: [it["ts"], it["usd"]] for it in items if it["ts"] is None or it["ts"] >= since}
+
+
+def _cached_reqs(c: dict, f: Path, table: dict, since: float, seen: set) -> dict:
     try:
         st = f.stat()
     except OSError:
         return {}
     stamp = [st.st_mtime_ns, st.st_size]
     ent = c["files"].get(str(f))
-    if not ent or ent["stamp"] != stamp:
-        ent = {"stamp": stamp, "days": _aggregate(_parse_file(f, table), tz, month_start)}
+    if not ent or ent.get("stamp") != stamp or not isinstance(ent.get("reqs"), dict):
+        ent = {"stamp": stamp, "reqs": _reqs(_parse_file(f, table), since)}
         c["files"][str(f)] = ent
         c["dirty"] = True
-    elif any(d < month_start for d in ent["days"]):  # the month rolled over since this was cached
-        ent["days"] = {d: v for d, v in ent["days"].items() if d >= month_start}
+    elif any(v[0] is not None and v[0] < since for v in ent["reqs"].values()):   # the month rolled over
+        ent["reqs"] = {k: v for k, v in ent["reqs"].items() if v[0] is None or v[0] >= since}
         c["dirty"] = True
     seen.add(str(f))
-    return ent["days"]
+    return ent["reqs"]
+
+
+def _session_reqs(files_reqs: list, sid: str) -> dict:
+    """One session's requests from all its files; a file-local key is made unique to its file."""
+    out = {}
+    for i, reqs in enumerate(files_reqs):
+        for k, v in reqs.items():
+            out[f"~{sid}:{i}:{k[1:]}" if k.startswith("~") else k] = v
+    return out
 
 
 def _resolve(c: dict, launched: dict, force: bool = False) -> None:
@@ -275,8 +298,9 @@ def _price_key(tz=None) -> str:
 
 
 def settle(short: str) -> None:
-    """Price a finished session now and keep per-day totals, so its spend outlives the transcript file. A
-    session that cannot be found is recorded as unsettled, and its launch stays unknown spend in `totals`."""
+    """Price a finished session now and keep its requests ({request id: [ts, usd]}), so its spend outlives the
+    transcript file and a resumed copy of it is still counted once. A session that cannot be found is recorded
+    as unsettled, and its launch stays unknown spend in `totals`."""
     tz = datetime.now().astimezone().tzinfo
     c = _load_cache(_price_key(tz))
     _resolve(c, {short: _clock()}, force=True)
@@ -288,10 +312,9 @@ def settle(short: str) -> None:
     if not t:
         _append("settled.jsonl", {"batch": batch, "short": short, "session": sid, "unsettled": True})
         return
-    for day, d in sorted(_aggregate([{"ts": it["ts"], "usd": it["usd"]} for f in _files(t) for it in _parse_file(f)],
-                                    tz, "0000-00-00").items()):
-        _append("settled.jsonl", {"batch": batch, "session": sid, "short": short, "day": day,
-                                  "usd": d["usd"], "unknown": d["unknown"]})
+    table = prices()
+    reqs = _session_reqs([_reqs(_parse_file(f, table), 0.0) for f in _files(t)], sid)
+    _append("settled.jsonl", {"batch": batch, "session": sid, "short": short, "reqs": reqs})
 
 
 def _launch_epoch(ln: dict) -> float:
@@ -319,9 +342,10 @@ def totals(now: datetime, mode: str = "gateway") -> dict:
         if ln.get("short"):
             last_launch[ln["short"]] = ln
     mine = {s: ln for s, ln in last_launch.items() if ln.get("mode") == mode}
+    workers_any = {s: ln for s, ln in last_launch.items() if ln.get("kind") == "worker"}
     table = prices()
     c = _load_cache(_price_key(tz))
-    _resolve(c, {s: _launch_epoch(ln) for s, ln in mine.items()})
+    _resolve(c, {s: _launch_epoch(ln) for s, ln in {**workers_any, **mine}.items()})
 
     out = {"today": 0.0, "week": 0.0, "month": 0.0, "unknown": False, "unknown_today": False}
 
@@ -342,14 +366,13 @@ def totals(now: datetime, mode: str = "gateway") -> dict:
     for s, ln in last_launch.items():
         sid = c["shorts"].get(s)
         if sid:
-            session_mode[sid] = (ln.get("mode"), this_month(ln), launch_day(ln) == today)
+            session_mode[sid] = (ln.get("mode"), this_month(ln), launch_day(ln) == today, _launch_epoch(ln),
+                                 ln.get("kind"))
 
     settled = {}
     for ln in _read_lines("settled.jsonl"):
         if ln.get("session") and not ln.get("unsettled"):
             settled.setdefault(ln["session"], {}).setdefault(ln.get("batch", ""), []).append(ln)
-
-    seen = set()
 
     def add(day: str, usd, unknown) -> None:
         if not (month_start <= day <= today):
@@ -365,22 +388,51 @@ def totals(now: datetime, mode: str = "gateway") -> dict:
             if day == today:
                 out["today"] += usd
 
-    for sid, (m, recent, launched_today) in session_mode.items():
-        if m != mode:
+    # The requests of every session that can share them with one of this mode: its own sessions, and every
+    # worker (a resumed copy repeats its original's requests, also across a profile switch).
+    since, seen, per_session = _month_ts(now), set(), {}
+    for sid, (m, recent, launched_today, _, kind) in session_mode.items():
+        if m != mode and kind != "worker":
             continue
         if sid in settled:
-            for ln in settled[sid][max(settled[sid])]:
-                add(ln["day"], ln.get("usd"), ln.get("unknown"))
+            rows = settled[sid][max(settled[sid])]
+            if any("reqs" in r for r in rows):
+                reqs = {}
+                for r in rows:
+                    reqs.update(r.get("reqs") or {})
+                per_session[sid] = reqs
+            elif m == mode:   # a line from before request ids were kept: its day totals, as they were
+                for r in rows:
+                    add(r["day"], r.get("usd"), r.get("unknown"))
             continue
         t = usage.find_transcript(sid)
         if not t:
-            # launched this month but neither a transcript nor settled lines remain
-            out["unknown"] = out["unknown"] or recent
-            out["unknown_today"] = out["unknown_today"] or launched_today
+            if m == mode:   # launched this month but neither a transcript nor settled lines remain
+                out["unknown"] = out["unknown"] or recent
+                out["unknown_today"] = out["unknown_today"] or launched_today
             continue
-        for f in _files(t):
-            for day, d in _cached_days(c, f, table, tz, month_start, seen).items():
-                add(day, d["usd"], d["unknown"])
+        per_session[sid] = _session_reqs([_cached_reqs(c, f, table, since, seen) for f in _files(t)], sid)
+
+    # A request belongs to the session that has it first (by its line's time; the earlier launch on a tie).
+    owner = {}
+    for sid, reqs in per_session.items():
+        rank = session_mode[sid][3]
+        for rid, (ts, _) in reqs.items():
+            key = (ts if ts is not None else float("inf"), rank, sid)
+            if rid not in owner or key < owner[rid]:
+                owner[rid] = key
+    for sid, reqs in per_session.items():
+        m, _, launched_today, _, _ = session_mode[sid]
+        if m != mode:
+            continue
+        for rid, (ts, usd) in reqs.items():
+            if owner[rid][2] != sid:
+                continue   # a copy of a request another session made
+            if ts is None:   # no usable time: unknown spend, on the day the session was launched
+                out["unknown"] = True
+                out["unknown_today"] = out["unknown_today"] or launched_today
+                continue
+            add(_day(ts, tz), usd, usd is None)
     for k in [k for k in c["files"] if k not in seen and not Path(k).exists()]:
         del c["files"][k]
         c["dirty"] = True

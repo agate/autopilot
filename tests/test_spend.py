@@ -221,19 +221,18 @@ class TotalsTest(SpendCase):
         self.launch("efgh5678")
         self.assertIs(spend.totals(NOW)["unknown_today"], True)
 
-    def test_cache_holds_per_day_aggregates_of_this_month_only(self):
+    def test_cache_holds_the_files_requests_of_this_month_only(self):
         self.put("days.jsonl")
         self.launch()
         spend.totals(NOW)
         ent = list(json.loads((self.data / "spend" / "cache.json").read_text())["files"].values())[0]
-        self.assertEqual(sorted(ent["days"]), ["2026-11-10", "2026-11-11"])
-        self.assertEqual(sorted(ent["days"]["2026-11-10"]), ["unknown", "usd"])
+        self.assertEqual(sorted(ent["reqs"]), ["req_a", "req_b"])   # the request ids dedupe resumed copies
         spend.totals(datetime(2026, 11, 11, 12, 0, tzinfo=TZ))
-        # the same file read in December keeps no November day
+        # the same file read in December keeps no November request
         self.clock += 20 * 86400
         spend.totals(datetime(2026, 12, 1, 12, 0, tzinfo=TZ))
         ent = list(json.loads((self.data / "spend" / "cache.json").read_text())["files"].values())[0]
-        self.assertEqual(ent["days"], {})
+        self.assertEqual(ent["reqs"], {})
 
     def test_synthetic_lines_are_ignored(self):
         self.put("synthetic.jsonl")
@@ -322,6 +321,65 @@ class TotalsTest(SpendCase):
     def test_record_session_without_an_id_is_unknown_spend(self):
         spend.record_session("", "oneoff", "checkout", profile())
         self.assertIs(spend.totals(NOW)["unknown"], True)
+
+    def copy(self, sid, extra=()):
+        """A resumed copy: a new session whose transcript repeats the original's requests, then its own."""
+        f = self.transcript.parent / f"{sid}.jsonl"
+        lines = (FIX / "days.jsonl").read_text().splitlines() + [json.dumps(x) for x in extra]
+        f.write_text("\n".join(lines) + "\n")
+        return f
+
+    NEW = {"type": "assistant", "requestId": "req_c", "timestamp": "2026-11-11T15:00:00Z",
+           "message": {"model": "claude-haiku-4-5", "usage": {"input_tokens": 1000000, "output_tokens": 0}}}
+    SID2 = "22222222-0000-0000-0000-00000000cccc"
+
+    def test_resumed_copy_counts_shared_requests_once(self):
+        self.put("days.jsonl")
+        self.launch()
+        self.copy(self.SID2, [self.NEW])
+        self.listing.append({"id": "zzzz9999", "sessionId": self.SID2})
+        self.clock += 60
+        self.launch("zzzz9999")
+        t = spend.totals(NOW)
+        self.assertAlmostEqual(t["month"], 3.0)    # req_a + req_b once, req_c once
+        self.assertAlmostEqual(t["today"], 2.0)
+
+    def test_subscription_history_resumed_under_a_gateway_stays_subscription(self):
+        self.put("days.jsonl")
+        self.launch(p=profile("sub", "subscription"))
+        self.copy(self.SID2, [self.NEW])
+        self.listing.append({"id": "zzzz9999", "sessionId": self.SID2})
+        self.clock += 60
+        self.launch("zzzz9999", profile("g1"))
+        self.assertAlmostEqual(spend.totals(NOW, mode="gateway")["month"], 1.0)
+        self.assertAlmostEqual(spend.totals(NOW, mode="subscription")["month"], 2.0)
+
+    def test_dedupe_survives_the_original_being_settled_and_removed(self):
+        self.put("days.jsonl")
+        self.launch()
+        self.copy(self.SID2, [self.NEW])
+        self.listing.append({"id": "zzzz9999", "sessionId": self.SID2})
+        self.clock += 60
+        self.launch("zzzz9999")
+        spend.settle(SHORT)
+        self.transcript.unlink()
+        self.assertAlmostEqual(spend.totals(NOW)["month"], 3.0)
+
+    def test_a_line_without_a_usable_timestamp_is_unknown_not_dropped(self):
+        d = self.transcript.parent
+        d.mkdir(parents=True)
+        self.transcript.write_text(json.dumps({"type": "assistant", "requestId": "r", "timestamp": "garbage",
+            "message": {"model": "claude-haiku-4-5", "usage": {"input_tokens": 10, "output_tokens": 1}}}) + "\n")
+        self.launch()
+        t = spend.totals(NOW)
+        self.assertEqual((t["unknown"], t["unknown_today"]), (True, True))
+
+    def test_cache_temp_file_is_per_process(self):
+        seen = []
+        real = os.replace
+        with mock.patch("autopilot.spend.os.replace", side_effect=lambda a, b: (seen.append(str(a)), real(a, b))):
+            self.launch()
+        self.assertTrue(seen and all(f".{os.getpid()}." in x for x in seen), seen)
 
     def test_record_launch_rejects_unknown_kind(self):
         with self.assertRaises(ValueError):
