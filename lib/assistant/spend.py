@@ -214,11 +214,11 @@ def _parse_file(path: Path, table: dict) -> list:
     resumed copy repeats (one that starts with "~" gets one more "~"), or a "~<line>" key local to this file. A line
     without a usable timestamp keeps ts None and usd None: unknown spend, never dropped. Only a regular file is read
     (checked on the open file, so a FIFO or a device swapped in after a check never blocks the read). The file is
-    read one line (split at b"\n") at a time,
-    each read asking for at most MAX_LINE_BYTES: a longer line is one unknown request ("~<line>"), and a file larger
-    than MAX_FILE_BYTES is not read at all and is one unknown request ("~file"). A file that is there but cannot be
-    opened (or an `_Unreadable` from `_files`) is one unknown request (UNREADABLE); a read that fails part way keeps
-    the requests read so far and adds that one. A file that is gone (it vanished after it was found) has none."""
+    read one line (split at b"\n") at a time, each read asking for at most MAX_LINE_BYTES: a longer line is one
+    unknown request ("~<line>"), and a file larger than MAX_FILE_BYTES is not read at all and is one unknown request
+    ("~file"). A file that is there but cannot be opened (or an `_Unreadable` from `_files`) is one unknown request
+    (UNREADABLE); a read that fails part way keeps the requests read so far and adds that one. A file that is gone
+    (it vanished after it was found) has none."""
     if isinstance(path, _Unreadable):
         return [_unknown(UNREADABLE)]
     per_req = {}

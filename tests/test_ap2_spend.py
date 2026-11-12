@@ -1064,7 +1064,7 @@ class HardeningTest(SpendCase):
 
         def stat_(p, *a, **kw):  # only the transcript cannot be checked; every other path is stat'ed as usual
             if p == self.transcript:
-                raise PermissionError(13, "Permission denied", str(p))
+                raise OSError(5, "Input/output error", str(p))
             return real(p, *a, **kw)
         unknown = {spend.UNREADABLE: [None, None, ""]}
         with mock.patch.object(Path, "stat", stat_):

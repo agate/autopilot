@@ -2255,10 +2255,10 @@ Calls the author made without asking (check them):
         `Path.is_file` says False on 3.14) each give one unknown request (key `~unreadable`), and `settle` writes it
         into the settled row like any other unknown request. That result is never cached, so the next read tries the
         file again (a `chmod` back keeps the file's mtime and size). The cache's key changes once, so a cache
-        written before this rule (which holds such a file as no requests) is priced again. A request id the file gives that starts with `~`
-        gets one more `~`, so a forged `~unreadable` (or `~<line>`) never reads as a key the parser makes. A file
-        that is gone (`FileNotFoundError`, a race with a deletion), no subagents folder, and a link to a FIFO or a
-        device are still nothing.
+        written before this rule (which holds such a file as no requests) is priced again. A request id the file
+        gives that starts with `~` gets one more `~`, so a forged `~unreadable` (or `~<line>`) never reads as a key
+        the parser makes. A file that is gone (`FileNotFoundError`, a race with a deletion), no subagents folder,
+        and a link to a FIFO or a device are still nothing.
       - No infinite totals. A sum too big for a number (about a million forged requests) is clamped: `today`,
         `week` or `month` that is not finite becomes `sys.float_info.max` (finite, over any cap) and sets
         `unknown` (and `unknown_today` for `today`), so `ap2 spend --json` stays valid JSON; the text output prints
