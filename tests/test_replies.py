@@ -266,9 +266,14 @@ class SwitchTest(Env):
     def test_an_unknown_cap_option_is_logged_not_raised(self):
         profile.use("g")
         cap.open_card(self.NOON)
-        self.result = {"ok": True, "replies": [{"id": "r1", "ap": None, "kind": "cap", "option": "bogus"}]}
+        self.result = {"ok": True, "replies": [self.cap_reply("bogus")]}   # today's day, card open
         self.assertEqual(replies.step(config.load_global(), {}, self.NOON), set())
         self.assertEqual(cap.state(self.NOON)["raise_pct"], 0)
+        self.assertEqual(cap.state(self.NOON)["card"], "open")
+        ev = (self.data / "events-global.jsonl").read_text()
+        self.assertIn("reply_failed", ev)
+        self.assertIn("unknown option", ev)
+        self.assertNotIn("cap_reply_ignored", ev)
 
     def cap_reply(self, option="raise50", day=None, at="2026-01-02T12:00:00Z", rid="r1"):
         return {"id": rid, "ap": None, "kind": "cap", "option": option, "day": day or cap.state(self.NOON)["day"], "at": at}
