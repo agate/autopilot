@@ -324,14 +324,19 @@ def _raw_active(f: Path):
 
 
 def remove(data, name: str) -> dict:
-    """Delete a stored profile. The subscription and the active profile cannot be removed."""
+    """Delete a stored profile. The subscription and the active profile cannot be removed, and nothing is removed
+    while active-profile.json is there but holds no name at all (unreadable, bad JSON, no string `name`): the active
+    one is then unknown."""
     f = path(data, name)
     if name == SUBSCRIPTION:
         raise ProfileError("the subscription profile cannot be removed")
     try:
         current = active_name(data)
-    except ProfileError:
-        current = _raw_active(active_file(data))
+    except ProfileError as e:
+        af = active_file(data)
+        current = _raw_active(af)
+        if current is None and _exists(af):  # unreadable, bad JSON, no name: it may be `name`, so fail closed
+            raise ProfileError(f"cannot remove {name!r}: the active profile is unknown, since {e}") from None
     if name == current:
         raise ProfileError(f"{name} is the active profile; `ap2 profile use` another one first")
     if not _exists(f):
