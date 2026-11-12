@@ -343,9 +343,11 @@ class ScrubTest(PhoneCase):
     def test_a_data_path_inside_markdown_marks_becomes_data(self):
         asked = self.ask(f"_{self.data}_ is full")
         dotted = self.ask(f"_{self.data}._ is full")
+        spaced = self.ask(f"the data folder {self.data} is locked")
         full = self.build()["full"]
         self.assertEqual(full[asked["id"]]["card"]["ask"]["text"], "_<data>_ is full")
         self.assertEqual(full[dotted["id"]]["card"]["ask"]["text"], "_<data>._ is full")
+        self.assertEqual(full[spaced["id"]]["card"]["ask"]["text"], "the data folder <data> is locked")
 
     def test_an_ask_text_that_is_not_a_string_has_each_string_scrubbed(self):
         per_lang = self.ask({"en": f"see {self.data}/x", "zh": f"看 {self.data}/x",
@@ -380,6 +382,9 @@ class ScrubTest(PhoneCase):
                 f"{real}._backup/a": f"{real}._backup/a", f"{real}--old/a": f"{real}--old/a",
                 f"cd {home}&&git pull": "cd ~&&git pull", f"cd {home};ls|head>{home}/o": "cd ~;ls|head>~/o",
                 f"HOME={home},PWD=/tmp": "HOME=~,PWD=/tmp", f"copied {real}...then": "copied ~...then",
+                f"cd {home} && ls\n{real}\tx": "cd ~ && ls\n~\tx",
+                " ".join(f"{c}{real}/a" for c in "`(\"[@*<|!?^])$#%."):
+                    " ".join(f"{c}~/a" for c in "`(\"[@*<|!?^])$#%."),
                 " ".join(f"{real}{c}a" for c in ",;:&|<>()'\"!?*^[]{}`"):
                     " ".join(f"~{c}a" for c in ",;:&|<>()'\"!?*^[]{}`"),
                 f"{real}-a {real}@a {real}~a {real}$a {real}%a {real}#a {real}=a":
