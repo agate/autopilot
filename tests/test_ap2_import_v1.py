@@ -599,6 +599,25 @@ class ImportV1Test(unittest.TestCase):
         self.assertEqual(set(card["title"]), {"en", "zh"})
         cards.check_title(card, ("en", "zh"))
 
+    def test_a_question_card_with_an_invisible_one_text_title_is_closed_with_the_decision_id(self):
+        # cards.blank: a title of only U+FEFF has no words, so it is not passed on as the closed card's words.
+        self.set_config("secondary_language: zh\n")
+        self.ok("--project", "shop")
+        d1 = self.by_key()["v1:shop:D1"]
+        path = Store(self.data).path(d1["id"])
+        old = json.loads(path.read_text(encoding="utf-8"))
+        old["title"] = "\ufeff"  # a hand-edited old card: an invisible title and no plain.what
+        del old["plain"]["what"]
+        path.write_text(json.dumps(old), encoding="utf-8")
+        self.edit_state("projects/shop", lambda s: s["decisions"].pop(0))
+        report = self.ok("--project", "shop")
+        self.assertEqual(self.actions(report)["v1:shop:D1"], "update")
+        card = self.by_key()["v1:shop:D1"]
+        self.assertEqual((card["lane"], card["ask"]), ("done", None))
+        self.assertEqual(card["plain"]["what"], {"en": "D1", "zh": "D1"})
+        self.assertEqual(card["title"], {"en": "D1", "zh": "D1"})
+        cards.check_title(card, ("en", "zh"))
+
     def test_a_question_card_the_old_import_closed_moves_to_one_text_per_language_once(self):
         self.set_config("secondary_language: zh\n")
         self.ok("--project", "shop")
