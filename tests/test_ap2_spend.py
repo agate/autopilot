@@ -1336,12 +1336,27 @@ class SpendCliTest(unittest.TestCase):
         self.assertTrue(r.stderr.startswith("ap2: "), r.stderr)
 
     def main(self, *args):
-        """`ap2 spend` in this process (so a test can patch the ledger), with no `claude` on PATH."""
+        """`ap2 spend` in this process (so a test can patch the ledger), with no `claude` on PATH. It runs in the
+        same fixed offset zone as `ap2`, so the local day, week and month are the ones `session()` writes in."""
+        if not hasattr(time, "tzset"):
+            self.skipTest("time.tzset is not available")
         out, err = io.StringIO(), io.StringIO()
-        with mock.patch("shutil.which", return_value=None), contextlib.redirect_stdout(out), \
-                contextlib.redirect_stderr(err):
-            code = cli.main(["spend", "--data", str(self.data), "--transcripts", str(self.projects), *args])
+        try:
+            with mock.patch.dict(os.environ, {"TZ": self.tzenv}), mock.patch("shutil.which", return_value=None), \
+                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                time.tzset()
+                code = cli.main(["spend", "--data", str(self.data), "--transcripts", str(self.projects), *args])
+        finally:
+            time.tzset()  # after the zone is restored
         return code, out.getvalue(), err.getvalue()
+
+    def test_spend_text_marks_only_the_total_that_is_too_large(self):
+        t = dict(today=1.0, week=2.5, month=sys.float_info.max, unknown=True, unknown_today=False,
+                 unknown_models=[], unknown_launches=0)
+        with mock.patch.object(spend, "totals", return_value=t):
+            code, out, err = self.main()
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(out.splitlines()[1:4], ["  today  $1.00", "  week   $2.50", "  month  too large to show"])
 
     def test_a_transcript_error_names_the_transcripts_folder(self):
         self.session()
