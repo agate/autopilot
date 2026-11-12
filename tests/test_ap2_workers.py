@@ -2976,6 +2976,23 @@ class LimitParkFromTranscriptTest(ApiStopCase):
         rec = self.rec()
         self.assertEqual((rec["parked"], rec["limit_parks"]), (None, 1))  # kept through the in-place resume
 
+    def test_the_reset_is_read_after_the_errors_own_time_not_the_checks(self):
+        w = self.workers()
+        a = self.start(w)
+        # The error comes at 20:38 in Los Angeles, two minutes before the 8:40pm reset it names ...
+        self.clock.at = datetime(2026, 1, 6, 4, 38, tzinfo=timezone.utc)
+        self.stopped_on(a, limit_line(iso(self.clock())))
+        # ... and the next check runs at 20:50, after that reset: the reset is still today's 20:40, not tomorrow's.
+        self.clock.at = datetime(2026, 1, 6, 4, 50, tzinfo=timezone.utc)
+        out = w.check()
+        self.assertEqual([(o["state"], o["did"]) for o in out], [("parked", "parked")])
+        pk = self.rec()["parked"]
+        self.assertEqual((pk["resets_at"], pk["resume_at"]), ("2026-01-05T20:40:00-08:00", "2026-01-05T20:45:00-08:00"))
+        # Its resume time has passed already, so the next check resumes it.
+        out = w.check(usage_file=self.quiet())
+        self.assertEqual([(o["state"], o["did"]) for o in out], [("parked", "resumed")])
+        self.assertEqual(self.bg_calls()[-1]["argv"][1:3], ["--resume", a["session_id"]])
+
     def test_parking_needs_no_live_mode(self):
         a = self.start()
         self.stopped_on(a, limit_line(iso(self.clock())))
