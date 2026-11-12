@@ -2197,7 +2197,8 @@ Calls the author made without asking (check them):
      failed again says so. One whose session no longer runs (its own stop landed before it timed out, or something
      else stopped it) keeps its park and is marked `parked` like a stopped one, and is in `stopped`, not in `failed`
      (nothing would retry it); a listing that failed counts as not running, and the next retry stops it again if it
-     does run. A stop loop cut short (Ctrl-C, any other exception) still runs that last step (its card updates
+     does run, but a failed stop stays in `failed` then (as well as in `stopped`): that listing cannot say it
+     stopped. A stop loop cut short (Ctrl-C, any other exception) still runs that last step (its card updates
      included, so a worker it stopped before the cut says `parked` on its card), and unparks, by the same rule,
      every worker this call parked and did not stop (its stop failed or never ran), then the exception goes on.
      Only one `cap_stop` runs at a time: two overlapping calls (the pause and a check's retry) kept finding new

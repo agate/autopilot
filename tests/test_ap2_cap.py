@@ -951,6 +951,30 @@ class PauseTest(CapWorkerCase):
         self.assertEqual([r["parked"]["kind"] for r in self.records()], ["cap", "cap"])
         self.assertEqual(len(out["stopped"]), 2)
 
+    def test_a_failed_stop_with_a_failed_listing_stays_in_failed(self):
+        self.use_gateway()
+        a, b = self.start(), self.start()
+        w = self.workers()
+        real_listing, real_run, tried = w._listing, subprocess.run, []
+
+        def listing():
+            return None if tried else real_listing()  # the re-check after the stops fails, as a hung CLI does
+
+        def run(argv, *args, **kw):
+            if argv[1:2] == ["stop"]:
+                tried.append(argv[2])
+                raise subprocess.TimeoutExpired(argv, 60)  # never lands
+            return real_run(argv, *args, **kw)
+        with mock.patch.object(w, "_listing", side_effect=listing), \
+                mock.patch("assistant.workers.subprocess.run", side_effect=run):
+            out = self.pause(w)
+        self.assertEqual(sorted(tried), sorted([a["short_id"], b["short_id"]]))
+        self.assertEqual(sorted(f["card"] for f in out["failed"]), sorted([a["card"], b["card"]]))
+        self.assertEqual([r["parked"]["kind"] for r in self.records()], ["cap", "cap"])
+        self.assertEqual(self.stops(), [])
+        self.workers().check()  # live, paused: its retry stops both
+        self.assertEqual(sorted(self.stops()), sorted([a["short_id"], b["short_id"]]))
+
     def pause_during_launch(self):
         """Patch `Workers._launch` so a pause runs on another thread while the launch holds the worker list's lock:
         the launch waits until the pause thread asks for the lock, then launches for real. Returns the patch and a

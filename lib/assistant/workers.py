@@ -360,7 +360,9 @@ class Workers:
         (`blocking`, the default) waits for it; a check's retry (`blocking=False`) is skipped when another call holds
         it, returning `{"stopped": [], "failed": [], "busy": True}`: that call is already stopping those workers, and
         a check meanwhile sees them cap-parked. Without `fcntl` there is no such lock. A pick whose stop failed and
-        whose session no longer runs is in `stopped`, never in `failed` as well. The card updates run in the same
+        whose session no longer runs is in `stopped`, never in `failed` as well; when that listing failed too, it
+        stays in `failed` (as well as `stopped`, its park kept): its session may still run, and the next `check`'s
+        retry stops it if it does. The card updates run in the same
         `finally` as the last locked step, so a loop cut short still marks the workers it stopped `parked`.
         Returns `{"stopped": [...], "failed": [...]}`."""
         self.data.mkdir(parents=True, exist_ok=True)
@@ -425,7 +427,8 @@ class Workers:
                     if k not in done and self._session_running(w, listing):
                         w["parked"] = None  # not stopped: still running, as far as anyone can tell
                         continue
-                    failed.pop(k, None)  # its session no longer runs: stopped (it landed), not failed
+                    if listing is not None:  # its session no longer runs: stopped (it landed), not failed
+                        failed.pop(k, None)  # a failed listing says nothing: a failed stop stays failed
                     if not w.get("closing"):
                         parked.append({"card": w["card"], "role": w["role"]})
             # In the finally too: a loop cut short still marks the workers it stopped `parked` on their cards.
