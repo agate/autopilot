@@ -328,6 +328,8 @@ Every item fills the same fields:
 - `key` names what the card is about. The same key updates the same card: a Slack thread is
   `{channel}:{thread}`, a PR is `{repo}#{number}` (so a Slack ask about a PR and the GitHub review request become
   one card).
+- **[decided by the builder]** One category may key on its own pattern: `key_for: {<category>: <pattern>}` (the
+  Slack ask keys on `{pr}`); the rule, the `pr` field and who wins a shared card are in 6.2.
 - Every card from a source shows a **source block** at the top: who, where, when, their words, and an "Open in
   Slack" / "Open on GitHub" / "Open in Jira" button. It is drawn from the record, so templates never hold links.
   The phone page shows the same button.
@@ -571,8 +573,10 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   flag cluster ends at `=`, as pflag reads it: in `-i=t` the `t` is the value of `-i`, not `-t`, so the next
   argument is checked as its own.
 - **[decided by the builder]** Which PR. From the card: kind `pr-review`, `key` matching `<owner>/<repo>#<number>`
-  (`[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*`), the URL from `source.link`, else
-  `https://github.com/<repo>/pull/<n>`. Anything else is a `ReviewError`. Every SHA from GitHub must be 40
+  (`[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*`), the URL from `source.link` when it is
+  `https://<host>/<repo>/pull/<n>` for the key's own repo and number (then `/`, `?...` or `#...` allowed), else
+  `https://github.com/<repo>/pull/<n>` (so a card a Slack ask made reviews the PR, not the message). Anything else
+  is a `ReviewError`. Every SHA from GitHub must be 40
   lowercase hex before it goes into a path.
 - **[decided by the builder]** `ap2 review plan CARD [--stage review|delta] [--checkout PATH] [--data PATH]`
   (secretary's `review roles`) prints and writes the plan: `card`, `stage`, `pr`, `repo`, `number`, `head_sha`,
@@ -624,7 +628,8 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   with `check`, as secretary's ends with `report validate`); the worker's done path will, once wired.
 - **[decided by the builder]** Plain words (point 4, 3.7): one function, `prreview.plain_for(record, card, langs)`,
   used by the source engine and by `apply`, so a re-read computes the same words. What: "<author> asked you to
-  review PR #<id>: <title>" ("Someone" with no author; the title is the record's first line, cut at 120
+  review PR #<n>: <title>" (n from the card's `key` when it is `<owner>/<repo>#<number>`, else the record's `id`,
+  so a Slack ask, whose `id` is a message ts, still reads "PR #5"; "Someone" with no author; the title is the record's first line, cut at 120
   characters). Where: before a review "Not reviewed yet."; after one, the TL;DR. Do: before, "Nothing yet; open it
   again once its review has run."; after, "Read the <n> findings, then approve or ask for changes on GitHub
   yourself." (n = open confirmed + questions; "the 1 finding"; n = 0: "Read the review, then approve or ask for
@@ -636,7 +641,10 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   <repo> --json state,headRefOid,reviewRequests,latestReviews,author` and `gh api user --jq .login`, and prints `state`:
   `merged`, `closed`, `reviewed` (the user has a review in `latestReviews`), `request_removed` (no review, and
   neither the user nor any team is in `reviewRequests`; a team request keeps the card open, since its members are
-  not read), then `not_reviewed`, `new_commits` (the head is not `pr.reviewed_sha`: a delta is due) or `current`.
+  not read; a card whose `source.link` is text that holds no `/<repo>/pull/<number>` (the number not followed by
+  another digit) anywhere was made by a Slack ask and never asked on GitHub, so it is never given
+  `request_removed`; a card with no `source.link`, a non-text one, or one that names this PR on any host or path
+  still is), then `not_reviewed`, `new_commits` (the head is not `pr.reviewed_sha`: a delta is due) or `current`.
   The first four move the card to lane `done` with the reason as `did` (a card already in `done` is left alone);
   every other state writes `pr.head_sha`. Only the card changes, in the data folder, so shadow mode allows it.
 - **[decided by the builder]** The user's own PRs (`github-my-prs` sorts them into `pr-review` too) are told apart
@@ -645,7 +653,8 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   the same wait, and after one is "Read the <n> findings, then fix the ones you agree with on your branch.", "Read
   the 1 finding, then fix it on your branch if you agree." or, with none open, "Read the review; nothing needs
   fixing." (`prreview.OWN_PHRASES`, in `en` and `zh`). The words follow the card's own `feed` (the source that
-  made it); a re-read by the other GitHub source keeps it, so the words do not flip. For `sync`, by the PR's author: when the reply's `author.login` is the
+  made it, or `github-my-prs` once it reads a card a Slack ask made, as "Who wins a shared card" says); a re-read
+  by the other GitHub source keeps it, so the words do not flip. For `sync`, by the PR's author: when the reply's `author.login` is the
   `gh api user` login, the user is never in their own `reviewRequests` and a comment they leave shows in
   `latestReviews`, so `reviewed` and `request_removed` are never given; only `merged` and `closed` move the card to
   `done`, else it is `not_reviewed`, `new_commits` or `current`. A reply with no author (an older recording, or a
@@ -656,9 +665,44 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
 - **[decided by the builder]** `ap2 review` subcommands are `plan`, `verdict`, `check`, `apply` and `sync`, each
   printing JSON. They take the data folder like `ap2 card` (`--data`, else `AP2_DATA`); `verdict` and `check` only
   read, so they do not create it.
+- **[decided by the builder]** A Slack ask lands on the review request's card (point 1, second half). A source may
+  have `key_for: {<category>: <pattern>}`: a record of a listed category keys on that pattern, every other record
+  on `key` as before. Each category must be one of `sort`'s, and each pattern is checked as `key` is (a `{field}`
+  pattern naming at least one field, not a path); a user's `<category>: null` turns one off. To turn the PR
+  keying off, also sort that category elsewhere (`sort: { review_request: question }`), since a `pr-review` card
+  needs a PR key. A user file that changes the sort of a `key_for` category without setting that category's
+  `key_for` is refused, anywhere in an `extends:` chain; writing the same value is not a change. The form gains one
+  optional field, `pr`: `<owner>/<repo>#<number>`. The built-in `slack-mentions` adds the form hint `pr`, `sort:
+  review_request: pr-review`, `key_for: {review_request: "{pr}"}` and an `instructions` line saying when a message
+  is a `review_request` ("PTAL", "take a look", "can you review", a review-assignment bot) and that it needs the PR
+  link; its thread `key` is unchanged.
+- **[decided by the builder]** `pr` cannot be invented. A `fill: ai` record keeps its `pr` only when it matches the
+  key shape above and the raw tool output holds `github.com/<owner>/<repo>/pull/<number>` (the host not inside a
+  longer name, the number not followed by a digit; a JSON reply's escaped `\/` counts) or the literal
+  `<owner>/<repo>#<number>` as a whole token; else the record is dropped with a reason naming `form.pr`. A blank
+  `pr` is left out, not a reason to drop the record. A record whose category is in `key_for` but lacks a field
+  its pattern names is dropped with the reason naming that field (`key: {pr} missing`).
+- **[decided by the builder]** Who wins a shared card. A record keyed by `key_for` never changes a card whose
+  `source.name` is another source: the item is `unchanged`, with a reason naming that source. A record keyed by
+  its source's plain `key` (the GitHub review request) updates a card a `key_for` record made, as any same-key read
+  does (words, title, source block). So whichever is read first, the card ends up holding the GitHub record, and
+  later reads of both are `unchanged`. The card's `feed` stays the source that made it, except that a
+  `github-my-prs` read moves it to `github-my-prs` on a card `github-review-requests` did not make: every PR that
+  source lists is the user's own, so a card a Slack ask made for the user's own PR gets the own words once
+  `github-my-prs` reads it. The Slack ask is not kept
+  on the card once the GitHub record takes it over (no second link or source block): the card shows the GitHub
+  record only.
+  A review ask for a PR whose card is already `done` lands on that card and does not reopen it, as a GitHub
+  re-request does not; reopening a done PR card on a new ask is not built here.
+- **[decided by the builder]** Threads still group. In one `fill: ai` read, a `key_for` record groups by its own
+  key, never with its thread: a thread whose first message asks for a review gives a `pr-review` card keyed on the
+  PR, and its replies still group on the thread key as before. A Slack review ask read before `key_for` was added
+  became a `question` card keyed on its thread; that card is not moved or closed. The next read keys the ask on its
+  PR, so an ask still in the read window shows once more, as the PR's card, and the old `question` card is closed
+  by hand.
 - Not built here: starting the `pr-review` role on its own when a card is made, and running `apply` and `sync` from
-  the worker's done path or the gate (they need the worker sessions); a Slack or other message asking for a review
-  landing on the same card (point 1, second half); and the PR loop's end (6.3).
+  the worker's done path or the gate (they need the worker sessions); reopening a done PR card when a new review
+  ask arrives; and the PR loop's end (6.3).
 
 ### 6.3 How the PR loop ends **[decided by the user, 2026-11-10]**
 
@@ -1965,7 +2009,7 @@ Calls the author made without asking (check them):
     with a key command (`apiKeyHelper`), so a key is never written in any file. Fields (v1's schema): `name`,
     `mode` (`subscription | gateway`), `label`, `model`, `dispatcher_model`, `small_model`, `effort`,
     `daily_cap_usd`, `gateway {base_url, key_command, refresh_command, rotate_command, models_command}`, `env`,
-    `settings`. Names follow the profile rule (`profiles.PROFILE_NAME`: like a project name, plus `_`, 40 at most,
+    `settings`, and `chosen_at` (see "Model and effort choice" below). Names follow the profile rule (`profiles.PROFILE_NAME`: like a project name, plus `_`, 40 at most,
     because a profile is often named after a gateway project such as `team_project`), not the project rule
     (`projects.NAME`, unchanged). One rule serves `path`, `validate`, `names` and `active_name`, so a name `save`
     accepts always loads, lists and becomes active (v1 once saved one it could not load).
@@ -1989,13 +2033,16 @@ Calls the author made without asking (check them):
   - Checks (v1's): a gateway needs `base_url` (http or https), `key_command`, `small_model` and
     `daily_cap_usd > 0`; `settings` may not hold `permissions`, `hooks`, `apiKeyHelper` or `disableAllHooks`; `env`
     and `settings.env` may not hold a credential-looking name (`KEY`, `TOKEN`, `SECRET`, `PASSWORD`), a name the
-    overlay sets or blanks, a cloud-provider switch, or (v2's addition) any `AP2_*` or `AUTOPILOT_*` name. On save,
-    `gateway.models_command` runs (`shell=True`, 30 s) and every model the profile names must be in the JSON list it
-    prints; its output is only parsed, never printed or kept. A list holding anything but texts is refused with the
-    same "must print a JSON list of model names" line. A model (`model`, `dispatcher_model` or `small_model`) may
-    end in `[1m]` (`profiles.LONG_CONTEXT`, Claude Code's marker for the 1M context window): it is checked without
-    the marker (`profiles.base_model` strips one trailing `[1m]`, nothing else), and stored and passed with it, to
-    `--model` and `ANTHROPIC_MODEL` alike.
+    overlay sets or blanks, a cloud-provider switch, or (v2's addition) any `AP2_*` or `AUTOPILOT_*` name. On a save
+    without a fetched list, `gateway.models_command` runs (`shell=True`, 30 s) and every model the profile names must
+    be in the JSON list it prints; its output is only parsed, never printed or kept. `ap2 profile add`, `choose`,
+    `choices`, and `use` when it must ask, fetch it with 20 s instead (`profiles.CHOICE_TIMEOUT`, see "Model and
+    effort choice") and show only the entries shaped like a model name (`profiles.MODEL_NAME`: a letter or digit,
+    then up to 127 letters, digits and `. _ : / @ [ ] -`), never any other output. A list holding anything but texts
+    is refused with the same "must print a JSON list of model names" line. A model (`model`, `dispatcher_model` or
+    `small_model`) may end in `[1m]` (`profiles.LONG_CONTEXT`, Claude Code's marker for the 1M context window): it is
+    checked without the marker (`profiles.base_model` strips one trailing `[1m]`, nothing else), and stored and
+    passed with it, to `--model` and `ANTHROPIC_MODEL` alike.
     - **[decided by the builder]** `small_model` may end in `[1m]` too (the same check for all three fields, as in
       v1), and only the exact lowercase `[1m]` is stripped: `[2m]` or `[1M]` must be listed as written.
     - **[decided by the builder]** The `[1m]` launch check sits in `tests/test_ap2_profiles.py` and imports `opt`
@@ -2019,6 +2066,73 @@ Calls the author made without asking (check them):
     that moment. Its name is kept on the worker record (`profile`) and on the card's `sessions.<role>.profile`.
     `ap2 profile use` rewrites no settings file: v2 writes each worker's floor at its own launch, so a running
     worker keeps its profile (design of the access profiles, 7) and only its next start or resume moves.
+  - Model and effort choice (port of the command-line half of v1's model and effort choice). A profile records
+    when its model and effort were chosen in `chosen_at`: an ISO 8601 time text or null (`validate` refuses
+    anything else with `chosen_at: must be an ISO time or null`). `profiles.needs_choice(data, p)` is True while it is
+    null, except on the subscription, built in or stored, which never needs a choice: v2 has no migration, so a
+    subscription-only user is never asked. `ap2 profile add` with both `--model` and `--effort` sets it at creation.
+    - The lists are fetched fresh on every call, never cached (`profiles.model_choices`). A gateway with a
+      `models_command` runs it (`profiles.CHOICE_TIMEOUT`, 20 s) and offers its list; otherwise (the subscription, or
+      a gateway with no models command) the `claude-*` models of `spend.prices(data)` (the data folder's override
+      included), then `default` (Claude Code's own default, stored as a null model). Every `claude-*` name but
+      `claude-haiku-*` is offered twice, its `[1m]` variant first, and no name twice. Efforts are
+      `low, medium, high, xhigh, max`. The recommended entries are `claude-opus-5-5[1m]` (when offered, else the
+      first model) and `high`. A failing models command raises `ModelsUnavailable` (a `ProfileError`) naming the exit
+      code or the exception only, never its output or its command line.
+    - One fetch per choice. `choose(data, name, model, effort, models=None, known=None)` fetches once with
+      `profiles.fetch_models` (or takes the caller's lists), refuses a model not in the shown list or an effort not
+      offered (the error lists the choices), and saves with `save(data, p, known)`, the full list of that same fetch,
+      so no command runs again. Nothing is written on a refusal. `add` fetches once too: the shown list checks
+      `--model` and feeds the prompt, the full list checks the save.
+    - `ap2 profile choices NAME` prints `{profile, models, efforts, recommended_model, recommended_effort}` (a fetch
+      failure is one `ap2:` line, exit 1). `ap2 profile choose NAME [--model M] [--effort E]` saves both and prints
+      the profile. A missing value is asked for in a terminal (`sys.stdin.isatty()`): a numbered list per value, the
+      recommended entry marked `(recommended)` and taken on Enter, a number or the exact name accepted, anything
+      else asked again; the end of input prints `ap2: no choice made; nothing changed` and exits 1. With no terminal
+      (a script, a worker, a talk session) it prints the choices JSON on stdout and a one-line hint naming
+      `ap2 profile choose NAME --model M --effort E` on stderr, and exits 3 (`profiles.NEEDS_CHOICE`), so the
+      caller can ask the user and come back.
+    - `add` and `use` ask once. `ap2 profile add NAME` without both flags saves the profile unchosen first, then
+      asks in a terminal (leaving the prompt says the profile is saved and `ap2 profile choose NAME` finishes it,
+      exit 1) or, with no terminal, prints the choices and the hint and exits 3. With both flags the model is
+      checked against the fetched list (`[1m]` variants included) and nothing is asked. `ap2 profile use NAME` for
+      a profile that needs a choice asks, saves, then switches in a terminal; with no terminal it exits 3 with the
+      choices and leaves `active-profile.json` untouched. Switching to the active profile again, to a chosen one or
+      to the subscription asks nothing.
+    - Workers never ask: a worker start or resume runs the active profile as stored, chosen or not; only
+      `ap2 profile` reads `needs_choice`.
+    - The page's choice card (the `profile_choice` reply, two selects) is not here: it needs the page's profile
+      switch, and is its own task after it.
+    - **[decided by the builder]** The time of a choice is `profiles.now()`: local time with its UTC offset, to the
+      second (v1's `_now`), so a test can patch one function.
+    - **[decided by the builder]** The numbered list, the `Number [N]:` prompt and "Type a number from 1 to N" go to
+      stderr, not stdout as in v1, so stdout holds only the JSON even when it is piped (`ap2 profile use g | jq`).
+    - **[decided by the builder]** The hints: `add` says "NAME is saved, but its model and effort are not chosen
+      yet: run `ap2 profile choose NAME --model M --effort E` with values from the list above"; `choose` says "no
+      terminal to ask in: run ..."; `use` says "NAME has no model and effort chosen yet, so nothing switched: run
+      `ap2 profile choose NAME --model M --effort E`, then `ap2 profile use NAME`".
+    - **[decided by the builder]** `add` refuses an `--effort` not in the list even when `--model` is missing (as v1
+      did), and `--model default` is stored as null whether or not `--effort` is given. A flag value not offered is
+      refused before anything is asked or printed, in `choose` too.
+    - **[decided by the builder]** A models command that lists no models at all is one `ap2:` line at the prompt
+      ("listed no models, so there is nothing to choose"), never an endless prompt.
+    - **[decided by the builder]** `add` now fetches the list before it saves (and so reads the price override
+      when the profile has no models command): the list the prompt shows comes from the fetch the save checked.
+      A broken `prices.json` therefore fails `add` with its one line.
+    - **[decided by the builder]** The choices keep only the models command's entries shaped like a model name
+      (`profiles.MODEL_NAME`, checked before the `[1m]` variants are added); any other entry is dropped and never
+      shown. Why: the list is shown in a terminal and in logs (the choices JSON, the numbered list, the "choose one
+      of" error), so the filter drops an entry with a space, a control character or any other character a model
+      name never has: a gateway's error text or a terminal control sequence is never shown. A bare token shaped
+      like a model name would still be shown (a gateway's model list holds no keys). The filter decides only what
+      is shown and what may be picked as the profile's model; a save checks the profile's models against the full
+      list from the same fetch (`profiles.fetch_models`): every entry the command printed, with the `[1m]` variant
+      and the plain name of each `claude-*` entry but `claude-haiku-*` added (as `_with_long` does for the shown
+      list), none dropped, so a listed `small_model` of another shape still saves. A save without a fetched list is
+      unchanged: it only parses the output and shows none of it. When every entry is dropped, it is a list with no
+      models ("listed no models, so there is nothing to choose").
+    - **[decided by the builder]** Ctrl-C at a prompt counts as "no choice made", like the end of input: one `ap2:`
+      line and exit 1, never a traceback (`add` still says the profile is saved and how to finish it).
   - Model and effort. A fresh start gets `--model <profile model>` when the profile has one and
     `--effort <profile effort>` when it has one, after `--agent`. A resume gets neither (8.2): a resumed gateway
     session takes its model from the overlay's `ANTHROPIC_MODEL`.
@@ -2042,7 +2156,8 @@ Calls the author made without asking (check them):
     fix), `show NAME` (the profile: its commands, never a key), `add NAME --subscription|--gateway [--base-url U]
     [--key-command C] [--refresh-command C] [--rotate-command C] [--models-command C] [--daily-cap N] [--label L]
     [--model M] [--dispatcher-model M] [--small-model M] [--effort E] [--env K=V ...] [--settings-file F]`,
-    `use NAME` (prints `{"active": new, "was": old}`, so `ap2 profile use <was>` undoes it) and `remove NAME`
+    `choices NAME` and `choose NAME [--model M] [--effort E]` (see "Model and effort choice"; exit 3 when a choice is
+    needed and no terminal can ask), `use NAME` (prints `{"active": new, "was": old}`, so `ap2 profile use <was>` undoes it) and `remove NAME`
     (refuses `subscription` and the active profile, and refuses any name while active-profile.json exists but holds no
     name at all: unreadable, bad JSON or no string `name`). `add` refuses a name that exists (`subscription` included)
     and the gateway flags on a `--subscription` profile, and prints the saved profile. `list` and `show` create

@@ -25,7 +25,7 @@ from __future__ import annotations
 import re
 from urllib.parse import quote
 
-FIELDS = ("id", "thread_id", "author", "at", "text", "place", "place_id", "status", "depends_on")
+FIELDS = ("id", "thread_id", "author", "at", "text", "place", "place_id", "status", "depends_on", "pr")
 REQUIRED = ("id", "at", "text")
 LIST_FIELDS = ("depends_on",)
 # Fields a pattern may name besides the form's: one place, so link and key patterns agree everywhere.

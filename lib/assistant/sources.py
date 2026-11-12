@@ -5,8 +5,15 @@
 - A file that has `extends: <name>` is merged over that source: maps key by key, lists and scalars replaced.
   `extends:` its own name means the built-in file of that name; another name means that source as loaded (the
   user's when there is one). The result takes the extending file's name.
-- `settings:` maps a name to the user's text (built-in files declare theirs empty). `link`, `key` and the read's
-  arguments may name one as `{name}`; one that is empty refuses the read or the scan plan before anything runs.
+- `settings:` maps a name to the user's text (built-in files declare theirs empty). `link`, `key`, `key_for` and
+  the read's arguments may name one as `{name}`; one that is empty refuses the read or the scan plan before anything
+  runs.
+- `key_for: {<category>: <pattern>}` (design 6.2): a record of a listed category keys on that pattern instead of
+  `key` (a Slack review ask keys on its PR, `{pr}`, so it lands on the GitHub review request's card). Each category
+  is one of `sort`'s; a user's `<category>: null` turns that one off. To turn the PR keying off, also sort that
+  category elsewhere (`sort: { review_request: question }`), since a `pr-review` card needs a PR key. A user file
+  that changes the sort of a `key_for` category without setting that category's `key_for` is refused, anywhere in
+  an `extends:` chain; writing the same value is not a change.
 - Every problem raises `SourceError`, whose message starts with the file it is about.
 """
 from __future__ import annotations
@@ -29,7 +36,7 @@ NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")
 BRINGS = ("messages", "work")
 VIAS = ("command", "mcp", "connector", "skill")
 FILLS = ("paths", "ai")
-KEYS = ("source", "brings", "read", "fill", "form", "link", "key", "sort")
+KEYS = ("source", "brings", "read", "fill", "form", "link", "key", "sort", "key_for")
 # `settings:` maps a name to the user's text, for {name} in link, key and the read's arguments. Kept out of KEYS
 # only so the unknown-key message (pinned by tests/test_ap2_sources.py) reads as before.
 SETTINGS = ("settings",)
@@ -73,6 +80,7 @@ class Source:
     prefix: tuple = ()               # the item path
     link: tuple = ("none",)          # ("none",) | ("path", steps) | ("pattern", parts)
     key: tuple = ()                  # pattern parts
+    key_for: dict = field(default_factory=dict)  # category -> pattern parts: its records key on that, not `key`
 
     @property
     def file(self) -> Path:
@@ -176,9 +184,10 @@ class Loader:
             base_layer = self._layer(base)
             if base_layer is None:
                 raise SourceError(f"{f.path}: line {line}: extends {base}, but there is no source named {base}")
-        merged, files = self._resolve(base_layer, base, chain + ((layer, name),))
+        prev, files = self._resolve(base_layer, base, chain + ((layer, name),))
         over = {k: v for k, v in f.data.items() if k != "extends"}
-        merged = merge(merged, over)
+        merged = merge(prev, over)
+        _check_re_sort(f, prev, over, merged)
         merged["source"] = name
         return merged, files + [f.path]
 
@@ -200,6 +209,29 @@ class Loader:
     def load_all(self) -> list:
         """Every source, by name. One bad file fails the whole call, naming that file."""
         return [self.load(n) for n in self.names()]
+
+
+def _check_re_sort(f: _File, prev: dict, over: dict, merged: dict) -> None:
+    """Refuse a layer that changes the sort of a `key_for` category but leaves its `key_for` to the file it extends.
+
+    Else a Slack ask sorted to `question` would make a question card keyed on its PR, and the GitHub review request
+    would land on that card. Checked at every layer of an `extends:` chain; writing the base's own sort is no change.
+    Shapes that are not maps are left to `validate`, which reports them.
+    """
+    kf, sort, own_sort, own_kf = (merged.get("key_for"), merged.get("sort"), over.get("sort"), over.get("key_for"))
+    if not (isinstance(kf, dict) and isinstance(sort, dict) and isinstance(own_sort, dict)):
+        return
+    base_sort = prev.get("sort") if isinstance(prev.get("sort"), dict) else {}
+    for cat, pattern in kf.items():
+        if pattern is None or cat not in own_sort or (isinstance(own_kf, dict) and cat in own_kf):
+            continue
+        if cat in base_sort and sort.get(cat) == base_sort[cat]:
+            continue
+        line = f.lines.get(("sort", cat), f.lines.get(("sort",)))
+        where = f"line {line}: " if line is not None else ""
+        raise SourceError(f"{f.path}: {where}sort.{cat}: re-sorted here while key_for.{cat} still keys it on "
+                          f"{pattern} (from the file this extends); set key_for.{cat} too (null keys it on key "
+                          f"again)")
 
 
 def merge(base: dict, over: dict) -> dict:
@@ -332,6 +364,31 @@ def validate(src: Source, lines: Optional[dict] = None) -> Source:
         if not (isinstance(to, str) and (to in SORT_SPECIAL or TEMPLATE.match(to))):
             fail(f"sort.{cat} must be a template name, update_card or none, not {to!r}", ("sort", cat))
 
+    if "key_for" in d:
+        kf = d["key_for"]
+        if not isinstance(kf, dict):
+            fail(f"key_for must map a category of sort to a {{field}} pattern, not {kf!r}", ("key_for",))
+        for cat, pattern in kf.items():
+            at = ("key_for", cat) if ("key_for", cat) in lines else ("key_for",)
+            # Checked before a null too: a merge never drops a sort category, so a null for one sort lacks is a
+            # misspelled opt-out that would leave the real category keyed.
+            if cat not in sort:
+                fail(f"key_for.{cat}: '{cat}' is not one of sort's categories ({', '.join(map(str, sort))})", at)
+            # A user's `review_request: null` keys that category on `key` again; they also sort it elsewhere
+            # (`sort: { review_request: question }`), since a pr-review card needs a PR key.
+            if pattern is None:
+                continue
+            if not _text(pattern) or pattern.startswith("."):
+                fail(f"key_for.{cat} must be a {{field}} pattern such as \"{{pr}}\", not {pattern!r}", at)
+            try:
+                parts = form.parse_pattern(pattern)
+            except form.PathError as e:
+                fail(f"key_for.{cat}: {e}", at)
+            if not any(kind == "field" for kind, _ in parts):
+                fail(f"key_for.{cat} must name at least one {{field}}, or every such item would be one card: "
+                     f"{pattern!r}", at)
+            src.key_for[cat] = parts
+
     if "instructions" in d and not _text(d["instructions"]):
         fail("instructions must be a text", ("instructions",))
     if "status_map" in d:
@@ -408,10 +465,11 @@ def _pattern_names(value) -> list:
 
 
 def unset_settings(src: Source) -> None:
-    """Refuse a source whose link, key or read arguments name a declared setting that is empty, before anything is
+    """Refuse a source whose link, key, key_for or read arguments name a declared setting that is empty, before anything is
     run, copied or saved. Raises SourceError saying where to set it."""
     st = settings(src)
     named = [n for kind, n in src.key if kind == "field"]
+    named += [n for parts in src.key_for.values() for kind, n in parts if kind == "field"]
     if src.link[0] == "pattern":
         named += [n for kind, n in src.link[1] if kind == "field"]
     named += _pattern_names(read_args(src))

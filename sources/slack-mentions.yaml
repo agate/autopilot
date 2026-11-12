@@ -1,6 +1,7 @@
 # Slack mentions (design appendix A): every message that mentions you, read by a scan session through the Slack
 # connector. A model fills the form; code checks that id, thread_id, at and place_id appear word for word in what
-# the tool returned, and drops a record that does not.
+# the tool returned, and drops a record that does not. A review_request keys on its PR (pr, also checked against
+# what the tool returned) instead of the thread, so it lands on the same card as the GitHub review request.
 # Set `me` (your Slack member id, such as U0EXAMPLE1) in <data>/sources/slack-mentions.yaml:
 #   extends: slack-mentions
 #   settings: { me: U0EXAMPLE1 }
@@ -23,6 +24,7 @@ form:
   text: Text
   place: Channel
   place_id: Channel id (C...)
+  pr: "The GitHub PR the message asks you to review, as owner/repo#number, taken from a github.com/<owner>/<repo>/pull/<number> link in the message; leave it out otherwise"
 link: "https://slack.com/archives/{place_id}/p{id_digits}?thread_ts={thread_or_id}&cid={place_id}"  # checkpkg: ignore
 key: "{place_id}:{thread_or_id}"
 sort:
@@ -30,3 +32,7 @@ sort:
   ask_to_do: errand          # code when it needs a repo
   alert:     alert
   fyi:       none            # goes into the daily digest
+  review_request: pr-review  # keys on the PR, so it shares the GitHub review request's card
+key_for:
+  review_request: "{pr}"
+instructions: "A message is a review_request when it asks you to review a GitHub PR (PTAL, take a look, can you review, or a review-assignment bot) and holds the PR's github.com/<owner>/<repo>/pull/<number> link; fill pr from that link. A message that asks for a review without a PR link is a question."
