@@ -230,6 +230,25 @@ class ModelChoicesTest(Case):
             self.assertNotIn("OUT-NOT-SHOWN", msg)
             self.assertNotIn("printf", msg)
 
+    def test_a_command_python_cannot_pass_to_the_shell_is_one_failure(self):
+        # A NUL byte and a lone surrogate: subprocess refuses both with a ValueError (UnicodeEncodeError is one).
+        p = self.gateway()
+        for cmd, kind in (("printf x\x00y", "ValueError"), ("printf \ud800", "UnicodeEncodeError")):
+            p["gateway"]["models_command"] = cmd
+            with self.assertRaises(ModelsUnavailable, msg=repr(cmd)) as cm:
+                profiles.model_choices(self.data, p)
+            msg = str(cm.exception)
+            self.assertEqual(msg, f"gateway.models_command: failed ({kind})")
+            self.assertNotIn("printf", msg)
+            self.assertIsNone(cm.exception.__cause__)
+            self.assertTrue(cm.exception.__suppress_context__)
+            # `save` checks the models with the same command: a ProfileError naming the failure, not a ValueError.
+            with self.assertRaises(ProfileError, msg=repr(cmd)) as cm:
+                profiles.save(self.data, dict(p, name="h"))
+            self.assertIn(f"gateway.models_command: failed ({kind})", str(cm.exception))
+            self.assertNotIn("printf", str(cm.exception))
+            self.assertFalse(self.file("h").exists())
+
     def test_a_slow_command_stops_at_the_choice_timeout(self):
         p = self.gateway()
         p["gateway"]["models_command"] = "sleep 5; printf 'OUT-NOT-SHOWN'"
@@ -327,6 +346,17 @@ class ChoicesCliTest(CliCase):
         self.assertNotIn("printf", err)
         self.assert_one_error(*self.run_cli("choices", "nope"), text="no profile named 'nope'")
 
+
+    def test_a_command_python_cannot_pass_to_the_shell_is_one_line(self):
+        self.gateway()
+        p = json.loads(self.file().read_text())
+        for cmd, kind in (("printf x\x00y", "ValueError"), ("printf \ud800", "UnicodeEncodeError")):
+            p["gateway"]["models_command"] = cmd
+            self.file().write_text(json.dumps(p))  # JSON escapes: "printf x\u0000y", "printf \ud800"
+            code, out, err = self.run_cli("choices", "g")
+            self.assert_one_error(code, out, err, f"ap2: gateway.models_command: failed ({kind})")
+            self.assertEqual(err, f"ap2: gateway.models_command: failed ({kind})\n")
+            self.assertNotIn("printf", err)
 
     def test_a_listed_entry_not_shaped_like_a_model_name_is_never_shown(self):
         self.gateway(small_model="claude-opus-5-5",
