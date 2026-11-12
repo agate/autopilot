@@ -48,7 +48,7 @@ def build_start(gcfg: dict, apcfg: dict, ap: str, task: str, role: str, prompt: 
         argv += ["--agent", AGENTS[role]]
     else:
         prompt = "/autopilot:pr-loop " + prompt
-    p = profile.active()
+    p = profile.launch_profile(settings)   # the profile the file was written for; refused when out of date
     if p.get("model"):
         argv += ["--model", p["model"]]
     if p.get("effort"):
@@ -119,6 +119,7 @@ def start(ap: str, task: str, role: str, cwd: str, prompt: str, needs: list = No
               f"Your port range: {port_range[0]}-{port_range[1]}. "
               f"The autopilot CLI: {paths.package_root() / 'bin' / 'ap'}.")
     argv, env = build_start(gcfg, apcfg, ap, task, role, prompt)
+    p = profile.launch_profile(argv[argv.index("--settings") + 1])
     # A parked worker resumes its own conversation; the saved session of the role is an earlier run's.
     sid = ((parked or {}).get("session_id") or _saved_session(ap, task, role)) if resume else ""
     if resume and not sid:
@@ -133,7 +134,7 @@ def start(ap: str, task: str, role: str, cwd: str, prompt: str, needs: list = No
         # The parked session sits idle; the copy that continues takes its place.
         subprocess.run([claude_bin(gcfg), "stop", parked["short_id"]], capture_output=True, timeout=60)
     short = _launch(argv, cwd, env)
-    _record(short, "worker", ap, profile.active())
+    _record(short, "worker", ap, p)
     name = sessions.name_for(ap, task, role)
     listed = sessions.list_all(claude_bin(gcfg))
     found = sessions.find_by_id(short, listed) or sessions.find(name, listed)
@@ -141,7 +142,7 @@ def start(ap: str, task: str, role: str, cwd: str, prompt: str, needs: list = No
            "session_id": (found or {}).get("sessionId") or "", "short_id": short,
            "ports": port_range,
            "needs": list(needs or []), "started_at": events.now_iso(), "resumes": 0, "cwd": str(cwd),
-           "profile": profile.active()["name"]}
+           "profile": p["name"]}
     if sid and (found or {}).get("sessionId") and found["sessionId"] != sid:
         # The resumed copy has a new session id; the original stays on disk until the task is cleaned up.
         rec["replaced_sessions"] = list((old or {}).get("replaced_sessions") or []) + [sid]
@@ -166,7 +167,7 @@ def resume(ap: str, worker: dict) -> dict:
     settings = paths.ap_dir(ap) / "settings.json"
     if not settings.exists():
         raise RuntimeError(f"{ap}: no permission floor yet; run `ap perms write {ap}` first")
-    p = profile.active()
+    p = profile.launch_profile(settings)
     argv = [claude_bin(gcfg), "--bg", "--resume", worker["session_id"],
             "-n", sessions.name_for(ap, worker["task"], worker["role"]), "--settings", str(settings), prompt]
     short = _launch(argv, worker.get("cwd") or str(paths.ap_dir(ap)), _env("worker"))

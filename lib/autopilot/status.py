@@ -115,6 +115,10 @@ def _config(args: list) -> int:
         if bad:
             print(f"unknown setting {bad[0]!r}; `ap config list` shows them all", file=sys.stderr)
             return 2
+        if any(k == "active_profile" for k, _, _ in pairs):
+            # The settings files must change with it, which only `ap profile use` does.
+            print("active_profile: use `ap profile use <name>` (it rewrites the settings files too)", file=sys.stderr)
+            return 2
         for k, _, v in pairs:
             if args[0] == "reset":
                 config.reset_setting(k)

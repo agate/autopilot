@@ -128,7 +128,13 @@ def _access(cur: dict, now: datetime, gcfg: dict = None) -> dict:
            "page_sessions": "subscription",
            "profiles": [], "broken_profiles": [], "cap_card": None,
            "switch_note": switch_note(gcfg or config.load_global())}
-    for n in profile.names():   # one unreadable profile file must not break the whole page
+    if cur["workers"].get("reason") == "profile":
+        acc["profile_error"] = {"error": cur["workers"].get("error"), "fix": profile.PROFILE_FIX}
+    try:
+        listed = profile.names()
+    except OSError:
+        listed = []
+    for n in listed:   # one unreadable profile file must not break the whole page
         try:
             q = profile.load(n)
             acc["profiles"].append({k: q.get(k) for k in ("name", "label", "mode")})

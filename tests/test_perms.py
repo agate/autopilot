@@ -77,6 +77,12 @@ class PermsTest(unittest.TestCase):
         deny = perms.generate([])["permissions"]["deny"] + perms.static_settings("worker")["permissions"]["deny"]
         self.assertEqual([d for d in deny if d.startswith("Write(")], [])
 
+    def test_package_dispatcher_fallback_carries_the_subscription_blanks(self):
+        env = json.loads((ROOT / "settings" / "dispatcher.json").read_text())["env"]
+        self.assertEqual(env["AUTOPILOT_PROFILE"], "subscription")
+        for k in ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL"):
+            self.assertEqual(env[k], "", k)
+
     def test_static_settings_files_match_generator(self):
         for role in ("dispatcher", "worker"):
             data = json.loads((ROOT / "settings" / f"{role}.json").read_text())

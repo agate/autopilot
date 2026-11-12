@@ -150,11 +150,54 @@ def for_env(env) -> dict:
     return active()
 
 
+def active_or_error():
+    """(the active profile, None), or (a stand-in, the reason) when it cannot be loaded: its file was removed
+    or is broken. The stand-in has no mode, so it is never taken for the subscription or a gateway."""
+    name = config.load_global().get("active_profile")
+    try:
+        return load(name), None
+    except (KeyError, ValueError, OSError, TypeError) as e:
+        why = e.args[0] if isinstance(e, KeyError) and e.args else str(e)
+        return {**_blank(str(name)), "mode": None}, f"the active profile {name!r} cannot be loaded: {why}"
+
+
+PROFILE_FIX = "Run `ap profile list`, then `ap profile use <name>` with a profile that loads."
+
+
 def use(name: str) -> None:
-    load(name)   # KeyError for an unknown name
+    """Make `name` the active profile: rewrite every settings file for it first, and only then record it. If
+    the files cannot be written, the active profile stays what it was and the error is raised."""
+    p = load(name)   # KeyError for an unknown name
+    apply(p)
     config.set_setting("active_profile", name)
     events.append_global("profile_used", {"profile": name})
-    apply()
+
+
+def file_profile(settings) -> str:
+    """The profile a settings file was written for (its env.AUTOPILOT_PROFILE), "" when it names none."""
+    try:
+        env = json.loads(Path(settings).read_text()).get("env") or {}
+    except (OSError, ValueError, AttributeError):
+        return ""
+    v = env.get("AUTOPILOT_PROFILE") if isinstance(env, dict) else None
+    return v if isinstance(v, str) else ""
+
+
+def launch_profile(settings, expected: str = None) -> dict:
+    """The profile a session started with `settings` runs on, read from the file itself. It must be `expected`
+    (default: the active profile); when it is not, the file is out of date and nothing may start on it: an
+    event is logged and RuntimeError says how to fix it."""
+    act, err = active_or_error()
+    if expected is None and err:
+        raise RuntimeError(f"{err}. {PROFILE_FIX}")
+    want = expected or act["name"]
+    got = file_profile(settings)
+    if got != want:
+        events.append_global("settings_out_of_date", {"file": str(settings), "file_profile": got or None,
+                                                      "expected": want})
+        raise RuntimeError(f"{settings} was written for profile {got or '(none)'!r}, not {want!r}: the settings are "
+                           f"out of date; run `ap profile use {act['name'] if not err else '<name>'}` to rewrite them")
+    return load(want)
 
 
 # ---- settings overlay ----
@@ -213,16 +256,18 @@ def light_settings() -> Path:
 
 
 def ensure_light() -> Path:
-    """The light settings file, written from the page profile when it is not there yet."""
+    """The light settings file, written from the page profile when it is not there yet or was written for another
+    profile. Its floor is fixed (no discovery), so rewriting it is always safe."""
     f = light_settings()
-    if not f.exists():
+    if file_profile(f) != SUBSCRIPTION:
         from autopilot import perms
         perms._write(f, merge(perms.static_settings("light"), overlay(page_profile())))
     return f
 
 
-def apply() -> list:
-    """Re-merge the overlays into the settings files already written, without rediscovering tools."""
+def apply(act: dict = None) -> list:
+    """Re-merge the overlays into the settings files already written, without rediscovering tools: worker and
+    one-off files for `act` (default the active profile), page files for the subscription."""
     from autopilot import perms
     root, done = paths.data_root(), []
 
@@ -230,7 +275,7 @@ def apply() -> list:
         perms._write(f, merge(floor, overlay(p)))
         done.append(f)
 
-    act, page = active(), page_profile()
+    act, page = act or active(), page_profile()
     files = sorted((root / "projects").glob("*/settings.json")) + sorted((root / "projects").glob("*/oneoff-*.json"))
     for f in files:
         remerge(f, json.loads(f.read_text()), act)

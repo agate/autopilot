@@ -81,8 +81,10 @@ def run(gcfg: dict, active: list, poll_s: float = 10, timeout_s: float = None) -
             except Exception:  # noqa: BLE001 - a broken check must never stop the pass
                 pass
             argv, env = build_command(gcfg, repo, aps)
+            page = profile.launch_profile(argv[argv.index("--settings") + 1], profile.SUBSCRIPTION) \
+                if "--settings" in argv else profile.page_profile()
             short = workers._launch(argv, repo, env)
-            workers._record(short, "dispatcher", None, profile.page_profile())
+            workers._record(short, "dispatcher", None, page)
             began = time.monotonic()
             deadline = began + timeout_s
             timed_out, seen_busy = True, False

@@ -109,9 +109,14 @@ def shared_authority() -> dict:
 
 
 def static_settings(role: str) -> dict:
-    """The fallback shipped in the package: home-relative paths, no user-specific values."""
-    return {"permissions": {"deny": deny_rules("~/.claude/autopilot-data", "~/.claude/skills/autopilot")},
-            "env": {"AUTOPILOT_ROLE": role}}
+    """The fallback shipped in the package: home-relative paths, no user-specific values. A page-session role
+    (the dispatcher fallback, the light file's floor) carries the subscription blanks: it bills the subscription
+    even when the background daemon carries gateway variables."""
+    out = {"permissions": {"deny": deny_rules("~/.claude/autopilot-data", "~/.claude/skills/autopilot")},
+           "env": {"AUTOPILOT_ROLE": role}}
+    if role != "worker":
+        out["env"].update(profiles.overlay(profiles._blank(profiles.SUBSCRIPTION))["env"])
+    return out
 
 
 def parse_discovery(stream: str) -> list:
@@ -239,6 +244,7 @@ def run_one_off(ap: str, decision_id: str) -> str:
         raise ValueError(f"{decision_id} is running since {action['running_since']}")
     gcfg, apcfg = config.load_global(), config.load_ap(ap)
     settings = one_off_settings(ap, action["tool"])
+    prof = profiles.launch_profile(settings)   # refused when the file is for another profile
     _set_action(ap, decision_id, running_since=events.now_iso())
     # `--allowedTools` takes a list: give it one value with `=` and end the options with `--`, or it
     # reads the prompt as a second tool and claude exits asking for a prompt.
@@ -253,7 +259,7 @@ def run_one_off(ap: str, decision_id: str) -> str:
         code, stdout, stderr = -1, _text(e.stdout), _text(e.stderr) + f"\ntimed out after {ONEOFF_TIMEOUT_S}s"
         sid = ""
     try:
-        spend.record_session(sid, "oneoff", ap, profiles.active())
+        spend.record_session(sid, "oneoff", ap, prof)
     except Exception:  # noqa: BLE001 - spend bookkeeping must not fail an approved action
         pass
     events.append(ap, "oneoff_done", {"decision": decision_id, "tool": action["tool"], "exit": code,

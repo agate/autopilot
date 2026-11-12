@@ -32,6 +32,13 @@
     ]
   },
   "env": {
-    "AUTOPILOT_ROLE": "dispatcher"
+    "AUTOPILOT_ROLE": "dispatcher",
+    "AUTOPILOT_PROFILE": "subscription",
+    "ANTHROPIC_BASE_URL": "",
+    "ANTHROPIC_AUTH_TOKEN": "",
+    "ANTHROPIC_MODEL": "",
+    "ANTHROPIC_SMALL_FAST_MODEL": "",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "",
+    "ANTHROPIC_API_KEY": ""
   }
 }

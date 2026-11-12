@@ -119,7 +119,10 @@ def workers_allowance(b: dict, cfg: dict, now: datetime, p: dict = None) -> tupl
     """(profile, spend totals or None, what the budget allows new workers) for `p`, default the active
     profile. Only a gateway profile pays for spend parsing."""
     from autopilot import profile, spend
-    p = p or profile.active()
+    if p is None:
+        p, err = profile.active_or_error()
+        if err:   # never a guess at which rules apply: no new worker until a profile loads again
+            return p, None, {"allow": 0, "paused_until": None, "reason": "profile", "error": err}
     if p.get("mode") != "gateway":
         return p, None, allowance(b, cfg, now)
     s = spend.totals(now.astimezone())
