@@ -73,7 +73,9 @@ Anti-goals (failure even if it "works"):
   source engine, routine runs) write the object with the same words in each slot, because they quote a record or
   the user's routine title and nothing in the code can translate. A writer that can write both languages (a scan
   session, a worker, `ap2 card add`) gives the object with real words per language. A reader picks a language's
-  slot, else the primary's (`cards.title_for`); the local page shows only the page language's title. Translating
+  slot, else the primary's, else **[decided by the builder]** any other non-blank slot, the first in sorted
+  key order (`cards.title_for`, and the page's `titleIn`): a stored title's words beat "Untitled" after the
+  primary language changes. The local page shows only one title, never two languages side by side. Translating
   quotes is the proposed line below (open question 4), not part of this rule.
 - **[proposed]** A reply drafted for someone else stays in the language that person wrote in. On the
   other-language page its meaning is shown separately, and Copy leaves the meaning out. A quote shows the
@@ -1393,7 +1395,8 @@ Calls the author made without asking (check them):
     card lacks, or holds as null or blank text, is an error (`BriefError`) naming every such field; a value must
     be text or a number. A filled value is not read again. Built-in briefs use only `{id}`, a field every
     stored card has, because `title` is optional. `{title}` fills the primary language's title
-    (`cards.title_for`), so a brief names the same words for a text or a per-language title.
+    (`cards.title_for`, so a per-language title without a primary slot fills its first non-blank slot), so a
+    brief names the same words for a text or a per-language title.
   - No added tools or permissions: a key that would widen a role is refused anywhere in the file (top level,
     a `roles` entry, a button), before any other check, with one error class `TemplateWidenError` naming the
     file, line and key. The keys, compared without letter case, `-`, `_` or spaces: `tools`, `tool`,
