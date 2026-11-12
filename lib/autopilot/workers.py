@@ -194,7 +194,7 @@ def park(ap: str, task: str, role: str, note: str, now: datetime = None, b: dict
     gcfg = config.load_global()
     now = now or datetime.now(timezone.utc)
     p = budget.parking(b if b is not None else budget.read(stale_min=gcfg["budget"]["stale_min"]), gcfg,
-                       profile.active())
+                       profile.for_env(os.environ))
     if p is None:
         raise ValueError("usage is under the park line (or unknown): keep working, do not park")
     rec = dict(p, reason="quota", note=note, parked_at=now.isoformat(), role=role)
@@ -259,6 +259,10 @@ def cleanup(ap: str, task: str) -> list:
     return removed
 
 
+def text_cap_parked() -> str:
+    return "paused at the daily cap; resumes when you resume the autopilot"
+
+
 def listing(ap: str) -> list:
     gcfg = config.load_global()
     all_s = sessions.list_all(claude_bin(gcfg))
@@ -282,7 +286,10 @@ def _cmd(args: list) -> int:
             print(json.dumps(rows, indent=1, ensure_ascii=False))
         else:
             for w in rows:
-                tail = f", resumes {w['parked']['resume_at']}" if w["state"] == "parked" else ""
+                tail = ""
+                if w["state"] == "parked":
+                    tail = (f", {text_cap_parked()}" if w["parked"].get("kind") == "cap"
+                            else f", resumes {w['parked']['resume_at']}")
                 print(f"{w['session_name']}: {w['state']} (resumes {w['resumes']}{tail})")
         return 0
     if len(args) < 4:

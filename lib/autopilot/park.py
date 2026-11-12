@@ -50,7 +50,7 @@ def decide(payload: dict, env, b: dict = None, cfg: dict = None):
         return None
     cfg = cfg or config.load_global()
     p = budget.parking(b if b is not None else budget.read_fast(stale_min=cfg["budget"]["stale_min"]), cfg,
-                       profile.active())
+                       profile.for_env(env))
     if p is None:
         return None
     if payload.get("tool_name") == "Bash" and is_park_command((payload.get("tool_input") or {}).get("command") or ""):

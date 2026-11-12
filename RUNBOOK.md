@@ -109,8 +109,10 @@ rejects one that does not.
 
 ## The pass
 
-1. **Begin.** Run `ap budget`. Note `allowance.allow`: `0` means start no new workers, `1` means at
-   most one. Read `$AUTOPILOT_DATA/RULES.md`, and for each autopilot its `config.json`, `RULES.md` and
+1. **Begin.** Run `ap budget`. Note `allowance.allow` (the allowance for new workers on the active profile): `0` means start no new
+   workers, `1` means at most one; `allowance.reason` `cap` means the gateway's daily dollar cap is
+   reached (`allowance.cause` says whether the spend or an unknown cost caused it). `passes` is the
+   same for dispatcher passes, which always run on the subscription. Read `$AUTOPILOT_DATA/RULES.md`, and for each autopilot its `config.json`, `RULES.md` and
    `state.json`. A line in an autopilot's `RULES.md` wins over a global line it conflicts with. An
    open `self` card with no `attention` field was added before every card had one: judge it by the rule
    under Authority and run `ap decision attention <ap> <D-id> true|false`.

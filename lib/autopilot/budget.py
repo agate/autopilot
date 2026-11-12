@@ -55,9 +55,11 @@ def allowance(b: dict, cfg: dict, now: datetime, p: dict = None, spent: dict = N
     if p is not None and p.get("mode") == "gateway":
         from autopilot import cap
         spent = spent or {}
-        if spent.get("unknown") or (spent.get("today") or 0) >= cap.today_limit(p, now):
+        unknown = bool(spent.get("unknown_today"))
+        if unknown or (spent.get("today") or 0) >= cap.today_limit(p, now):
             cap.open_card(now)
-            return {"allow": 0, "paused_until": None, "reason": "cap"}
+            return {"allow": 0, "paused_until": None, "reason": "cap", "cause": "unknown" if unknown else "spent"}
+        cap.close_card(now)   # the condition cleared before anyone answered: the card may reopen later today
         return {"allow": None, "paused_until": None, "reason": "ok"}
     rules = cfg["budget"]
     if not b.get("ok"):
@@ -158,6 +160,6 @@ def parking(b: dict, cfg: dict, p: dict = None):
 @cli.command("budget")
 def _cmd(args: list) -> int:
     cur = current(config.load_global(), datetime.now(timezone.utc))
-    print(json.dumps({"budget": cur["budget"], "allowance": cur["passes"], "workers": cur["workers"],
+    print(json.dumps({"budget": cur["budget"], "allowance": cur["workers"], "passes": cur["passes"],
                       "spent": cur["spent"]}, indent=1))
     return 0

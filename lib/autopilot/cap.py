@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from datetime import datetime
 
 from autopilot import config, events, paths
@@ -62,6 +63,14 @@ def open_card(now: datetime) -> bool:
     return True
 
 
+def close_card(now: datetime) -> None:
+    """The cap no longer holds and nobody answered: take the card back so it can open again later today."""
+    s = state(now)
+    if s["card"] == "open":
+        s["card"] = None
+        _save(s)
+
+
 def answer(option: str, now: datetime) -> None:
     if option not in OPTIONS and option != "pause":
         raise ValueError(f"unknown option {option!r}: use raise50, raise100 or pause")
@@ -76,20 +85,25 @@ def answer(option: str, now: datetime) -> None:
 
 
 def _pause_all(now: datetime) -> None:
-    """`ap pause` for every active autopilot, and park its running workers. Nothing resumes by itself."""
-    from autopilot import state as ap_state
-    for ap in config.active_aps():
-        (paths.ap_dir(ap) / "paused").write_text("")
-        events.append(ap, "paused", {"reason": "cap"})
-        parked = []
+    """`ap pause` for every autopilot not stopped (also one the user paused by hand), and stop and park its
+    running workers. Nothing resumes by itself; a worker resumed later continues its own conversation."""
+    from autopilot import state as ap_state, workers
+    gcfg = config.load_global()
+    for ap in config.list_aps():
+        if config.status_of(ap) == "stopped":
+            continue
+        flag = paths.ap_dir(ap) / "paused"
+        if not flag.exists():
+            flag.write_text("")
+            events.append(ap, "paused", {"reason": "cap"})
         with ap_state.mutate(ap) as st:
-            for w in st["workers"]:
-                if w.get("parked"):
-                    continue
+            running = [w for w in st["workers"] if not w.get("parked")]
+            for w in running:
+                workers._settle(w["short_id"])
+                subprocess.run([workers.claude_bin(gcfg), "stop", w["short_id"]], capture_output=True, timeout=60)
                 w["parked"] = {"kind": "cap", "model": None, "percent": None, "resets_at": None, "resume_at": None,
                                "reason": "cap", "note": PAUSE_NOTE, "parked_at": now.isoformat(), "role": w["role"]}
-                parked.append(w)
-        for w in parked:
+        for w in running:
             run = paths.ap_dir(ap) / "runs" / w["task"]
             run.mkdir(parents=True, exist_ok=True)
             (run / "parked.json").write_text(json.dumps(w["parked"], indent=1) + "\n")

@@ -108,7 +108,7 @@ def collect(aps: list) -> dict:
     assets = _page().get("assets") or {}
     out = {c: {} for c in COLLECTIONS}
     cur = budget.current(gcfg, datetime.now(timezone.utc))
-    out["meta"]["budget"] = {"budget": cur["budget"], "allowance": cur["passes"], "workers": cur["workers"],
+    out["meta"]["budget"] = {"budget": cur["budget"], "allowance": cur["workers"], "passes": cur["passes"],
                              "spent": cur["spent"]}
     active = config.active_aps()
     out["meta"]["cap"] = {"max_workers": gcfg["max_workers"], "active": len(active),

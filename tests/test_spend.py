@@ -196,6 +196,31 @@ class TotalsTest(SpendCase):
         self.launch()
         self.assertIs(spend.totals(NOW)["unknown"], True)
 
+    def test_unknown_today_only_counts_what_is_dated_today(self):
+        self.listing.clear()
+        self.launch()                                            # an unresolved launch made today
+        t = spend.totals(NOW)
+        self.assertIs(t["unknown_today"], True)
+
+    def test_unresolved_launch_from_yesterday_is_unknown_but_not_unknown_today(self):
+        self.listing.clear()
+        self.clock = datetime(2026, 11, 10, 8, 0, tzinfo=TZ).timestamp()
+        self.launch()
+        t = spend.totals(NOW)
+        self.assertIs(t["unknown"], True)
+        self.assertIs(t["unknown_today"], False)
+
+    def test_missing_transcript_unknown_today_follows_the_launch_day(self):
+        self.clock = datetime(2026, 11, 10, 8, 0, tzinfo=TZ).timestamp()
+        self.launch()
+        t = spend.totals(NOW)
+        self.assertEqual((t["unknown"], t["unknown_today"]), (True, False))
+        self.launch("efgh5678")
+        self.listing.append({"id": "efgh5678", "sessionId": "22222222-0000-0000-0000-00000000bbbb"})
+        self.clock = datetime(2026, 11, 11, 8, 0, tzinfo=TZ).timestamp()
+        self.launch("efgh5678")
+        self.assertIs(spend.totals(NOW)["unknown_today"], True)
+
     def test_cache_holds_per_day_aggregates_of_this_month_only(self):
         self.put("days.jsonl")
         self.launch()

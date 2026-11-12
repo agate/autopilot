@@ -304,7 +304,9 @@ def _launch_epoch(ln: dict) -> float:
 def totals(now: datetime, mode: str = "gateway") -> dict:
     """Dollars spent today, this week (from Monday) and this calendar month on sessions launched in `mode`.
     `now`'s timezone decides where the days begin. unknown is True when a request this month had no price, or
-    when a launch this month cannot be matched to its session (its spend is not counted, and that shows)."""
+    when a launch this month cannot be matched to its session (its spend is not counted, and that shows).
+    unknown_today is the same, but only for cost dated today or a launch made today: it is what the daily cap
+    trips on, so a gap from an earlier day does not block today."""
     if now.tzinfo is None:
         now = now.astimezone()
     tz = now.tzinfo
@@ -321,21 +323,26 @@ def totals(now: datetime, mode: str = "gateway") -> dict:
     c = _load_cache(_price_key(tz))
     _resolve(c, {s: _launch_epoch(ln) for s, ln in mine.items()})
 
-    out = {"today": 0.0, "week": 0.0, "month": 0.0, "unknown": False}
+    out = {"today": 0.0, "week": 0.0, "month": 0.0, "unknown": False, "unknown_today": False}
+
+    def launch_day(ln: dict) -> str:
+        return datetime.fromtimestamp(_launch_epoch(ln), tz).strftime("%Y-%m-%d")
 
     def this_month(ln: dict) -> bool:
-        return datetime.fromtimestamp(_launch_epoch(ln), tz).strftime("%Y-%m-%d") >= month_start
+        return launch_day(ln) >= month_start
 
     for s, ln in mine.items():
         if s not in c["shorts"] and this_month(ln):
             out["unknown"] = True
+            if launch_day(ln) == today:
+                out["unknown_today"] = True
 
     # A session resumed under a new short id is one session: it counts once, in the mode of its latest launch.
     session_mode = {}
     for s, ln in last_launch.items():
         sid = c["shorts"].get(s)
         if sid:
-            session_mode[sid] = (ln.get("mode"), this_month(ln))
+            session_mode[sid] = (ln.get("mode"), this_month(ln), launch_day(ln) == today)
 
     settled = {}
     for ln in _read_lines("settled.jsonl"):
@@ -349,6 +356,8 @@ def totals(now: datetime, mode: str = "gateway") -> dict:
             return
         if unknown:
             out["unknown"] = True
+            if day == today:
+                out["unknown_today"] = True
         if usd:
             out["month"] += usd
             if day >= week_start:
@@ -356,7 +365,7 @@ def totals(now: datetime, mode: str = "gateway") -> dict:
             if day == today:
                 out["today"] += usd
 
-    for sid, (m, recent) in session_mode.items():
+    for sid, (m, recent, launched_today) in session_mode.items():
         if m != mode:
             continue
         if sid in settled:
@@ -365,7 +374,9 @@ def totals(now: datetime, mode: str = "gateway") -> dict:
             continue
         t = usage.find_transcript(sid)
         if not t:
-            out["unknown"] = out["unknown"] or recent  # launched this session but neither a transcript nor settled lines remain
+            # launched this month but neither a transcript nor settled lines remain
+            out["unknown"] = out["unknown"] or recent
+            out["unknown_today"] = out["unknown_today"] or launched_today
             continue
         for f in _files(t):
             for day, d in _cached_days(c, f, table, tz, month_start, seen).items():

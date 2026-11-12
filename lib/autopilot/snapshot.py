@@ -57,7 +57,11 @@ def _txt(obj) -> str:
 
 def _parked(w: dict) -> str:
     pk = w.get("parked")
-    return f" [parked for quota, resumes {pk.get('resume_at') or 'when usage drops'}]" if pk else ""
+    if not pk:
+        return ""
+    if pk.get("kind") == "cap":
+        return " [paused at the daily cap; resumes when you resume the autopilot]"
+    return f" [parked for quota, resumes {pk.get('resume_at') or 'when usage drops'}]"
 
 
 def _self_line(st: dict) -> str:

@@ -47,7 +47,10 @@ def _volatile_free(cur: dict) -> dict:
     b = meta.get("budget")
     if isinstance(b, dict):
         a = b.get("allowance") if isinstance(b.get("allowance"), dict) else {}
-        meta["budget"] = {"allowance": {"reason": a.get("reason"), "paused_until": a.get("paused_until")}}
+        pa = b.get("passes") if isinstance(b.get("passes"), dict) else {}
+        meta["budget"] = {"allowance": {"reason": a.get("reason"), "paused_until": a.get("paused_until"),
+                                        "cause": a.get("cause")},
+                          "passes": {"reason": pa.get("reason"), "paused_until": pa.get("paused_until")}}
     if isinstance(meta.get("health"), dict):
         meta["health"].pop("last_gate_at", None)
     for a in out["autopilots"].values():

@@ -504,7 +504,7 @@ function renderBanners() {
 // When an answer takes effect: the gate reads the page once a minute outside its quiet hours
 // (the machine's time, hence the offset); otherwise at the next forced pass.
 function pickup() {
-  const rc = S.meta.reply_check || {}, a = (S.meta.budget || {}).allowance || {};
+  const rc = S.meta.reply_check || {}, bd = S.meta.budget || {}, a = bd.passes || bd.allowance || {};
   if (a.allow === 0) return L("pickup_paused");
   const later = L("pickup_later", { min: rc.forced_pass_min || 30 });
   if (!rc.every_s) return later;
@@ -958,7 +958,7 @@ function renderStatus() {
   const stateSec = el("div", { class: "ps" },
     el("div", { class: "state-line" }, el("span", { class: "st " + st.cls }, st.glyph + " " + st.text),
       el("span", { class: "meta" }, [health.last_gate_at ? L("gate_checked", { when: rel(health.last_gate_at) }) : null,
-        a.paused_until ? L("paused_until", { when: rel(a.paused_until) }) : null].filter(Boolean).join(" · "))),
+        (bud.passes || a).paused_until ? L("paused_until", { when: rel((bud.passes || a).paused_until) }) : null].filter(Boolean).join(" · "))),
     el("div", { class: "meta" }, L("cap_line", { cap: cap.max_workers, active: cap.active })));
 
   const used = b.credits_used_usd || 0, limit = b.credits_limit_usd || 0;

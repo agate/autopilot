@@ -136,6 +136,18 @@ def active() -> dict:
     return load(config.load_global()["active_profile"])
 
 
+def for_env(env) -> dict:
+    """The profile a session runs on: the one its environment names (a worker keeps its own profile after the
+    active one changes), else the active profile."""
+    name = (env or {}).get("AUTOPILOT_PROFILE")
+    if name:
+        try:
+            return load(name)
+        except (KeyError, ValueError, OSError):
+            pass
+    return active()
+
+
 def use(name: str) -> None:
     load(name)   # KeyError for an unknown name
     config.set_setting("active_profile", name)
