@@ -335,12 +335,15 @@ class ProfileCliTest(unittest.TestCase):
     def add_gateway(self, name="g", key="echo k"):
         return self.ok("add", name, "--gateway", "--base-url", URL, "--key-command", key,
                        "--small-model", "claude-haiku-4-5", "--model", "claude-opus-5-5",
+                       "--dispatcher-model", "claude-sonnet-4-5", "--effort", "high",
                        "--daily-cap", "500", "--env", "A=b")
 
     def test_cli_add_use_list_remove(self):
         got = self.add_gateway()
         self.assertEqual((got["name"], got["mode"], got["daily_cap_usd"], got["env"]),
                          ("g", "gateway", 500.0, {"A": "b"}))
+        self.assertEqual((got["model"], got["dispatcher_model"], got["small_model"], got["effort"]),
+                         ("claude-opus-5-5", "claude-sonnet-4-5", "claude-haiku-4-5", "high"))
         self.assertEqual(json.loads((self.data / "profiles" / "g.json").read_text())["gateway"]["base_url"], URL)
         self.fails("add", "g", "--subscription", text="already exists")
         self.fails("add", "subscription", "--subscription", text="already exists")
@@ -348,6 +351,9 @@ class ProfileCliTest(unittest.TestCase):
         self.fails("add", "h", "--gateway", "--daily-cap", "lots", text="--daily-cap")
         self.fails("add", "h", "--subscription", "--env", "nokey", text="KEY=VALUE")
         self.fails("add", "h", "--subscription", "--base-url", URL, text="are for a --gateway profile")
+        self.fails("add", "h", "--gateway", "--base-url", URL, "--key-command", "echo k", "--small-model", "s",
+                   "--model", "m", "--daily-cap", "1", "--models-command", "printf '[\"s\"]'",
+                   text="model: m is not offered by the gateway")
         self.assertFalse((self.data / "profiles" / "h.json").exists())
         extra = self.tmp / "extra.json"
         extra.write_text(json.dumps({"pluginConfigs": {"p": {}}}))
