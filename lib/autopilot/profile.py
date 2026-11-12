@@ -260,7 +260,8 @@ def migrate_from_config() -> bool:
 # autopilot runs that command to learn whether it works, and throws the output away: no key is ever read,
 # logged or stored.
 
-KEY_TTL = timedelta(minutes=10)
+KEY_TTL = timedelta(minutes=10)       # a working key is checked again after this
+KEY_FAIL_TTL = timedelta(seconds=60)  # a failing key is checked again sooner: the user may have just fixed it
 KEY_FIX = "Run the key command in a terminal (sign in again if it asks), then the next gate tick starts work."
 _AUTH_TEXT = re.compile(r"\b40[13]\b|authentication[_ ]error|authentication[_ ]failed|invalid[ _-]*(x-)?api[ _-]*key",
                         re.IGNORECASE)
@@ -283,14 +284,19 @@ def _read(f: Path) -> dict:
         return {}
 
 
-def _fresh(rec: dict, now: datetime):
+def _parse_time(text):
     try:
-        at = datetime.fromisoformat(rec["at"])
-        if at.tzinfo is None:
-            at = at.astimezone()
-        return abs(now - at) < KEY_TTL if now.tzinfo else abs(now.astimezone() - at) < KEY_TTL
-    except (KeyError, TypeError, ValueError):
+        at = datetime.fromisoformat(str(text).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return at if at.tzinfo else at.astimezone()
+
+
+def _fresh(rec: dict, now: datetime, ttl: timedelta = KEY_TTL):
+    at = _parse_time(rec.get("at"))
+    if at is None:
         return False
+    return abs(now.astimezone() - at) < ttl
 
 
 def _run_silent(cmd: str, timeout: int) -> str:
@@ -309,7 +315,10 @@ def check_key(p: dict, now: datetime):
     if p.get("mode") != "gateway":
         return None
     rec = _read(_key_file())
-    if rec.get("profile") == p["name"] and _fresh(rec, now):
+    # A failure found by the key command is re-checked after 60 s; one set by repeated gateway rejections
+    # (marked "auth") holds 10 minutes, since the key command itself works.
+    ttl = KEY_TTL if rec.get("ok") or rec.get("auth") else KEY_FAIL_TTL
+    if rec.get("profile") == p["name"] and _fresh(rec, now, ttl):
         return None if rec.get("ok") else rec.get("error") or "key command failed"
     why = _run_silent(p["gateway"]["key_command"], 60)
     err = f"the key command failed ({why})" if why else None
@@ -326,13 +335,17 @@ def rotate(name: str) -> None:
     if why:
         raise RuntimeError(f"rotate_command failed ({why})")   # its output may hold a key, so it is never shown
     _key_file().unlink(missing_ok=True)
+    if _read(_refresh_file()).get("profile") == name:
+        _refresh_file().unlink(missing_ok=True)
     apply()
 
 
-def session_auth_failed(session_id: str) -> bool:
+def session_auth_failed(session_id: str, after=None) -> bool:
     """True when the end of a session's transcript holds an API authentication failure (HTTP 401/403). Claude
     Code writes an API error as an assistant line flagged isApiErrorMessage (model <synthetic>); the check is
-    tolerant: that flag, an auth `error` field, or a synthetic message, and the text must name the failure."""
+    tolerant: that flag, an auth `error` field, or a synthetic message, and the text must name the failure.
+    A failure counts only if its timestamp is newer than `after` (the last refresh) and no normal assistant
+    line follows it (the session recovered)."""
     from autopilot import usage
     f = usage.find_transcript(session_id)
     if not f:
@@ -344,6 +357,7 @@ def session_auth_failed(session_id: str) -> bool:
             lines = h.read().decode("utf-8", "replace").splitlines()[-12:]
     except OSError:
         return False
+    found = False
     for line in lines:
         try:
             e = json.loads(line)
@@ -356,13 +370,18 @@ def session_auth_failed(session_id: str) -> bool:
         flagged = (e.get("isApiErrorMessage") is True or msg.get("model") == "<synthetic>"
                    or (isinstance(err, str) and err in _AUTH_FIELDS))
         if not flagged:
+            if e.get("type") == "assistant":
+                found = False   # a normal reply after the error: the session recovered
             continue
+        at = _parse_time(e.get("timestamp")) if e.get("timestamp") else None
+        if after is not None and at is not None and at <= after:
+            continue   # an old error, from before the last refresh
         content = msg.get("content")
         parts = [c.get("text", "") for c in content if isinstance(c, dict)] if isinstance(content, list) else [str(content or "")]
         text = " ".join(parts + [str(e.get("content") or ""), err if isinstance(err, str) else ""])
         if _AUTH_TEXT.search(text):
-            return True
-    return False
+            found = True
+    return found
 
 
 def note_session_end(session_id: str, profile_name: str, now: datetime) -> bool:
@@ -373,11 +392,15 @@ def note_session_end(session_id: str, profile_name: str, now: datetime) -> bool:
         p = load(profile_name)
     except (KeyError, ValueError, OSError):
         return False
-    if p.get("mode") != "gateway" or not session_auth_failed(session_id):
+    if p.get("mode") != "gateway":
         return False
     last = _read(_refresh_file())
-    if last.get("profile") == p["name"] and _fresh(last, now):
-        config._write(_key_file(), {"at": now.isoformat(), "ok": False, "profile": p["name"],
+    if last.get("profile") != p["name"]:
+        last = {}
+    if not session_auth_failed(session_id, _parse_time(last.get("at"))):
+        return False
+    if last and _fresh(last, now):
+        config._write(_key_file(), {"at": now.isoformat(), "ok": False, "profile": p["name"], "auth": True,
                                     "error": "the gateway rejected the key again right after a refresh"})
         events.append_global("key_error", {"profile": p["name"]})
         return True

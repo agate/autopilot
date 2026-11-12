@@ -63,6 +63,15 @@ class KeyTest(Base):
             if f.is_file():
                 self.assertNotIn("SECRET123", f.read_text(errors="ignore"), str(f))
 
+    def test_failed_key_rechecked_after_a_minute(self):
+        flag = self.data / "fixed"
+        self.use(key=f"test -f {flag}")
+        p = profile.active()
+        self.assertIn("failed", profile.check_key(p, NOW))
+        flag.write_text("")
+        self.assertIn("failed", profile.check_key(p, NOW + timedelta(seconds=30)))   # still cached
+        self.assertIsNone(profile.check_key(p, NOW + timedelta(seconds=61)))
+
     def test_result_is_cached_ten_minutes(self):
         marker = self.data / "ran"
         self.use(key=f"echo x >> {marker}")
@@ -93,6 +102,13 @@ class RotateTest(Base):
         self.assertTrue(marker.exists())
         ap.assert_called_once()
         self.assertFalse((self.data / "profile-key.json").exists())
+
+    def test_rotate_clears_refresh_record(self):
+        self.use(rotate_command="true")
+        (self.data / "profile-refresh.json").write_text(json.dumps({"at": NOW.isoformat(), "profile": "gw"}))
+        with mock.patch.object(profile, "apply"):
+            profile.rotate("gw")
+        self.assertFalse((self.data / "profile-refresh.json").exists())
 
     def test_rotate_without_command_raises(self):
         self.use()
@@ -145,6 +161,33 @@ class AuthFailureTest(Base):
             self.assertIn("rejected", err)
             # after ten minutes the key command is tried again
             self.assertIsNone(profile.check_key(profile.active(), NOW + timedelta(minutes=14)))
+
+    def test_stale_error_after_refresh_is_not_a_second_failure(self):
+        old = (NOW - timedelta(minutes=1)).isoformat()
+        with mock.patch.object(profile, "apply"):
+            transcript(self.proj, "s1", [dict(api_error("API Error: 401"), timestamp=old)])
+            profile.note_session_end("s1", "gw", NOW - timedelta(minutes=2))   # refresh at NOW-2m
+            # an error stamped before that refresh, still at the end of a later transcript
+            transcript(self.proj, "s2", [dict(api_error("API Error: 401"), timestamp=(NOW - timedelta(minutes=3)).isoformat())])
+            self.assertFalse(profile.note_session_end("s2", "gw", NOW))
+        self.assertIsNone(profile.check_key(profile.active(), NOW))
+
+    def test_recovered_session_is_not_a_failure(self):
+        transcript(self.proj, "s1", [api_error("API Error: 401"),
+                                     {"type": "assistant", "message": {"model": "m", "content": [{"type": "text", "text": "back"}]}}])
+        self.assertFalse(profile.session_auth_failed("s1"))
+
+    def test_rate_limit_line_is_not_an_auth_failure(self):
+        line = {"type": "assistant", "isApiErrorMessage": True, "error": "rate_limit",
+                "message": {"model": "<synthetic>", "content": [{"type": "text", "text":
+                            "You've hit your individual spend limit \u00b7 run /usage-credits to ask for more"}]}}
+        transcript(self.proj, "s1", [line])
+        with mock.patch.object(profile, "apply"):
+            self.assertFalse(profile.note_session_end("s1", "gw", NOW))
+            self.assertFalse(profile.note_session_end("s1", "gw", NOW + timedelta(minutes=1)))
+        self.assertEqual(self.count(), 0)
+        self.assertFalse((self.data / "profile-key.json").exists())
+        self.assertFalse((self.data / "profile-refresh.json").exists())
 
     def test_other_errors_do_nothing(self):
         transcript(self.proj, "s1", [api_error("API Error: 500 overloaded"),
