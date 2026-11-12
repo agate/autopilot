@@ -63,7 +63,7 @@ class ProfileStoreTest(WorkerCase):
         errs = " ".join(profiles.validate({"name": "g", "mode": "gateway"}))
         for field in ("base_url", "key_command", "small_model", "daily_cap_usd"):
             self.assertIn(field, errs)
-        for cap in (0, -1, True, "5"):
+        for cap in (0, -1, True, "5", float("nan"), float("inf")):
             self.assertTrue(any("daily_cap_usd" in e for e in profiles.validate(gateway(daily_cap_usd=cap))), cap)
         self.assertEqual(profiles.validate(gateway()), [])
         self.assertTrue(profiles.validate(gateway(name="Bad_Name")))
@@ -366,6 +366,21 @@ class ProfileCliTest(unittest.TestCase):
         self.assertIn("ghost", listed["active_error"])
         self.assertEqual(self.ok("use", "subscription"), {"active": "subscription", "was": "ghost"})
         self.assertIsNone(self.ok("list")["active_error"])
+
+    def test_a_write_error_prints_one_line(self):
+        if os.geteuid() == 0:
+            self.skipTest("root writes into a read-only folder")
+        self.ok("add", "s2", "--subscription")
+        folder = self.data / "profiles"
+        folder.chmod(0o555)
+        self.addCleanup(folder.chmod, 0o755)
+        r = self.run_ap2("remove", "s2")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertEqual(len(r.stderr.splitlines()), 1, r.stderr)
+        self.assertTrue(r.stderr.startswith("ap2: "), r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertIn("s2", r.stderr)
+        self.assertTrue((folder / "s2.json").exists())
 
     def test_list_and_show_create_nothing(self):
         self.ok("list")

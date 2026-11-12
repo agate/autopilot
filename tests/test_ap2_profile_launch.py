@@ -12,7 +12,7 @@ from tests.helpers import ROOT
 from tests.test_ap2_profiles import URL, gateway, key_script
 from tests.test_ap2_workers import WorkerCase
 from assistant import profiles, resources, transcripts
-from assistant.workers import Workers
+from assistant.workers import WorkerError, Workers
 
 OTHER_URL = "https://other-gateway.example.com/anthropic"
 CONNECTOR = "mcp__claude_ai_Slack__slack_send_message"
@@ -215,6 +215,42 @@ class WorkerProfileLaunchTest(WorkerCase):
         self.assertEqual(probes, ["settings-discover-implement.json"])
         self.assertIn("mcp__gw__post_message", self.deny(b["card"]))
         self.assertNotIn(CONNECTOR, self.deny(b["card"]))
+
+    def test_a_failed_page_probe_fails_the_start(self):
+        def disc(self_, cwd, env, settings):
+            if Path(settings).name.endswith("-page.json"):
+                raise RuntimeError("no init event")
+            return ["Bash"], []
+
+        self.use_gateway()
+        cid = self.add_card()
+        with mock.patch.object(Workers, "_discover", disc):
+            with self.assertRaisesRegex(WorkerError, "no init event"):
+                self.start(card_id=cid)
+        self.assertEqual(self.bg_calls(), [])
+        self.assertFalse((transcripts.run_dir(self.data, cid) / "settings-implement.json").exists())
+
+    def test_the_profile_is_read_once_per_start(self):
+        """A `use` while the tools are listed changes nothing in this start: the probes, the floor, the record and
+        the card all take the profile read before the discovery."""
+        self.use_gateway("g2", url=OTHER_URL)
+        self.use_gateway("g1")
+        real = Workers._discover
+        switched = []
+
+        def disc(self_, cwd, env, settings):
+            if not switched:
+                switched.append(profiles.use(self.data, "g2"))
+            return real(self_, cwd, env, settings)
+
+        with mock.patch.object(Workers, "_discover", disc):
+            a = self.start()
+        self.assertEqual(switched, [{"active": "g2", "was": "g1"}])
+        env = self.settings_of(self.bg_calls()[-1])["env"]
+        self.assertEqual((env["ANTHROPIC_BASE_URL"], env["AP2_PROFILE"]), (URL, "g1"))
+        self.assertEqual(a["profile"], "g1")
+        self.assertEqual(resources.Registry(self.data).read()[0]["profile"], "g1")
+        self.assertEqual(self.get(a["card"])["sessions"]["implement"]["profile"], "g1")
 
     def test_one_probe_on_the_subscription(self):
         a = self.start()

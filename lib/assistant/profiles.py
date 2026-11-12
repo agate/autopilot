@@ -13,6 +13,7 @@ or writes v1's data folder, and a symlink at `profiles/`, a profile file or `act
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 from pathlib import Path
 
@@ -132,8 +133,8 @@ def validate(p) -> list:
         if not p.get("small_model"):
             errs.append("small_model: required for a gateway profile")
         cap = p.get("daily_cap_usd")
-        if isinstance(cap, bool) or not isinstance(cap, (int, float)) or cap <= 0:
-            errs.append("daily_cap_usd: required for a gateway profile, a number above 0")
+        if isinstance(cap, bool) or not isinstance(cap, (int, float)) or not math.isfinite(cap) or cap <= 0:
+            errs.append("daily_cap_usd: required for a gateway profile, a finite number above 0")
     elif mode == "subscription" and gw:
         errs.append("gateway: a subscription profile has none")
     settings = p.get("settings") if p.get("settings") is not None else {}
@@ -195,7 +196,10 @@ def save(data, p: dict) -> dict:
     if errs:
         raise ProfileError("; ".join(errs))
     target = path(data, p["name"])
-    write_json(target, {k: p.get(k) for k in FIELDS})
+    try:
+        write_json(target, {k: p.get(k) for k in FIELDS})
+    except OSError as e:
+        raise ProfileError(f"cannot write {target}: {e}") from e
     return load(data, p["name"])
 
 
@@ -263,7 +267,10 @@ def use(data, name: str) -> dict:
         was = active_name(data)
     except ProfileError:
         was = _raw_active(f)  # a broken file: say what it held, when anything
-    write_json(f, {"name": name})
+    try:
+        write_json(f, {"name": name})
+    except OSError as e:
+        raise ProfileError(f"cannot write {f}: {e}") from e
     return {"active": name, "was": was}
 
 
@@ -290,7 +297,10 @@ def remove(data, name: str) -> dict:
         raise ProfileError(f"{name} is the active profile; `ap2 profile use` another one first")
     if not f.exists():
         raise ProfileError(f"no profile named {name!r}")
-    f.unlink()
+    try:
+        f.unlink()
+    except OSError as e:
+        raise ProfileError(f"cannot remove {f}: {e}") from e
     return {"removed": name}
 
 
