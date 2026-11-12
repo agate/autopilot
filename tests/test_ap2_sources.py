@@ -478,6 +478,14 @@ class KeyForTest(SourceCase):
             Loader(self.data, plugin_dir=sources.PLUGIN_DIR).load("slack-mentions")
         self.assertEqual(str(cm.exception), self.re_sorted(p, 3))
 
+    def test_re_sorting_with_another_categorys_key_for_is_refused(self):
+        # A key_for for some other category does not stand in for the re-sorted one's.
+        p = self.user("slack-mentions", "extends: slack-mentions\nsettings: { me: U0EXAMPLE1 }\n"
+                                        "sort: { review_request: question }\nkey_for: { fyi: \"{pr}\" }\n")
+        with self.assertRaises(SourceError) as cm:
+            Loader(self.data, plugin_dir=sources.PLUGIN_DIR).load("slack-mentions")
+        self.assertEqual(str(cm.exception), self.re_sorted(p, 3))
+
     @staticmethod
     def re_sorted(path, line):
         return (f"{path}: line {line}: sort.review_request: re-sorted here while key_for.review_request still "
