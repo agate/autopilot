@@ -420,6 +420,44 @@ class PlainWordsTest(Case):
         self.assertEqual(len(words["what"]["en"]) - len("octo-dev asked you to review PR #7: "), 120)
 
 
+    def test_the_pr_number_comes_from_the_card_key_not_a_slack_message_id(self):
+        # A Slack record's id is a message ts; the card's key says which PR it is.
+        record = {"id": "1730000000.123456", "author": "U0EXAMPLE2", "text": "PTAL"}
+        words = prreview.plain_for(record, {"kind": "pr-review", "key": KEY}, ("en",))
+        self.assertEqual(words["what"]["en"], "U0EXAMPLE2 asked you to review PR #42: PTAL")
+        with self.subTest("a key that is not owner/repo#number falls back to the record's id"):
+            words = prreview.plain_for({"id": "7", "text": "x"}, {"key": "C0123:1.2"}, ("en",))
+            self.assertEqual(words["what"]["en"], "Someone asked you to review PR #7: x")
+
+
+class PrOfTest(unittest.TestCase):
+    def pr(self, link):
+        card = {"id": "c1", "kind": "pr-review", "key": KEY, "source": {"name": "s", "link": link}}
+        return prreview.pr_of(card)
+
+    def test_the_source_link_is_the_pr_url_only_when_it_is_that_pr(self):
+        github = f"https://github.com/{REPO}/pull/42"
+        cases = [
+            (github, github),
+            (github + "/", github + "/"),
+            (github + "/files", github + "/files"),
+            (github + "?w=1", github + "?w=1"),
+            (github + "#discussion_r1", github + "#discussion_r1"),
+            (f"https://git.example.com/{REPO}/pull/42", f"https://git.example.com/{REPO}/pull/42"),
+            ("https://slack.com/archives/C0123ABCD/p1730000000123456?thread_ts=1730000000.123456",  # checkpkg: ignore
+             github),
+            (f"https://github.com/{REPO}/pull/420", github),
+            (f"https://github.com/{REPO}/pull/4", github),
+            (f"https://github.com/example/gadgets/pull/42", github),
+            (f"https://github.com/{REPO}/issues/42", github),
+            (f"http://github.com/{REPO}/pull/42", github),
+            (f"https://github.com/{REPO}/pull/42 x", github),
+            (None, github),
+        ]
+        for link, url in cases:
+            with self.subTest(link=link):
+                self.assertEqual(self.pr(link), {"repo": REPO, "number": 42, "url": url})
+
 # --- criterion 3: the plan ---------------------------------------------------------------------------------------
 
 def git(repo, *args):

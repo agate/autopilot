@@ -304,7 +304,9 @@ def whole_pr_reason(repo: str, reviewed: str, head: str, run=None) -> Optional[s
 # --- the card ---------------------------------------------------------------------------------------------------
 
 def pr_of(card: dict) -> dict:
-    """{repo, number, url} of a PR review card. Anything else is a ReviewError."""
+    """{repo, number, url} of a PR review card. Anything else is a ReviewError. The url is the card's
+    `source.link` when that is `https://<host>/<repo>/pull/<number>` for the key's repo and number (then `/`, `?...`
+    or `#...` allowed), else `https://github.com/<repo>/pull/<number>`."""
     cid = card.get("id", "?")
     if card.get("kind") != KIND:
         raise ReviewError(f"card {cid} is a {card.get('kind')!r} card, not a {KIND} card")
@@ -314,8 +316,10 @@ def pr_of(card: dict) -> dict:
         raise ReviewError(f"card {cid}: key {str(key)[:80]!r} is not <owner>/<repo>#<number>")
     repo, number = m.group(1), int(m.group(2))
     link = (card.get("source") or {}).get("link") if isinstance(card.get("source"), dict) else None
-    url = link if isinstance(link, str) and re.match(r"https://\S+\Z", link) else \
-        f"https://github.com/{repo}/pull/{number}"
+    # The source's link is the PR only when it is this PR's page (GitHub or another host); a Slack ask's link is the
+    # message, so the URL is then made from the key.
+    own = re.compile(r"https://[^\s/]+/" + re.escape(repo) + f"/pull/{number}" + r"(?:[/?#]\S*)?\Z")
+    url = link if isinstance(link, str) and own.match(link) else f"https://github.com/{repo}/pull/{number}"
     return {"repo": repo, "number": number, "url": url}
 
 
@@ -706,10 +710,10 @@ def plain_for(record, card, langs) -> dict:
     tldr = block.get("tldr") if block and isinstance(block.get("tldr"), dict) else None
     found = card.get("findings") if isinstance(card.get("findings"), dict) else {}
     n = sum(len(found.get(b) or []) for b in ("confirmed", "questions") if isinstance(found.get(b), list))
-    number = record.get("id")
+    m = KEY.match(card.get("key")) if isinstance(card.get("key"), str) else None
+    number = m.group(2) if m else record.get("id")  # a Slack ask's id is its message ts, not the PR number
     if not (isinstance(number, (str, int)) and str(number).strip()):
-        m = KEY.match(card.get("key") or "") if isinstance(card.get("key"), str) else None
-        number = m.group(2) if m else "?"
+        number = "?"
     author = record.get("author") if isinstance(record.get("author"), str) and record["author"].strip() else None
     own = card.get("feed") == OWN_FEED
     out = {line: {} for line in cards.PLAIN_LINES}

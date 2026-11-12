@@ -250,8 +250,8 @@ class ValidationTest(SourceCase):
     CASES = [
         # (what, the change to GOOD as (old, new) or extra text, the expected reason)
         ("unknown top-level key", ("sort:", "raed: x\nsort:"),
-         "line 13: unknown key 'raed' (known keys: source, brings, read, fill, form, link, key, sort, instructions, "
-         "status_map, writes, never, plan)"),
+         "line 13: unknown key 'raed' (known keys: source, brings, read, fill, form, link, key, sort, key_for, "
+         "instructions, status_map, writes, never, plan)"),
         ("brings", ("brings: messages", "brings: tasks"), "line 2: brings must be one of messages, work, not 'tasks'"),
         ("read missing", ("read:\n  via: command\n  run: echo []\n", ""), "read missing"),
         ("read not a map", ("read:\n  via: command\n  run: echo []\n", "read: command\n"),
@@ -272,7 +272,7 @@ class ValidationTest(SourceCase):
          "line 7: form must name id, at, text; missing: id, text"),
         ("unknown form field", ("  text: .text\n", "  text: .text\n  title: .title\n"),
          "line 11: form: unknown field 'title' (fields: id, thread_id, author, at, text, place, place_id, status, "
-         "depends_on)"),
+         "depends_on, pr)"),
         ("bad path", ("  at: .at\n", "  at: at\n"), "line 9: form.at: a path starts with '.', not 'at'"),
         ("path with an index", ("  at: .at\n", "  at: .times[0]\n"),
          "line 9: form.at: '.times[0]': [0] looks like an index; indexes are not supported"),
@@ -395,6 +395,59 @@ class ValidationTest(SourceCase):
         self.user("s", GOOD.replace("link: .url", 'link: "https://x.example.com/{id}"'))
         self.assertEqual(self.loader().load("s").link,
                          ("pattern", (("text", "https://x.example.com/"), ("field", "id"))))
+
+
+class KeyForTest(SourceCase):
+    """`key_for: {<category>: <pattern>}`: the records of one category key on their own pattern (design 6.2)."""
+
+    KEYED = GOOD.replace("sort: { all: alert }\n",
+                         'sort: { all: alert, review_request: pr-review }\nkey_for: { review_request: "{pr}" }\n')
+
+    def test_key_for_loads_into_parsed_patterns(self):
+        self.user("s", self.KEYED)
+        src = self.loader().load("s")
+        self.assertEqual(src.key_for, {"review_request": form.parse_pattern("{pr}")})
+        self.assertEqual(src.key, form.parse_pattern("{id}"))  # every other category keys as before
+
+    def test_a_source_without_key_for_gets_an_empty_map(self):
+        self.user("s", GOOD)
+        self.assertEqual(self.loader().load("s").key_for, {})
+
+    def test_bad_key_for_is_refused_naming_its_path(self):
+        cases = [
+            ('key_for: { review_request: "{pr}" }', 'key_for: { other: "{pr}" }',
+             "line 14: key_for.other: 'other' is not one of sort's categories (all, review_request)"),
+            ('key_for: { review_request: "{pr}" }', "key_for: { review_request: pr }",
+             "line 14: key_for.review_request must name at least one {field}, or every such item would be one "
+             "card: 'pr'"),
+            ('key_for: { review_request: "{pr}" }', "key_for: { review_request: .pr }",
+             "line 14: key_for.review_request must be a {field} pattern such as \"{pr}\", not '.pr'"),
+            ('key_for: { review_request: "{pr}" }', "key_for: { review_request: \"\" }",
+             "line 14: key_for.review_request must be a {field} pattern such as \"{pr}\", not ''"),
+            ('key_for: { review_request: "{pr}" }', 'key_for: { review_request: "{pr" }',
+             "line 14: key_for.review_request: '{pr': a brace that is not a {field}"),
+            ('key_for: { review_request: "{pr}" }', "key_for: [review_request]",
+             "line 14: key_for must map a category of sort to a {field} pattern, not ['review_request']"),
+        ]
+        for old, new, reason in cases:
+            with self.subTest(new):
+                self.assertIn(old, self.KEYED)
+                p = self.user("s", self.KEYED.replace(old, new))
+                with self.assertRaises(SourceError) as cm:
+                    self.loader().load("s")
+                self.assertEqual(str(cm.exception), f"{p}: {reason}")
+
+    def test_the_builtin_slack_mentions_keys_a_review_request_on_its_pr(self):
+        # The real built-in file (sources.PLUGIN_DIR), not the test copy.
+        src = Loader(self.data, plugin_dir=sources.PLUGIN_DIR).load("slack-mentions")
+        self.assertEqual(src.origin, "built-in")
+        self.assertIn("pr", src.data["form"])
+        self.assertIn("github.com/<owner>/<repo>/pull/<number>", src.data["form"]["pr"])
+        self.assertEqual(src.sort, {"question": "question", "ask_to_do": "errand", "alert": "alert", "fyi": "none",
+                                    "review_request": "pr-review"})
+        self.assertEqual(src.key_for, {"review_request": form.parse_pattern("{pr}")})
+        self.assertEqual(src.data["key"], "{place_id}:{thread_or_id}")  # the thread key is unchanged
+        self.assertIn("review_request", src.data["instructions"])
 
 
 if __name__ == "__main__":

@@ -5,8 +5,12 @@
 - A file that has `extends: <name>` is merged over that source: maps key by key, lists and scalars replaced.
   `extends:` its own name means the built-in file of that name; another name means that source as loaded (the
   user's when there is one). The result takes the extending file's name.
-- `settings:` maps a name to the user's text (built-in files declare theirs empty). `link`, `key` and the read's
-  arguments may name one as `{name}`; one that is empty refuses the read or the scan plan before anything runs.
+- `settings:` maps a name to the user's text (built-in files declare theirs empty). `link`, `key`, `key_for` and
+  the read's arguments may name one as `{name}`; one that is empty refuses the read or the scan plan before anything
+  runs.
+- `key_for: {<category>: <pattern>}` (design 6.2): a record of a listed category keys on that pattern instead of
+  `key` (a Slack review ask keys on its PR, `{pr}`, so it lands on the GitHub review request's card). Each category
+  is one of `sort`'s; a user's `<category>: null` turns that one off.
 - Every problem raises `SourceError`, whose message starts with the file it is about.
 """
 from __future__ import annotations
@@ -29,7 +33,7 @@ NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")
 BRINGS = ("messages", "work")
 VIAS = ("command", "mcp", "connector", "skill")
 FILLS = ("paths", "ai")
-KEYS = ("source", "brings", "read", "fill", "form", "link", "key", "sort")
+KEYS = ("source", "brings", "read", "fill", "form", "link", "key", "sort", "key_for")
 # `settings:` maps a name to the user's text, for {name} in link, key and the read's arguments. Kept out of KEYS
 # only so the unknown-key message (pinned by tests/test_ap2_sources.py) reads as before.
 SETTINGS = ("settings",)
@@ -73,6 +77,7 @@ class Source:
     prefix: tuple = ()               # the item path
     link: tuple = ("none",)          # ("none",) | ("path", steps) | ("pattern", parts)
     key: tuple = ()                  # pattern parts
+    key_for: dict = field(default_factory=dict)  # category -> pattern parts: its records key on that, not `key`
 
     @property
     def file(self) -> Path:
@@ -332,6 +337,27 @@ def validate(src: Source, lines: Optional[dict] = None) -> Source:
         if not (isinstance(to, str) and (to in SORT_SPECIAL or TEMPLATE.match(to))):
             fail(f"sort.{cat} must be a template name, update_card or none, not {to!r}", ("sort", cat))
 
+    if "key_for" in d:
+        kf = d["key_for"]
+        if not isinstance(kf, dict):
+            fail(f"key_for must map a category of sort to a {{field}} pattern, not {kf!r}", ("key_for",))
+        for cat, pattern in kf.items():
+            if pattern is None:  # a user's `review_request: null` keys that category on `key` again
+                continue
+            at = ("key_for", cat) if ("key_for", cat) in lines else ("key_for",)
+            if cat not in sort:
+                fail(f"key_for.{cat}: '{cat}' is not one of sort's categories ({', '.join(map(str, sort))})", at)
+            if not _text(pattern) or pattern.startswith("."):
+                fail(f"key_for.{cat} must be a {{field}} pattern such as \"{{pr}}\", not {pattern!r}", at)
+            try:
+                parts = form.parse_pattern(pattern)
+            except form.PathError as e:
+                fail(f"key_for.{cat}: {e}", at)
+            if not any(kind == "field" for kind, _ in parts):
+                fail(f"key_for.{cat} must name at least one {{field}}, or every such item would be one card: "
+                     f"{pattern!r}", at)
+            src.key_for[cat] = parts
+
     if "instructions" in d and not _text(d["instructions"]):
         fail("instructions must be a text", ("instructions",))
     if "status_map" in d:
@@ -408,10 +434,11 @@ def _pattern_names(value) -> list:
 
 
 def unset_settings(src: Source) -> None:
-    """Refuse a source whose link, key or read arguments name a declared setting that is empty, before anything is
+    """Refuse a source whose link, key, key_for or read arguments name a declared setting that is empty, before anything is
     run, copied or saved. Raises SourceError saying where to set it."""
     st = settings(src)
     named = [n for kind, n in src.key if kind == "field"]
+    named += [n for parts in src.key_for.values() for kind, n in parts if kind == "field"]
     if src.link[0] == "pattern":
         named += [n for kind, n in src.link[1] if kind == "field"]
     named += _pattern_names(read_args(src))
