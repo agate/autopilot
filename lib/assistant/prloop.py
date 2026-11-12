@@ -356,6 +356,9 @@ def _check(record, c: _Checker, limit=None) -> int:
         if record.get(key) is not None and (d["next"] != "end" or d[key] != record[key]):
             said = f"{d[key]}" if d["next"] == "end" else f"not ended (next: {d['next']})"
             c.fail(key, f"is {record[key]!r}, but the recorded rounds say {said}")
+    # Walk the whole record the way record_check copies it, so a value nested too deep anywhere (an earlier
+    # round's angle, say) is refused here, by every function, and never only when record_check writes the check.
+    copy.deepcopy(record)
     return lim
 
 

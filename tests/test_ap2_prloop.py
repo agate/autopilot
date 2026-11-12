@@ -161,6 +161,16 @@ class BelowLimitTest(unittest.TestCase):
                             finding("t-2", "Test value", "out_of_scope", text="a retry test for refunds")],
                         commit=SHA2), limit=2),
              "end", "converged", "converged"),
+            ("a non-behavior round, then a round with no fix and CI red: converged",
+             record(rnd(1, [finding("c-1", "Correctness", behavior=False)], commit=SHA1),
+                    rnd(2, [ACC_FINDING], ci="red")), "end", "converged", "converged"),
+            ("a non-behavior round, then no fix and CI red at the limit: converged before the limit's stop",
+             record(rnd(1, [finding("c-1", "Correctness", behavior=False)], commit=SHA1),
+                    rnd(2, [ACC_FINDING], ci="red"), limit=2), "end", "converged", "converged"),
+            ("a round with no fix and CI red, then a non-behavior round: converged",
+             record(rnd(1, [ACC_FINDING], ci="red"),
+                    rnd(2, [finding("c-2", "Correctness", behavior=False)], commit=SHA2)),
+             "end", "converged", "converged"),
         ]
         for name, rec, nxt, result, ended_by in cases:
             with self.subTest(name):
@@ -270,6 +280,10 @@ class AtLimitTest(unittest.TestCase):
                     rnd(2, [finding("c-2", "Correctness", behavior=False),
                             finding("t-2", "Test value", "out_of_scope", text="a retry test for refunds")],
                         commit=SHA2), limit=2),
+             r"^the record: rounds\[1\]: no check of the fix: the loop ended after round 2 \(converged: "),
+            ("converged at the limit after a round with no fix",
+             record(rnd(1, [ACC_FINDING], ci="red"),
+                    rnd(2, [finding("c-2", "Correctness", behavior=False)], commit=SHA2), limit=2),
              r"^the record: rounds\[1\]: no check of the fix: the loop ended after round 2 \(converged: "),
         ]
         for name, rec, says in cases:
@@ -628,6 +642,7 @@ class AtMostOnceTest(unittest.TestCase):
             ("a missed angle", at_limit(), {"Correctness": []}, "Test value"),
             ("an added angle", at_limit(), dict(no_findings(), Accuracy=[]), "Accuracy"),
             ("bad ci", at_limit(), no_findings(), "ci"),
+            ("null ci", at_limit(), no_findings(), "ci"),
             ("a stop at the limit", record(rnd(1, [R1_FINDING], commit=SHA1),
                                            rnd(2, [R2_FINDING], commit=SHA2, stop="the branch moved"), limit=2),
              {"Test value": []}, "ended"),
@@ -637,7 +652,7 @@ class AtMostOnceTest(unittest.TestCase):
         ]
         for name, rec, results, says in cases:
             with self.subTest(name):
-                ci = "blue" if name == "bad ci" else "green"
+                ci = {"bad ci": "blue", "null ci": None}.get(name, "green")
                 with self.assertRaisesRegex(PrLoopError, says):
                     prloop.record_check(rec, results, ci)
 
@@ -716,6 +731,7 @@ class ReadTest(unittest.TestCase):
             ("more rounds than the limit", json.dumps(four).encode(), r"rounds\[3\].*past the round limit"),
             ("limit 21", change(lambda r: r.update(limit=21)), "limit"),
             ("bad ci", change(lambda r: r["rounds"][0].update(ci="yellow")), r"rounds\[0\]\.ci"),
+            ("null ci", change(lambda r: r["rounds"][0].update(ci=None)), r": rounds\[0\]\.ci: "),
             ("behavior not a bool", change(lambda r: r["rounds"][0]["findings"][0].update(behavior="no")),
              r"rounds\[0\]\.findings\[0\]\.behavior"),
             ("behavior null", change(lambda r: r["rounds"][0]["findings"][0].update(behavior=None)),
@@ -745,6 +761,7 @@ class ReadTest(unittest.TestCase):
                 id="ci-", angle=None)), r"rounds\[0\]\.findings\[0\]\.angle"),
             ("round number a bool", change(lambda r: r["rounds"][0].update(n=True)), r"rounds\[0\]\.n"),
             ("check ci blue", change(lambda r: r["fix_check"].update(ci="blue"), checked), r": fix_check\.ci: "),
+            ("check ci null", change(lambda r: r["fix_check"].update(ci=None), checked), r": fix_check\.ci: "),
             ("check finding bucket maybe", change(lambda r: r["fix_check"]["reviewers"][0]["findings"].append(
                 {"id": "check-1", "angle": "Correctness", "bucket": "maybe"}), checked),
              r"fix_check\.reviewers\[0\]\.findings\[0\]\.bucket"),
@@ -829,6 +846,16 @@ class ReadTest(unittest.TestCase):
         self.assertIn(str(path), str(cm.exception))
         self.assertIn("nested too deep", str(cm.exception))
 
+    def test_deep_extra_key_on_an_earlier_rounds_angle_is_refused(self):
+        # Only a deep copy of the whole record walks an earlier round's angle extras: read refuses it too.
+        rec = at_limit()
+        rec["rounds"][0]["angles"][1]["extra"] = deep(600)
+        path = self.write(rec, "deep-early.json")
+        with self.assertRaises(PrLoopError) as cm:
+            prloop.read(path)
+        self.assertIn(str(path), str(cm.exception))
+        self.assertIn("nested too deep", str(cm.exception))
+
     def test_error_is_a_value_error(self):
         self.assertTrue(issubclass(PrLoopError, ValueError))
         self.assertEqual(prloop.BUCKETS, ("fix", "out_of_scope", "invalid", "owner"))
@@ -838,16 +865,19 @@ class DeepRecordTest(unittest.TestCase):
     """A record in memory nested too deep is a PrLoopError, not a RecursionError."""
 
     def test_every_function_refuses_it(self):
-        rec = at_limit()
-        rec["rounds"][2]["angles"][0]["extra"] = deep(5000)
-        calls = [("decide", lambda: prloop.decide(rec)), ("plan", lambda: prloop.plan(rec)),
-                 ("record_check", lambda: prloop.record_check(rec, no_findings(), "green")),
-                 ("report", lambda: prloop.report(rec)), ("summary", lambda: prloop.summary(rec)),
-                 ("ask", lambda: prloop.ask(rec))]
-        for name, call in calls:
-            with self.subTest(name):
-                with self.assertRaisesRegex(PrLoopError, "^the record: nested too deep$"):
-                    call()
+        # On the last round's angle (which plan copies) and on the first round's (which only record_check's copy
+        # of the whole record walks): every function refuses both, so none of them goes ahead alone.
+        for i, k in [(2, 0), (0, 1)]:
+            rec = at_limit()
+            rec["rounds"][i]["angles"][k]["extra"] = deep(5000)
+            calls = [("decide", lambda: prloop.decide(rec)), ("plan", lambda: prloop.plan(rec)),
+                     ("record_check", lambda: prloop.record_check(rec, no_findings(), "green")),
+                     ("report", lambda: prloop.report(rec)), ("summary", lambda: prloop.summary(rec)),
+                     ("ask", lambda: prloop.ask(rec))]
+            for name, call in calls:
+                with self.subTest(f"rounds[{i}].angles[{k}]: {name}"):
+                    with self.assertRaisesRegex(PrLoopError, "^the record: nested too deep$"):
+                        call()
 
     def test_deep_check_results_are_refused(self):
         # Only a repr walks this value, and some Pythons repr 5000 deep: 100000 is past every one's limit.
