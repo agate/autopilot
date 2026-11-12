@@ -10,6 +10,8 @@
   `question` card under its task (else the project). Keys (`v1:<name>`, `v1:<name>:<id>`) make a re-run update the
   same cards; a card is never removed.
 - Plain words are made by code from fixed phrases (`PHRASES`, `en` and `zh`), in every configured language.
+- A card's title is one text per configured language, the same texts as its `plain.what` (the project card: its
+  name in each slot). A re-run moves a card the old import wrote with a one-text title to that shape once.
 """
 from __future__ import annotations
 
@@ -297,7 +299,7 @@ class _Maker:
     def card(self, kind: str, key: str, lane: str, what: dict, where: dict, do: dict, record: dict,
              parent_key: Optional[str], **more) -> dict:
         card = {"kind": kind, "lane": lane, "feed": FEED, "links": [], "pri": more.pop("pri", PRI),
-                "origin": more.pop("origin", "source"), "title": what[self.langs[0]], "key": key,
+                "origin": more.pop("origin", "source"), "title": dict(what), "key": key,
                 "project": self.name, "plain": {"what": what, "where": where, "do": do},
                 "source": {"name": FEED, "record": record}}
         card.update(more)
@@ -334,16 +336,20 @@ class _Maker:
 
     def closed(self, old: dict) -> dict:
         """The closed question card for `old`, a question card whose decision has left state.json: as `question`
-        makes it with `open_=False`, keeping the old card's title, `what`, `where`, source and parent."""
+        makes it with `open_=False`, keeping the old card's words, `where`, source and parent. Each language's
+        `what` (and title slot) is the old `plain.what` text, else the old title in that language (a one-text title
+        the old import wrote, or an object title), else the decision id."""
         plain = old.get("plain") if isinstance(old.get("plain"), dict) else {}
         what = plain.get("what") if isinstance(plain.get("what"), dict) else {}
         where = plain.get("where") if isinstance(plain.get("where"), dict) else {}
         fresh = self.say("question_where", project=self.name, about="")
         source = old.get("source") if isinstance(old.get("source"), dict) else {}
-        entry = self.card("question", old["key"], "done",
-                          {lang: what.get(lang) or old.get("title") for lang in self.langs},
+        decision = old["key"].rsplit(":", 1)[-1]
+        words = {lang: (what[lang] if isinstance(what.get(lang), str) and what[lang].strip()
+                        else cards.title_for(old, lang, self.langs[0]) or decision) for lang in self.langs}
+        entry = self.card("question", old["key"], "done", words,
                           {lang: where.get(lang) or fresh[lang] for lang in self.langs}, self.say("do_closed"),
-                          source.get("record"), None, title=old.get("title"), ask=None)
+                          source.get("record"), None, ask=None)
         if old.get("parent"):
             entry["card"]["parent"] = old["parent"]
         return entry

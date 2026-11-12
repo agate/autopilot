@@ -109,7 +109,7 @@ class ImportV1Test(unittest.TestCase):
             self.assertEqual(c["audit"][0]["by"], "v1-import")
 
         proj = got["v1:shop"]
-        self.assertEqual((proj["kind"], proj["lane"], proj["pri"], proj["title"]), ("project", "running", "P2", "shop"))
+        self.assertEqual((proj["kind"], proj["lane"], proj["pri"], proj["title"]), ("project", "running", "P2", {"en": "shop"}))
         self.assertIsNone(proj.get("parent"))
         self.assertEqual(proj["source"]["record"], {
             "repo": "/srv/repos/shop", "branch_pattern": "{prefix}.{task}.{short}", "branch_prefix": "dev",
@@ -258,7 +258,7 @@ class ImportV1Test(unittest.TestCase):
         report = self.ok("--project", "shop")
         self.assertEqual(self.actions(report)["v1:shop:PROJ-1"], "update")
         card = self.by_key()["v1:shop:PROJ-1"]
-        self.assertEqual(card["title"], "Add the basket")
+        self.assertEqual(card["title"], {"en": "Add the basket"})
         self.assertEqual(card["source"]["record"]["pr"], "https://github.com/org/repo/pull/9")
 
     def test_a_card_of_another_feed_with_the_same_key_is_left_alone(self):
@@ -296,7 +296,7 @@ class ImportV1Test(unittest.TestCase):
         self.assertEqual((card["lane"], card["ask"]), ("done", None))
         self.assertEqual(card["plain"]["do"]["en"], importv1.PHRASES["en"]["do_closed"])
         self.assertEqual((card["id"], card["title"], card["parent"], card["source"]),
-                         (before["id"], before["title"], before["parent"], before["source"]))
+                         (before["id"], card["plain"]["what"], before["parent"], before["source"]))
         self.assertEqual(card["plain"]["what"], before["plain"]["what"])
         self.assertEqual(card["plain"]["where"], before["plain"]["where"])
         self.assertEqual(set(self.actions(self.ok("--project", "shop")).values()), {"unchanged"})
@@ -385,15 +385,17 @@ class ImportV1Test(unittest.TestCase):
         self.ok()
         got = self.by_key()
         both = got["v1:shop:PROJ-1"]
-        self.assertEqual(both["title"], "Add the cart")  # the primary language's text
+        self.assertEqual(both["title"], {"en": "Add the cart", "zh": "加购物车"})  # one text per language
         self.assertEqual(both["plain"]["what"], {"en": "Add the cart", "zh": "加购物车"})
         only_en = got["v1:shop:PROJ-2"]
         self.assertEqual(only_en["plain"]["what"], {"en": "Fix the checkout total", "zh": "Fix the checkout total"})
         label = got["v1:shop:D2"]
-        self.assertEqual(label["title"], "Two different answers arrived for D9. Which one counts?")
+        self.assertEqual(label["title"], {"en": "Two different answers arrived for D9. Which one counts?",
+                                          "zh": "D9 收到了两个不同的回答。以哪个为准？"})
         self.assertEqual(label["plain"]["what"]["zh"], "D9 收到了两个不同的回答。以哪个为准？")  # v1's labels.zh.json
         for c in got.values():
             cards.check_plain(c, ("en", "zh"))
+            cards.check_title(c, ("en", "zh"))
             self.assertIn("v1", c["plain"]["do"]["en"])
             self.assertIn("v1", c["plain"]["do"]["zh"])
         self.assertIn("shop", got["v1:shop:PROJ-1"]["plain"]["where"]["en"])
@@ -406,7 +408,7 @@ class ImportV1Test(unittest.TestCase):
         self.edit_state("projects/shop", lambda s: s["tasks"][0].update(title={"de": "Alte Idee"}))
         self.ok("--project", "shop")
         c = self.by_key()["v1:shop:PROJ-1"]
-        self.assertEqual(c["title"], "Alte Idee")
+        self.assertEqual(c["title"], {"en": "Alte Idee", "zh": "Alte Idee"})
         self.assertEqual(c["plain"]["what"], {"en": "Alte Idee", "zh": "Alte Idee"})
 
     def test_a_title_without_the_configured_language_uses_english_before_another(self):
@@ -422,7 +424,7 @@ class ImportV1Test(unittest.TestCase):
                 (self.v1 / "labels.en.json").write_text(json.dumps({"two_answers": template}), encoding="utf-8")
                 self.ok("--project", "shop")
                 c = self.by_key()["v1:shop:D2"]
-                self.assertEqual(c["title"], template)
+                self.assertEqual(c["title"], {"en": template})
                 self.assertEqual(c["plain"]["what"]["en"], template)
 
     def test_a_label_that_cannot_be_filled_is_shown_as_written(self):
@@ -439,13 +441,13 @@ class ImportV1Test(unittest.TestCase):
         self.edit_state("projects/shop", lambda s: s["decisions"][1].update(title={"key": "two_answers"}))
         self.ok("--project", "shop")
         self.assertEqual(self.by_key()["v1:shop:D2"]["title"],
-                         "Two different answers arrived for {id}. Which one counts?")
+                         {"en": "Two different answers arrived for {id}. Which one counts?"})
         shutil.rmtree(self.data)
         (self.v1 / "labels.en.json").write_text(json.dumps({"two_answers": "{id} and {other}"}), encoding="utf-8")
         self.edit_state("projects/shop", lambda s: s["decisions"][1].update(
             title={"key": "two_answers", "args": {"id": "D9"}}))
         self.ok("--project", "shop")
-        self.assertEqual(self.by_key()["v1:shop:D2"]["title"], "D9 and {other}")
+        self.assertEqual(self.by_key()["v1:shop:D2"]["title"], {"en": "D9 and {other}"})
 
     def test_a_label_with_no_translation_falls_back_to_english(self):
         self.set_config("secondary_language: zh\n")
@@ -478,7 +480,7 @@ class ImportV1Test(unittest.TestCase):
     def test_a_label_key_with_no_text_is_shown_as_the_key(self):
         self.edit_state("projects/shop", lambda s: s["decisions"][1].update(title={"key": "no_such_label"}))
         self.ok("--project", "shop")
-        self.assertEqual(self.by_key()["v1:shop:D2"]["title"], "no_such_label")
+        self.assertEqual(self.by_key()["v1:shop:D2"]["title"], {"en": "no_such_label"})
 
     def test_a_label_that_would_fill_too_long_is_shown_as_written(self):
         template = "{i}" * 100
@@ -487,7 +489,7 @@ class ImportV1Test(unittest.TestCase):
             title={"key": "boom", "args": {"i": "x" * 20}}))
         self.ok("--project", "shop")
         c = self.by_key()["v1:shop:PROJ-1"]
-        self.assertEqual(c["title"], template)
+        self.assertEqual(c["title"], {"en": template})
         self.assertEqual(c["plain"]["what"]["en"], template)
 
     def test_a_label_too_long_to_show_as_written_is_shown_as_its_key(self):
@@ -499,7 +501,7 @@ class ImportV1Test(unittest.TestCase):
                     title={"key": "big", "args": {"id": "D9"}}))
                 self.ok("--project", "shop")
                 c = self.by_key()["v1:shop:PROJ-1"]
-                self.assertEqual(c["title"], "big")
+                self.assertEqual(c["title"], {"en": "big"})
                 self.assertEqual(c["plain"]["what"]["en"], "big")
 
     def test_a_label_template_too_long_is_shown_as_its_key_without_being_parsed(self):
@@ -508,7 +510,7 @@ class ImportV1Test(unittest.TestCase):
         self.edit_state("projects/shop", lambda s: s["tasks"][0].update(title={"key": "k", "args": {"a": ""}}))
         with mock.patch.object(importv1, "_filled_size", wraps=importv1._filled_size) as spy:
             self.ok("--project", "shop")
-        self.assertEqual(self.by_key()["v1:shop:PROJ-1"]["title"], "k")
+        self.assertEqual(self.by_key()["v1:shop:PROJ-1"]["title"], {"en": "k"})
         self.assertNotIn(template, [c.args[0] for c in spy.call_args_list])
 
     def test_the_filled_size_stops_early_and_turns_each_argument_into_text_once(self):
@@ -527,10 +529,94 @@ class ImportV1Test(unittest.TestCase):
         self.assertGreater(importv1._filled_size("".join("{" + k + "}" for k in many), many), importv1.MAX_LABEL)
         self.assertLessEqual(sum(c.calls for c in many.values()), 2)  # it stops once past MAX_LABEL
 
+    def test_the_title_has_one_text_per_configured_language(self):
+        self.set_config("secondary_language: zh\n")
+        self.ok("--project", "shop")
+        self.assertEqual(self.by_key()["v1:shop:PROJ-1"]["title"], {"en": "Add the cart", "zh": "加购物车"})
+
+    def test_the_title_has_only_the_primary_slot_when_only_one_language_is_configured(self):
+        self.ok("--project", "shop")
+        self.assertEqual(self.by_key()["v1:shop:PROJ-1"]["title"], {"en": "Add the cart"})
+
+    def test_the_project_cards_title_is_its_name_in_every_language(self):
+        self.set_config("secondary_language: zh\n")
+        self.ok("--project", "shop")
+        self.assertEqual(self.by_key()["v1:shop"]["title"], {"en": "shop", "zh": "shop"})
+
+    def test_a_blank_title_in_one_language_falls_back_and_passes_the_title_check(self):
+        self.set_config("secondary_language: zh\n")
+        self.edit_state("projects/shop", lambda s: s["tasks"][0].update(title={"en": "  ", "zh": "加购物车"}))
+        self.ok("--project", "shop")
+        c = self.by_key()["v1:shop:PROJ-1"]
+        self.assertEqual(c["title"], {"en": "加购物车", "zh": "加购物车"})
+        self.assertEqual(c["title"], c["plain"]["what"])
+        for card in self.by_key().values():
+            cards.check_title(card, ("en", "zh"))
+
+    def test_each_title_is_its_own_copy_of_the_plain_words(self):
+        entries, _ = importv1.plan("shop", self.v1 / "projects" / "shop", ("en", "zh"),
+                                   importv1.Labels(self.v1), {}, [])
+        for e in entries:
+            with self.subTest(e["key"]):
+                self.assertEqual(e["card"]["title"], e["card"]["plain"]["what"])
+                self.assertIsNot(e["card"]["title"], e["card"]["plain"]["what"])
+
+    def test_a_rerun_moves_cards_with_a_one_text_title_to_one_text_per_language_once(self):
+        self.set_config("secondary_language: zh\n")
+        self.ok("--project", "shop")
+        store = Store(self.data)
+        # As the import wrote every card before titles had one slot per language: the primary language's text.
+        for c in store.list():
+            store.update(c["id"], {"title": c["plain"]["what"]["en"]}, by="test")
+        old = self.by_key()
+        self.assertTrue(all(isinstance(c["title"], str) for c in old.values()))
+        report = self.ok("--project", "shop")
+        self.assertEqual(set(self.actions(report).values()), {"update"})
+        now = self.by_key()
+        self.assertEqual(sorted(now), sorted(old))
+        for key, c in now.items():
+            with self.subTest(key):
+                self.assertEqual(c["title"], old[key]["plain"]["what"])
+                self.assertEqual((c["id"], c.get("parent")), (old[key]["id"], old[key].get("parent")))
+                self.assertEqual(c["audit"][:len(old[key]["audit"])], old[key]["audit"])
+                self.assertEqual(len(c["audit"]), len(old[key]["audit"]) + 1)
+        self.assertEqual(set(self.actions(self.ok("--project", "shop")).values()), {"unchanged"})
+
+    def test_a_question_card_with_a_one_text_title_is_closed_with_one_text_per_language(self):
+        self.set_config("secondary_language: zh\n")
+        self.ok("--project", "shop")
+        store = Store(self.data)
+        d1 = self.by_key()["v1:shop:D1"]
+        store.update(d1["id"], {"title": d1["plain"]["what"]["en"]}, by="test")  # as the old import wrote it
+        before = self.by_key()["v1:shop:D1"]
+        self.assertIsInstance(before["title"], str)
+        self.edit_state("projects/shop", lambda s: s["decisions"].pop(0))
+        report = self.ok("--project", "shop")
+        self.assertEqual(self.actions(report)["v1:shop:D1"], "update")
+        card = self.by_key()["v1:shop:D1"]
+        self.assertEqual((card["lane"], card["ask"]), ("done", None))
+        self.assertEqual(card["title"], before["plain"]["what"])
+        self.assertEqual(set(card["title"]), {"en", "zh"})
+        cards.check_title(card, ("en", "zh"))
+
+    def test_a_closed_question_without_plain_words_takes_each_slot_from_its_old_title(self):
+        make = importv1._Maker("shop", self.v1 / "projects" / "shop", ("en", "zh"), importv1.Labels(self.v1))
+        for title, want in (("Old words", {"en": "Old words", "zh": "Old words"}),
+                            ({"en": "Old", "zh": "旧"}, {"en": "Old", "zh": "旧"}),
+                            ({"en": "Old"}, {"en": "Old", "zh": "Old"}),
+                            (None, {"en": "D1", "zh": "D1"})):
+            with self.subTest(title=title):
+                old = {"key": "v1:shop:D1", "kind": "question", "title": title, "plain": {"what": {"zh": " "}},
+                       "parent": "abc", "source": {"name": "v1-import", "record": {}}}
+                card = make.closed(old)["card"]
+                self.assertEqual(card["title"], want)
+                self.assertEqual(card["plain"]["what"], want)
+                cards.check_title(card, ("en", "zh"))
+
     def test_the_title_is_the_primary_languages_text_when_it_is_not_english(self):
         self.set_config("primary_language: zh\nsecondary_language: en\n")
         self.ok("--project", "shop")
-        self.assertEqual(self.by_key()["v1:shop:PROJ-1"]["title"], "加购物车")
+        self.assertEqual(self.by_key()["v1:shop:PROJ-1"]["title"], {"zh": "加购物车", "en": "Add the cart"})
 
     def test_where_names_the_project_and_a_questions_task(self):
         self.set_config("secondary_language: zh\n")
@@ -914,7 +1000,7 @@ class ImportV1Test(unittest.TestCase):
         self.edit_state("notes", odd)
         report = self.ok("--project", "notes")
         self.assertEqual(report["projects"][0]["not_imported"], {"decisions": 1})
-        self.assertEqual(self.by_key()["v1:notes:D7"]["title"], "['x']")
+        self.assertEqual(self.by_key()["v1:notes:D7"]["title"], {"en": "['x']"})
 
     # -- 7. a broken project does not stop the others -----------------------------------------------------------
 
