@@ -124,15 +124,21 @@ rejects one that does not.
 2. **Check workers.** For each autopilot run `ap worker list <ap> --json` and handle each worker by
    its `state`:
    - `running` or `unknown` (the session list could not be read): leave it.
-   - `parked` (it stopped itself because a usage window reached `budget.park_pct`; `parked.resume_at`
-     and `parked.note` say when and where): it is not dead and not done. Never `ap worker resume` or
-     `ap worker end` it. Resume it now, before any other step, when `parked.resume_at` has passed and
-     `allowance.allow` is not `0`: write `runs/<task>/brief-<role>.md` (the usual brief fields, then
-     "You were parked for quota. Your note: <note>. Continue from there.") and run
+   - `parked`: it is not dead and not done. Never `ap worker resume` or `ap worker end` it. Two kinds:
+     - A quota park (it stopped itself because a usage window reached `budget.park_pct`; `parked.resume_at`
+       and `parked.note` say when and where). Resume it now, before any other step, when
+       `parked.resume_at` has passed and `allowance.allow` is not `0`, with the brief line
+       "You were parked for quota. Your note: <note>. Continue from there." While usage is still high or
+       `resume_at` is ahead, leave it.
+     - A cap park (`parked.kind` is `cap`, `parked.resume_at` is null: the user chose pause on the daily-cap
+       card, which paused every autopilot and stopped its workers). Resume it only when this autopilot is
+       not paused (the user resumed it) and `allowance.allow` is not `0`, with the brief line
+       "You were paused at the daily cap. Your note: <note>. Continue from there." Otherwise leave it.
+     To resume either: write `runs/<task>/brief-<role>.md` (the usual brief fields, then that line) and run
      `ap worker start <ap> <task> <role> --resume --cwd <its cwd> --prompt-file <brief> --needs <needs>`.
-     That keeps its slot and ports, clears the parked record and logs `worker_resumed`. While usage is
-     still high or `resume_at` is ahead, leave it. A parked worker holds its slot, so it counts toward
-     `max_workers` and resumes before step 8 starts any new task.
+     That keeps its slot and ports, clears the parked record and logs `worker_resumed` (it exits 1 at the
+     cap, with a failing key or a broken profile: leave the worker then). A parked worker holds its slot,
+     so it counts toward `max_workers` and resumes before step 8 starts any new task.
    - `blocked` (waiting for a permission nobody can give): add an `ask` card (title
      `{"key": "worker_blocked", "args": {"session": "<name>"}}`) unless one is open; tell the user they
      can `claude attach "<name>"` to answer it.

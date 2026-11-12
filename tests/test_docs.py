@@ -63,6 +63,13 @@ class DocsTest(unittest.TestCase):
         labels = (ROOT / "templates" / "labels.en.json").read_text()
         self.assertIn('"two_answers"', labels)
 
+    def test_cap_parked_workers_resume_only_when_unpaused_and_allowed(self):
+        rb = (ROOT / "RUNBOOK.md").read_text()
+        step = rb[rb.index("2. **Check workers.**"):rb.index("3. **Implementer done**")]
+        self.assertIn("`parked.kind` is `cap`", step)
+        self.assertIn("not paused", step)
+        self.assertIn("You were paused at the daily cap", step)
+
     def test_profile_and_cap_replies_go_through_reply_kind(self):
         rb = (ROOT / "RUNBOOK.md").read_text()
         step = rb[rb.index("**Replies.**"):rb.index("7. **Sync the source.**")]
