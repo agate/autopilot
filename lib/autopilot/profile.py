@@ -204,6 +204,8 @@ def launch_profile(settings, expected: str = None) -> dict:
 
 _BLANKED_ENV = ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL",
                 "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_API_KEY")
+# A cloud-provider switch in the daemon's env would send any session to that provider instead: blanked in both modes.
+_PROVIDER_ENV = ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY")
 
 
 def overlay(p: dict) -> dict:
@@ -214,10 +216,10 @@ def overlay(p: dict) -> dict:
     extra_env = extra.pop("env", None) or {}
     if p.get("mode") == "gateway":
         gw = p["gateway"]
-        env = {"ANTHROPIC_BASE_URL": gw["base_url"], "ANTHROPIC_MODEL": p.get("model"),
+        # No model of its own: blank the variable, so a model name in the daemon's env cannot reach the gateway.
+        env = {"ANTHROPIC_BASE_URL": gw["base_url"], "ANTHROPIC_MODEL": p.get("model") or "",
                "ANTHROPIC_SMALL_FAST_MODEL": p["small_model"], "ANTHROPIC_DEFAULT_HAIKU_MODEL": p["small_model"],
                "ENABLE_TOOL_SEARCH": "true", "AUTOPILOT_PROFILE": p["name"]}
-        env = {k: v for k, v in env.items() if v is not None}
         out = {"apiKeyHelper": gw["key_command"]}
     else:
         env = {"AUTOPILOT_PROFILE": p["name"], **{k: "" for k in _BLANKED_ENV}}
@@ -228,6 +230,7 @@ def overlay(p: dict) -> dict:
         out["env"].update({"ANTHROPIC_AUTH_TOKEN": "", "ANTHROPIC_API_KEY": ""})
     else:
         out["env"].update({k: "" for k in _BLANKED_ENV})   # the blanks win: no silent fallback to a gateway
+    out["env"].update({k: "" for k in _PROVIDER_ENV})
     out.update(extra)
     return out
 

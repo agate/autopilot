@@ -127,6 +127,20 @@ class ProfileSettingsTest(unittest.TestCase):
             self.assertEqual(read(profile.light_settings())["permissions"],
                              perms.static_settings("light")["permissions"])
 
+    def test_cloud_provider_switches_are_blanked_in_both_modes(self):
+        for prof in (profile.load("subscription"), gateway()):
+            prof["env"] = {"CLAUDE_CODE_USE_BEDROCK": "1"}
+            prof["settings"] = {"env": {"CLAUDE_CODE_USE_VERTEX": "1"}}
+            env = profile.overlay(prof)["env"]
+            for k in ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"):
+                self.assertEqual(env[k], "", (prof["mode"], k))
+
+    def test_a_gateway_profile_without_a_model_blanks_the_model(self):
+        g = gateway()
+        g["model"] = None
+        self.assertEqual(profile.overlay(g)["env"]["ANTHROPIC_MODEL"], "")
+        self.assertEqual(profile.overlay(gateway())["env"]["ANTHROPIC_MODEL"], "big")
+
     def test_merge_keeps_floor_autopilot_env(self):
         floor = {"permissions": {"deny": ["x"]}, "hooks": {"h": 1},
                  "env": {"AUTOPILOT_ROLE": "worker", "AUTOPILOT_PROFILE": "old", "OTHER": "1"}}
