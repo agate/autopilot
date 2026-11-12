@@ -1965,7 +1965,7 @@ Calls the author made without asking (check them):
     with a key command (`apiKeyHelper`), so a key is never written in any file. Fields (v1's schema): `name`,
     `mode` (`subscription | gateway`), `label`, `model`, `dispatcher_model`, `small_model`, `effort`,
     `daily_cap_usd`, `gateway {base_url, key_command, refresh_command, rotate_command, models_command}`, `env`,
-    `settings`. Names follow the profile rule (`profiles.PROFILE_NAME`: like a project name, plus `_`, 40 at most,
+    `settings`, and `chosen_at` (see "Model and effort choice" below). Names follow the profile rule (`profiles.PROFILE_NAME`: like a project name, plus `_`, 40 at most,
     because a profile is often named after a gateway project such as `team_project`), not the project rule
     (`projects.NAME`, unchanged). One rule serves `path`, `validate`, `names` and `active_name`, so a name `save`
     accepts always loads, lists and becomes active (v1 once saved one it could not load).
@@ -1989,13 +1989,16 @@ Calls the author made without asking (check them):
   - Checks (v1's): a gateway needs `base_url` (http or https), `key_command`, `small_model` and
     `daily_cap_usd > 0`; `settings` may not hold `permissions`, `hooks`, `apiKeyHelper` or `disableAllHooks`; `env`
     and `settings.env` may not hold a credential-looking name (`KEY`, `TOKEN`, `SECRET`, `PASSWORD`), a name the
-    overlay sets or blanks, a cloud-provider switch, or (v2's addition) any `AP2_*` or `AUTOPILOT_*` name. On save,
-    `gateway.models_command` runs (`shell=True`, 30 s) and every model the profile names must be in the JSON list it
-    prints; its output is only parsed, never printed or kept. A list holding anything but texts is refused with the
-    same "must print a JSON list of model names" line. A model (`model`, `dispatcher_model` or `small_model`) may
-    end in `[1m]` (`profiles.LONG_CONTEXT`, Claude Code's marker for the 1M context window): it is checked without
-    the marker (`profiles.base_model` strips one trailing `[1m]`, nothing else), and stored and passed with it, to
-    `--model` and `ANTHROPIC_MODEL` alike.
+    overlay sets or blanks, a cloud-provider switch, or (v2's addition) any `AP2_*` or `AUTOPILOT_*` name. On a save
+    without a fetched list, `gateway.models_command` runs (`shell=True`, 30 s) and every model the profile names must
+    be in the JSON list it prints; its output is only parsed, never printed or kept. `ap2 profile add`, `choose`,
+    `choices`, and `use` when it must ask, fetch it with 20 s instead (`profiles.CHOICE_TIMEOUT`, see "Model and
+    effort choice") and show only the entries shaped like a model name (`profiles.MODEL_NAME`: a letter or digit,
+    then up to 127 letters, digits and `. _ : / @ [ ] -`), never any other output. A list holding anything but texts
+    is refused with the same "must print a JSON list of model names" line. A model (`model`, `dispatcher_model` or
+    `small_model`) may end in `[1m]` (`profiles.LONG_CONTEXT`, Claude Code's marker for the 1M context window): it is
+    checked without the marker (`profiles.base_model` strips one trailing `[1m]`, nothing else), and stored and
+    passed with it, to `--model` and `ANTHROPIC_MODEL` alike.
     - **[decided by the builder]** `small_model` may end in `[1m]` too (the same check for all three fields, as in
       v1), and only the exact lowercase `[1m]` is stripped: `[2m]` or `[1M]` must be listed as written.
     - **[decided by the builder]** The `[1m]` launch check sits in `tests/test_ap2_profiles.py` and imports `opt`
@@ -2019,6 +2022,73 @@ Calls the author made without asking (check them):
     that moment. Its name is kept on the worker record (`profile`) and on the card's `sessions.<role>.profile`.
     `ap2 profile use` rewrites no settings file: v2 writes each worker's floor at its own launch, so a running
     worker keeps its profile (design of the access profiles, 7) and only its next start or resume moves.
+  - Model and effort choice (port of the command-line half of v1's model and effort choice). A profile records
+    when its model and effort were chosen in `chosen_at`: an ISO 8601 time text or null (`validate` refuses
+    anything else with `chosen_at: must be an ISO time or null`). `profiles.needs_choice(data, p)` is True while it is
+    null, except on the subscription, built in or stored, which never needs a choice: v2 has no migration, so a
+    subscription-only user is never asked. `ap2 profile add` with both `--model` and `--effort` sets it at creation.
+    - The lists are fetched fresh on every call, never cached (`profiles.model_choices`). A gateway with a
+      `models_command` runs it (`profiles.CHOICE_TIMEOUT`, 20 s) and offers its list; otherwise (the subscription, or
+      a gateway with no models command) the `claude-*` models of `spend.prices(data)` (the data folder's override
+      included), then `default` (Claude Code's own default, stored as a null model). Every `claude-*` name but
+      `claude-haiku-*` is offered twice, its `[1m]` variant first, and no name twice. Efforts are
+      `low, medium, high, xhigh, max`. The recommended entries are `claude-opus-5-5[1m]` (when offered, else the
+      first model) and `high`. A failing models command raises `ModelsUnavailable` (a `ProfileError`) naming the exit
+      code or the exception only, never its output or its command line.
+    - One fetch per choice. `choose(data, name, model, effort, models=None, known=None)` fetches once with
+      `profiles.fetch_models` (or takes the caller's lists), refuses a model not in the shown list or an effort not
+      offered (the error lists the choices), and saves with `save(data, p, known)`, the full list of that same fetch,
+      so no command runs again. Nothing is written on a refusal. `add` fetches once too: the shown list checks
+      `--model` and feeds the prompt, the full list checks the save.
+    - `ap2 profile choices NAME` prints `{profile, models, efforts, recommended_model, recommended_effort}` (a fetch
+      failure is one `ap2:` line, exit 1). `ap2 profile choose NAME [--model M] [--effort E]` saves both and prints
+      the profile. A missing value is asked for in a terminal (`sys.stdin.isatty()`): a numbered list per value, the
+      recommended entry marked `(recommended)` and taken on Enter, a number or the exact name accepted, anything
+      else asked again; the end of input prints `ap2: no choice made; nothing changed` and exits 1. With no terminal
+      (a script, a worker, a talk session) it prints the choices JSON on stdout and a one-line hint naming
+      `ap2 profile choose NAME --model M --effort E` on stderr, and exits 3 (`profiles.NEEDS_CHOICE`), so the
+      caller can ask the user and come back.
+    - `add` and `use` ask once. `ap2 profile add NAME` without both flags saves the profile unchosen first, then
+      asks in a terminal (leaving the prompt says the profile is saved and `ap2 profile choose NAME` finishes it,
+      exit 1) or, with no terminal, prints the choices and the hint and exits 3. With both flags the model is
+      checked against the fetched list (`[1m]` variants included) and nothing is asked. `ap2 profile use NAME` for
+      a profile that needs a choice asks, saves, then switches in a terminal; with no terminal it exits 3 with the
+      choices and leaves `active-profile.json` untouched. Switching to the active profile again, to a chosen one or
+      to the subscription asks nothing.
+    - Workers never ask: a worker start or resume runs the active profile as stored, chosen or not; only
+      `ap2 profile` reads `needs_choice`.
+    - The page's choice card (the `profile_choice` reply, two selects) is not here: it needs the page's profile
+      switch, and is its own task after it.
+    - **[decided by the builder]** The time of a choice is `profiles.now()`: local time with its UTC offset, to the
+      second (v1's `_now`), so a test can patch one function.
+    - **[decided by the builder]** The numbered list, the `Number [N]:` prompt and "Type a number from 1 to N" go to
+      stderr, not stdout as in v1, so stdout holds only the JSON even when it is piped (`ap2 profile use g | jq`).
+    - **[decided by the builder]** The hints: `add` says "NAME is saved, but its model and effort are not chosen
+      yet: run `ap2 profile choose NAME --model M --effort E` with values from the list above"; `choose` says "no
+      terminal to ask in: run ..."; `use` says "NAME has no model and effort chosen yet, so nothing switched: run
+      `ap2 profile choose NAME --model M --effort E`, then `ap2 profile use NAME`".
+    - **[decided by the builder]** `add` refuses an `--effort` not in the list even when `--model` is missing (as v1
+      did), and `--model default` is stored as null whether or not `--effort` is given. A flag value not offered is
+      refused before anything is asked or printed, in `choose` too.
+    - **[decided by the builder]** A models command that lists no models at all is one `ap2:` line at the prompt
+      ("listed no models, so there is nothing to choose"), never an endless prompt.
+    - **[decided by the builder]** `add` now fetches the list before it saves (and so reads the price override
+      when the profile has no models command): the list the prompt shows comes from the fetch the save checked.
+      A broken `prices.json` therefore fails `add` with its one line.
+    - **[decided by the builder]** The choices keep only the models command's entries shaped like a model name
+      (`profiles.MODEL_NAME`, checked before the `[1m]` variants are added); any other entry is dropped and never
+      shown. Why: the list is shown in a terminal and in logs (the choices JSON, the numbered list, the "choose one
+      of" error), so the filter drops an entry with a space, a control character or any other character a model
+      name never has: a gateway's error text or a terminal control sequence is never shown. A bare token shaped
+      like a model name would still be shown (a gateway's model list holds no keys). The filter decides only what
+      is shown and what may be picked as the profile's model; a save checks the profile's models against the full
+      list from the same fetch (`profiles.fetch_models`): every entry the command printed, with the `[1m]` variant
+      and the plain name of each `claude-*` entry but `claude-haiku-*` added (as `_with_long` does for the shown
+      list), none dropped, so a listed `small_model` of another shape still saves. A save without a fetched list is
+      unchanged: it only parses the output and shows none of it. When every entry is dropped, it is a list with no
+      models ("listed no models, so there is nothing to choose").
+    - **[decided by the builder]** Ctrl-C at a prompt counts as "no choice made", like the end of input: one `ap2:`
+      line and exit 1, never a traceback (`add` still says the profile is saved and how to finish it).
   - Model and effort. A fresh start gets `--model <profile model>` when the profile has one and
     `--effort <profile effort>` when it has one, after `--agent`. A resume gets neither (8.2): a resumed gateway
     session takes its model from the overlay's `ANTHROPIC_MODEL`.
@@ -2042,7 +2112,8 @@ Calls the author made without asking (check them):
     fix), `show NAME` (the profile: its commands, never a key), `add NAME --subscription|--gateway [--base-url U]
     [--key-command C] [--refresh-command C] [--rotate-command C] [--models-command C] [--daily-cap N] [--label L]
     [--model M] [--dispatcher-model M] [--small-model M] [--effort E] [--env K=V ...] [--settings-file F]`,
-    `use NAME` (prints `{"active": new, "was": old}`, so `ap2 profile use <was>` undoes it) and `remove NAME`
+    `choices NAME` and `choose NAME [--model M] [--effort E]` (see "Model and effort choice"; exit 3 when a choice is
+    needed and no terminal can ask), `use NAME` (prints `{"active": new, "was": old}`, so `ap2 profile use <was>` undoes it) and `remove NAME`
     (refuses `subscription` and the active profile, and refuses any name while active-profile.json exists but holds no
     name at all: unreadable, bad JSON or no string `name`). `add` refuses a name that exists (`subscription` included)
     and the gateway flags on a `--subscription` profile, and prints the saved profile. `list` and `show` create
