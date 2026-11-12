@@ -100,16 +100,26 @@ class _Checker:
             self.fail(f"{field}.{missing[0]}" if field else missing[0], "missing")
         return value
 
+    def unicode(self, field: str, value: str) -> str:
+        """Refuse text the card cannot hold: a lone surrogate (JSON's \\ud800) is a str, but not UTF-8."""
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            pass
+        else:
+            return value
+        self.fail(field, f"must be valid Unicode text, not {_show(value)}")
+
     def one_line(self, field: str, value, empty: bool = False) -> str:
         if not isinstance(value, str) or (not empty and not value.strip()) or any(
                 ord(ch) < 32 or ord(ch) == 127 for ch in value):
             self.fail(field, f"must be one line of text, not {_show(value)}")
-        return value
+        return self.unicode(field, value)
 
     def text(self, field: str, value) -> str:
         if not isinstance(value, str):
             self.fail(field, f"must be text, not {_show(value)}")
-        return value
+        return self.unicode(field, value)
 
     def choice(self, field: str, value, allowed: tuple, null: bool = False):
         if value is None and null:

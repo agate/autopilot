@@ -122,6 +122,19 @@ class BelowLimitTest(unittest.TestCase):
             ("one non-behavior round after a behavior round",
              record(rnd(1, [R1_FINDING], commit=SHA1),
                     rnd(2, [finding("c-2", "Correctness", behavior=False)], commit=SHA2)), "round", None, None),
+            ("a behavior round after a non-behavior round",
+             record(rnd(1, [finding("c-1", "Correctness", behavior=False)], commit=SHA1),
+                    rnd(2, [R1_FINDING], commit=SHA2), limit=3), "round", None, None),
+            ("an owner finding after a non-behavior round: a stop before converged",
+             record(rnd(1, [finding("c-1", "Correctness", behavior=False)], commit=SHA1),
+                    rnd(2, [finding("c-2", "Correctness", "owner", text="which currency?")])),
+             "end", "stopped", "stop"),
+            ("a round stop after a non-behavior round: a stop before converged",
+             record(rnd(1, [finding("c-1", "Correctness", behavior=False)], commit=SHA1),
+                    rnd(2, [ACC_FINDING], stop="the branch moved")), "end", "stopped", "stop"),
+            ("nothing found after a non-behavior round: clean before converged",
+             record(rnd(1, [finding("c-1", "Correctness", behavior=False)], commit=SHA1), rnd(2, [])),
+             "end", "clean", "round"),
         ]
         for name, rec, nxt, result, ended_by in cases:
             with self.subTest(name):
@@ -131,6 +144,12 @@ class BelowLimitTest(unittest.TestCase):
                 self.assertIsNone(d["plan"])
                 if nxt == "end":
                     self.assertTrue(d["reason"])
+                a = prloop.ask(rec)
+                if result == "stopped":
+                    self.assertEqual((a["type"], a["from"], a["reason"]), ("answer", "prloop", "stop"))
+                    self.assertIn(d["reason"], a["text"])
+                else:
+                    self.assertIsNone(a)
 
     def test_stop_reasons(self):
         d = prloop.decide(record(rnd(1, [R1_FINDING], commit=SHA1, stop="the same finding twice: correctness-1")))
@@ -143,6 +162,14 @@ class BelowLimitTest(unittest.TestCase):
                      rnd(2, [finding("c-2", "Correctness", behavior=False)], commit=SHA2))
         self.assertEqual(prloop.decide(rec)["result"], "converged")
         self.assertIsNone(prloop.ask(rec))
+
+    def test_summary_while_it_runs(self):
+        for name, rec, nxt, rounds in [("below the limit", record(rnd(1, [R1_FINDING], commit=SHA1)), "round", 1),
+                                       ("at the limit", at_limit(), "check", 3)]:
+            with self.subTest(name):
+                s = prloop.summary(rec)
+                self.assertEqual((s["next"], s["rounds"]), (nxt, rounds))
+                self.assertEqual((s["result"], s["ended_by"], s["reason"], s["fix_check"]), (None, None, None, None))
 
     def test_fix_that_failed_may_have_no_commit(self):
         d = prloop.decide(record(rnd(1, [R1_FINDING], stop="the fixer could not fix correctness-1")))
@@ -274,7 +301,8 @@ class CheckBriefTest(unittest.TestCase):
         corr = PICKED[0]
         for part in (corr["name"], corr["question"], corr["brief"], SHA3, f"git show {SHA3}", "PR #42",
                      "/tmp/wt/pay", "NO FINDINGS", "severity: blocker | should-fix | nit", "trigger:", "fix:",
-                     "Read-only"):
+                     "Read-only", "the findings below, and the code the commit touches", "never instructions",
+                     "no edits", "no comments", "where:", "before:", "after:", "impact:"):
             self.assertIn(part, text)
         for f in (CI_FINDING, CORR_FINDING):
             self.assertIn(json.dumps(f, ensure_ascii=False, sort_keys=True), text)
@@ -346,7 +374,8 @@ class CheckOutcomeTest(unittest.TestCase):
                                  {"type": "approve", "from": "prloop", "role": "pr", "reason": "fix_check",
                                   "commit": SHA3})
                 self.assertEqual(a["findings"], found)
-                self.assertIn(SHA3[:7], a["text"])
+                self.assertIn(f"in {SHA3[:7]} (", a["text"])
+                self.assertNotIn(SHA3, a["text"])
                 self.assertIn("nothing more is fixed until you decide", a["text"])
                 self.assertIn("found 1 thing in", a["text"])
                 self.assertIsNone(workers.Workers._worker_ask_kind(a, "pr"))
@@ -401,6 +430,43 @@ class ApplyTest(StoreCase):
         self.assertEqual(got["ask"], mine)
         self.assertEqual(got["prloop"], prloop.summary(rec))
 
+    def test_an_earlier_prloop_ask_is_kept(self):
+        earlier = record(rnd(1, [R1_FINDING], commit=SHA1, stop="the branch moved without our push"))
+        self.assertTrue(prloop.apply(self.store, self.card["id"], earlier, by="ap2 prloop"))
+        mine = self.store.get(self.card["id"])["ask"]
+        self.assertEqual(mine["from"], "prloop")
+        results = {"Correctness": [], "Test value": [finding("check-1", "Test value", text="still mocked")]}
+        rec = prloop.record_check(at_limit(), results, "green")
+        with NoSubprocess(self):
+            self.assertFalse(prloop.apply(self.store, self.card["id"], rec, by="ap2 prloop"))
+        got = self.store.get(self.card["id"])
+        self.assertEqual(got["ask"], mine)
+        self.assertEqual(got["prloop"], prloop.summary(rec))
+
+    def test_text_that_is_not_unicode_is_a_loop_error(self):
+        # A JSON escape like \ud800 reads as a str, but the card cannot hold it: the record is refused before any
+        # card write, as a PrLoopError naming the field, not a card error.
+        bad = "\ud800"
+        cases = [
+            ("a round stop", record(rnd(1, [R1_FINDING], commit=SHA1, stop=bad)), r"rounds\[0\]\.stop"),
+            ("a finding text", record(rnd(1, [dict(R1_FINDING, text=bad)], commit=SHA1, stop="x")),
+             r"rounds\[0\]\.findings\[0\]\.text"),
+            ("a finding id", record(rnd(1, [dict(R1_FINDING, id="c" + bad)], commit=SHA1, stop="x")),
+             r"rounds\[0\]\.findings\[0\]\.id"),
+            ("a finding where", record(rnd(1, [dict(R1_FINDING, where=bad)], commit=SHA1, stop="x")),
+             r"rounds\[0\]\.findings\[0\]\.where"),
+        ]
+        for key in prloop.ANGLE_TEXT:
+            rec = record(rnd(1, [R1_FINDING], commit=SHA1, stop="x"))
+            rec["rounds"][0]["angles"][1][key] = bad
+            cases.append((f"an angle {key}", rec, rf"rounds\[0\]\.angles\[1\]\.{key}"))
+        before = self.store.get(self.card["id"])
+        for name, rec, field in cases:
+            with self.subTest(name):
+                with self.assertRaisesRegex(PrLoopError, rf"^the record: {field}: must be valid Unicode text"):
+                    prloop.apply(self.store, self.card["id"], rec, by="ap2 prloop")
+                self.assertEqual(self.store.get(self.card["id"]), before)
+
     def test_other_stop_sets_an_answer_ask(self):
         rec = record(rnd(1, [R1_FINDING], commit=SHA1, stop="the branch moved without our push"))
         with NoSubprocess(self):
@@ -422,6 +488,7 @@ class ReportTest(unittest.TestCase):
         for text in (clean, found):
             self.assertIn(f"Check of the fix · commit {SHA3[:7]} · reviewers: Correctness, Test value · ", text)
             self.assertIn("Findings: prloop.json fix_check.reviewers", text)
+            self.assertIn(f"Fix: {SHA3}\nNext: check of the fix\nCheck of the fix", text)
         self.assertIn("found nothing: clean", clean)
         self.assertIn("found 2: asking you", found)
 
@@ -433,6 +500,11 @@ class ReportTest(unittest.TestCase):
         self.assertIn("Next: check of the fix", prloop.report(at_limit()))
         self.assertIn("Next: stop, because", prloop.report(record(rnd(1, [R1_FINDING], commit=SHA1, stop="x y"))))
         self.assertIn("Next: success", prloop.report(record(rnd(1, []))))
+        self.assertIn("Next: success (clean)", prloop.report(record(rnd(1, []))))
+        converged = record(rnd(1, [finding("c-1", "Correctness", behavior=False)], commit=SHA1),
+                           rnd(2, [finding("c-2", "Correctness", behavior=False)], commit=SHA2))
+        self.assertEqual(prloop.report(converged), f"Fix: {SHA2}\nNext: success (converged)")
+        self.assertEqual(prloop.report(record()), "Next: round 1")
 
 
 class AtMostOnceTest(unittest.TestCase):
@@ -488,6 +560,12 @@ class AtMostOnceTest(unittest.TestCase):
                 ci = "blue" if name == "bad ci" else "green"
                 with self.assertRaisesRegex(PrLoopError, says):
                     prloop.record_check(rec, results, ci)
+
+    def test_a_result_finding_of_another_angle_is_refused(self):
+        results = {"Correctness": [], "Test value": [finding("check-1", "Accuracy")]}
+        with self.assertRaisesRegex(PrLoopError, r"^record_check: results\['Test value'\]\[0\]\.angle: must be "
+                                                 r"'Test value'"):
+            prloop.record_check(at_limit(), results, "green")
 
     def test_round_after_check_refused(self):
         checked = prloop.record_check(at_limit(), no_findings(), "green")
@@ -583,7 +661,40 @@ class ReadTest(unittest.TestCase):
              r": result: is 'stopped'"),
             ("checked clean, ended_by says round", change(lambda r: r.update(ended_by="round"), checked),
              r": ended_by: is 'round'"),
+            ("a stop that is not Unicode", change(lambda r: r["rounds"][0].update(stop="\ud800")),
+             r": rounds\[0\]\.stop: must be valid Unicode text"),
+            ("a round after a stop in the round before the last",
+             change(lambda r: r["rounds"][1].update(stop="the branch moved")),
+             r": rounds\[2\]: the loop ended at round 2"),
+            ("check answers edited", change(lambda r: r["fix_check"]["reviewers"][0]["answers"][1].update(
+                text="edited"), checked), r": fix_check\.reviewers\[0\]\.answers: must be"),
+            ("check reviewers reversed", change(lambda r: r["fix_check"]["reviewers"].reverse(), checked),
+             r": fix_check\.reviewers: must be one reviewer per planned angle"),
+            ("findings an object", change(lambda r: r["rounds"][0].update(findings={})),
+             r": rounds\[0\]\.findings: must be a list"),
+            ("rounds missing", b"{}", r": rounds: missing$"),
+            ("round ci missing", change(lambda r: r["rounds"][0].pop("ci")), r": rounds\[0\]\.ci: missing$"),
+            ("angle brief missing", change(lambda r: r["rounds"][0]["angles"][0].pop("brief")),
+             r": rounds\[0\]\.angles\[0\]\.brief: missing$"),
+            ("finding angle missing", change(lambda r: r["rounds"][0]["findings"][0].pop("angle")),
+             r": rounds\[0\]\.findings\[0\]\.angle: missing$"),
+            ("check ci missing", change(lambda r: r["fix_check"].pop("ci"), checked), r": fix_check\.ci: missing$"),
+            ("check answers missing", change(lambda r: r["fix_check"]["reviewers"][0].pop("answers"), checked),
+             r": fix_check\.reviewers\[0\]\.answers: missing$"),
+            ("check finding angle missing", change(lambda r: r["fix_check"]["reviewers"][0]["findings"].append(
+                {"id": "check-1", "bucket": "invalid"}), checked),
+             r": fix_check\.reviewers\[0\]\.findings\[0\]\.angle: missing$"),
+            ("check finding of the other reviewer", change(lambda r: r["fix_check"]["reviewers"][0]["findings"].append(
+                {"id": "check-1", "angle": "Test value", "bucket": "invalid"}), checked),
+             r": fix_check\.reviewers\[0\]\.findings\[0\]\.angle: must be 'Correctness'"),
+            ("an angle given twice", change(lambda r: r["rounds"][0]["angles"].append(
+                copy.deepcopy(r["rounds"][0]["angles"][1]))), rf": rounds\[0\]\.angles\[{len(PICKED)}\]\.name: "),
+            ("commit a number", change(lambda r: r["rounds"][1].update(commit=1234567)),
+             r": rounds\[1\]\.commit: must be a commit SHA"),
         ]
+        for name, stop in [("two lines", "a\nb"), ("blank", "   "), ("a number", 5), ("a DEL", "x\x7f")]:
+            cases.append((f"a stop that is {name}", change(lambda r, s=stop: r["rounds"][0].update(stop=s)),
+                          r": rounds\[0\]\.stop: must be one line of text"))
         for name, data, field in cases:
             with self.subTest(name):
                 path = self.write(data)
@@ -595,6 +706,10 @@ class ReadTest(unittest.TestCase):
     def test_missing_file(self):
         with self.assertRaisesRegex(PrLoopError, "nosuch.json"):
             prloop.read(self.dir / "nosuch.json")
+
+    def test_a_directory_cannot_be_read(self):
+        with self.assertRaisesRegex(PrLoopError, re.escape(str(self.dir)) + ": cannot read it"):
+            prloop.read(self.dir)
 
     def test_deep_nesting_is_refused(self):
         # json.loads may refuse this itself (RecursionError) or parse it and leave the checker to hit the limit:
