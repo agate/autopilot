@@ -8,7 +8,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 
-from autopilot import budget, cli, config, dispatch, events, lock, nextwork, ops, paths, park, profile, refresh, replies, sessions, state, workers
+from autopilot import budget, cap, cli, config, dispatch, events, lock, nextwork, ops, paths, park, profile, refresh, replies, sessions, state, workers
 
 
 def report_due(times: list, last_slot, now: datetime):
@@ -298,6 +298,10 @@ def run(now: datetime = None, dispatch_fn=None) -> int:
     tick_file = paths.data_root() / "tick.json"
     ticked = set(_read_json(tick_file).get("aps") or [])
     allow = _allowance(gcfg, now)
+    try:
+        cap.retry_stops(now)   # a worker the cap pause could not stop is stopped again
+    except Exception as e:  # noqa: BLE001 - a retry must never stop the gate
+        notify(f"cap pause: could not retry stopping workers: {str(e)[:100]}")
     ticked |= replies.step(gcfg, gs, now)   # a new answer on the page queues its autopilot
     gs["paused_until"] = allow.get("paused_until") if allow["reason"] == "window" else None
     last = gs.get("last_pass_at") if isinstance(gs.get("last_pass_at"), dict) else {}

@@ -202,11 +202,40 @@ class PauseTest(Base):
             cap.answer("pause", DAY)
         for n in ("alpha", "beta"):
             self.assertTrue((paths.ap_dir(n) / "paused").exists())
-            self.assertEqual(state.load(n)["workers"][0]["parked"]["kind"], "cap")
+        self.assertEqual(state.load("beta")["workers"][0]["parked"]["kind"], "cap")
         self.assertIn("stop bbbb2222", self.log.read_text())
         ev = (paths.ap_dir("alpha") / "events.jsonl").read_text()
         self.assertIn("cap_stop_failed", ev)
         self.assertIn("timed out", ev)
+        self.assertNotIn("worker_parked", ev)
+        self.assertFalse((paths.ap_dir("alpha") / "runs" / "T-1" / "parked.json").exists())
+
+    def test_a_failed_stop_leaves_the_worker_running_and_the_next_gate_tick_retries(self):
+        import subprocess
+        from autopilot import sessions
+        write_ap(self.data, "alpha")
+        add_worker("alpha", short="aaaa1111")
+        real = subprocess.run
+        with mock.patch("autopilot.cap.subprocess.run", side_effect=subprocess.TimeoutExpired("x", 60)):
+            cap.answer("pause", DAY)
+        w = state.load("alpha")["workers"][0]
+        self.assertNotIn("parked", w)
+        live = [{"id": "aaaa1111", "name": w["session_name"], "state": "working", "pid": os.getpid()}]
+        self.assertEqual(sessions.classify(w, live, paths.ap_dir("alpha") / "runs" / "T-1"), "running")
+        self.assertFalse(self.log.exists() and "stop aaaa1111" in self.log.read_text())
+        with mock.patch.object(gate, "_sessions", lambda g: []), mock.patch.object(gate, "notify", lambda m: None), \
+                mock.patch.object(spend, "totals", return_value=totals(0)):
+            gate.run(dispatch_fn=lambda g, aps: [])
+        self.assertIn("stop aaaa1111", self.log.read_text())
+        self.assertEqual(state.load("alpha")["workers"][0]["parked"]["kind"], "cap")
+        self.assertIn("worker_parked", (paths.ap_dir("alpha") / "events.jsonl").read_text())
+
+    def test_a_hand_pause_is_not_retried(self):
+        write_ap(self.data, "alpha")
+        add_worker("alpha", short="aaaa1111")
+        (paths.ap_dir("alpha") / "paused").write_text("")
+        cap.retry_stops(DAY)
+        self.assertNotIn("parked", state.load("alpha")["workers"][0])
 
     def test_a_stopped_autopilot_is_left_alone(self):
         write_ap(self.data, "alpha", stopped=True)
