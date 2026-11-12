@@ -169,7 +169,7 @@ def _model_errors(p: dict) -> list:
         return []
     try:
         r = subprocess.run(cmd, shell=True, stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                           timeout=MODELS_TIMEOUT)
+                           errors="replace", timeout=MODELS_TIMEOUT)
     except subprocess.TimeoutExpired:
         return [f"gateway.models_command: failed (no answer within {MODELS_TIMEOUT} s)"]
     except (OSError, subprocess.SubprocessError) as e:
@@ -209,7 +209,7 @@ def load(data, name) -> dict:
     if not f.exists():
         if name == SUBSCRIPTION:
             return builtin()
-        raise ProfileError(f"no profile named {name!r}")
+        raise ProfileError(f"no profile named {name!r} ({f} does not exist)")
     try:
         raw = json.loads(f.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, ValueError) as e:

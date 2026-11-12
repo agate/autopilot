@@ -231,21 +231,23 @@ class WorkerProfileLaunchTest(WorkerCase):
         self.assertFalse((transcripts.run_dir(self.data, cid) / "settings-implement.json").exists())
 
     def test_the_profile_is_read_once_per_start(self):
-        """A `use` while the tools are listed changes nothing in this start: the probes, the floor, the argv, the
-        process env, the record and the card all take the profile read before the discovery."""
+        """A `use` just as the tools start to be listed changes nothing in this start: the probes, the floor, the
+        argv, the process env, the record and the card all take the profile read before the tool listing."""
         self.use_gateway("g2", url=OTHER_URL, model="m2", effort="low")
         self.use_gateway("g1", model="m1", effort="high")
-        real = Workers._discover
+        real = Workers._tools
         switched = []
 
-        def disc(self_, cwd, env, settings):
+        def tools(self_, *args):
             if not switched:
                 switched.append(profiles.use(self.data, "g2"))
-            return real(self_, cwd, env, settings)
+            return real(self_, *args)
 
-        with mock.patch.object(Workers, "_discover", disc):
+        with mock.patch.object(Workers, "_tools", tools):
             a = self.start()
         self.assertEqual(switched, [{"active": "g2", "was": "g1"}])
+        probe = transcripts.run_dir(self.data, a["card"]) / "settings-discover-implement.json"
+        self.assertEqual(json.loads(probe.read_text())["env"]["ANTHROPIC_BASE_URL"], URL)
         env = self.settings_of(self.bg_calls()[-1])["env"]
         self.assertEqual((env["ANTHROPIC_BASE_URL"], env["AP2_PROFILE"]), (URL, "g1"))
         argv = self.bg_calls()[-1]["argv"]

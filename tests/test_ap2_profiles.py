@@ -104,6 +104,16 @@ class ProfileStoreTest(WorkerCase):
         profiles.save(self.data, p)
         self.assertEqual(profiles.names(self.data), ["g", "subscription"])
 
+    def test_a_models_command_printing_bad_bytes_is_named(self):
+        """Output that is not UTF-8 (a models endpoint answering in gzip) is not a list of model names: the same
+        one error, never a traceback."""
+        p = gateway()
+        p["gateway"]["models_command"] = "printf '\\377\\213'"
+        with self.assertRaises(ProfileError) as cm:
+            profiles.save(self.data, p)
+        self.assertIn("must print a JSON list", str(cm.exception))
+        self.assertEqual(profiles.names(self.data), ["subscription"])
+
     def test_use_unknown_fails(self):
         with self.assertRaises(ProfileError):
             profiles.use(self.data, "nope")
@@ -131,6 +141,8 @@ class ProfileStoreTest(WorkerCase):
             msg = str(cm.exception)
             self.assertIsInstance(cm.exception, ConfigError)  # so `cli.main` exits 1 with one line
             self.assertIn(str(active) if body != '{"name": "ghost"}' else "ghost", msg)
+            if body == '{"name": "ghost"}':  # the file that is missing is named
+                self.assertIn(str(self.data / "profiles" / "ghost.json"), msg)
             self.assertIn("ap2 profile list", msg)
             self.assertIn("ap2 profile use <name>", msg)
         # A stored profile that no longer loads (hand-edited) refuses the same way.
