@@ -5,12 +5,14 @@ pause, the pause stops and parks every running worker, and parking is split by m
 (`tests/bin/fake-claude-v2`), and `spend.totals` is a stub where a test only needs a number."""
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -656,6 +658,68 @@ class PauseTest(CapWorkerCase):
         self.assertEqual(self.records(), [])
         ask = self.get(a["card"])["ask"]
         self.assertEqual((ask["type"], ask["reason"]), ("fix", workers_mod.DIED))
+
+    def pause_during_launch(self):
+        """Patch `Workers._launch` so a pause runs on another thread while the launch holds the worker list's lock:
+        the launch waits until the pause thread asks for the lock, then launches for real. Returns the patch and a
+        dict that gets the pause's result (`out`) or its error (`error`) once `join` is called."""
+        real_launch, real_locked = workers_mod.Workers._launch, resources.Registry.locked
+        asked, box = threading.Event(), {}
+
+        def run():
+            try:
+                box["out"] = self.pause()
+            except BaseException as e:  # noqa: BLE001 - re-raised on the test's thread
+                box["error"] = e
+
+        thread = threading.Thread(target=run, daemon=True)
+
+        def locked(reg):
+            if threading.current_thread() is thread:
+                asked.set()
+            return real_locked(reg)
+
+        def launch(w, *args, **kw):
+            thread.start()
+            self.assertTrue(asked.wait(10), "the pause never asked for the worker list's lock")
+            return real_launch(w, *args, **kw)
+
+        def join():
+            thread.join(30)
+            self.assertFalse(thread.is_alive(), "the pause did not finish")
+            if "error" in box:
+                raise box["error"]
+            return box["out"]
+
+        patches = contextlib.ExitStack()
+        patches.enter_context(mock.patch.object(resources.Registry, "locked", new=locked))
+        patches.enter_context(mock.patch.object(workers_mod.Workers, "_launch", autospec=True, side_effect=launch))
+        return patches, join
+
+    def test_pause_during_a_start_parks_the_new_worker(self):
+        cid = self.add_card()
+        patches, join = self.pause_during_launch()
+        with patches:
+            rec = self.workers().start(cid, "implement", cwd=self.wt, prompt="Do the work.")
+            out = join()
+        self.assertEqual(out["stopped"], [{"card": cid, "role": "implement"}])
+        self.assertIn(rec["short_id"], self.stops())
+        self.assertEqual(self.records()[0]["short_id"], rec["short_id"])
+        self.assertEqual(self.records()[0]["parked"]["kind"], "cap")
+
+    def test_pause_during_a_dead_workers_resume_parks_the_copy(self):
+        a = self.start()
+        self.drop_agent(a["short_id"])
+        patches, join = self.pause_during_launch()
+        with patches:
+            entry = self.workers().check()[0]
+            out = join()
+        self.assertEqual((entry["state"], entry["did"]), ("dead", "resumed"))
+        rec = self.records()[0]
+        self.assertNotEqual(rec["short_id"], a["short_id"])
+        self.assertEqual(out["stopped"], [{"card": a["card"], "role": "implement"}])
+        self.assertIn(rec["short_id"], self.stops())
+        self.assertEqual((rec["parked"]["kind"], rec["resumes"]), ("cap", 1))
 
     def test_check_while_paused_never_stops_a_dead_worker(self):
         a = self.start()

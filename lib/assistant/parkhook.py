@@ -8,8 +8,10 @@ sessions get no opinion, and neither does a worker whose own profile (`AP2_PROFI
 gateway's daily cap (`cap.py`) holds it instead. It looks only at the 5-hour and weekly windows, not at extra
 credits. It writes nothing and never breaks a session: any error is no output and exit 0.
 
-It runs before every tool call, so it imports only what it needs; `workers.py`, `store.py` and `config.py` are too
-heavy. `PARK_RULES` and `ROLES` are copies of `workers.PARK_RULES` and `workers.ROLES`, kept equal by a test.
+It runs before every tool call, so it imports only what it needs: on the common path (under the line) only `json`,
+`os`, `shlex`, `pathlib` and v1's `budget`; at the park line it also imports `profiles` (and with it `store` and
+`config`) to read the worker's own profile; never `workers`, `spend` or `cap`. `PARK_RULES` and `ROLES` are copies
+of `workers.PARK_RULES` and `workers.ROLES`, kept equal by a test.
 """
 from __future__ import annotations
 

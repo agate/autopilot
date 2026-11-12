@@ -1840,8 +1840,9 @@ Calls the author made without asking (check them):
     the list, so a save that keeps failing (e.g. the card file is gone) cannot hold its slot and ports forever. The blocked pause raises its resume hint only
     once the stop has returned. The archive copy is best-effort (`archive: null` and `archive_error` on the line;
     `finish` copies every id again). Dead once: resume in place (same slot) with "You were
-    interrupted. Check your worktree and run files first..."; dead twice: stop and set a `fix` ask. Parked: with
-    `--usage`, resume once v1's `park.resume_due` allows, on the same ports. Every in-place resume stops the old
+    interrupted. Check your worktree and run files first..."; dead twice: stop and set a `fix` ask. Parked: on a
+    subscription profile, with `--usage`, resume once v1's `park.resume_due` allows; on a gateway profile by the
+    daily cap, with no usage file (see the daily cap entry); on the same ports. Every in-place resume stops the old
     session first, whatever its state (a failed one may keep its process), and the copy takes its place. One worker's error (a bad project file, a failed call, a run folder that cannot
     be read while it is classified) never stops the pass: it goes on that worker's line as `note` (and `error`, the exception's name, when it is not one of v2's own
     errors), the other workers are still acted on, and the worker list is written back. The worker list is written
@@ -1925,10 +1926,11 @@ Calls the author made without asking (check them):
       the line and gets no opinion under it. It writes nothing, needs no data folder and works the same in shadow
       mode.
     - It runs before every tool call, so `bin/ap2` routes `hook-park` to `parkhook.main` before it imports `cli`
-      (and `cli.main` routes it before it builds the parser, for a caller that imports `cli`), and `parkhook`
-      imports only `json`, `os`, `shlex`, `pathlib` and v1's `budget`: not `workers`, `store` or
-      `config`. Its copies of the park rules and roles are kept equal to `workers.PARK_RULES` and `workers.ROLES`
-      by a test.
+      (and `cli.main` routes it before it builds the parser, for a caller that imports `cli`), and on the common
+      path (under the line) `parkhook` imports only `json`, `os`, `shlex`, `pathlib` and v1's `budget`; at the park
+      line it also imports `profiles` (and with it `store` and `config`) to read the worker's own profile; never
+      `workers`, `spend` or `cap`. Its copies of the park rules and roles are kept equal to `workers.PARK_RULES`
+      and `workers.ROLES` by a test.
   - Shadow mode: starting a worker, resuming one (dead, parked, answered) and `claude rm` call
     `config.require_live` first and raise `ShadowModeError` before anything runs. Listing, classifying, `check`,
     `end` (stopping is local), parking and archiving copies work in shadow mode; `finish` then makes the copies,
@@ -2171,15 +2173,17 @@ Calls the author made without asking (check them):
      fix (`ap2 cap answer ...` or `ap2 cap resume`). The pause is read again under the worker list's lock, before
      anything is written or launched (a `CapError` again), and so is it in `_still_due` for a dead worker's resume:
      a pause written while the tools were listed refuses the launch. That suffices because `pause` writes
-     `paused.json` before `cap_stop` reads the list, so a launch that commits under the lock either sees the pause
-     or is on the list `cap_stop` stops. `_plan_resume` (an in-place resume in `check`) checks the same,
+     `paused.json` before `cap_stop` reads the list and the listing, both under the same lock, so a launch that
+     commits under the lock either sees the pause or is on the list `cap_stop` stops (with its session in the
+     listing, so it is not taken for dead). `_plan_resume` (an in-place resume in `check`) checks the same,
      after its own `profiles.active`. A dead worker refused this way keeps its one resume (as for a ProfileError:
      the line names the cap, nothing resumes); a parked worker stays parked, never stopped as `parked_failed`: a
      CapError is no WorkerError in `_resume_step`. The allowance is computed at most once per profile per `check`
      pass, and only when a resume asks (`_pass_allowance`): one `spend.totals` call per pass. Running workers are
      never stopped by the cap itself: only the `pause` answer stops them.
-  7. Pause stops and parks; a failed stop is retried. `Workers.cap_stop()`: for every worker on the list that is
-     not parked (and no close started) and not dead, `_kill` (`claude stop`, then settle its spend) outside the lock; then, under the lock,
+  7. Pause stops and parks; a failed stop is retried. `Workers.cap_stop()`: under the lock, it reads the list and
+     one listing; for every worker on that list that is not parked (and no close started) and not dead, `_kill`
+     (`claude stop`, then settle its spend) outside the lock; then, under the lock,
      a record whose session is still the one stopped gets `parked` `{"kind": "cap", "reason": "cap", "model": null,
      "percent": null, "resets_at": null, "resume_at": null, "note": PAUSE_NOTE, "parked_at": <stamp>}`, and its card's
      session state becomes `parked`. A worker whose stop failed stays unparked (it still shows as running); every

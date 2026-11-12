@@ -314,15 +314,20 @@ class Workers:
     def cap_stop(self, by: str = BY) -> dict:
         """The cap pause: stop every worker on the list that is not parked (`_kill`: `claude stop`, then its spend
         settled), outside the lock, then park the ones that stopped (`kind: cap`, no `resume_at`) and mark their
-        card's session `parked`. A worker whose stop failed stays unparked, so it still shows as running, and the
-        next `check` while paused tries again. One stop that fails never blocks the rest. A dead worker (by one
+        card's session `parked`. The list and the listing are read under the lock, so a launch that was committing
+        under it (a start, or an in-place resume in `check`) is on the list, and its session in the listing. Never
+        call it while holding the lock. A worker whose stop failed stays unparked, so it still shows as running, and
+        the next `check` while paused tries again. One stop that fails never blocks the rest. A dead worker (by one
         listing; a listing that failed says unknown, so it is stopped) is left to `check`: it closes one that died
         twice and refuses the resume while paused, so the pause never hands it an uncounted run.
         Returns `{"stopped": [...], "failed": [...]}`."""
         now = self.clock()
-        listing = self._listing()
-        running = [r for r in self.registry.read() if not r.get("parked") and not r.get("closing")
-                   and not self._dead(r, listing)]
+        with self.registry.locked() as records:
+            # Under the lock: a launch that holds it writes its record only when its block ends, and a listing
+            # taken before that launch would call its session dead.
+            listing = self._listing()
+            running = [dict(r) for r in records if not r.get("parked") and not r.get("closing")
+                       and not self._dead(r, listing)]
         done, failed = [], []
         for r in running:  # outside the lock: a stop can take up to a minute
             try:
@@ -617,8 +622,8 @@ class Workers:
         require_literal(self.data)  # before the tool discovery runs a session
         found = self._tools(project, planned["cwd"], planned["env"], prof, card_id, role)
         with self.registry.locked() as records:
-            # A pause written while the tools were listed: `cap_stop` reads the list after it writes paused.json,
-            # so a launch that commits here either sees the pause or is on the list it stops.
+            # A pause written while the tools were listed: `cap_stop` reads the list under this lock after it writes
+            # paused.json, so a launch that commits here either sees the pause or is on the list it stops.
             pz = cap.paused(self.data)
             if pz is not None:
                 raise cap.CapError(cap.refusal({"reason": "paused", "paused": pz}))
