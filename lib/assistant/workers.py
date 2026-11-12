@@ -312,39 +312,55 @@ class Workers:
             return False
 
     def cap_stop(self, by: str = BY) -> dict:
-        """The cap pause: stop every worker on the list that is not parked (`_kill`: `claude stop`, then its spend
-        settled), outside the lock, then park the ones that stopped (`kind: cap`, no `resume_at`) and mark their
-        card's session `parked`. The list and the listing are read under the lock, so a launch that was committing
-        under it (a start, or an in-place resume in `check`) is on the list, and its session in the listing. Never
-        call it while holding the lock. A worker whose stop failed stays unparked, so it still shows as running, and
+        """The cap pause: park every worker on the list that is not parked (`kind: cap`, no `resume_at`) under the
+        lock first, then stop each one outside the lock (`_kill`: `claude stop`, then its spend settled), then mark
+        the card's session `parked` for the ones that stopped. Parked first, a `check` that runs while the stops do
+        sees each one as parked, never as a session that died (and closes one that died twice). The list and the
+        listing are read under the lock, so a launch that was committing under it (a start, or an in-place resume in
+        `check`) is on the list, and its session in the listing. Never call it while holding the lock. A worker
+        whose stop failed is unparked again (when its park is still this one), so it still shows as running, and
         the next `check` while paused tries again. One stop that fails never blocks the rest. A dead worker (by one
         listing; a listing that failed says unknown, so it is stopped) is left to `check`: it closes one that died
         twice and refuses the resume while paused, so the pause never hands it an uncounted run.
         Returns `{"stopped": [...], "failed": [...]}`."""
         now = self.clock()
+        rec = {"kind": "cap", "reason": "cap", "model": None, "percent": None, "resets_at": None, "resume_at": None,
+               "note": cap.PAUSE_NOTE, "parked_at": cards.stamp(now)}
+
+        def key(r):
+            return (r["card"], r["role"], r.get("short_id"))
+
+        def ours(w):
+            pk = w.get("parked") or {}
+            return pk.get("kind") == "cap" and pk.get("parked_at") == rec["parked_at"]
+
         with self.registry.locked() as records:
             # Under the lock: a launch that holds it writes its record only when its block ends, and a listing
             # taken before that launch would call its session dead.
             listing = self._listing()
-            running = [dict(r) for r in records if not r.get("parked") and not r.get("closing")
-                       and not self._dead(r, listing)]
-        done, failed = [], []
+            running = []
+            for w in records:
+                if not w.get("parked") and not w.get("closing") and not self._dead(w, listing):
+                    w["parked"] = dict(rec)  # parked before its stop: a check meanwhile never calls it dead
+                    running.append(dict(w))
+        done, failed = set(), []
         for r in running:  # outside the lock: a stop can take up to a minute
             try:
                 self._kill(r.get("short_id"), r.get("session_id") or "")
-                done.append(r)
+                done.add(key(r))
             except (OSError, subprocess.SubprocessError) as e:
-                failed.append({"card": r["card"], "role": r["role"],
+                failed.append({"card": r["card"], "role": r["role"], "key": key(r),
                                "note": f"the cap pause could not stop it ({str(e) or type(e).__name__}); the next "
                                        "`ap2 worker check` tries again"})
-        rec = {"kind": "cap", "reason": "cap", "model": None, "percent": None, "resets_at": None, "resume_at": None,
-               "note": cap.PAUSE_NOTE, "parked_at": cards.stamp(now)}
-        keys = {(r["card"], r["role"], r.get("short_id")) for r in done}
+        unpark = {f.pop("key") for f in failed}
         parked = []
         with self.registry.locked() as records:
             for w in records:
-                if (w["card"], w["role"], w.get("short_id")) in keys and not w.get("parked") and not w.get("closing"):
-                    w["parked"] = dict(rec)
+                if not ours(w):
+                    continue
+                if key(w) in unpark:
+                    w["parked"] = None  # its stop failed: still running, as far as anyone can tell
+                elif key(w) in done and not w.get("closing"):
                     parked.append({"card": w["card"], "role": w["role"]})
         for w in parked:
             try:

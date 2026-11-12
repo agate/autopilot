@@ -416,6 +416,7 @@ class CapWorkerCase(WorkerCase):
 
     def fake_totals(self, data, projects, now=None, mode="gateway", listing=None):
         self.totals_calls += 1
+        self.totals_listing = listing
         return dict(self.spent)
 
     def use_gateway(self, name="g", cap_usd=500):
@@ -454,6 +455,24 @@ class WorkerCapTest(CapWorkerCase):
         self.assertEqual(self.records(), [])
         self.assertFalse((self.data / "spend" / "launches.jsonl").exists())
         self.assertEqual(len([c for c in Store(self.data, self.cfg).list() if c.get("feed") == "cap"]), 1)
+
+    def test_unknown_refusal_names_accept_unknown(self):
+        self.use_gateway()
+        self.spent = totals(10.0, unknown_today=True)
+        with self.assertRaises(cap.CapError) as e:
+            self.workers().start(self.add_card(), "implement", cwd=self.wt, prompt="Do the work.")
+        msg = str(e.exception)
+        for want in ("cannot be priced", "accept_unknown", "$10.00"):
+            self.assertIn(want, msg)
+
+    def test_allowance_passes_the_workers_listing(self):
+        # `spend.totals` resolves a launch with no session id yet through the listing; without it, every such
+        # launch turns into unknown cost after the grace time, and every start is refused.
+        self.use_gateway()
+        w = self.workers()
+        w.start(self.add_card(), "implement", cwd=self.wt, prompt="Do the work.")
+        self.assertTrue(callable(self.totals_listing))
+        self.assertEqual(self.totals_listing, w._listing)
 
     def test_resume_refused_while_paused(self):
         a = self.start()
@@ -635,6 +654,30 @@ class PauseTest(CapWorkerCase):
         self.assertEqual({r["parked"]["kind"] for r in self.records()}, {"cap"})
         self.assertEqual(entries[a["card"]]["state"], "parked")
         self.assertNotIn(a["short_id"], [x["id"] for x in self.agents()])
+
+    def test_a_check_during_the_pause_never_closes_a_stopped_worker(self):
+        self.use_gateway()
+        a, b = self.start(), self.start()
+        with resources.Registry(self.data).locked() as records:
+            next(r for r in records if r["card"] == a["card"])["resumes"] = 1  # resumed once: a death closes it
+        real, inner = subprocess.run, []
+
+        def run(argv, *args, **kw):
+            if argv[1:3] == ["stop", b["short_id"]] and not inner:
+                # A check (the check loop) while the pause stops B: A is stopped already, its session gone.
+                inner.append(None)
+                inner[0] = {e["card"]: e for e in self.workers().check()}
+            return real(argv, *args, **kw)
+        with mock.patch("assistant.workers.subprocess.run", side_effect=run):
+            self.pause()
+        self.assertTrue(inner)
+        self.assertNotEqual(inner[0][a["card"]]["did"], "stopped")
+        self.assertEqual({r["card"]: r["parked"]["kind"] for r in self.records()},
+                         {a["card"]: "cap", b["card"]: "cap"})
+        self.assertNotEqual((self.get(a["card"]).get("ask") or {}).get("type"), "fix")
+        cap.resume(self.data)
+        out = {e["card"]: e["did"] for e in self.workers().check()}
+        self.assertEqual(out, {a["card"]: "resumed", b["card"]: "resumed"})
 
     def test_pause_lasts_past_midnight(self):
         self.use_gateway()
@@ -985,12 +1028,12 @@ class CapCliTest(unittest.TestCase):
         profiles.save(self.data, gateway("g", daily_cap_usd=500))
         profiles.use(self.data, "g")
 
-    def ap2(self, *args):
-        env = {k: v for k, v in os.environ.items() if k not in ("AP2_DATA",)}
+    def ap2(self, *args, env=None, data=None):
+        extra, env = env or {}, {k: v for k, v in os.environ.items() if k not in ("AP2_DATA",)}
         env.update(HOME=str(self.home), PATH=f"{self.bin}{os.pathsep}{env.get('PATH', '')}",
-                   FAKE_CLAUDE_HOME=str(self.tmp / "fake"), FAKE_CLAUDE_LOG=str(self.log))
-        return subprocess.run([sys.executable, AP2, "cap", *args, "--data", str(self.data)], capture_output=True,
-                              text=True, env=env, timeout=60)
+                   FAKE_CLAUDE_HOME=str(self.tmp / "fake"), FAKE_CLAUDE_LOG=str(self.log), **extra)
+        return subprocess.run([sys.executable, AP2, "cap", *args, "--data", str(data or self.data)],
+                              capture_output=True, text=True, env=env, timeout=60)
 
     def json_of(self, r):
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -1008,6 +1051,21 @@ class CapCliTest(unittest.TestCase):
         r = self.ap2("--transcripts", str(self.projects))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("$500.00", r.stdout)
+
+    def test_cap_uses_the_local_day_in_any_zone(self):
+        # 14 hours ahead of UTC and 12 behind are always on different dates, so a day taken in UTC (or in any one
+        # zone) misses one. POSIX zone names flip the sign.
+        for name, hours in (("Etc/GMT-14", 14), ("Etc/GMT+12", -12)):  # checkpkg: ignore
+            zone = timezone(timedelta(hours=hours))
+            data = self.tmp / f"data-{hours}"
+            data.mkdir()
+            profiles.save(data, gateway("g", daily_cap_usd=500))
+            profiles.use(data, "g")
+            for args in (("--json", "--transcripts", str(self.projects)), ("answer", "raise50")):
+                before = datetime.now(zone).strftime("%Y-%m-%d")
+                out = self.json_of(self.ap2(*args, env={"TZ": name}, data=data))
+                after = datetime.now(zone).strftime("%Y-%m-%d")
+                self.assertIn(out["day"], {before, after}, (name, args))  # either side of a midnight in between
 
     def test_cap_answer_raise50(self):
         out = self.json_of(self.ap2("answer", "raise50"))

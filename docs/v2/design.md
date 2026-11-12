@@ -1887,12 +1887,14 @@ Calls the author made without asking (check them):
     asks and the "died twice" ask (`reason: died_twice`) are never closed by it; only the user closes them.
     When the user's own ask is open, a permission prompt is reported on the check's line (`did: nothing`, the
     attach text in `note`); once the card has no open ask and the prompt is still there, the attach ask is
-    raised, and the 30 minutes still count from the first sight of the prompt. Parking (`ap2 worker park`) reuses `budget.parking`
-    with v1's default rules (park at 90%, resume 5 minutes after the reset). The prompt asks the worker to park;
-    the park hook `ap2 hook-park` (`lib/assistant/parkhook.py`) makes it stop **[decided by the builder]**:
+    raised, and the 30 minutes still count from the first sight of the prompt. Parking (`ap2 worker park`)
+    (refused for a gateway worker) reuses `budget.parking` with v1's default rules (park at 90%, resume 5 minutes
+    after the reset). The prompt asks the worker to park; the park hook `ap2 hook-park`
+    (`lib/assistant/parkhook.py`) makes it stop **[decided by the builder]**:
     - It acts only on a v2 worker: `AP2_ROLE` one of the roles and `AP2_CARD` set in its env. The user's own
       sessions, v1 workers (`AUTOPILOT_ROLE=worker`, which v1's own hook keeps) and dispatchers get no opinion (no
-      output, exit 0), so the two hooks never overlap.
+      output, exit 0), so the two hooks never overlap; and a worker whose own profile (`AP2_PROFILE`) loads as a
+      gateway profile gets no opinion either (see the daily cap entry, 10).
     - It denies every tool call (PreToolUse `deny`) while `budget.parking` with the same rules returns a window;
       under the line, stale or unreadable usage is no opinion, as in v1. Usage is `budget.read` of `~/.claude.json`
       (`--usage PATH` for tests), the same read `ap2 worker park` makes, so whenever the hook denies, the park
@@ -2182,11 +2184,13 @@ Calls the author made without asking (check them):
      pass, and only when a resume asks (`_pass_allowance`): one `spend.totals` call per pass. Running workers are
      never stopped by the cap itself: only the `pause` answer stops them.
   7. Pause stops and parks; a failed stop is retried. `Workers.cap_stop()`: under the lock, it reads the list and
-     one listing; for every worker on that list that is not parked (and no close started) and not dead, `_kill`
-     (`claude stop`, then settle its spend) outside the lock; then, under the lock,
-     a record whose session is still the one stopped gets `parked` `{"kind": "cap", "reason": "cap", "model": null,
-     "percent": null, "resets_at": null, "resume_at": null, "note": PAUSE_NOTE, "parked_at": <stamp>}`, and its card's
-     session state becomes `parked`. A worker whose stop failed stays unparked (it still shows as running); every
+     one listing, and every worker on that list that is not parked (and no close started) and not dead gets
+     `parked` `{"kind": "cap", "reason": "cap", "model": null, "percent": null, "resets_at": null, "resume_at": null,
+     "note": PAUSE_NOTE, "parked_at": <stamp>}` first; then `_kill` (`claude stop`, then settle its spend) outside the
+     lock. Parked before its stop, a worker that a `check` sees while the stops run is parked, never dead (so never
+     closed as one that died twice). Then, under the lock, a record whose stop worked and whose park is still this
+     one has its card's session state set to `parked`; a record whose stop failed is unparked again (only when its
+     park is still this one). So a worker whose stop failed stays unparked (it still shows as running); every
      live `check` while `paused.json` holds `reason: cap` runs `cap_stop` again first, and the line of a stop that
      failed again says so. One failed stop never blocks the rest; `paused.json` is written before any stop. A worker that one listing
      shows dead is not stopped or parked: it is left to `check`, which closes one that died twice (`died`, its fix
@@ -2214,8 +2218,8 @@ Calls the author made without asking (check them):
   11. `ap2 cap [--json] [--transcripts P] [--data PATH]` prints today's state: the day, the active profile and its
       mode and cap, `raise_pct`, today's limit, today's gateway spend (and what is unknown), the card's state and
       id, `accept_unknown` and the pause; `--json` prints it as JSON, else a few plain lines. It reads only, apart
-      from the ledger's cache. `ap2 cap answer OPTION` and `ap2 cap resume` print JSON. Exit 0; an error is one
-      `ap2: ...` line and exit 1. All write only inside the data folder, so they work in shadow mode, except that
+      from the ledger's cache and, on first use, the data folder's layout. `ap2 cap answer OPTION` and `ap2 cap
+      resume` print JSON. Exit 0; an error is one `ap2: ...` line and exit 1. All write only inside the data folder, so they work in shadow mode, except that
       `answer pause` stops workers only in live mode.
   12. Workers cannot edit the cap: `cap-state.json` and `paused.json` are in `PROTECTED`, so every worker floor
       Edit-denies them.
