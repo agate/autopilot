@@ -1036,6 +1036,10 @@ class HardeningTest(SpendCase):
         items = spend._parse_file(self.transcript, spend.prices(self.data))
         self.assertEqual([i["id"] for i in items], ["~~unreadable", "~~0"])
         self.assertEqual([round(i["usd"], 6) for i in items], [1.0, 1.0])
+        self.write(json.dumps(dict(NEW, requestId=5)) + "\n")  # an id that is not a string is made one
+        items = spend._parse_file(self.transcript, spend.prices(self.data))
+        self.assertEqual([(i["id"], round(i["usd"], 6)) for i in items], [("5", 1.0)])
+        self.write(self.line(spend.UNREADABLE), self.line("~0"))
         self.launch(at=TODAY_8)
         t = self.totals()
         self.assertAlmostEqual(t["month"], 2.0)
@@ -1171,14 +1175,15 @@ class HardeningTest(SpendCase):
 
         def stat_(p, *a, **kw):  # only this one subagent cannot be checked; every other path is stat'ed as usual
             if p == sub:
-                raise PermissionError(13, "Permission denied", str(p))
+                raise err
             return real(p, *a, **kw)
-        with mock.patch.object(Path, "stat", stat_):
-            self.assertEqual(spend._files(self.transcript), [self.transcript, spend._Unreadable(sub)])
-            items = self.costs()
-        self.assertEqual(len(items), 2)
-        self.assertAlmostEqual(items[0]["usd"], STREAMING_USD)
-        self.assertEqual(items[1], {"day": None, "model": "", "usd": None})
+        for err in (PermissionError(13, "Permission denied", str(sub)), OSError(5, "Input/output error", str(sub))):
+            with self.subTest(err=err.errno), mock.patch.object(Path, "stat", stat_):
+                self.assertEqual(spend._files(self.transcript), [self.transcript, spend._Unreadable(sub)])
+                items = self.costs()
+                self.assertEqual(len(items), 2)
+                self.assertAlmostEqual(items[0]["usd"], STREAMING_USD)
+                self.assertEqual(items[1], {"day": None, "model": "", "usd": None})
 
     def test_a_subagent_file_that_vanished_before_its_check_is_nothing(self):
         self.put(sub="subagent.jsonl")
