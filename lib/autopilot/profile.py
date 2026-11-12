@@ -140,6 +140,77 @@ def use(name: str) -> None:
     load(name)   # KeyError for an unknown name
     config.set_setting("active_profile", name)
     events.append_global("profile_used", {"profile": name})
+    apply()
+
+
+# ---- settings overlay ----
+
+_BLANKED_ENV = ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL")
+
+
+def overlay(p: dict) -> dict:
+    """The settings keys a profile owns, never `permissions` or `hooks`. A gateway profile points the session at
+    the gateway and names the command that prints its key. A subscription profile blanks every gateway variable,
+    so a session bills the subscription even when the shared background daemon carries gateway variables."""
+    extra = dict(p.get("settings") or {})
+    extra_env = extra.pop("env", None) or {}
+    if p.get("mode") == "gateway":
+        gw = p["gateway"]
+        env = {"ANTHROPIC_BASE_URL": gw["base_url"], "ANTHROPIC_MODEL": p.get("model"),
+               "ANTHROPIC_SMALL_FAST_MODEL": p["small_model"], "ANTHROPIC_DEFAULT_HAIKU_MODEL": p["small_model"],
+               "ENABLE_TOOL_SEARCH": "true", "AUTOPILOT_PROFILE": p["name"]}
+        env = {k: v for k, v in env.items() if v is not None}
+        out = {"apiKeyHelper": gw["key_command"]}
+    else:
+        env = {"AUTOPILOT_PROFILE": p["name"], **{k: "" for k in _BLANKED_ENV}}
+        out = {}
+    out["env"] = {**env, **(p.get("env") or {}), **extra_env}
+    out.update(extra)
+    return out
+
+
+def merge(floor: dict, ov: dict) -> dict:
+    """Keep the floor's permissions, hooks and its AUTOPILOT_* variables (except AUTOPILOT_PROFILE); all else
+    comes from the overlay. Merging never changes a deny or allow list."""
+    out = {k: v for k, v in ov.items() if k not in ("permissions", "hooks", "env")}
+    kept = {k: v for k, v in (floor.get("env") or {}).items()
+            if k.startswith("AUTOPILOT_") and k != "AUTOPILOT_PROFILE"}
+    out["env"] = {**kept, **(ov.get("env") or {})}
+    out["permissions"] = floor["permissions"]
+    if floor.get("hooks"):
+        out["hooks"] = floor["hooks"]
+    return out
+
+
+def page_profile() -> dict:
+    """Sessions that use claude.ai tools (a dispatcher pass, a reply check, a page refresh) cannot authenticate
+    through a gateway, so they always run on the subscription."""
+    return load(SUBSCRIPTION)
+
+
+def light_settings() -> Path:
+    return paths.data_root() / "settings-light.json"
+
+
+def apply() -> list:
+    """Re-merge the overlays into the settings files already written, without rediscovering tools."""
+    from autopilot import perms
+    root, done = paths.data_root(), []
+
+    def remerge(f: Path, floor: dict, p: dict) -> None:
+        perms._write(f, merge(floor, overlay(p)))
+        done.append(f)
+
+    act, page = active(), page_profile()
+    files = sorted((root / "projects").glob("*/settings.json")) + sorted((root / "projects").glob("*/oneoff-*.json"))
+    for f in files:
+        remerge(f, json.loads(f.read_text()), act)
+    disp = root / "settings-dispatcher.json"
+    if disp.exists():
+        remerge(disp, json.loads(disp.read_text()), page)
+    remerge(light_settings(), perms.static_settings("light"), page)
+    return done
 
 
 def migrate_from_config() -> bool:

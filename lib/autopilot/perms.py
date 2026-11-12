@@ -7,7 +7,7 @@ import sys
 import time
 from datetime import datetime
 
-from autopilot import cli, config, events, paths, state, workers
+from autopilot import cli, config, events, paths, profile as profiles, state, workers
 
 # Outward actions, matched case-insensitively on the tool's own name (after mcp__<server>__).
 DENY_TOOL_PATTERNS = [re.compile(p, re.I) for p in (
@@ -76,7 +76,8 @@ def park_hook() -> dict:
         {"type": "command", "command": f"\"{paths.package_root() / 'bin' / 'ap'}\" hook-park", "timeout": 5}]}]}
 
 
-def generate(tools: list, exclude: set = frozenset(), role: str = "worker", authority: dict = None) -> dict:
+def generate(tools: list, exclude: set = frozenset(), role: str = "worker", authority: dict = None,
+             profile: dict = None) -> dict:
     deny = [t for t in denied_tools(tools) if t not in exclude]
     deny += deny_rules("/" + str(paths.data_root()), "/" + str(paths.package_root()))
     perms = {"deny": deny}
@@ -87,6 +88,8 @@ def generate(tools: list, exclude: set = frozenset(), role: str = "worker", auth
            "env": {"AUTOPILOT_ROLE": role, "AUTOPILOT_DATA": str(paths.data_root())}}
     if role == "worker":
         out["hooks"] = park_hook()
+    if profile is not None:
+        out = profiles.merge(out, profiles.overlay(profile))
     return out
 
 
@@ -162,14 +165,14 @@ def write_for(ap: str) -> list:
     """Discover the tools a session in this autopilot's repo has and write its permission floors."""
     gcfg, apcfg = config.load_global(), config.load_ap(ap)
     tools, found = discover(workers.claude_bin(gcfg), apcfg["repo"])
-    _write(paths.ap_dir(ap) / "settings.json", generate(tools, role="worker"))
+    _write(paths.ap_dir(ap) / "settings.json", generate(tools, role="worker", profile=profiles.active()))
     disp = paths.data_root() / "settings-dispatcher.json"
     known = set()
     if disp.exists():
         cur = json.loads(disp.read_text())["permissions"]
         known = {t for t in cur["deny"] + cur.get("allow", []) if t.startswith("mcp__")}
     floor = generate(sorted(known | set(denied_tools(tools)) | set(status_tools(tools))), role="dispatcher",
-                     authority=shared_authority())
+                     authority=shared_authority(), profile=profiles.page_profile())
     _write(disp, floor)
     # The servers whose tools the dispatcher floor allows are the ones a pass needs: their access is checked.
     from autopilot import access
@@ -182,8 +185,9 @@ def one_off_settings(ap: str, tool: str):
     cur = json.loads((paths.ap_dir(ap) / "settings.json").read_text()).get("permissions", {}).get("deny", [])
     path = paths.ap_dir(ap) / f"oneoff-{re.sub(r'[^A-Za-z0-9_-]', '_', tool)}.json"
     deny = [t for t in cur if t != tool] or generate([], role="oneoff")["permissions"]["deny"]
-    _write(path, {"permissions": {"deny": deny}, "env": {"AUTOPILOT_ROLE": "oneoff",
-                                                           "AUTOPILOT_DATA": str(paths.data_root())}})
+    floor = {"permissions": {"deny": deny}, "env": {"AUTOPILOT_ROLE": "oneoff",
+                                                      "AUTOPILOT_DATA": str(paths.data_root())}}
+    _write(path, profiles.merge(floor, profiles.overlay(profiles.active())))
     return path
 
 
