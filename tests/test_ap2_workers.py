@@ -20,6 +20,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
+from zoneinfo import ZoneInfo
 
 try:
     import fcntl
@@ -27,8 +28,9 @@ except ImportError:  # not POSIX
     fcntl = None
 
 from tests.helpers import ROOT
+from tests.test_ap2_apistop import LIMIT_TEXT, error_line, limit_line, refused_line, reply
 from tests.test_ap2_store import card
-from assistant import config, resources, transcripts
+from assistant import cards, config, profiles, resources, transcripts
 from assistant import workers as workers_mod
 from assistant.config import Config, ShadowModeError
 from assistant.resources import WorkerError
@@ -1908,6 +1910,8 @@ class WorkerAskTableTest(WorkerCase):
             return "user"
         if "died twice" in text:
             return "died"
+        if ask.get("reason") == "gateway_refused":
+            return "refused"
         if ask.get("type") == "answer":
             return "question"
         if "--resume" in text:
@@ -1962,6 +1966,13 @@ class WorkerAskTableTest(WorkerCase):
         w.check()
         old = (T0 - timedelta(hours=1)).timestamp()
         os.utime(q, (old, old))  # older than the next worker's start, so it is not that worker's question
+        return w
+
+    def setup_refused(self, cid):
+        """A gateway's safety guard refused the worker's conversation: it was stopped, no worker on record."""
+        w = self.workers()
+        self.start(w, card_id=cid)
+        self.path_refused(w, cid)
         return w
 
     def setup_user(self, cid):
@@ -2030,6 +2041,12 @@ class WorkerAskTableTest(WorkerCase):
         self.clock.advance(30)
         self.assertEqual(w.check()[0]["did"], "paused")
 
+    def path_refused(self, w, cid):
+        rec = self.rec()
+        self.set_agent(rec["short_id"], state="blocked", status="idle")
+        say(self.fake_home, rec["session_id"], refused_line(iso(self.clock())))
+        self.assertEqual(w.check()[0]["did"], "paused")
+
     def path_question(self, w, cid):
         self.write_result(cid, "question.json", {"text": "Three or five?"})
         self.assertEqual(w.check()[0]["state"], "question")
@@ -2045,12 +2062,16 @@ class WorkerAskTableTest(WorkerCase):
         # question: the worker asked and was stopped, no worker on record
         ("question", "start", None), ("question", "resume", None), ("question", "answer", None),
         ("question", "finish", None),
+        # refused: stopped on a gateway's safety-guard refusal, no worker on record
+        ("refused", "start", None), ("refused", "resume", None), ("refused", "finish", None),
+        ("attach", "refused", "refused"),
         # never closed by any path
         ("died", "start", "died"), ("died", "resume", "died"), ("died", "finish", "died"),
         ("died", "start_block_answered", "died"), ("review_question", "start_block_answered", "question"),
         ("user", "in_place_resume", "user"), ("user", "parked_resume", "user"), ("user", "end", "user"),
         ("user", "end_then_resume", "user"), ("user", "end_then_finish", "user"), ("user", "pause", "user"),
         ("user", "question", "user"), ("user", "prompt_answered", "user"), ("user", "done", "user"),
+        ("user", "refused", "user"),
     ]
 
     def test_every_worker_ask_against_every_path(self):
@@ -2878,6 +2899,456 @@ class WriteBackErrorTest(WorkerCase):
                 records.append({"card": "c1", "role": "implement"})
                 raise WorkerError("first")
         self.assertEqual(reg.read(), [{"card": "c1", "role": "implement"}])
+
+
+# -- API stops: a limit error parks, a gateway refusal stops and asks, a replaced session is stopped ------------------
+
+def iso(at: datetime) -> str:
+    """A transcript line's time, as Claude Code writes it."""
+    return at.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def say(fake_home: Path, session_id: str, *lines) -> Path:
+    """Append transcript lines to the fake claude's transcript of `session_id`."""
+    p = transcripts.find(fake_home / "projects", session_id)
+    with open(p, "a", encoding="utf-8") as f:
+        for x in lines:
+            f.write(json.dumps(x) + "\n")
+    return p
+
+
+NO_RESET = "API Error: 429 rate limited"  # a limit (status 429) whose message names no reset
+
+
+class ApiStopCase(WorkerCase):
+    def rec(self, card_id=None) -> dict:
+        rows = resources.Registry(self.data).read()
+        return next(r for r in rows if card_id is None or r["card"] == card_id)
+
+    def stopped_on(self, a, line, state="blocked", status="idle"):
+        """`a`'s turn ended: the listing shows it `state`/`status` and its transcript ends on `line`."""
+        self.set_agent(a["short_id"], state=state, status=status)
+        say(self.fake_home, a["session_id"], line)
+
+    def quiet(self):
+        return usage_file(self.tmp / "q.json", 3, resets_at="2026-01-07T17:00:00+00:00", fetched=self.clock())
+
+    def stops(self) -> list:
+        return [c["argv"][1] for c in self.calls() if c["argv"][:1] == ["stop"]]
+
+
+class LimitParkFromTranscriptTest(ApiStopCase):
+    """Criteria 3 and 5: a limit error at the end of a stopped turn parks the worker until the reset it names."""
+
+    def test_lesson_4_1s_limit_parks_until_the_reset_plus_the_resume_delay_then_resumes(self):
+        w = self.workers()
+        a = self.start(w)
+        self.clock.advance(1)
+        self.stopped_on(a, limit_line(iso(self.clock())))
+        out = w.check()
+        self.assertEqual([(o["state"], o["did"]) for o in out], [("parked", "parked")])
+        rec = self.rec()
+        pk = rec["parked"]
+        self.assertEqual(pk, {"reason": "limit", "note": LIMIT_TEXT, "resets_at": "2026-01-05T20:40:00-08:00",
+                              "resume_at": "2026-01-05T20:45:00-08:00", "parked_at": cards.stamp(self.clock()),
+                              "kind": None, "model": None, "percent": None})
+        self.assertEqual(str(datetime.fromisoformat(pk["resume_at"]).astimezone(ZoneInfo("America/Los_Angeles"))),
+                         "2026-01-05 20:45:00-08:00")
+        self.assertEqual(rec["limit_parks"], 1)
+        self.assertIsNone(rec["idle_since"])
+        self.assertEqual(self.stops(), [])  # nothing is stopped: the session sits idle until the resume
+        # A second check before the resume time changes nothing and reads no transcript (the record is parked).
+        before = (self.data / "workers.json").read_bytes()
+        self.clock.advance(60)
+        with mock.patch.object(workers_mod.apistop, "tail", side_effect=AssertionError("read again")):
+            out = w.check(usage_file=self.quiet())
+        self.assertEqual([(o["state"], o["did"]) for o in out], [("parked", "nothing")])
+        self.assertEqual((self.data / "workers.json").read_bytes(), before)
+        # Past 20:45 in Los Angeles (04:45Z the next day), in live mode: it resumes with LIMIT_RESUME.
+        self.clock.at = datetime(2026, 1, 6, 4, 46, tzinfo=timezone.utc)
+        out = w.check(usage_file=self.quiet())
+        self.assertEqual([(o["state"], o["did"]) for o in out], [("parked", "resumed")])
+        last = self.bg_calls()[-1]
+        self.assertEqual(last["argv"][1:3], ["--resume", a["session_id"]])
+        self.assertIn(workers_mod.LIMIT_RESUME, last["argv"][-1])
+        self.assertEqual(self.stops(), [a["short_id"]])  # the old idle session is stopped first
+        rec = self.rec()
+        self.assertEqual((rec["parked"], rec["limit_parks"]), (None, 1))  # kept through the in-place resume
+
+    def test_parking_needs_no_live_mode(self):
+        a = self.start()
+        self.stopped_on(a, limit_line(iso(self.clock())))
+        out = self.workers(cfg=Config()).check()
+        self.assertEqual(out[0]["did"], "parked")
+        self.assertEqual(self.rec()["parked"]["reason"], "limit")
+
+    def test_no_readable_reset_parks_30_minutes_then_60_on_the_next_limit_in_a_row(self):
+        w = self.workers()
+        a = self.start(w)
+        self.stopped_on(a, error_line(NO_RESET, iso(self.clock()), apiErrorStatus=429))
+        self.assertEqual(w.check()[0]["did"], "parked")
+        pk = self.rec()["parked"]
+        self.assertIsNone(pk["resets_at"])
+        self.assertEqual(datetime.fromisoformat(pk["resume_at"]), self.clock() + timedelta(minutes=30))
+        self.clock.advance(31)
+        self.assertEqual(w.check(usage_file=self.quiet())[0]["did"], "resumed")
+        b = self.rec()
+        self.clock.advance(5)
+        self.stopped_on(b, error_line(NO_RESET, iso(self.clock()), apiErrorStatus=429))
+        self.assertEqual(w.check()[0]["did"], "parked")
+        rec = self.rec()
+        self.assertEqual(datetime.fromisoformat(rec["parked"]["resume_at"]), self.clock() + timedelta(minutes=60))
+        self.assertEqual(rec["limit_parks"], 2)
+
+    def test_a_reply_in_between_starts_the_count_again(self):
+        w = self.workers()
+        a = self.start(w)
+        self.stopped_on(a, error_line(NO_RESET, iso(self.clock()), apiErrorStatus=429))
+        w.check()
+        self.clock.advance(31)
+        self.assertEqual(w.check(usage_file=self.quiet())[0]["did"], "resumed")
+        b = self.rec()
+        self.clock.advance(5)
+        self.stopped_on(b, reply(iso(self.clock())), state="done")  # a normal turn, then idle
+        out = w.check()
+        self.assertEqual((out[0]["state"], out[0]["did"]), ("idle", "nothing"))
+        rec = self.rec()
+        self.assertNotIn("limit_parks", rec)  # a normal reply in this run clears the count
+        self.assertIsNotNone(rec["idle_since"])  # today's idle path ran
+        self.clock.advance(5)
+        say(self.fake_home, b["session_id"], error_line(NO_RESET, iso(self.clock()), apiErrorStatus=429))
+        self.assertEqual(w.check()[0]["did"], "parked")
+        rec = self.rec()
+        self.assertEqual(datetime.fromisoformat(rec["parked"]["resume_at"]), self.clock() + timedelta(minutes=30))
+        self.assertEqual(rec["limit_parks"], 1)
+
+    def test_a_reply_then_a_limit_in_the_same_run_starts_the_count_again(self):
+        w = self.workers()
+        a = self.start(w)
+        with resources.Registry(self.data).locked() as records:
+            records[0]["limit_parks"] = 3  # three limit parks in a row before this run
+        self.clock.advance(1)
+        say(self.fake_home, a["session_id"], reply(iso(self.clock())))
+        self.clock.advance(1)
+        self.stopped_on(a, error_line(NO_RESET, iso(self.clock()), apiErrorStatus=429))
+        self.assertEqual(w.check()[0]["did"], "parked")
+        rec = self.rec()
+        self.assertEqual(datetime.fromisoformat(rec["parked"]["resume_at"]), self.clock() + timedelta(minutes=30))
+        self.assertEqual(rec["limit_parks"], 1)
+
+    def test_start_resume_of_a_parked_record_carries_the_count(self):
+        w = self.workers()
+        a = self.start(w)
+        self.stopped_on(a, error_line(NO_RESET, iso(self.clock()), apiErrorStatus=429))
+        w.check()
+        self.clock.advance(10)
+        b = w.start(a["card"], "implement", prompt="Continue.", resume=True)
+        self.assertEqual(b["limit_parks"], 1)
+        self.assertEqual(self.rec()["limit_parks"], 1)
+        self.clock.advance(5)
+        self.stopped_on(b, error_line(NO_RESET, iso(self.clock()), apiErrorStatus=429))
+        self.assertEqual(w.check()[0]["did"], "parked")
+        rec = self.rec()
+        self.assertEqual(datetime.fromisoformat(rec["parked"]["resume_at"]), self.clock() + timedelta(minutes=60))
+        self.assertEqual(rec["limit_parks"], 2)
+
+    def test_a_fresh_start_after_the_worker_ended_starts_at_30(self):
+        w = self.workers()
+        a = self.start(w)
+        with resources.Registry(self.data).locked() as records:
+            records[0]["limit_parks"] = 2
+        w.end(a["card"], "implement")
+        b = w.start(a["card"], "implement", cwd=self.wt, prompt="Again.")
+        self.assertNotIn("limit_parks", b)
+
+    def test_a_dead_worker_that_hit_a_limit_is_parked_not_resumed(self):
+        w = self.workers()
+        a = self.start(w)
+        say(self.fake_home, a["session_id"], limit_line(iso(self.clock())))
+        self.drop_agent(a["short_id"])
+        out = w.check()
+        self.assertEqual(out[0]["did"], "parked")
+        self.assertEqual(len(self.bg_calls()), 1)
+        self.assertEqual(self.rec()["resumes"], 0)
+
+    def test_a_worker_at_a_permission_prompt_that_hit_a_limit_is_parked(self):
+        w = self.workers()
+        a = self.start(w)
+        self.stopped_on(a, limit_line(iso(self.clock())), state="blocked", status="waiting")
+        self.assertEqual(w.check()[0]["did"], "parked")
+        self.assertIsNone(self.get(a["card"]).get("ask"))  # no attach ask: there is no prompt to answer
+
+    def test_parking_closes_a_raised_attach_ask(self):
+        w = self.workers()
+        a = self.start(w)
+        self.set_agent(a["short_id"], state="blocked", status="waiting")
+        self.assertEqual(w.check()[0]["did"], "asked")
+        self.clock.advance(1)
+        say(self.fake_home, a["session_id"], limit_line(iso(self.clock())))
+        self.assertEqual(w.check()[0]["did"], "parked")
+        self.assertIsNone(self.get(a["card"])["ask"])
+        self.assertIsNone(self.rec()["blocked_since"])
+
+    def test_a_record_whose_id_was_empty_is_read_too(self):
+        w = self.workers()
+        a = self.start(w)
+        with resources.Registry(self.data).locked() as records:
+            records[0]["session_id"] = ""  # the listing did not show it at the start
+        self.stopped_on(a, limit_line(iso(self.clock())))
+        self.assertEqual(w.check()[0]["did"], "parked")
+        self.assertEqual(self.rec()["session_id"], a["session_id"])
+
+    def test_an_error_within_two_minutes_before_the_start_is_the_runs_own(self):
+        w = self.workers()
+        a = self.start(w)
+        self.stopped_on(a, limit_line(iso(self.clock() - timedelta(minutes=2))))
+        self.assertEqual(w.check()[0]["did"], "parked")
+
+
+class ApiStopIgnoredTest(ApiStopCase):
+    """Criterion 4: only this run's error, only a stopped turn; everything else is today's path."""
+
+    def assert_not_parked(self, w, state="idle"):
+        out = w.check()
+        self.assertEqual(out[0]["state"], state)
+        self.assertNotEqual(out[0]["did"], "parked")
+        rows = resources.Registry(self.data).read()
+        for r in rows:
+            self.assertIsNone(r["parked"])
+        return out[0], (rows[0] if rows else None)
+
+    def test_a_running_session_is_never_read(self):
+        w = self.workers()
+        a = self.start(w)
+        say(self.fake_home, a["session_id"], limit_line(iso(self.clock())))
+        for state, status in (("working", "busy"), ("working", "idle"), ("blocked", "busy")):
+            self.set_agent(a["short_id"], state=state, status=status)
+            with mock.patch.object(workers_mod.apistop, "tail", side_effect=AssertionError("read")):
+                out = w.check()
+            self.assertNotEqual(out[0]["did"], "parked", (state, status))
+
+    def test_an_error_from_before_the_run_is_history(self):
+        w = self.workers()
+        a = self.start(w)
+        self.stopped_on(a, limit_line(iso(self.clock() - timedelta(minutes=3))))
+        _, rec = self.assert_not_parked(w)
+        self.assertIsNotNone(rec["idle_since"])
+
+    def test_a_recovered_transcript_is_ignored(self):
+        w = self.workers()
+        a = self.start(w)
+        say(self.fake_home, a["session_id"], limit_line(iso(self.clock())))
+        self.clock.advance(1)
+        self.stopped_on(a, reply(iso(self.clock())))
+        _, rec = self.assert_not_parked(w)
+        self.assertIsNotNone(rec["idle_since"])
+
+    def test_a_result_file_wins(self):
+        w = self.workers()
+        a = self.start(w)
+        self.stopped_on(a, limit_line(iso(self.clock())))
+        self.write_result(a["card"])
+        out, _ = self.assert_not_parked(w, state="done")
+        self.assertEqual(out["did"], "ended")
+
+    def test_a_question_wins(self):
+        w = self.workers()
+        a = self.start(w)
+        self.stopped_on(a, refused_line(iso(self.clock())))
+        self.write_result(a["card"], "question.json", {"text": "Three or five?"})
+        out, _ = self.assert_not_parked(w, state="question")
+        self.assertEqual(out["did"], "asked")
+        self.assertEqual(self.get(a["card"])["ask"]["type"], "answer")
+
+    def test_a_missing_transcript_leaves_todays_idle_path(self):
+        w = self.workers()
+        a = self.start(w)
+        self.set_agent(a["short_id"], state="blocked", status="idle")
+        transcripts.find(self.fake_home / "projects", a["session_id"]).unlink()
+        _, rec = self.assert_not_parked(w)
+        self.assertIsNotNone(rec["idle_since"])
+
+    def test_an_unreadable_transcript_leaves_todays_blocked_path(self):
+        w = self.workers()
+        a = self.start(w)
+        self.stopped_on(a, limit_line(iso(self.clock())), status="waiting")
+        p = transcripts.find(self.fake_home / "projects", a["session_id"])
+        p.chmod(0)
+        self.addCleanup(p.chmod, 0o600)
+        try:
+            p.read_bytes()
+            self.skipTest("this user reads a file with no permissions (root)")
+        except OSError:
+            pass
+        _, rec = self.assert_not_parked(w, state="blocked")
+        self.assertIsNotNone(rec["blocked_since"])
+        self.assertIn("claude attach", self.get(a["card"])["ask"]["text"])
+
+    def test_an_error_that_is_neither_kind_leaves_todays_dead_path(self):
+        w = self.workers()
+        a = self.start(w)
+        say(self.fake_home, a["session_id"], error_line("API Error: 500 overloaded", iso(self.clock()),
+                                                        apiErrorStatus=500))
+        self.drop_agent(a["short_id"])
+        out = w.check()
+        self.assertEqual((out[0]["state"], out[0]["did"]), ("dead", "resumed"))
+
+
+class GatewayRefusedTest(ApiStopCase):
+    """Criterion 6: a gateway's safety-guard refusal stops the worker at once and asks to resume on the
+    subscription."""
+
+    def test_lesson_4_3s_refusal_stops_the_worker_and_asks(self):
+        w = self.workers()
+        a = self.start(w)
+        with resources.Registry(self.data).locked() as records:
+            records[0]["profile"] = "corp-gw"  # the worker's own profile, named in the switch back
+        self.stopped_on(a, refused_line(iso(self.clock())))
+        out = w.check()
+        self.assertEqual([(o["state"], o["did"]) for o in out], [("idle", "paused")])
+        self.assertEqual(resources.Registry(self.data).read(), [])
+        self.assertEqual(self.stops(), [a["short_id"]])
+        c = self.get(a["card"])
+        self.assertEqual(c["sessions"]["implement"]["state"], "paused")
+        ask = c["ask"]
+        self.assertEqual((ask["type"], ask["role"], ask["reason"], ask["from"]),
+                         ("fix", "implement", "gateway_refused", "worker"))
+        self.assertIn("refuses this conversation every time", ask["text"])
+        cmds = re.findall(r"`([^`]+)`", ask["text"])
+        self.assertEqual(cmds, ["ap2 profile use subscription", f"ap2 worker start {a['card']} implement --resume",
+                                "ap2 profile use corp-gw"])
+        self.assertEqual(workers_mod.Workers._worker_ask_kind(ask, "implement"), "refused")
+        self.assertIn("refused", workers_mod.WORKER_ASKS)
+        self.assertEqual(workers_mod.CLOSES["refused"], ("paused", "paused", True))
+        # The session is saved paused and resumable; the resume closes the ask.
+        w.start(a["card"], "implement", prompt="Continue.", resume=True)
+        self.assertEqual(self.bg_calls()[-1]["argv"][1:3], ["--resume", a["session_id"]])
+        self.assertIsNone(self.get(a["card"])["ask"])
+
+    def test_a_refusal_never_touches_a_profile(self):
+        w = self.workers()
+        a = self.start(w)
+        before = sorted(p.relative_to(self.data).as_posix() for p in self.data.rglob("*")
+                        if "profile" in p.as_posix())
+        active = profiles.active(self.data)["name"]
+        self.stopped_on(a, refused_line(iso(self.clock())))
+        self.assertEqual(w.check()[0]["did"], "paused")
+        self.assertEqual(profiles.active(self.data)["name"], active)
+        self.assertEqual(sorted(p.relative_to(self.data).as_posix() for p in self.data.rglob("*")
+                                if "profile" in p.as_posix()), before)
+
+    def test_a_dead_refused_worker_is_stopped_not_resumed(self):
+        w = self.workers()
+        a = self.start(w)
+        say(self.fake_home, a["session_id"], refused_line(iso(self.clock())))
+        self.drop_agent(a["short_id"])
+        out = w.check()
+        self.assertEqual((out[0]["state"], out[0]["did"]), ("dead", "paused"))
+        self.assertEqual(len(self.bg_calls()), 1)
+        self.assertEqual(self.get(a["card"])["ask"]["reason"], "gateway_refused")
+
+    def test_the_users_own_ask_is_kept(self):
+        w = self.workers()
+        cid = self.add_card(ask={"type": "confirm", "text": "the plan"})
+        a = self.start(w, card_id=cid)
+        self.stopped_on(a, refused_line(iso(self.clock())))
+        self.assertEqual(w.check()[0]["did"], "paused")
+        self.assertEqual(self.get(cid)["ask"]["type"], "confirm")
+
+    def test_finish_closes_the_ask(self):
+        w = self.workers()
+        a = self.start(w)
+        self.stopped_on(a, refused_line(iso(self.clock())))
+        w.check()
+        self.assertEqual(self.get(a["card"])["ask"]["reason"], "gateway_refused")
+        w.finish(a["card"])
+        self.assertIsNone(self.get(a["card"])["ask"])
+
+    def test_an_old_refusal_in_a_resumed_copy_is_history(self):
+        w = self.workers()
+        a = self.start(w)
+        self.stopped_on(a, refused_line(iso(self.clock())))
+        w.check()
+        self.clock.advance(30)
+        b = w.start(a["card"], "implement", prompt="Continue.", resume=True)  # the copy repeats the refusal
+        self.set_agent(b["short_id"], state="blocked", status="idle")
+        out = w.check()
+        self.assertEqual((out[0]["state"], out[0]["did"]), ("idle", "nothing"))
+
+
+class ReplacedSessionTest(ApiStopCase):
+    """Criterion 7 (lesson 4.6): `start --resume` stops the saved session it replaces when the listing still shows
+    it."""
+
+    def relist(self, a, state="idle", status="idle"):
+        rows = self.agents() + [{"id": a["short_id"], "sessionId": a["session_id"], "name": "someone else's name",
+                                 "kind": "background", "state": state, "status": status, "cwd": str(self.wt),
+                                 "startedAt": 1}]
+        (self.fake_home / "agents.json").write_text(json.dumps(rows))
+
+    def resume_calls(self, w, a) -> list:
+        n = len(self.calls())
+        w.start(a["card"], "implement", prompt="Continue.", resume=True)
+        return [c["argv"][:2] for c in self.calls()[n:] if c["argv"][:1] in (["stop"], ["--bg"])]
+
+    def test_a_saved_session_still_listed_is_stopped_before_the_launch(self):
+        w = self.workers()
+        a = self.start(w)
+        w.end(a["card"], "implement")
+        self.relist(a)  # e.g. a stop that never landed: the listing still shows the session idle
+        self.assertEqual(self.resume_calls(w, a), [["stop", a["short_id"]], ["--bg", "--resume"]])
+
+    def test_a_session_the_listing_does_not_show_is_not_stopped(self):
+        w = self.workers()
+        a = self.start(w)
+        w.end(a["card"], "implement")
+        self.assertEqual(self.resume_calls(w, a), [["--bg", "--resume"]])
+
+    def test_a_session_listed_stopped_is_not_stopped_again(self):
+        w = self.workers()
+        a = self.start(w)
+        w.end(a["card"], "implement")
+        self.relist(a, state="stopped", status=None)
+        self.assertEqual(self.resume_calls(w, a), [["--bg", "--resume"]])
+
+    def test_a_parked_record_is_stopped_once(self):
+        w = self.workers()
+        a = self.start(w)
+        w.park(a["card"], "implement", "x", usage_file=usage_file(self.tmp / "u.json", 95))
+        self.assertEqual(self.resume_calls(w, a), [["stop", a["short_id"]], ["--bg", "--resume"]])
+
+
+class ListApiStopTest(ApiStopCase):
+    """Criterion 8: `list` says why a stopped worker stopped, and writes nothing."""
+
+    def test_rows_say_api_stop_and_nothing_is_written(self):
+        w = self.workers()
+        lim, ref, run, old = self.start(w), self.start(w), self.start(w), self.start(w)
+        self.stopped_on(lim, limit_line(iso(self.clock())))
+        self.stopped_on(ref, refused_line(iso(self.clock())), state="done")
+        say(self.fake_home, run["session_id"], limit_line(iso(self.clock())))  # still working
+        self.stopped_on(old, limit_line(iso(self.clock() - timedelta(minutes=5))))  # history
+        before = (self.data / "workers.json").read_bytes()
+        rows = {r["card"]: r for r in w.list()}
+        self.assertEqual((self.data / "workers.json").read_bytes(), before)
+        self.assertEqual((rows[lim["card"]]["state"], rows[lim["card"]]["api_stop"]), ("idle", "limit"))
+        self.assertEqual((rows[ref["card"]]["state"], rows[ref["card"]]["api_stop"]), ("idle", "gateway_refused"))
+        self.assertEqual(rows[run["card"]]["state"], "running")
+        self.assertNotIn("api_stop", rows[run["card"]])
+        self.assertNotIn("api_stop", rows[old["card"]])
+        self.assertTrue(all(r["parked"] is None for r in rows.values()))
+
+    def test_a_dead_row_says_it_too_and_a_parked_one_is_not_read(self):
+        w = self.workers()
+        a, b = self.start(w), self.start(w)
+        say(self.fake_home, a["session_id"], limit_line(iso(self.clock())))
+        self.drop_agent(a["short_id"])
+        w.park(b["card"], "implement", "x", usage_file=usage_file(self.tmp / "u.json", 95))
+        say(self.fake_home, b["session_id"], limit_line(iso(self.clock())))
+        rows = {r["card"]: r for r in w.list()}
+        self.assertEqual((rows[a["card"]]["state"], rows[a["card"]]["api_stop"]), ("dead", "limit"))
+        self.assertEqual(rows[b["card"]]["state"], "parked")
+        self.assertNotIn("api_stop", rows[b["card"]])
 
 
 if __name__ == "__main__":

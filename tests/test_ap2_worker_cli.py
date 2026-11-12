@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from tests.helpers import ROOT
+from tests.test_ap2_apistop import refused_line
 from tests.test_ap2_cli import temp_inside_the_accounts_claude
 from tests.test_ap2_store import card
 from tests.test_ap2_workers import usage_file
@@ -113,6 +114,24 @@ class WorkerCommandTest(unittest.TestCase):
 
     def bg_calls(self) -> list:
         return [c for c in self.calls() if c["argv"][:1] == ["--bg"]]
+
+    def test_list_says_why_a_stopped_worker_stopped(self):
+        self.live()
+        cid = self.add_card()
+        rec = self.ok("worker", "start", cid, "implement", "--cwd", str(self.wt))
+        agents = json.loads((self.fake_home / "agents.json").read_text())
+        for a in agents:
+            a.update(state="blocked", status="idle")
+        (self.fake_home / "agents.json").write_text(json.dumps(agents))
+        # `worker list` reads the default projects folder, under this test's own HOME.
+        folder = self.home / ".claude" / "projects" / "-worktree"
+        folder.mkdir(parents=True)
+        at = (datetime.now(timezone.utc) + timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        (folder / f"{rec['session_id']}.jsonl").write_text(json.dumps(refused_line(at)) + "\n", encoding="utf-8")
+        before = (self.data / "workers.json").read_bytes()
+        listed = self.ok("worker", "list")
+        self.assertEqual([(w["state"], w["api_stop"]) for w in listed], [("idle", "gateway_refused")])
+        self.assertEqual((self.data / "workers.json").read_bytes(), before)
 
     def usage(self, path: Path, percent: int, resets_in_min: int = 180) -> Path:
         """A usage cache fetched now (the command runs on the real clock) with one window at `percent`."""
