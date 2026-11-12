@@ -10,7 +10,8 @@
   runs.
 - `key_for: {<category>: <pattern>}` (design 6.2): a record of a listed category keys on that pattern instead of
   `key` (a Slack review ask keys on its PR, `{pr}`, so it lands on the GitHub review request's card). Each category
-  is one of `sort`'s; a user's `<category>: null` turns that one off.
+  is one of `sort`'s; a user's `<category>: null` turns that one off. To turn the PR keying off, also sort that
+  category elsewhere (`sort: { review_request: question }`), since a `pr-review` card needs a PR key.
 - Every problem raises `SourceError`, whose message starts with the file it is about.
 """
 from __future__ import annotations
@@ -342,7 +343,9 @@ def validate(src: Source, lines: Optional[dict] = None) -> Source:
         if not isinstance(kf, dict):
             fail(f"key_for must map a category of sort to a {{field}} pattern, not {kf!r}", ("key_for",))
         for cat, pattern in kf.items():
-            if pattern is None:  # a user's `review_request: null` keys that category on `key` again
+            # A user's `review_request: null` keys that category on `key` again; they also sort it elsewhere
+            # (`sort: { review_request: question }`), since a pr-review card needs a PR key.
+            if pattern is None:
                 continue
             at = ("key_for", cat) if ("key_for", cat) in lines else ("key_for",)
             if cat not in sort:

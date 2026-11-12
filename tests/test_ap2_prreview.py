@@ -1598,6 +1598,27 @@ class SyncTest(Case):
                 self.assertEqual((out["state"], out["lane"]), ("request_removed", "done"))
                 self.assertEqual(self.store().get(cid)["audit"][-1]["did"], "the review request was removed")
 
+    def test_a_link_that_only_looks_like_this_pr_holds_back_request_removed(self):
+        """A link names this PR only as `/<repo>/pull/<number>` exactly: a longer number, a repo whose `.` is
+        another character, or a longer owner is another page, so the card keeps waiting (not_reviewed)."""
+        base = {k: v for k, v in self.card().items() if k not in ("id", "created_at", "updated_at", "audit", "pr")}
+        views = fixture("pr-view.json")
+        nobody = own_view(author="octo-dev")
+        for name, key, link in (
+                ("a longer number", KEY, f"https://github.com/{REPO}/pull/420"),
+                ("a dot in the repo is not any character", "acme/my.repo#3", "https://github.com/acme/myXrepo/pull/3"),
+                ("a longer owner", KEY, f"https://github.com/my{REPO}/pull/42")):
+            with self.subTest(name):
+                repo, number = key.split("#")
+                card = dict(base, key=key, source=dict(base["source"], link=link))
+                cid = self.store().add(card, by="test")["id"]
+                run = Replay([{"argv": ["pr", "view", number, "--repo", repo, "--json", GH_SYNC_FIELDS],
+                               "stdout": nobody},
+                              {"argv": ["api", "user", "--jq", ".login"], "stdout": views["user"]}])
+                out = prreview.sync(self.data, cid, cfg=self.cfg, run=run)
+                self.assertEqual((out["state"], out["lane"]), ("not_reviewed", "needs"))
+                self.assertEqual(self.store().get(cid)["lane"], "needs")
+
 def own_view(head=A, state="OPEN", reviews=(), requests=(), author="octo-me"):
     """A pr view reply for a PR whose author is `author` (the recorded user is octo-me)."""
     return {"state": state, "headRefOid": head, "author": {"login": author} if isinstance(author, str) else author,

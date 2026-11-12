@@ -668,7 +668,9 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
 - **[decided by the builder]** A Slack ask lands on the review request's card (point 1, second half). A source may
   have `key_for: {<category>: <pattern>}`: a record of a listed category keys on that pattern, every other record
   on `key` as before. Each category must be one of `sort`'s, and each pattern is checked as `key` is (a `{field}`
-  pattern naming at least one field, not a path); a user's `<category>: null` turns one off. The form gains one
+  pattern naming at least one field, not a path); a user's `<category>: null` turns one off. To turn the PR
+  keying off, also sort that category elsewhere (`sort: { review_request: question }`), since a `pr-review` card
+  needs a PR key. The form gains one
   optional field, `pr`: `<owner>/<repo>#<number>`. The built-in `slack-mentions` adds the form hint `pr`, `sort:
   review_request: pr-review`, `key_for: {review_request: "{pr}"}` and an `instructions` line saying when a message
   is a `review_request` ("PTAL", "take a look", "can you review", a review-assignment bot) and that it needs the PR
@@ -689,6 +691,8 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   `github-my-prs` reads it. The Slack ask is not kept
   on the card once the GitHub record takes it over (no second link or source block): the card shows the GitHub
   record only.
+  A review ask for a PR whose card is already `done` lands on that card and does not reopen it, as a GitHub
+  re-request does not; reopening a done PR card on a new ask is not built here.
 - **[decided by the builder]** Threads still group. In one `fill: ai` read, a `key_for` record groups by its own
   key, never with its thread: a thread whose first message asks for a review gives a `pr-review` card keyed on the
   PR, and its replies still group on the thread key as before. A Slack review ask read before `key_for` was added
@@ -696,7 +700,8 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   PR, so an ask still in the read window shows once more, as the PR's card, and the old `question` card is closed
   by hand.
 - Not built here: starting the `pr-review` role on its own when a card is made, and running `apply` and `sync` from
-  the worker's done path or the gate (they need the worker sessions); and the PR loop's end (6.3).
+  the worker's done path or the gate (they need the worker sessions); reopening a done PR card when a new review
+  ask arrives; and the PR loop's end (6.3).
 
 ### 6.3 How the PR loop ends **[decided by the user, 2026-11-10]**
 

@@ -1102,6 +1102,26 @@ class PrKeyTest(EngineCase):
         self.assertEqual((card["source"]["name"], card["source"]["record"]["id"]),
                          ("slack-mentions", "1730000300.000400"))
 
+    def test_a_new_ask_on_a_done_pr_card_lands_on_it_and_leaves_it_done(self):
+        # Design 6.2: a review ask for a PR whose card is done lands on that card and does not reopen it, as a
+        # GitHub re-request does not; no new card is made.
+        self.assertEqual(self.item(self.slack(), self.KEY)["action"], "add")
+        [card] = self.pr_cards()
+        self.store().update(card["id"], {"lane": "done"}, by="tester")
+        again = {**self.ASK, "id": "1730000300.000400", "at": "1730000300.000400",
+                 "text": "<@U0EXAMPLE1> PTAL again <https://github.com/example/widgets/pull/42>"}
+        raw = ("## Channel: #payments (C0123ABCD)\n"
+               "From: U0EXAMPLE2\nMessage_ts: 1730000300.000400\n"
+               "Text: <@U0EXAMPLE1> PTAL again <https://github.com/example/widgets/pull/42>\n")
+        result = self.slack(again, text=raw)
+        self.assertEqual(result["dropped"], [])
+        item = self.item(result, self.KEY)
+        self.assertEqual((item["action"], item["card"]), ("update", card["id"]))
+        [after] = self.pr_cards()
+        self.assertEqual((after["id"], after["lane"], after["source"]["record"]["id"]),
+                         (card["id"], "done", "1730000300.000400"))
+        self.assertEqual([c["id"] for c in self.store().list()], [card["id"]])  # no card for the thread key
+
     def test_a_dry_run_slack_ask_on_a_github_card_is_unchanged_too(self):
         self.github()
         raw = self.tmp / "slack.txt"
