@@ -418,6 +418,7 @@ class TitleForTest(unittest.TestCase):
     def test_no_slot_and_no_primary_gives_any_non_blank_slot(self):
         self.assertEqual(cards.title_for({"title": {"ja": "再試行"}}, "zh", "en"), "再試行")
         self.assertEqual(cards.title_for({"title": {"ko": "b", "ja": "a"}}, "zh", "en"), "a")  # sorted key order
+        self.assertEqual(cards.title_for({"title": {"ko": "a", "ja": "b"}}, "zh", "en"), "b")  # by key, not by text
         self.assertEqual(cards.title_for({"title": {"fr": " ", "ko": "b", "ja": None}}, "zh", "en"), "b")
 
     def test_the_viewers_and_the_primary_slot_still_come_first(self):
