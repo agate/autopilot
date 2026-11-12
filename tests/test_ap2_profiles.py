@@ -224,6 +224,19 @@ class ProfileOverlayTest(unittest.TestCase):
             self.assertNotIn("permissions", profiles.overlay(gateway()))
             self.assertNotIn("hooks", profiles.overlay(gateway()))
 
+    def test_a_profiles_own_env_and_settings_reach_the_overlay(self):
+        from assistant import workers
+        with tempfile.TemporaryDirectory() as d:
+            data = Path(d).resolve()
+            base = workers.floor("implement", {"tools": ["Read"]}, data, {"AP2_ROLE": "implement"})
+            for prof in (gateway(), profiles.builtin()):
+                prof["env"] = {"API_TIMEOUT_MS": "960000"}
+                prof["settings"] = {"env": {"BUN_CONFIG_HTTP_IDLE_TIMEOUT": "960"}, "pluginConfigs": {"p": {}}}
+                for got in (profiles.overlay(prof), profiles.merge(base, profiles.overlay(prof))):
+                    self.assertEqual(got["env"]["API_TIMEOUT_MS"], "960000", prof["mode"])
+                    self.assertEqual(got["env"]["BUN_CONFIG_HTTP_IDLE_TIMEOUT"], "960", prof["mode"])
+                    self.assertEqual(got["pluginConfigs"], {"p": {}}, prof["mode"])
+
     def test_gateway_overlay_blanks_competing_auth(self):
         g = gateway(env={"ANTHROPIC_API_KEY": "x"}, settings={"env": {"ANTHROPIC_AUTH_TOKEN": "y"}})
         ov = profiles.overlay(g)
@@ -334,6 +347,15 @@ class ProfileCliTest(unittest.TestCase):
         self.fails("add", "h", "--gateway", "--base-url", URL, text="key_command")
         self.fails("add", "h", "--gateway", "--daily-cap", "lots", text="--daily-cap")
         self.fails("add", "h", "--subscription", "--env", "nokey", text="KEY=VALUE")
+        self.fails("add", "h", "--subscription", "--base-url", URL, text="are for a --gateway profile")
+        self.assertFalse((self.data / "profiles" / "h.json").exists())
+        extra = self.tmp / "extra.json"
+        extra.write_text(json.dumps({"pluginConfigs": {"p": {}}}))
+        self.assertEqual(self.ok("add", "s", "--subscription", "--settings-file", str(extra))["settings"],
+                         {"pluginConfigs": {"p": {}}})
+        self.assertEqual(json.loads((self.data / "profiles" / "s.json").read_text())["settings"],
+                         {"pluginConfigs": {"p": {}}})
+        self.assertEqual(self.ok("remove", "s"), {"removed": "s"})
         self.assertEqual(self.ok("use", "g"), {"active": "g", "was": "subscription"})
         listed = self.ok("list")
         self.assertEqual(listed["active"], "g")
