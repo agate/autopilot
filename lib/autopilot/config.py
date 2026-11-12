@@ -35,6 +35,7 @@ DEFAULT_GLOBAL: dict = {
     "worktree_root": "~/worktrees",
     "reader_lang": "en",
     "tools": {"claude": None, "gh": None, "git": None, "python3": None},
+    "prices": {},
 }
 
 # One line per setting, shown by `ap config list` and in references/config.md (a test keeps both complete).
@@ -70,6 +71,7 @@ DESCRIBE: dict = {
     "tools.gh": "Path to gh that the gate uses; `ap install` records it.",
     "tools.git": "Path to git that the gate uses; `ap install` records it.",
     "tools.python3": "Path to python3 that the gate uses; `ap install` records it.",
+    "prices": "Per-model price overrides in USD per million tokens, same shape as `models` in lib/autopilot/prices.json; used to count gateway spend.",
 }
 
 DEFAULT_AP: dict = {

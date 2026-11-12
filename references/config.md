@@ -39,3 +39,4 @@ that setting.
 | `tools.gh` | `null` | Path to gh that the gate uses; `ap install` records it. |
 | `tools.git` | `null` | Path to git that the gate uses; `ap install` records it. |
 | `tools.python3` | `null` | Path to python3 that the gate uses; `ap install` records it. |
+| `prices` | `{}` | Per-model price overrides in USD per million tokens, same shape as `models` in lib/autopilot/prices.json; used to count gateway spend. |
