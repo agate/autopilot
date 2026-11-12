@@ -1694,6 +1694,21 @@ Calls the author made without asking (check them):
       or `{`, no chaining/redirect token, at most 4096 characters) and `#` read as a plain character, as bash reads one inside a word, so it hides
       nothing. Any other flag (`--usage`, `--data`, `--by`, `--note=`), card, role or program (v1's `bin/ap`,
       another `ap2`) is denied.
+    - v1's own check (`lib/autopilot/park.py` `is_park_command`) now applies the same four rules: any `$`, any
+      `{` and a command past `MAX_COMMAND` (4096) are refused before it is tokenized, and `#` is a plain
+      character. v1 keeps its looser tail after `<role>`.
+      **[decided by the builder]** A plain `#` at a word start (`--note "a #b"` quoted, or `--note x #comment`
+      after a space) stays allowed in v1, as it was: quoted it is plain text, and after a space bash starts a
+      comment, which only shortens the note, so bash still runs the one park command. The tokenizer now keeps
+      `#comment` as a token, which v1's tail rules accept. A word-start `#` comment is now read by the same rules
+      as the rest of the line, so it is refused when `shlex` gives a token made only of `;`, `&`, `|`, `<`, `>`,
+      `(`, `)` (unquoted, as in `--note x # ; later`, or quoted or escaped alone, as in `# ";"` or `# \;`), or
+      fails on an unbalanced quote or a trailing backslash; this was allowed before and bash runs only the park
+      command, but after `shlex` a quoted `"#"` and an unquoted word-start `#` give the same token, so dropping
+      the comment could hide a real `; cmd`, and refusing fails closed (as v2's hook does). Punctuation that shares
+      a token with other characters (`# "a; b"`, `# a\;b`) stays allowed, as before. The other way round, a word-start comment now counts as words
+      in a short line, so `<ap> worker park a T #x y` and `<ap> worker park #a b c`, refused before, are now
+      allowed: bash still runs only `ap worker park` with too few arguments, which fails its own argument check.
     - The deny reason names that command with the worker's own card and role filled in, and the window and its
       percent. A subagent's call (payload `agent_id`) is told to stop and reply to its parent with exactly
       `parked for quota`.
