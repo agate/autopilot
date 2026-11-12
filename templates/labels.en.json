@@ -200,11 +200,15 @@
   "usage_unknown": "Some cost could not be priced, so these numbers may be too low.",
   "usage_page_session": "5-hour window (page sessions)",
   "worker_profile": "Profile: {profile}",
-  "cap_card_body_unknown": "Today's cost could not be priced, so no new workers start. Raise the limit or pause.",
+  "cap_card_body_unknown": "Some of today's cost could not be priced, so no new workers start. Accept today's unknown cost or pause.",
   "profile_broken": "Could not read profile: {names}.",
   "access_switch_note_quiet": "Between {start} and {end} (this computer's clock) the next dispatcher pass applies it, within {min} minutes.",
   "access_switch_note_off": "The next dispatcher pass applies a switch, within {min} minutes.",
   "cap_pending_off": "Answer sent: {answer}. The next dispatcher pass applies it, within {min} minutes.",
   "access_profile_error": "Profile not working: {error}. New workers are paused.",
-  "access_profile_fix": "Run `ap profile list`, then `ap profile use` with a profile that loads."
+  "access_profile_fix": "Run `ap profile list`, then `ap profile use` with a profile that loads.",
+  "cap_accept_unknown": "Accept today's unknown cost",
+  "cap_unknown_models": "No price for: {models}.",
+  "cap_unknown_launches": "{n} launch(es) today could not be priced (no session to read).",
+  "cap_unknown_fix": "To fix it: add the model's list price under `prices` in the global config (same shape as lib/autopilot/prices.json). Accepting counts today's unknown cost as $0 for the limit until midnight; it still shows as unknown."
 }

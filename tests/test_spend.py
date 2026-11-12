@@ -381,6 +381,20 @@ class TotalsTest(SpendCase):
             self.launch()
         self.assertTrue(seen and all(f".{os.getpid()}." in x for x in seen), seen)
 
+    def test_a_launch_without_a_session_id_stops_blocking_today_after_30_minutes(self):
+        spend.record_session("", "oneoff", "checkout", profile())
+        t = spend.totals(NOW)
+        self.assertEqual((t["unknown_today"], t["unknown_launches"]), (True, 1))
+        self.clock += 31 * 60
+        t = spend.totals(NOW)
+        self.assertEqual((t["unknown"], t["unknown_today"]), (True, False))
+
+    def test_totals_name_the_unpriced_models_of_today(self):
+        self.put("unknown.jsonl")
+        self.launch()
+        self.assertEqual(spend.totals(NOW)["unknown_models"], [])   # its request is dated yesterday
+        self.assertEqual(spend.totals(datetime(2026, 11, 10, 20, 0, tzinfo=TZ))["unknown_models"], ["claude-nonesuch-9"])
+
     def test_record_launch_rejects_unknown_kind(self):
         with self.assertRaises(ValueError):
             spend.record_launch(SHORT, "bogus", None, profile())

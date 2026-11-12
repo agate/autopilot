@@ -375,7 +375,17 @@ class AccessTest(unittest.TestCase):
         t = {"today": 510.0, "week": 510.0, "month": 510.0, "unknown": False, "unknown_today": False}
         with mock.patch.object(spend, "totals", return_value=t):
             acc = publish.collect([])["meta"]["access"]
-        self.assertEqual(acc["cap_card"], {"day": cap.state(now)["day"], "spent": 510.0, "limit": 500.0, "cause": "spent"})
+        self.assertEqual(acc["cap_card"], {"day": cap.state(now)["day"], "spent": 510.0, "limit": 500.0, "cause": "spent",
+                                           "options": ["raise50", "raise100", "pause"]})
+
+    def test_cap_card_buttons_come_from_the_card_and_name_the_unknown(self):
+        body = js_fn("renderCapCard")
+        self.assertIn("c.options", body)
+        self.assertIn('L("cap_accept_unknown")', body)
+        self.assertIn("c.unknown", body)
+        for key in ("cap_accept_unknown", "cap_unknown_models", "cap_unknown_launches", "cap_unknown_fix"):
+            self.assertTrue(LABELS.get(key), key)
+        self.assertNotIn("Raise the limit", LABELS["cap_card_body_unknown"])
 
     def test_cap_card_cause(self):
         self.gateway()

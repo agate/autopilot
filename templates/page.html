@@ -1016,10 +1016,16 @@ function renderCapCard() {
   if (c && capSent && capSent.day !== c.day) capSent = null;
   if (!c) { capSent = null; fill($("capcard")); return; }
   const money = (n) => "$" + (n || 0).toFixed(2);
-  const opts = [["raise50", L("cap_raise50")], ["raise100", L("cap_raise100")], ["pause", L("cap_pause")]];
+  // The card lists its own answers: an unpriced cost is accepted for today, never "raised".
+  const names = { raise50: L("cap_raise50"), raise100: L("cap_raise100"), accept_unknown: L("cap_accept_unknown"), pause: L("cap_pause") };
+  const opts = (c.options || (c.cause === "unknown" ? ["accept_unknown", "pause"] : ["raise50", "raise100", "pause"])).map((id) => [id, names[id] || id]);
+  const u = c.unknown || null;
   fill($("capcard"), el("div", { class: "card dec capcard", role: "group", "aria-label": L("cap_card_title") },
     el("h2", {}, "▲ " + L("cap_card_title")),
     el("p", {}, L(c.cause === "unknown" ? "cap_card_body_unknown" : "cap_card_body", { spent: (c.spent || 0).toFixed(2), limit: (c.limit || 0).toFixed(2) })),
+    u && (u.models || []).length ? el("p", {}, L("cap_unknown_models", { models: u.models.join(", ") })) : null,
+    u && u.launches ? el("p", {}, L("cap_unknown_launches", { n: u.launches })) : null,
+    u ? el("p", { class: "meta" }, L("cap_unknown_fix")) : null,
     capSent ? el("div", { class: "sent", role: "status" }, capPending((opts.find((o) => o[0] === capSent.option) || [0, capSent.option])[1])) :
       el("div", { class: "switch" }, opts.map(([id, label]) => el("button", { type: "button", class: id === "pause" ? "btn ghost" : "btn", disabled: off, onclick: () => sendCap(id, c.day) }, label))),
     errNote("cap")));

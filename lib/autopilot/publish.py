@@ -148,8 +148,14 @@ def _access(cur: dict, now: datetime, gcfg: dict = None) -> dict:
         acc["usage"] = {"today": spent.get("today", 0.0), "week": spent.get("week", 0.0), "month": spent.get("month", 0.0),
                         "cap_today": limit, "unknown": bool(spent.get("unknown")), "session_pct": session_pct}
         if cap.state(now)["card"] == "open":
+            cause = cur["workers"].get("cause") or ("unknown" if spent.get("unknown_today") else "spent")
             acc["cap_card"] = {"day": cap.state(now)["day"], "spent": spent.get("today", 0.0), "limit": limit,
-                               "cause": "unknown" if spent.get("unknown_today") else "spent"}
+                               "cause": cause,
+                               "options": ["accept_unknown", "pause"] if cause == "unknown" else ["raise50", "raise100", "pause"]}
+            if cause == "unknown":
+                acc["cap_card"]["unknown"] = {"models": list(spent.get("unknown_models") or []),
+                                              "launches": int(spent.get("unknown_launches") or 0),
+                                              "fix": cap.UNKNOWN_FIX}
     else:
         acc["usage"] = {"session_pct": session_pct, "credits_used_usd": b.get("credits_used_usd", 0.0),
                         "credits_limit_usd": b.get("credits_limit_usd", 0.0)}

@@ -158,9 +158,13 @@ commands that print a key, never the key.
 
 - **Daily cap.** `--daily-cap` is dollars per local day. At the cap no new worker starts and
   running ones continue. One card on the page asks you to raise today's limit by 50% or 100%, or to
-  pause. Pause pauses every autopilot and stops running workers; resume by hand. An unanswered
-  card ends at local midnight, when today's spend starts again at $0, and workers start again. If today's cost cannot be read, it counts
-  as over the cap.
+  pause. A raise adds to an earlier one, and the card opens again if spend crosses the raised limit.
+  Pause pauses every autopilot and stops running workers; resume by hand. An unanswered
+  card ends at local midnight, when today's spend starts again at $0, and workers start again. If some
+  of today's cost cannot be priced, it counts as over the cap: the card names the unpriced models (or a
+  launch that could not be read) and offers to accept today's unknown cost (it then counts as $0 for
+  the cap until midnight, still shown as unknown) or to pause. To fix it for good, add the model's price
+  under `prices`.
 - **Key health.** If the key command fails, no new worker starts and the page shows the error with its
   fix. It never falls back to the subscription. Fix the key, or run `ap profile rotate <name>`.
 - **Switching from the page.** The answer check applies the switch. It takes up to about 5 minutes (about 1 when a card

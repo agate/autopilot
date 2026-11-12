@@ -58,10 +58,13 @@ def allowance(b: dict, cfg: dict, now: datetime, p: dict = None, spent: dict = N
         if key_error:   # never a silent fallback to the subscription: workers wait until the key works
             return {"allow": 0, "paused_until": None, "reason": "key", "error": key_error}
         spent = spent or {}
-        unknown = bool(spent.get("unknown_today"))
-        if unknown or (spent.get("today") or 0) >= cap.today_limit(p, now):
-            cap.open_card(now)
-            return {"allow": 0, "paused_until": None, "reason": "cap", "cause": "unknown" if unknown else "spent"}
+        limit = cap.today_limit(p, now)
+        over = (spent.get("today") or 0) >= limit
+        unknown = bool(spent.get("unknown_today")) and not cap.unknown_accepted(now)
+        if unknown or over:
+            cause = "spent" if over else "unknown"
+            cap.open_card(now, limit, cause)
+            return {"allow": 0, "paused_until": None, "reason": "cap", "cause": cause}
         cap.close_card(now)   # the condition cleared before anyone answered: the card may reopen later today
         return {"allow": None, "paused_until": None, "reason": "ok"}
     rules = cfg["budget"]

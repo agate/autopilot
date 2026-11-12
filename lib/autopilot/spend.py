@@ -20,6 +20,7 @@ _PRICE_KEYS = ("input", "output", "cache_read", "cache_write_5m", "cache_write_1
 _LONG_PROMPT_TOKENS = 100_000
 _RETRY_S = 600          # retry resolving one short id at most this often
 _GIVE_UP_S = 2 * 86400  # and stop trying once its launch is older than this
+_NO_ID_HOLD_S = 1800    # a launch with no session id holds the daily cap this long
 _clock = time.time
 
 
@@ -240,7 +241,8 @@ def _month_ts(now: datetime) -> float:
 
 def _reqs(items: list, since: float) -> dict:
     """{request id: [ts, usd]} of one file's requests from `since` on; an undated one is always kept."""
-    return {it["id"]: [it["ts"], it["usd"]] for it in items if it["ts"] is None or it["ts"] >= since}
+    return {it["id"]: [it["ts"], it["usd"]] + ([it["model"]] if it["usd"] is None else [])
+            for it in items if it["ts"] is None or it["ts"] >= since}
 
 
 def _cached_reqs(c: dict, f: Path, table: dict, since: float, seen: set) -> dict:
@@ -348,6 +350,7 @@ def totals(now: datetime, mode: str = "gateway") -> dict:
     _resolve(c, {s: _launch_epoch(ln) for s, ln in {**workers_any, **mine}.items()})
 
     out = {"today": 0.0, "week": 0.0, "month": 0.0, "unknown": False, "unknown_today": False}
+    models, launches = set(), 0   # what today's unknown is: unpriced model ids, launches that could not be priced
 
     def launch_day(ln: dict) -> str:
         return datetime.fromtimestamp(_launch_epoch(ln), tz).strftime("%Y-%m-%d")
@@ -358,8 +361,11 @@ def totals(now: datetime, mode: str = "gateway") -> dict:
     for s, ln in mine.items():
         if s not in c["shorts"] and this_month(ln):
             out["unknown"] = True
-            if launch_day(ln) == today:
+            # A `-p` run that gave no session id can never be matched; after 30 minutes it stops holding today.
+            no_id = s.startswith("unknown-") and _clock() - _launch_epoch(ln) > _NO_ID_HOLD_S
+            if launch_day(ln) == today and not no_id:
                 out["unknown_today"] = True
+                launches += 1
 
     # A session resumed under a new short id is one session: it counts once, in the mode of its latest launch.
     session_mode = {}
@@ -410,6 +416,7 @@ def totals(now: datetime, mode: str = "gateway") -> dict:
             if m == mode:   # launched this month but neither a transcript nor settled lines remain
                 out["unknown"] = out["unknown"] or recent
                 out["unknown_today"] = out["unknown_today"] or launched_today
+                launches += 1 if launched_today else 0
             continue
         per_session[sid] = _session_reqs([_cached_reqs(c, f, table, since, seen) for f in _files(t)], sid)
 
@@ -417,25 +424,30 @@ def totals(now: datetime, mode: str = "gateway") -> dict:
     owner = {}
     for sid, reqs in per_session.items():
         rank = session_mode[sid][3]
-        for rid, (ts, _) in reqs.items():
-            key = (ts if ts is not None else float("inf"), rank, sid)
+        for rid, rec in reqs.items():
+            key = (rec[0] if rec[0] is not None else float("inf"), rank, sid)
             if rid not in owner or key < owner[rid]:
                 owner[rid] = key
     for sid, reqs in per_session.items():
         m, _, launched_today, _, _ = session_mode[sid]
         if m != mode:
             continue
-        for rid, (ts, usd) in reqs.items():
+        for rid, rec in reqs.items():
+            ts, usd = rec[0], rec[1]
             if owner[rid][2] != sid:
                 continue   # a copy of a request another session made
+            day = _day(ts, tz) if ts is not None else None
+            if usd is None and (day == today or (day is None and launched_today)):
+                models.add(rec[2] if len(rec) > 2 and rec[2] else "an unnamed model")
             if ts is None:   # no usable time: unknown spend, on the day the session was launched
                 out["unknown"] = True
                 out["unknown_today"] = out["unknown_today"] or launched_today
                 continue
-            add(_day(ts, tz), usd, usd is None)
+            add(day, usd, usd is None)
     for k in [k for k in c["files"] if k not in seen and not Path(k).exists()]:
         del c["files"][k]
         c["dirty"] = True
     if c.pop("dirty", False):
         _save_cache(c)
+    out["unknown_models"], out["unknown_launches"] = sorted(models), launches
     return out

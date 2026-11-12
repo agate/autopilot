@@ -65,10 +65,10 @@ class CapTest(Base):
         self.assertEqual(cur["passes"]["reason"], "ok")
         self.assertEqual(cap.state(DAY)["card"], "open")
 
-    def test_card_opens_once_a_day(self):
+    def test_card_opens_once_a_day_per_limit(self):
         self.current(totals(500))
         cap.answer("raise50", DAY)
-        self.current(totals(800))
+        self.current(totals(700))   # under the raised limit
         self.assertEqual(cap.state(DAY)["card"], "answered")
 
     def test_unknown_cost_counts_as_over(self):
@@ -124,6 +124,45 @@ class CapTest(Base):
         later = datetime(2026, 3, 11, 0, 1)
         self.assertEqual(cap.today_limit(profile.active(), later), 500)
         self.assertEqual(cap.state(later), {"day": "2026-03-11", "raise_pct": 0, "card": None})
+
+    def test_card_reopens_when_spend_crosses_the_raised_limit(self):
+        self.current(totals(500))
+        cap.answer("raise50", DAY)
+        self.current(totals(600))
+        self.assertEqual(cap.state(DAY)["card"], "answered")
+        w = self.current(totals(750))["workers"]
+        self.assertEqual((w["reason"], cap.state(DAY)["card"]), ("cap", "open"))
+        cap.answer("raise50", DAY)   # a second raise adds to the first
+        self.assertEqual(cap.today_limit(profile.active(), DAY), 1000)
+
+    def test_a_pause_answer_does_not_reopen_at_the_same_limit(self):
+        self.current(totals(500))
+        with mock.patch.object(cap, "_pause_all"):
+            cap.answer("pause", DAY)
+        self.current(totals(520))
+        self.assertEqual(cap.state(DAY)["card"], "answered")
+
+    def test_accepting_todays_unknown_cost_lets_work_start_until_midnight(self):
+        w = self.current(totals(1, unknown=True))["workers"]
+        self.assertEqual(w["cause"], "unknown")
+        cap.answer("accept_unknown", DAY)
+        self.assertEqual(self.current(totals(1, unknown=True))["workers"]["reason"], "ok")
+        # The spend still counts: crossing the limit opens the card again, for the spend.
+        w = self.current(totals(500, unknown=True))["workers"]
+        self.assertEqual((w["reason"], w["cause"], cap.state(DAY)["card"]), ("cap", "spent", "open"))
+        later = datetime(2026, 3, 11, 0, 1)
+        self.assertEqual(self.current(totals(1, unknown=True), later)["workers"]["cause"], "unknown")
+
+    def test_the_unknown_card_says_what_is_unknown_and_how_to_fix_it(self):
+        from autopilot import publish
+        t = dict(totals(1, unknown=True), unknown_models=["claude-nonesuch-9"], unknown_launches=1)
+        with mock.patch.object(spend, "totals", return_value=t):
+            card = publish.collect([])["meta"]["access"]["cap_card"]
+        self.assertEqual(card["cause"], "unknown")
+        self.assertEqual(card["unknown"]["models"], ["claude-nonesuch-9"])
+        self.assertEqual(card["unknown"]["launches"], 1)
+        self.assertIn("prices", card["unknown"]["fix"])
+        self.assertEqual([o for o in card["options"]], ["accept_unknown", "pause"])
 
     def test_raise100(self):
         cap.answer("raise100", DAY)
