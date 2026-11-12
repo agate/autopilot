@@ -269,6 +269,109 @@ class ProfileStoreTest(WorkerCase):
         self.assertTrue((self.data / "active-profile.json").is_file())
 
 
+class ProfileNameAndLongContextTest(WorkerCase):
+    """Profile names may hold `_` (often a gateway project's name), and a model may end in `[1m]` (Claude Code's
+    marker for the 1M context window): checked against the gateway's list without it, kept and passed with it."""
+
+    MODELS = "printf '[\"claude-opus-5-5\", \"claude-haiku-4-5\"]'"
+
+    def long_context(self, **over) -> dict:
+        p = gateway(**{"small_model": "claude-haiku-4-5", **over})
+        p["gateway"]["models_command"] = self.MODELS
+        return p
+
+    def test_the_profile_name_rule(self):
+        for name in ("team_project", "a", "a-b_c", "x" + "y" * 39):
+            self.assertEqual(profiles.validate({"name": name, "mode": "subscription"}), [], name)
+        for name in ("", "Team", "_x", "1x", "a/b", "a.b", "a b", "x" * 41, "a\n", "../x"):
+            errs = profiles.validate({"name": name, "mode": "subscription"})
+            self.assertEqual(len(errs), 1, (name, errs))
+            self.assertTrue(errs[0].startswith("name:"), (name, errs))
+            self.assertIn("lowercase letters, digits, - and _, starting with a letter (40 at most)", errs[0])
+        with self.assertRaisesRegex(ProfileError, r"\(lowercase letters, digits, - and _, starting with a letter "
+                                                  r"\(40 at most\)\)"):
+            profiles.path(self.data, "a\n")
+        self.assertFalse(hasattr(profiles, "NAME"))  # the project rule is no longer imported
+
+    def test_an_underscore_name_round_trips(self):
+        """A bug v1 had: a name `save` accepted but `load` refused was saved, then broke `profile list`."""
+        p = profiles.save(self.data, dict(profiles.builtin(), name="team_project", label="Team"))
+        self.assertEqual(p["name"], "team_project")
+        self.assertTrue((self.data / "profiles" / "team_project.json").exists())
+        self.assertEqual(profiles.load(self.data, "team_project")["label"], "Team")
+        self.assertEqual(profiles.names(self.data), ["subscription", "team_project"])
+        self.assertEqual(profiles.use(self.data, "team_project"), {"active": "team_project", "was": "subscription"})
+        self.assertEqual(profiles.active_name(self.data), "team_project")
+        self.assertEqual(profiles.active(self.data)["name"], "team_project")
+        if temp_inside_the_accounts_claude():
+            self.skipTest("the temp folder is inside the account's ~/.claude, so ap2 refuses every temp data folder")
+        home = self.tmp / "cli-home"
+        home.mkdir()
+        env = {k: v for k, v in os.environ.items() if k != "AP2_DATA" and not k.startswith("AUTOPILOT_")}
+        env.update(HOME=str(home), AUTOPILOT_DATA=str(self.tmp / "v1-cli"), PYTHONIOENCODING="utf-8")
+        for args in (("use", "subscription"), ("list",), ("use", "team_project"), ("list",)):
+            r = subprocess.run([sys.executable, str(AP2), "profile", *args, "--data", str(self.data)],
+                               capture_output=True, text=True, env=env, timeout=60)
+            self.assertEqual(r.returncode, 0, (args, r.stderr))
+        listed = json.loads(r.stdout)
+        self.assertEqual(listed["active"], "team_project")
+        self.assertIsNone(listed["active_error"])
+        self.assertIn("team_project", [x["name"] for x in listed["profiles"]])
+
+    def test_project_names_keep_their_rule(self):
+        from assistant.projects import NAME
+        self.assertIsNone(NAME.match("team_project"))
+        self.assertIsNotNone(profiles.PROFILE_NAME.match("team_project"))
+
+    def test_base_model_strips_one_long_context_marker(self):
+        self.assertEqual(profiles.LONG_CONTEXT, "[1m]")
+        for name, base in (("claude-opus-5-5[1m]", "claude-opus-5-5"), ("claude-opus-5-5", "claude-opus-5-5"),
+                           ("m[1m][1m]", "m[1m]"), ("m[2m]", "m[2m]"), ("[1m]m", "[1m]m"), ("m[1M]", "m[1M]")):
+            self.assertEqual(profiles.base_model(name), base, name)
+
+    def test_a_long_context_model_is_checked_without_its_marker(self):
+        saved = profiles.save(self.data, self.long_context(model="claude-opus-5-5[1m]",
+                                                           dispatcher_model="claude-opus-5-5[1m]"))
+        self.assertEqual((saved["model"], saved["dispatcher_model"]), ("claude-opus-5-5[1m]", "claude-opus-5-5[1m]"))
+        for bad in ("claude-opus-9[1m]", "claude-opus-5-5[2m]"):
+            with self.assertRaises(ProfileError) as cm:
+                profiles.save(self.data, self.long_context(name="h", model=bad))
+            self.assertIn(f"model: {bad} is not offered by the gateway", str(cm.exception))
+        with self.assertRaises(ProfileError) as cm:
+            profiles.save(self.data, self.long_context(name="h", model="claude-opus-5-5",
+                                                       small_model="claude-haiku-9[1m]"))
+        self.assertIn("small_model: claude-haiku-9[1m] is not offered", str(cm.exception))
+        self.assertEqual(profiles.names(self.data), ["g", "subscription"])
+
+    def test_a_long_context_model_is_stored_and_passed_as_written(self):
+        profiles.save(self.data, self.long_context(model="claude-opus-5-5[1m]", effort="high"))
+        self.assertEqual(json.loads((self.data / "profiles" / "g.json").read_text())["model"], "claude-opus-5-5[1m]")
+        p = profiles.load(self.data, "g")
+        self.assertEqual(p["model"], "claude-opus-5-5[1m]")
+        self.assertEqual(profiles.overlay(p)["env"]["ANTHROPIC_MODEL"], "claude-opus-5-5[1m]")
+        from tests.test_ap2_profile_launch import opt  # imported here: that module imports this one
+        profiles.use(self.data, "g")
+        self.start()
+        call = self.bg_calls()[-1]
+        self.assertEqual(opt(call["argv"], "--model"), "claude-opus-5-5[1m]")
+        settings = json.loads(Path(opt(call["argv"], "--settings")).read_text())
+        self.assertEqual(settings["env"]["ANTHROPIC_MODEL"], "claude-opus-5-5[1m]")
+
+    def test_a_models_list_with_a_non_text_item_is_refused(self):
+        p = self.long_context(model="claude-x")
+        p["gateway"]["models_command"] = "printf '[1, \"claude-x\"]'"
+        with self.assertRaises(ProfileError) as cm:
+            profiles.save(self.data, p)
+        msg = str(cm.exception)
+        self.assertEqual(msg, "gateway.models_command: must print a JSON list of model names")
+        self.assertNotIn("claude-x", msg)  # the command's output is never shown
+        # An unhashable item (a list in the list) is refused the same way, never a traceback.
+        p["gateway"]["models_command"] = "printf '[[\"claude-x\"], \"claude-x\"]'"
+        with self.assertRaisesRegex(ProfileError, "must print a JSON list of model names"):
+            profiles.save(self.data, p)
+        self.assertEqual(profiles.names(self.data), ["subscription"])
+
+
 class ProfileOverlayTest(unittest.TestCase):
     def test_gateway_overlay_keeps_floor(self):
         from assistant import workers
