@@ -1093,9 +1093,7 @@ class ResumeByProfileTest(CapWorkerCase):
         a = self.start(w)
         self.park_quota(w, a)
         self.use_gateway()
-        self.assertEqual(self.workers().check()[0]["did"], "nothing")  # its resume time has not come
-        self.clock.advance(4 * 60)
-        out = self.workers().check()[0]  # no --usage at all
+        out = self.workers().check()[0]  # before its 12:05 resume time (a subscription window's), no --usage at all
         self.assertEqual((out["state"], out["did"]), ("parked", "resumed"))
         self.assertIn(workers_mod.PARKED_RESUME, self.bg_calls()[-1]["argv"][-1])
 
@@ -1122,7 +1120,7 @@ class ResumeByProfileTest(CapWorkerCase):
         self.assertEqual(len(self.bg_calls()), 1)
 
 
-# -- 8. a limit park resumes like a quota park (lessons 4.1) ---------------------------------------------------------------
+# -- 8. a limit park resumes like a quota park -----------------------------------------------------------------------------
 
 class LimitParkTest(CapWorkerCase):
     def limit_park(self, minutes=30):

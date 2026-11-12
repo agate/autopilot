@@ -2222,8 +2222,11 @@ Calls the author made without asking (check them):
      `resume_at` (a missing or null one is no time to wait for); then on a subscription profile v1's
      `park.resume_due` with the usage file (no `--usage`: not due), on a gateway profile the allowance (`allow != 0`;
      no usage file needed, the subscription's windows ignored). So a worker parked for quota on the subscription
-     resumes on a gateway profile once its `resume_at` passed, and a cap-parked worker resumes only after `ap2 cap
-     resume` and while the cap allows. The resume prompt follows the record's `reason`: `PARKED_RESUME` (quota),
+     resumes on a gateway profile right away (its `resume_at` is a subscription window's; a limit park keeps its
+     `resume_at` wait), and a cap-parked worker resumes only after `ap2 cap resume` and while the cap allows.
+     **[decided by the builder]** On a gateway profile a `reason: "quota"` park skips its `resume_at` wait, since
+     the subscription's usage windows never hold a gateway worker; a `reason: "limit"` park still waits for its
+     `resume_at` (the API's own reset), and a cap park has none. The resume prompt follows the record's `reason`: `PARKED_RESUME` (quota),
      `CAP_RESUME` (the pause was lifted), `LIMIT_RESUME` (below).
   9. A limit park resumes like a quota park. A record with `reason: "limit"` (written by the slice that detects API
      limit errors) resumes by 8 once its `resume_at` has passed, with `LIMIT_RESUME`: "You were parked at a usage

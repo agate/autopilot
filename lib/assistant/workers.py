@@ -947,11 +947,17 @@ class Workers:
         """A parked worker may resume now, by the active profile's rules: never while paused (`paused.json`); not
         before its `resume_at` (a missing or null one is no time to wait for); then on a subscription profile v1's
         `park.resume_due` with the usage file (none given: not due), and on a gateway profile the daily cap
-        (`allow(prof)`, no usage file needed, the subscription's windows ignored). A record parked for an API limit
-        (`reason: limit`) and one parked by the cap pause resume the same way."""
+        (`allow(prof)`, no usage file needed, the subscription's windows ignored). On a gateway profile a quota park
+        (`reason: quota`) skips its `resume_at` wait: that time is a subscription window's. A record parked for an
+        API limit (`reason: limit`, its `resume_at` waited for on every profile) and one parked by the cap pause
+        resume the same way."""
         if cap.paused(self.data) is not None:
             return False
-        at = (rec.get("parked") or {}).get("resume_at")
+        prof = profiles.active(self.data)
+        parked = rec.get("parked") or {}
+        at = parked.get("resume_at")
+        if prof.get("mode") == "gateway" and parked.get("reason") == "quota":
+            at = None  # a subscription window's reset: the subscription's windows never hold a gateway worker
         if at is not None:
             try:
                 at = datetime.fromisoformat(at)
@@ -959,7 +965,6 @@ class Workers:
                 at = None  # no usable resume time: nothing to wait for
             if at is not None and (at.tzinfo is None or now < at):
                 return False
-        prof = profiles.active(self.data)
         if prof.get("mode") == "gateway":
             return allow(prof).get("allow") != 0
         return b is not None and v1_park.resume_due(rec, now, {"budget": PARK_RULES}, b)
