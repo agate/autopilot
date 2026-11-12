@@ -59,6 +59,12 @@ def at_limit(**top):
                   rnd(3, [CI_FINDING, CORR_FINDING, TEST_FINDING, ACC_FINDING], commit=SHA3, ci="red"), **top)
 
 
+def converged_at_limit():
+    """Two rounds of non-behavior fixes at a limit of 2: the loop converged, so no check is due."""
+    return record(rnd(1, [finding("c-1", "Correctness", behavior=False)], commit=SHA1),
+                  rnd(2, [finding("c-2", "Correctness", behavior=False)], commit=SHA2), limit=2)
+
+
 def deep(n):
     """A list nested `n` deep."""
     value = []
@@ -191,6 +197,22 @@ class AtLimitTest(unittest.TestCase):
                 self.assertEqual(d["plan"][0]["angle"], PICKED[0])
                 self.assertEqual(d["plan"], prloop.plan(at_limit()))
 
+    def test_converged_at_the_limit_ends_with_no_check(self):
+        d = prloop.decide(converged_at_limit())
+        self.assertEqual((d["next"], d["result"], d["ended_by"]), ("end", "converged", "converged"))
+        self.assertIsNone(d["plan"])
+
+    def test_explicit_null_fix_check_is_no_check(self):
+        rec = at_limit(fix_check=None)
+        self.assertEqual(prloop.decide(rec)["next"], "check")
+        d = Path(tempfile.mkdtemp(prefix="ap2-prloop-"))
+        self.addCleanup(shutil.rmtree, d, True)
+        path = d / "prloop.json"
+        path.write_text(json.dumps(rec))
+        got = prloop.read(path)
+        self.assertEqual(got, rec)
+        self.assertEqual(prloop.decide(got)["next"], "check")
+
     def test_plan_skips_angles_with_no_fix(self):
         names = [e["angle"]["name"] for e in prloop.plan(at_limit())]
         self.assertNotIn("Accuracy", names)
@@ -205,6 +227,8 @@ class AtLimitTest(unittest.TestCase):
             ("the check already ran", prloop.record_check(at_limit(), no_findings(), "green"),
              r"^the record: fix_check: the record already has a check of the fix; it runs at most once per loop$"),
             ("no rounds yet", record(), r"^the record: rounds: no check of the fix: the loop has no rounds yet$"),
+            ("converged at the limit", converged_at_limit(),
+             r"^the record: rounds\[1\]: no check of the fix: the loop ended after round 2 \(converged: "),
         ]
         for name, rec, says in cases:
             with self.subTest(name):
@@ -290,6 +314,9 @@ class AtLimitTest(unittest.TestCase):
         d = prloop.decide(rec)
         self.assertEqual((d["next"], d["result"], d["ended_by"]), ("end", "stopped", "round"))
         self.assertIn("red", d["reason"])
+        a = prloop.ask(rec)
+        self.assertEqual((a["type"], a["from"]), ("answer", "prloop"))
+        self.assertIn(d["reason"], a["text"])
 
 
 class CheckBriefTest(unittest.TestCase):
@@ -552,6 +579,7 @@ class AtMostOnceTest(unittest.TestCase):
             ("a stop at the limit", record(rnd(1, [R1_FINDING], commit=SHA1),
                                            rnd(2, [R2_FINDING], commit=SHA2, stop="the branch moved"), limit=2),
              {"Test value": []}, "ended"),
+            ("converged at the limit", converged_at_limit(), {"Correctness": []}, "converged"),
             ("a bad bucket", at_limit(), {"Correctness": [finding("check-1", "Correctness", "maybe")],
                                           "Test value": []}, "bucket"),
         ]
@@ -626,6 +654,7 @@ class ReadTest(unittest.TestCase):
             ("bad sha", change(lambda r: r["rounds"][1].update(commit="HEAD~1")), r"rounds\[1\]\.commit"),
             ("upper-case sha", change(lambda r: r["rounds"][1].update(commit=SHA2.upper())), r"rounds\[1\]\.commit"),
             ("short sha", change(lambda r: r["rounds"][1].update(commit="abc12")), r"rounds\[1\]\.commit"),
+            ("41-character sha", change(lambda r: r["rounds"][1].update(commit="a" * 41)), r"rounds\[1\]\.commit"),
             ("more rounds than the limit", json.dumps(four).encode(), r"rounds\[3\].*past the round limit"),
             ("limit 21", change(lambda r: r.update(limit=21)), "limit"),
             ("bad ci", change(lambda r: r["rounds"][0].update(ci="yellow")), r"rounds\[0\]\.ci"),
@@ -650,6 +679,8 @@ class ReadTest(unittest.TestCase):
              r"rounds\[1\]\.commit"),
             ("null angle on a ci-x finding", change(lambda r: r["rounds"][0]["findings"][0].update(
                 id="ci-x", angle=None)), r"rounds\[0\]\.findings\[0\]\.angle"),
+            ("null angle on a ci- finding with no number", change(lambda r: r["rounds"][0]["findings"][0].update(
+                id="ci-", angle=None)), r"rounds\[0\]\.findings\[0\]\.angle"),
             ("round number a bool", change(lambda r: r["rounds"][0].update(n=True)), r"rounds\[0\]\.n"),
             ("check ci blue", change(lambda r: r["fix_check"].update(ci="blue"), checked), r": fix_check\.ci: "),
             ("check finding bucket maybe", change(lambda r: r["fix_check"]["reviewers"][0]["findings"].append(
