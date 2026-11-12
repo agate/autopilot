@@ -61,7 +61,8 @@ def decide(payload: dict, env, b: dict = None, cfg: dict = None):
 
 def resume_due(worker: dict, now: datetime, cfg: dict, b: dict, ap: str = None) -> bool:
     """A parked worker can continue: its resume time has passed, no window is at the line, and the budget
-    allows new work. `b` is `budget.read()`."""
+    allows new work. `b` is `budget.read()`. The rules are the active profile's, whatever profile the worker
+    ran on before: a resumed worker runs on the active profile's settings."""
     pk = worker.get("parked")
     if not pk:
         return False
@@ -73,13 +74,7 @@ def resume_due(worker: dict, now: datetime, cfg: dict, b: dict, ap: str = None) 
         return False
     if ap is not None and (paths.ap_dir(ap) / "paused").exists():
         return False   # a pause lasts until the user resumes, also past midnight
-    own = None
-    if worker.get("profile"):
-        try:
-            own = profile.load(worker["profile"])   # the profile the worker runs on, not the active one
-        except (KeyError, ValueError, OSError):
-            pass
-    p, _, workers = budget.workers_allowance(b, cfg, now, own)
+    p, _, workers = budget.workers_allowance(b, cfg, now)
     return budget.parking(b, cfg, p) is None and workers["allow"] != 0
 
 

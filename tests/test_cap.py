@@ -296,17 +296,22 @@ class ResumeProfileTest(Base):
         return {"profile": name, "task": "T-1", "role": "implement",
                 "parked": {"kind": "cap", "resume_at": None, "reason": "cap"}}
 
-    def test_a_gateway_worker_ignores_a_full_subscription_window_after_a_switch(self):
+    # A resumed worker runs on the active profile's settings, so that profile's rules decide when it may resume.
+    def test_a_gateway_worker_waits_for_the_window_after_a_switch_to_subscription(self):
         budget.DEFAULT_PATH = usage_file(97)
         profile.use("subscription")
         with mock.patch.object(spend, "totals", return_value=totals(0)):
-            self.assertTrue(park.resume_due(self.parked("gw"), self.LATER, self.gcfg, budget.read()))
+            self.assertFalse(park.resume_due(self.parked("gw"), self.LATER, self.gcfg, budget.read()))
 
-    def test_a_subscription_worker_waits_for_the_window_after_a_switch_to_gateway(self):
+    def test_a_subscription_worker_resumes_on_the_gateway_after_a_switch(self):
         budget.DEFAULT_PATH = usage_file(97)
         with mock.patch.object(spend, "totals", return_value=totals(0)):
-            self.assertFalse(park.resume_due(self.parked("subscription"), self.LATER, self.gcfg, budget.read()))
+            self.assertTrue(park.resume_due(self.parked("subscription"), self.LATER, self.gcfg, budget.read()))
             self.assertTrue(park.resume_due(self.parked("gw"), self.LATER, self.gcfg, budget.read()))
+
+    def test_the_active_gateway_cap_holds_back_a_subscription_worker(self):
+        with mock.patch.object(spend, "totals", return_value=totals(500)):
+            self.assertFalse(park.resume_due(self.parked("subscription"), self.LATER, self.gcfg, budget.read()))
 
     def test_a_worker_without_a_profile_uses_the_active_one(self):
         w = self.parked("gw")
