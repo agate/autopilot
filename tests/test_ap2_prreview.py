@@ -421,6 +421,11 @@ class PlanTest(Case):
                 out, _ = self.plan(cid, table(b_pages, head=B, since=since), stage="delta")
                 self.assertEqual(out["compare"], compare(BASE, B))
                 self.assertIn(words, out["whole_pr"])
+        with self.subTest("a compare that fails for another reason is an error, not a whole-PR review"):
+            with self.assertRaisesRegex(prreview.ReviewError, "HTTP 502") as cm:
+                self.plan(cid, table(b_pages, head=B, since="since_error"), stage="delta")
+            self.assertNotIsInstance(cm.exception, prreview.NotFound)
+            self.assertNotIn("no longer on GitHub", str(cm.exception))
         with self.subTest("nothing new"):
             with self.assertRaisesRegex(prreview.ReviewError, f"nothing new since {A[:7]}"):
                 self.plan(cid, table(fixture("graphql-head-a.json")), stage="delta")
@@ -736,6 +741,9 @@ class CheckTest(Case):
                 ("an en TL;DR not starting with its verdict", bad(tldr={"en": "Looks risky.", "zh": "有风险。"}),
                  "tldr.en: must start with the verdict, 'Changes'"),
                 ("an en TL;DR starting with another verdict", bad(tldr={"en": "Approve: fine.", "zh": "没问题。"}),
+                 "tldr.en: must start with the verdict, 'Changes'"),
+                ("an en TL;DR with its verdict word later",
+                 bad(tldr={"en": "Approve the idea, but Changes are needed.", "zh": "一。"}),
                  "tldr.en: must start with the verdict, 'Changes'"),
                 ("a two-line zh TL;DR", bad(tldr={"en": "Changes: x.", "zh": "一。\n二。"}),
                  "tldr.zh: must be one line"),

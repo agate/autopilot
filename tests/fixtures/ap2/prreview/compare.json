@@ -7,5 +7,9 @@
   "since_missing": {
     "exit": 1,
     "stderr": "gh: Not Found (HTTP 404)\n"
+  },
+  "since_error": {
+    "exit": 1,
+    "stderr": "gh: Server Error (HTTP 502)\n"
   }
 }
