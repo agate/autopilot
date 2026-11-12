@@ -249,6 +249,14 @@ class PlainWordsTest(Case):
                 self.assertTrue(words["do"]["en"].startswith(want), words["do"]["en"])
                 self.assertEqual(words["what"]["en"], f"Someone asked you to review PR #42: {TITLE}")
 
+    def test_with_no_source_record_the_title_is_the_cards(self):
+        for title, zh in (("Fix it", "Fix it"), ({"en": "Fix it", "zh": "修好它"}, "修好它")):
+            with self.subTest(title=title):
+                card = {"kind": "pr-review", "key": "o/r#5", "title": title}
+                words = prreview.plain_for(None, card, LANGS)
+                self.assertEqual(words["what"], {"en": "Someone asked you to review PR #5: Fix it",
+                                                 "zh": f"有人 请你审查 PR #5：{zh}"})
+
     def test_a_long_title_is_cut_at_120_characters(self):
         words = prreview.plain_for({"id": "7", "author": "octo-dev", "text": "x" * 300 + "\nsecond line"}, {},
                                    ("en",))
@@ -341,6 +349,7 @@ class PlanTest(Case):
             self.assertEqual(out["compare"], compare(A, B))
             self.assertIsNone(out["whole_pr"])
         for since, words in (("since_merge", "merge commit (e5f6a7b)"), ("since_diverged", "rewritten"),
+                             ("since_behind", "rewritten since the last review (compare status behind)"),
                              ("since_missing", "no longer on GitHub")):
             with self.subTest(since):
                 out, _ = self.plan(cid, table(b_pages, head=B, since=since), stage="delta")
@@ -455,6 +464,11 @@ class VerdictTest(Ap2Case):
                  "findings.confirmed[0].checked: missing"),
                 ("rejected with no reason", buckets(rejected=[rejected]), "findings.rejected[0].reason: missing"),
                 ("a text missing zh", buckets(confirmed=[no_zh]), "findings.confirmed[0].impact.zh: missing"),
+                ("an extra key", buckets(confirmed=[good_finding(score=3)]),
+                 "findings.confirmed[0].score: not a field in confirmed"),
+                ("a text in a language not configured",
+                 buckets(confirmed=[good_finding(impact={"en": "x", "zh": "x", "fr": "x"})]),
+                 "findings.confirmed[0].impact.fr: not a configured language (en, zh)"),
                 ("not four buckets", {"confirmed": []}, "findings: must be an object")):
             with self.subTest(name):
                 code, out = self.verdict(obj)
@@ -466,6 +480,11 @@ class VerdictTest(Ap2Case):
         r = self.ap2("review", "verdict", "--file", "-", stdin="{nope")
         self.assertEqual(r.returncode, 1)
         self.assertTrue(r.stderr.startswith("ap2: cannot read '-'"), r.stderr)
+
+    def test_a_file_nested_too_deeply(self):
+        r = self.ap2("review", "verdict", "--file", "-", stdin="[" * 100000)
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.stderr.strip(), "ap2: cannot read '-': nested too deeply")
 
 
 # --- criterion 5: the report is checked --------------------------------------------------------------------------
@@ -484,6 +503,13 @@ class CheckTest(Case):
 
     def test_a_good_report_passes(self):
         self.assertEqual(self.errors(self.report("report-review.json", self.cid)), [])
+
+    def test_a_tldr_of_200_characters_passes(self):
+        rep = self.report("report-review.json", self.cid)
+        rep["tldr"]["en"] = "Changes: " + "x" * 191
+        self.assertEqual(self.errors(rep), [])
+        rep["tldr"]["en"] += "x"
+        self.assertEqual(self.errors(rep), ["tldr.en: 201 characters; at most 200"])
 
     def test_a_good_delta_report_passes(self):
         self.put_report(self.cid, self.report("report-review.json", self.cid))
@@ -514,12 +540,15 @@ class CheckTest(Case):
                 ("an en TL;DR not starting with its verdict", bad(tldr={"en": "Looks risky.", "zh": "有风险。"}),
                  "tldr.en: must start with the verdict, 'Changes'"),
                 ("angles not the plan's", bad(angles=good["angles"][:2]), "angles: must be the plan's angles"),
+                ("the plan's angles out of order", bad(angles=good["angles"][::-1]),
+                 "angles: must be the plan's angles"),
                 ("an angle from another layer", bad(angles=[dict(good["angles"][0], origin="user")] + good["angles"][1:]),
                  "angles: must be the plan's angles"),
                 ("a head not the plan's", bad(head_sha=B), f"head_sha: must be {A}"),
                 ("a stage not the plan's", bad(stage="delta"), "stage: must be review"),
                 ("a <script> in the diagram", bad(diagram=script), "diagram: must be one inline <svg>"),
                 ("an onload in the diagram", bad(diagram='<svg onload="x()"></svg>'), "diagram: must be one"),
+                ("a diagram that is not an svg", bad(diagram="<div></div>"), "diagram: must be one inline <svg>"),
                 ("a missing block", bad(problem=None), "problem: missing"),
                 ("a text missing zh", bad(background={"en": "x"}), "background.zh: missing"),
                 ("a bad time", bad(reviewed_at="2026-11-11 09:30"), "reviewed_at: must be a UTC time"),
@@ -542,6 +571,10 @@ class CheckTest(Case):
             errors = prreview.check(self.data, self.cid, cfg=self.cfg)["errors"]
             self.assertEqual(len(errors), 1)
             self.assertTrue(errors[0].startswith("prreview.json: not JSON"), errors)
+        with self.subTest("nested too deeply"):
+            path.write_text("[" * 100000)
+            errors = prreview.check(self.data, self.cid, cfg=self.cfg)["errors"]
+            self.assertEqual(errors, ["prreview.json: not JSON (nested too deeply)"])
         with self.subTest("missing"):
             path.unlink()
             errors = prreview.check(self.data, self.cid, cfg=self.cfg)["errors"]
@@ -596,10 +629,19 @@ class CheckTest(Case):
                 ("an id that was not on the card",
                  bad(earlier=good["earlier"] + [{"id": "other-9", "state": "fixed"}]), "other-9 is not an earlier"),
                 ("a bad state", bad(earlier=[{"id": "correctness-1", "state": "gone"},
-                                             {"id": "q-1", "state": "answered"}]), "earlier[0].state: must be one of")):
+                                             {"id": "q-1", "state": "answered"}]), "earlier[0].state: must be one of"),
+                ("fixed on a question id",
+                 bad(earlier=[{"id": "correctness-1", "state": "fixed"}, {"id": "q-1", "state": "fixed"}]),
+                 "q-1 is a question; mark it answered, not fixed")):
             with self.subTest(name):
                 errors = self.errors(rep)
                 self.assertTrue(any(words in e for e in errors), errors)
+        for name, value in (("questions: true", True), ("confirmed: 1", 1)):
+            with self.subTest(name):
+                rep = copy.deepcopy(good)
+                rep["findings"][name.split(":")[0]] = value
+                errors = self.errors(rep)
+                self.assertTrue(any("findings: must be an object with exactly the lists" in e for e in errors), errors)
 
         # Once q-1 is answered and on the card's answered list, a later delta's new finding may not take its id.
         self.put_report(self.cid, good)
@@ -613,6 +655,111 @@ class CheckTest(Case):
         rep["tldr"] = {"en": "Approve: one nit.", "zh": "一个小问题。"}
         errors = self.errors(rep)
         self.assertTrue(any("q-1 reuses an earlier id (answered)" in e for e in errors), errors)
+        rep["findings"] = buckets(confirmed=[good_finding(severity="nit")])
+        errors = self.errors(rep)
+        self.assertTrue(any("correctness-1 reuses an earlier id (fixed)" in e for e in errors), errors)
+
+
+# --- apply -------------------------------------------------------------------------------------------------------
+
+C = "f" * 40
+
+
+class ApplyTest(Case):
+    def question(self):
+        q = {k: v for k, v in good_finding(id="q-1", severity="nit").items() if k != "checked"}
+        q["question"] = {"en": "Should a retry wait longer?", "zh": "重试要不要等更久？"}
+        return q
+
+    def two_finding_card(self):
+        """A card with a full review at A holding correctness-1 (confirmed) and q-1 (a question)."""
+        cid = self.card()["id"]
+        self.plan(cid, table(fixture("graphql-head-a.json")))
+        rep = self.report("report-review.json", cid)
+        rep["findings"]["questions"] = [self.question()]
+        self.put_report(cid, rep)
+        prreview.apply(self.data, cid, cfg=self.cfg)
+        return cid
+
+    def delta(self, cid, earlier, findings=None, head=B, reviewed=A, at="2026-11-11T11:00:00Z"):
+        """Plan a delta at `head` and put a delta report with these marks; return the report."""
+        pages = fixture("graphql-head-b.json") if head == B else with_head(fixture("graphql-head-b.json"), head)
+        self.plan(cid, table(pages, head=head, since="since_clean", reviewed=reviewed), stage="delta")
+        rep = self.report("report-delta.json", cid)
+        rep.update(head_sha=head, reviewed_at=at, earlier=earlier, findings=buckets(**(findings or {})))
+        rep["verdict"] = prreview.verdict(rep["findings"])
+        if rep["verdict"] != "approve":
+            word = prreview.VERDICT_WORD[rep["verdict"]]
+            rep["tldr"] = {"en": f"{word}: see the findings.", "zh": "看发现。"}
+        self.put_report(cid, rep)
+        return rep
+
+    def test_fixed_and_answered_are_kept_across_deltas(self):
+        cid = self.two_finding_card()
+        self.delta(cid, [{"id": "correctness-1", "state": "fixed"}, {"id": "q-1", "state": "answered"}])
+        prreview.apply(self.data, cid, cfg=self.cfg)
+        self.delta(cid, [], head=C, reviewed=B, at="2026-11-11T12:00:00Z")
+        card = prreview.apply(self.data, cid, cfg=self.cfg)
+        self.assertEqual([(f["id"], f["fixed_in"]) for f in card["findings"]["fixed"]], [("correctness-1", B)])
+        self.assertEqual([(f["id"], f["fixed_in"]) for f in card["findings"]["answered"]], [("q-1", B)])
+
+    def test_a_full_review_starts_fixed_and_answered_empty(self):
+        cid = self.two_finding_card()
+        self.delta(cid, [{"id": "correctness-1", "state": "fixed"}, {"id": "q-1", "state": "answered"}])
+        self.assertTrue(prreview.apply(self.data, cid, cfg=self.cfg)["findings"]["fixed"])
+        self.plan(cid, table(with_head(fixture("graphql-head-a.json"), C), head=C))
+        rep = self.report("report-review.json", cid)
+        rep.update(head_sha=C, reviewed_at="2026-11-11T12:00:00Z")
+        self.put_report(cid, rep)
+        card = prreview.apply(self.data, cid, cfg=self.cfg)
+        self.assertEqual((card["findings"]["fixed"], card["findings"]["answered"]), ([], []))
+
+    def test_a_delta_counts_its_marks_and_keeps_since_last(self):
+        cid = self.two_finding_card()
+        rep = self.delta(cid, [{"id": "correctness-1", "state": "fixed"}, {"id": "q-1", "state": "open"}],
+                         findings={"questions": [self.question()]})
+        card = prreview.apply(self.data, cid, cfg=self.cfg)
+        self.assertEqual(card["audit"][-1]["did"], f"delta review {B[:7]}: question, 1 fixed, 1 open")
+        self.assertEqual(card["verdict"]["since_last"], rep["since_last"])
+
+    def test_the_same_report_twice_is_refused(self):
+        cid = self.reviewed_card()
+        before = self.store().get(cid)
+        with self.assertRaisesRegex(prreview.ReviewError, "is already on the card"):
+            prreview.apply(self.data, cid, cfg=self.cfg)
+        self.assertEqual(len(self.store().get(cid)["reviews"]), len(before["reviews"]))
+        self.assertEqual(self.store().get(cid), before)
+
+    def test_a_report_that_fails_the_check_is_refused(self):
+        cid = self.card()["id"]
+        self.plan(cid, table(fixture("graphql-head-a.json")))
+        rep = self.report("report-review.json", cid)
+        rep.update(verdict="approve", tldr={"en": "Approve: fine.", "zh": "没问题。"})
+        self.put_report(cid, rep)
+        before = self.store().get(cid)
+        with self.assertRaisesRegex(prreview.ReviewError, "does not pass ap2 review check"):
+            prreview.apply(self.data, cid, cfg=self.cfg)
+        self.assertEqual(self.store().get(cid)["updated_at"], before["updated_at"])
+        self.assertEqual(self.store().get(cid), before)
+
+    def test_a_write_between_the_read_and_the_write_is_kept(self):
+        cid = self.card()["id"]
+        self.plan(cid, table(fixture("graphql-head-a.json")))
+        self.put_report(cid, self.report("report-review.json", cid))
+        real = prreview.check_report
+
+        def racing(*a, **kw):  # another writer lands while apply checks the report
+            Store(self.data, cfg=self.cfg).update(cid, {"pr": {"repo": REPO, "number": 42, "reviewed_sha": B}},
+                                                  by="test")
+            return real(*a, **kw)
+
+        with mock.patch.object(prreview, "check_report", racing), \
+                self.assertRaisesRegex(prreview.ReviewError,
+                                       f"card {cid} changed while the report was being applied; run it again"):
+            prreview.apply(self.data, cid, cfg=self.cfg)
+        card = self.store().get(cid)
+        self.assertEqual(card["pr"]["reviewed_sha"], B)
+        self.assertNotIn("reviews", card)
 
 
 # --- criteria 6 and 8: the whole flow through bin/ap2 and fake-gh-replay, in shadow and live mode ----------------
@@ -652,6 +799,27 @@ class FlowTest(Ap2Case):
                 self.assertEqual([a for a in logged if prreview.refusal(a) is not None], [])
                 self.assertTrue({a[0] for a in logged} <= {"api", "pr"})
 
+    def test_plan_reads_the_repo_layer_from_the_checkout(self):
+        repo = self.tmp / "checkout"
+        repo.mkdir()
+        git(repo, "init", "-q")
+        (repo / ".autopilot").mkdir()
+        (repo / ".autopilot" / "review.yaml").write_text(
+            '- name: Payments safety\n  question: "Can this change charge a customer twice?"\n'
+            '  when: { paths: ["billing/**"] }\n  brief: "Read every caller of the charge functions."\n')
+        git(repo, "add", ".")
+        git(repo, "commit", "-q", "-m", "init")
+        head = git(repo, "rev-parse", "HEAD")
+        self.env["PATH"] = self.path + os.pathsep + str(Path(shutil.which("git")).parent)
+        raw = self.tmp / "gh-search-prs.json"
+        shutil.copy(SCAN / "gh-search-prs.json", raw)
+        read = self.ok("source", "read", "github-review-requests", "--raw", str(raw))
+        cid = next(i["card"] for i in read["items"] if i["key"] == KEY)
+        self.replies.write_text(json.dumps(table(with_head(fixture("graphql-head-a.json"), head), head=head)))
+        plan = self.ok("review", "plan", cid, "--checkout", str(repo))
+        self.assertEqual(plan["repo_layer"], f"{repo} at {head[:7]}")
+        self.assertIn(("Payments safety", "repo"), [(a["name"], a["origin"]) for a in plan["angles"]])
+
     def flow(self):
         raw = self.tmp / "gh-search-prs.json"
         shutil.copy(SCAN / "gh-search-prs.json", raw)
@@ -663,6 +831,10 @@ class FlowTest(Ap2Case):
         plan = self.ok("review", "plan", cid)
         self.assertEqual((plan["stage"], plan["head_sha"]), ("review", A))
         rep = self.report("report-review.json", cid)
+        Path(plan["report"]).write_text(json.dumps(dict(rep, verdict="approve")))
+        r = self.ap2("review", "check", cid)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIs(json.loads(r.stdout)["ok"], False)
         Path(plan["report"]).write_text(json.dumps(rep))
         self.assertEqual(self.ok("review", "check", cid), {"ok": True, "errors": []})
         card = self.ok("review", "apply", cid)
@@ -723,6 +895,20 @@ class SyncTest(Case):
                 self.assertEqual(card["audit"][-1]["did"], did)
                 self.assertEqual(card["pr"]["head_sha"], fixture("pr-view.json")[view]["headRefOid"])
 
+    def test_a_write_during_the_sync_is_kept(self):
+        cid = self.card()["id"]
+        replay = Replay(table([], view="open_head_b"))
+
+        def run(argv):  # an apply lands while sync reads GitHub
+            if argv[1:3] == ["pr", "view"]:
+                Store(self.data, cfg=self.cfg).update(cid, {"pr": {"repo": REPO, "number": 42, "reviewed_sha": A}},
+                                                      by="test")
+            return replay(argv)
+
+        with self.assertRaisesRegex(prreview.ReviewError, f"card {cid} changed while it was being synced; run it again"):
+            prreview.sync(self.data, cid, cfg=self.cfg, run=run)
+        self.assertEqual(self.store().get(cid)["pr"], {"repo": REPO, "number": 42, "reviewed_sha": A})
+
     def test_the_card_stays_open(self):
         cid = self.card()["id"]
         with self.subTest("a team request alone"):
@@ -775,9 +961,22 @@ class NothingPostedTest(unittest.TestCase):
         ["api", "graphql", "-f", "query=query { a }", "-if=query=mutation { x }"],
         ["api", "graphql", "-F", "query=query { a }", "-F=query=mutation { x }"],
         ["api", "graphql", "-f", "query=query { a }", "-F=query=@q.graphql"],
+        # pflag reads `-i=t` as -i with the value t: the argument ends there, so the next one is checked too.
+        ["api", "repos/o/r/issues/1/comments", "-i=t", "-fbody=hello"],
+        ["api", "-i=t", "-XPOST", "repos/o/r/issues/1/comments"],
+        ["api", "graphql", "-i=t", "--input=mut.json", "-f", "query={viewer{login}}"],
+        ["api", "-i=f", "--input=x", "repos/o/r/issues/1/comments"],
+        # gh fills {owner}, {repo} and {branch} in a typed field, so a query must be a raw field.
+        ["api", "graphql", "-F", 'query={branch}{addStar(input:{starrableId:"R_x"}){clientMutationId}}'],
+        ["api", "repos/o/r/pulls/1/reviews", "--input=body.json"],
+        ["api", "repos/o/r/issues/1/comments", "--field=body=x"],
+        ["api", "graphql", "-f", "query=query { a }", "--raw-field=query=mutation { x }"],
+        ["api", "graphql", "--field", "query=@q.graphql"],
         ["--repo", "o/r", "pr", "merge", "1"],
         [],
     )
+    WHY = (r"may write|a field makes gh api POST|refusing a mutation|cannot be checked|must be a raw field"
+           r"|only pr view|a list of text arguments")
     READS = (
         ["pr", "view", "42", "--repo", "o/r", "--json", "state"],
         ["pr", "diff", "42", "--repo", "o/r"],
@@ -795,7 +994,8 @@ class NothingPostedTest(unittest.TestCase):
         with mock.patch("subprocess.run", boom), mock.patch("subprocess.Popen", boom):
             for args in self.REFUSED:
                 with self.subTest(args):
-                    with self.assertRaises(prreview.PostRefused):
+                    # The reason names the write, not a parse slip like "one path only" or "no path".
+                    with self.assertRaisesRegex(prreview.PostRefused, self.WHY):
                         prreview.gh_read(args)
 
     def test_reads_pass(self):

@@ -3,6 +3,7 @@
   "since_clean": "{\"status\": \"ahead\", \"merges\": []}\n",
   "since_merge": "{\"status\": \"ahead\", \"merges\": [\"e5f6a7b8e5f6a7b8e5f6a7b8e5f6a7b8e5f6a7b8\"]}\n",
   "since_diverged": "{\"status\": \"diverged\", \"merges\": []}\n",
+  "since_behind": "{\"status\": \"behind\", \"merges\": []}\n",
   "since_missing": {
     "exit": 1,
     "stderr": "gh: Not Found (HTTP 404)\n"

@@ -557,6 +557,10 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   timeout; a failure is a `ReviewError` naming the call and gh's first stderr line. `ReviewError` is a
   `ConfigError` (one `ap2: ...` line, exit 1); `PostRefused` is a `ReviewError`. Nothing here calls
   `config.require_live`: there is no write to allow, in shadow or live mode.
+- **[decided by the builder]** A graphql `query` must be a raw field (`-f` or `--raw-field`): gh fills `{owner}`,
+  `{repo}` and `{branch}` in a typed field (`-F`, `--field`), so a mutation could hide in a branch name. A short
+  flag cluster ends at `=`, as pflag reads it: in `-i=t` the `t` is the value of `-i`, not `-t`, so the next
+  argument is checked as its own.
 - **[decided by the builder]** Which PR. From the card: kind `pr-review`, `key` matching `<owner>/<repo>#<number>`
   (`[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*`), the URL from `source.link`, else
   `https://github.com/<repo>/pull/<n>`. Anything else is a `ReviewError`. Every SHA from GitHub must be 40
@@ -624,6 +628,9 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   not read), then `not_reviewed`, `new_commits` (the head is not `pr.reviewed_sha`: a delta is due) or `current`.
   The first four move the card to lane `done` with the reason as `did` (a card already in `done` is left alone);
   every other state writes `pr.head_sha`. Only the card changes, in the data folder, so shadow mode allows it.
+- **[decided by the builder]** `apply` and `sync` read the card, do their slow part (the report check, the gh
+  calls), then write with `store.update_checked`, which refuses when the card is no longer the one they read (a
+  `ReviewError`: "card <id> changed while ...; run it again"), so neither overwrites a write that landed between.
 - **[decided by the builder]** `ap2 review` subcommands are `plan`, `verdict`, `check`, `apply` and `sync`, each
   printing JSON. They take the data folder like `ap2 card` (`--data`, else `AP2_DATA`); `verdict` and `check` only
   read, so they do not create it.

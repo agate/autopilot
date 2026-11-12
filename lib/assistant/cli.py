@@ -534,8 +534,9 @@ def _read_review_file(name: str):
         else:
             raw = sources.read_capped(name, sources.MAX_SOURCE, f"{name!r}: larger than {sources.MAX_SOURCE} bytes")
         return json.loads(raw.decode("utf-8"))
-    except (OSError, UnicodeDecodeError, ValueError) as e:
-        raise prreview.ReviewError(f"cannot read {name!r}: {e}") from e
+    except (OSError, UnicodeDecodeError, ValueError, RecursionError) as e:
+        why = "nested too deeply" if isinstance(e, RecursionError) else e
+        raise prreview.ReviewError(f"cannot read {name!r}: {why}") from e
 
 
 COMMANDS["review"] = cmd_review

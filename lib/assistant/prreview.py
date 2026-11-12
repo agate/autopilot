@@ -133,6 +133,8 @@ def refusal(args) -> Optional[str]:
             j = 1
             while j < len(a):
                 ch = a[j]
+                if ch == "=":  # pflag gives the flag before `=` the rest as its value, and the argument ends there
+                    break
                 if ch in _API_FIELD_SHORT:
                     value = a[j + 1:]
                     if value.startswith("="):  # pflag reads `-f=VALUE` as VALUE, so `=` cannot hide the key
@@ -166,6 +168,8 @@ def refusal(args) -> Optional[str]:
         if flag in ("-F", "--field") and val.startswith("@"):
             return f"gh api graphql {flag} {key}=@...: a value read from a file cannot be checked"
         if key == "query":
+            if flag in ("-F", "--field"):  # gh fills {owner}, {repo} and {branch} in a typed field's value
+                return f"gh api graphql {flag} query=...: the query must be a raw field (-f or --raw-field)"
             has_query = True
             if _MUTATION.search(val):
                 return "gh api graphql: refusing a mutation; nothing is posted"
@@ -484,8 +488,9 @@ def read_report(data, card_id: str):
         return None, [f"{REPORT_FILE}: cannot read {path}: {e}"]
     try:
         rep = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError) as e:
-        return None, [f"{REPORT_FILE}: not JSON ({e})"]
+    except (UnicodeDecodeError, ValueError, RecursionError) as e:
+        why = "nested too deeply" if isinstance(e, RecursionError) else e
+        return None, [f"{REPORT_FILE}: not JSON ({why})"]
     if not isinstance(rep, dict):
         return None, [f"{REPORT_FILE}: must be a JSON object"]
     return rep, []
@@ -496,7 +501,8 @@ def _ids(buckets, names=BUCKETS) -> dict:
     out = {}
     if isinstance(buckets, dict):
         for b in names:
-            for f in buckets.get(b) or []:
+            found = buckets.get(b)
+            for f in found if isinstance(found, list) else []:
                 if isinstance(f, dict) and isinstance(f.get("id"), str):
                     out.setdefault(f["id"], b)
     return out
@@ -677,8 +683,8 @@ def plain_for(record, card, langs) -> dict:
         p = phrases(lang)
         if p is None:
             raise ReviewError(f"no plain words for PR review cards in {lang} yet (built in: {', '.join(PHRASES)})")
-        out["what"][lang] = p["what"].format(author=author or p["someone"], id=number,
-                                             title=_first_line(record.get("text")))
+        title = _first_line(record.get("text")) or _first_line(cards.title_for(card, lang, langs[0]))
+        out["what"][lang] = p["what"].format(author=author or p["someone"], id=number, title=title)
         said = tldr.get(lang) if tldr else None
         if tldr and not (isinstance(said, str) and said.strip()):
             said = next((t for t in tldr.values() if isinstance(t, str) and t.strip()), None)
@@ -742,7 +748,10 @@ def apply(data, card_id: str, by: str = "ap2 review", cfg=None) -> dict:
     changes["plain"] = plain_for(record, {**card, **changes}, langs)
     did = f"reviewed {head[:7]}: {v}" if stage == "review" else \
         f"delta review {head[:7]}: {v}, {n_fixed} fixed, {n_open} open"
-    return store.update(card_id, changes, by=by, did=did)
+    new = store.update_checked(card_id, changes, by=by, check=lambda now: now == card, did=did)
+    if new is None:
+        raise ReviewError(f"card {card_id} changed while the report was being applied; run it again")
+    return new
 
 
 SYNC_DONE = {"merged": "the PR was merged", "closed": "the PR was closed",
@@ -797,6 +806,8 @@ def sync(data, card_id: str, by: str = "ap2 review", cfg=None, run=None) -> dict
     if out in SYNC_DONE:
         changes["lane"] = "done"
         did = SYNC_DONE[out]
-    new = store.update(card_id, changes, by=by, did=did)
+    new = store.update_checked(card_id, changes, by=by, check=lambda now: now == card, did=did)
+    if new is None:
+        raise ReviewError(f"card {card_id} changed while it was being synced; run it again")
     result.update(lane=new.get("lane"), changed=new.get("updated_at") != card.get("updated_at"))
     return result
