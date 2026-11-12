@@ -558,8 +558,8 @@ How it is built (`lib/assistant/prloop.py`):
   every rule; a broken file is a `PrLoopError` (a `ValueError`) naming the file and the field
   (`rounds[2].findings[0].bucket`). Also refused: unknown keys, rounds not numbered 1, 2, 3 ... in order, a round
   past the limit, a round after one that ended the loop, a `fix` finding in a round with no commit (unless the
-  round's `stop` says the fix failed), a check whose reviewers or answers differ from the plan, and a stored
-  `result` or `ended_by` that the rounds do not give.
+  round records a `stop`, such as a fix that failed), a check whose reviewers or answers differ from the plan, and
+  a stored `result` or `ended_by` that the rounds do not give.
 - **[decided by the builder]** The decision. `decide(record)` returns `{"next", "result", "ended_by", "reason",
   "plan"}`, `next` one of `round`, `check`, `end`, checked in this order on the last round: a `stop` or any `owner`
   finding ends `stopped` (`ended_by: stop`, point 5: it asks as before); no `fix` finding and CI green ends `clean`
@@ -569,8 +569,10 @@ How it is built (`lib/assistant/prloop.py`):
   is no separate one. A limit round with no fix and CI red has nothing to check and ends `stopped` (`round`).
 - **[decided by the builder]** Who checks. `plan(record)`: one entry per angle with at least one `fix` finding in
   the last round, in that round's `angles` order, each `{"angle": <the picked angle>, "commit", "answers": [the fix
-  findings it answers, verbatim]}`. A CI finding goes to Correctness. An angle whose findings were all `invalid` or
-  `out_of_scope` gets no check reviewer: the fix commit answers none of them.
+  findings it answers, verbatim]}`. A CI finding (id `ci-<n>`, whatever its `angle`) goes to Correctness. An angle
+  whose findings were all `invalid` or `out_of_scope` gets no check reviewer: the fix commit answers none of them.
+  `plan(record)` refuses (a `PrLoopError`) a record where no check is due, exactly when `decide` does not give
+  `check`; otherwise its list equals `decide(record)["plan"]`.
 - **[decided by the builder]** What a check reviewer reads. `check_brief(entry, pr, worktree)` is the prompt for one
   fresh `reviewer-angle` session: the angle's name, question and brief; the PR number, the worktree and the fix
   commit; "read only this commit: `git show <commit>`, the findings below, and the code the commit touches"; each
@@ -585,9 +587,10 @@ How it is built (`lib/assistant/prloop.py`):
   `clean` (`ended_by: fix_check`, point 2; `ap merge-check` still decides). Something found ends `stopped`
   (`fix_check`), the reason naming how many things: no more fixing (point 3).
 - **[decided by the builder]** At most once. `record_check` refuses a record that already has a `fix_check`, one
-  whose last round is below the limit, fixed nothing or stopped, and `results` that miss a planned angle or add
-  one. `read` and `decide` refuse a round after a `fix_check` and a round past the limit. With a check recorded,
-  `decide` only ever returns `end`.
+  whose last round is below the limit, fixed nothing, stopped or converged (any record where `decide` does not
+  give `check`), and `results` that miss a planned angle or add one; `plan` refuses the same records. `read` and
+  `decide` refuse a round after a `fix_check` and a round past the limit. With a check recorded, `decide` only ever
+  returns `end`.
 - **[decided by the builder]** The card and the report (point 4). `report(record)` is the last lines of the round
   report: `Fix:` and `Next:`, and on a check `Check of the fix · commit <short sha> · reviewers: <angles> · <found
   nothing: clean | found <n>: asking you>` then `Findings: prloop.json fix_check.reviewers`. `summary(record)` is

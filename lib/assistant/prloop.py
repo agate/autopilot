@@ -217,7 +217,7 @@ def _round(c: _Checker, i: int, rnd, limit: int, checked: bool) -> None:
     fixes = _fixes(rnd)
     if fixes and rnd.get("commit") is None and rnd.get("stop") is None:
         c.fail(f"{field}.commit", f"null, but the round has a fix finding ({fixes[0]['id']}): a round that fixes "
-                                  "records its fix commit, or a stop when the fix failed")
+                                  "records its fix commit, or a stop")
 
 
 def _decide_rounds(rounds: list, limit: int) -> dict:
@@ -268,7 +268,8 @@ def _plan(rounds: list) -> list:
     last = rounds[-1]
     answers = {}
     for f in _fixes(last):
-        answers.setdefault(f["angle"] if f["angle"] is not None else angles.CORRECTNESS, []).append(f)
+        ci = f["angle"] is None or _CI_ID.match(f["id"])
+        answers.setdefault(angles.CORRECTNESS if ci else f["angle"], []).append(f)
     return [{"angle": copy.deepcopy(a), "commit": last.get("commit"), "answers": copy.deepcopy(answers[a["name"]])}
             for a in last["angles"] if a["name"] in answers]
 
@@ -419,14 +420,25 @@ def decide(record: dict, limit: Optional[int] = None) -> dict:
         return _decide(record, lim)
 
 
+def _due(record: dict, c: _Checker, lim: int) -> None:
+    """Refuse a checked record where no check of the fix is due: one already checked, or one where `decide` does
+    not give `check`."""
+    if record.get("fix_check") is not None:
+        c.fail("fix_check", "the record already has a check of the fix; it runs at most once per loop")
+    no = _no_check(record["rounds"], lim)
+    if no is not None:
+        c.fail(no[0], f"no check of the fix: {no[1]}")
+
+
 def plan(record: dict) -> list:
     """Who checks the last round's fix: one entry per angle with a `fix` finding in that round, in its `angles`
     order, each {"angle": <the picked angle>, "commit", "answers": [its fix findings, verbatim]}. A CI finding
-    (angle null) goes to Correctness. An angle with no `fix` finding gets no check reviewer."""
+    (id ci-<n>, whatever its angle) goes to Correctness. An angle with no `fix` finding gets no check reviewer.
+    A record where no check is due (exactly when `decide` does not give `check`) is refused; otherwise the list
+    equals `decide(record)["plan"]`."""
+    c = _Checker("the record")
     with _Deep("the record"):
-        _check(record, _Checker("the record"))
-        if not record["rounds"]:
-            raise PrLoopError("the record: rounds: the loop has no rounds yet")
+        _due(record, c, _check(record, c))
         return _plan(record["rounds"])
 
 
@@ -494,13 +506,8 @@ def record_check(record: dict, results: dict, ci: str) -> dict:
     c = _Checker("the record")
     with _Deep("the record"):
         lim = _check(record, c)
-        if record.get("fix_check") is not None:
-            c.fail("fix_check", "the record already has a check of the fix; it runs at most once per loop")
-        rounds = record["rounds"]
-        no = _no_check(rounds, lim)
-        if no is not None:
-            c.fail(no[0], f"no check of the fix: {no[1]}")
-        planned = _plan(rounds)
+        _due(record, c, lim)
+        planned = _plan(record["rounds"])
     r = _Checker("record_check")
     with _Deep("record_check: results"):
         r.choice("ci", ci, CI)
