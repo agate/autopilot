@@ -306,7 +306,9 @@ class ParkCommandRulesTest(Base):
     def test_a_hash_at_a_word_start_is_allowed_as_before(self):
         # Quoted, `#` is plain text; after a space bash starts a comment there, so it only shortens the note.
         # Either way bash runs the one park command, and the check keeps allowing both, as it did before.
-        for cmd in (self.OWN + ' --note "a #b"', self.OWN + " --note x #comment"):
+        # Punctuation that shares a token with other characters is not a chaining token, so it stays allowed too.
+        for cmd in (self.OWN + ' --note "a #b"', self.OWN + " --note x #comment",
+                    self.OWN + ' --note x # "a; b"', self.OWN + r" --note x # a\;b"):
             with self.subTest(cmd=cmd):
                 self.assertTrue(_before(cmd))
                 self.assertTrue(park.is_park_command(cmd))
@@ -323,7 +325,8 @@ class ParkCommandRulesTest(Base):
         # bash runs only the park command here, but after shlex a quoted "#" and a word-start # give the same
         # token, so the check cannot drop the comment without hiding a real `; cmd`: it fails closed, as v2's does.
         for cmd in (self.OWN + " --note x # ; later", self.OWN + " --note x #(see PR)",
-                    self.OWN + " --note \"done\" # can't finish", self.OWN + " --note \"done\" # C:\\"):
+                    self.OWN + " --note \"done\" # can't finish", self.OWN + " --note \"done\" # C:\\",
+                    self.OWN + ' --note x # ";"', self.OWN + r" --note x # \;"):
             with self.subTest(cmd=cmd):
                 self.assertTrue(_before(cmd))
                 self.assertFalse(park.is_park_command(cmd))
