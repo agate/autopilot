@@ -1773,10 +1773,10 @@ Calls the author made without asking (check them):
   - **[decided by the builder]** A card an older import wrote with a one-text title is moved to the per-language
     title by the next run, when that run still makes or closes it (`title` is one of the fields a re-run updates:
     `action: update`, its `id`, `parent` and audit history kept), and is `unchanged` on the run after that. A
-    question card that was already closed is closed again once for this, and only its title changes (the run
-    after that leaves it out of the report, as any closed card). A task card whose task left v1, and the cards of a
-    project gone from v1, are not made by the run any more and keep the title they had (as a card never removed
-    keeps its other fields). No separate migration step.
+    question card that was already closed is closed again once for this: its title changes, and so do its plain words
+    in a language added since (filled in as for any closed card); the run after that leaves it out of the report, as
+    any closed card. A task card whose task left v1, and the cards of a project gone from v1, are not made by the run
+    any more and keep the title they had (as a card never removed keeps its other fields). No separate migration step.
   - Re-run: the same key (among this feed's cards) updates `title`, `plain`, `lane`, `status`, `ask` and
     `source` when they changed, and leaves the card alone when nothing did. A card is never removed (a task gone
     from v1 keeps its card). `--dry-run` writes nothing, not even the data folder's layout, and reports
