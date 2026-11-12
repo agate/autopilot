@@ -402,6 +402,27 @@ class ReplyKindTest(SwitchBase):
         self.assertEqual(code, 0)
         self.assertIn("ignored", out)
 
+    def test_a_failure_while_applying_leaves_the_reply_unmarked_and_retries(self):
+        doc = {"id": "r1", "kind": "profile", "option": "g"}
+        with mock.patch.object(profile, "use", side_effect=KeyError("settings.json")):
+            with self.assertRaises(KeyError):
+                replies.apply_kind(doc, self.NOON)
+        self.assertNotIn("r1", replies._applied())
+        ev = [json.loads(x) for x in (self.data / "events-global.jsonl").read_text().splitlines()]
+        self.assertTrue(any(e["type"] == "reply_failed" for e in ev))
+        self.result = {"ok": True, "replies": [dict(doc, ap=None)]}
+        with mock.patch.object(profile, "use", side_effect=ValueError("bad file")):
+            replies.step(config.load_global(), {}, self.NOON)
+        self.assertNotIn("r1", replies._applied())
+        replies.apply_kind(doc, self.NOON)   # the next check, once the cause is fixed
+        self.assertEqual((profile.active()["name"], "r1" in replies._applied()), ("g", True))
+
+    def test_a_reply_refused_for_its_own_content_is_marked_applied(self):
+        out = replies.apply_kind({"id": "r1", "kind": "cap", "option": "bogus", "day": cap.state(self.NOON)["day"]},
+                                 self.NOON)
+        self.assertIn("refused", out)
+        self.assertIn("r1", replies._applied())
+
     def test_refuses_a_doc_that_is_not_a_profile_or_cap_reply(self):
         self.assertEqual(self.run_cli(json.dumps({"id": "r1", "decision": "checkout:D-1", "option": "a"}))[0], 2)
         self.assertEqual(self.run_cli("{nope")[0], 2)

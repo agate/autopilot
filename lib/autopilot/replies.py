@@ -177,27 +177,31 @@ def _ignore(r: dict, why: str) -> str:
     return f"ignored: {why}"
 
 
+def _refused(kind: str, option: str, why: str) -> str:
+    events.append_global("reply_failed", {"kind": kind, "option": option, "error": why})
+    return f"refused: {why}"
+
+
 def _apply(r: dict, now: datetime) -> str:
-    """Apply one profile or cap reply and say what happened. A bad answer is logged and reported, never raised;
-    only a failure to write (OSError) raises, so the reply can be tried again."""
+    """Apply one profile or cap reply and say what happened. A reply that is wrong in itself (unknown profile,
+    bad option, wrong day, card not open) is logged and reported, never raised. A failure while applying it
+    (use, apply, answer) raises, so apply_kind leaves the reply unmarked and the next check tries again."""
     kind, option = r.get("kind"), str(r.get("option") or "")
-    try:
-        if kind == "profile":
-            if option not in profile.names():
-                events.append_global("profile_unknown", {"option": option})
-                return f"ignored: no profile named {option!r}"
-            profile.use(option)
-            return f"applied: profile {option}"
-        st = cap.state(now)
-        if r.get("day") != st["day"]:
-            return _ignore(r, "not today's card")
-        if st["card"] != "open":
-            return _ignore(r, "the card is not open")
-        cap.answer(option, now)
-        return f"applied: cap {option}"
-    except (ValueError, KeyError) as e:   # the gate must keep running whatever an answer holds
-        events.append_global("reply_failed", {"kind": kind, "option": option, "error": str(e)})
-        return f"refused: {e}"
+    if kind == "profile":
+        if option not in profile.names():
+            events.append_global("profile_unknown", {"option": option})
+            return f"ignored: no profile named {option!r}"
+        profile.use(option)
+        return f"applied: profile {option}"
+    if option not in cap.OPTIONS and option not in ("pause", cap.ACCEPT_UNKNOWN):
+        return _refused(kind, option, f"unknown option {option!r}: use raise50, raise100, accept_unknown or pause")
+    st = cap.state(now)
+    if r.get("day") != st["day"]:
+        return _ignore(r, "not today's card")
+    if st["card"] != "open":
+        return _ignore(r, "the card is not open")
+    cap.answer(option, now)
+    return f"applied: cap {option}"
 
 
 def apply_kind(r: dict, now: datetime) -> str:
@@ -210,8 +214,9 @@ def apply_kind(r: dict, now: datetime) -> str:
         return "already applied"
     try:
         out = _apply(r, now)
-    except OSError as e:
-        events.append_global("reply_failed", {"kind": r.get("kind"), "option": r.get("option"), "error": str(e)})
+    except Exception as e:   # noqa: BLE001 - a failure while applying: keep the reply unmarked so it is retried
+        events.append_global("reply_failed", {"kind": r.get("kind"), "option": r.get("option"),
+                                              "error": f"{type(e).__name__}: {e}"[:300]})
         raise
     if rid:
         _mark_applied(rid)
@@ -280,8 +285,8 @@ def step(gcfg: dict, gs: dict, now: datetime) -> set:
     for r in acc:
         try:
             apply_kind(r, now)
-        except OSError:
-            failed.add(r["id"])   # not seen: the next check tries it again
+        except Exception:   # noqa: BLE001 - not seen: the next check tries it again (reply_failed is logged)
+            failed.add(r["id"])
     new = [r for r in new if r.get("kind") not in KINDS]
     if night:
         # Other answers wait: they stay unseen, so the first check after the quiet hours queues their pass.
@@ -315,11 +320,14 @@ def _reply_kind(args: list) -> int:
         return 2
     try:
         r = _doc(args[0])
-        out = apply_kind(r, datetime.now().astimezone())
+        if r.get("kind") not in KINDS:
+            raise ValueError("not a profile or cap reply (it has no kind: profile or kind: cap)")
     except ValueError as e:
         print(f"ap reply-kind: {e}", file=sys.stderr)
         return 2
-    except OSError as e:
+    try:
+        out = apply_kind(r, datetime.now().astimezone())
+    except Exception as e:   # noqa: BLE001 - a failure while applying: the reply stays unmarked
         print(f"ap reply-kind: could not apply it ({e}); keep the reply and try again next pass", file=sys.stderr)
         return 1
     print(out)
