@@ -6,7 +6,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from autopilot import budget, cli, config, nextwork, paths, state, text, usage
+from autopilot import budget, cap, cli, config, nextwork, paths, profile, state, text, usage
 
 COLLECTIONS = ("meta", "autopilots", "tasks", "workers", "decisions", "archive", "reports", "evidence")
 REPORTS_KEPT = 10
@@ -103,6 +103,32 @@ def _evidence(ap: str, task: str, assets: dict):
     return ev
 
 
+SWITCH_NOTE = ("Switching takes up to a minute. Between 22:00 and 06:00 it can take up to 30 minutes.")
+
+
+def _access(cur: dict, now: datetime) -> dict:
+    """What the page shows about the access profile: the active one, the choices, usage by mode and the cap
+    card. Never a key, a key command, a gateway address or anything else from the profile's secrets."""
+    p, b, spent = cur["profile"], cur["budget"], cur["spent"]
+    session = next((w.get("percent") for w in b.get("windows") or [] if w.get("kind") == "session"), None)
+    session_pct = None if session is None else int(round(session))
+    acc = {"profile": {k: p.get(k) for k in ("name", "label", "mode", "model", "effort")},
+           "page_sessions": "subscription",
+           "profiles": [{k: q.get(k) for k in ("name", "label", "mode")} for q in map(profile.load, profile.names())],
+           "cap_card": None, "switch_note": SWITCH_NOTE}
+    if p.get("mode") == "gateway":
+        spent = spent or {}
+        limit = cap.today_limit(p, now)
+        acc["usage"] = {"today": spent.get("today", 0.0), "week": spent.get("week", 0.0), "month": spent.get("month", 0.0),
+                        "cap_today": limit, "unknown": bool(spent.get("unknown")), "session_pct": session_pct}
+        if cap.state(now)["card"] == "open":
+            acc["cap_card"] = {"day": cap.state(now)["day"], "spent": spent.get("today", 0.0), "limit": limit}
+    else:
+        acc["usage"] = {"session_pct": session_pct, "credits_used_usd": b.get("credits_used_usd", 0.0),
+                        "credits_limit_usd": b.get("credits_limit_usd", 0.0)}
+    return acc
+
+
 def collect(aps: list) -> dict:
     gcfg = config.load_global()
     assets = _page().get("assets") or {}
@@ -110,6 +136,7 @@ def collect(aps: list) -> dict:
     cur = budget.current(gcfg, datetime.now(timezone.utc))
     out["meta"]["budget"] = {"budget": cur["budget"], "allowance": cur["workers"], "passes": cur["passes"],
                              "spent": cur["spent"]}
+    out["meta"]["access"] = _access(cur, datetime.now(timezone.utc))
     active = config.active_aps()
     out["meta"]["cap"] = {"max_workers": gcfg["max_workers"], "active": len(active),
                           "warning": gcfg["max_workers"] < len(active)}
@@ -146,7 +173,7 @@ def collect(aps: list) -> dict:
         for w in st["workers"]:
             out["workers"][f"{ap}:{w['task']}:{w['role']}"] = {
                 "ap": ap, "task": w["task"], "role": w["role"], "session_name": w["session_name"],
-                "started_at": w["started_at"], "resumes": w["resumes"]}
+                "started_at": w["started_at"], "resumes": w["resumes"], "profile": w.get("profile")}
             if w.get("parked"):
                 out["workers"][f"{ap}:{w['task']}:{w['role']}"]["parked"] = {
                     "resume_at": w["parked"].get("resume_at"), "percent": w["parked"].get("percent")}

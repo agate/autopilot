@@ -5,10 +5,13 @@ import re
 import shutil
 import subprocess
 import unittest
+from datetime import datetime, timezone
 from html.parser import HTMLParser
 
 from tests.helpers import ROOT, TempData
-from autopilot import publish
+from unittest import mock
+
+from autopilot import cap, config, profile, publish, spend
 
 PAGE = (ROOT / "templates" / "page.html").read_text()
 LABELS = json.loads((ROOT / "templates" / "labels.en.json").read_text())
@@ -305,6 +308,68 @@ console.log(JSON.stringify([
         # A kept card does not keep the reply check running, so its undo waits for the forced pass.
         self.assertIn('L("pickup_later"', js_fn("selfButtons"))
 
+
+
+class AccessTest(unittest.TestCase):
+    def setUp(self):
+        self.td = TempData()
+        self.data = self.td.__enter__()
+
+    def tearDown(self):
+        self.td.__exit__(None, None, None)
+
+    def gateway(self):
+        profile.save({"name": "gw", "mode": "gateway", "label": "Team gateway", "model": "m1", "small_model": "s",
+                      "effort": "high", "daily_cap_usd": 500,
+                      "gateway": {"base_url": "https://llm-gateway.example.com/anthropic", "key_command": "echo SECRET-KEY-VALUE"}})
+
+    def test_collect_access_gateway(self):
+        self.gateway()
+        profile.use("gw")
+        t = {"today": 12.5, "week": 40.0, "month": 90.0, "unknown": True, "unknown_today": False}
+        with mock.patch.object(spend, "totals", return_value=t):
+            acc = publish.collect([])["meta"]["access"]
+        self.assertEqual(acc["profile"], {"name": "gw", "label": "Team gateway", "mode": "gateway", "model": "m1", "effort": "high"})
+        self.assertEqual(acc["page_sessions"], "subscription")
+        self.assertEqual({p["name"] for p in acc["profiles"]}, {"gw", "subscription"})
+        self.assertEqual(set(acc["profiles"][0]), {"name", "label", "mode"})
+        self.assertEqual(acc["usage"], {"today": 12.5, "week": 40.0, "month": 90.0, "cap_today": 500.0, "unknown": True,
+                                        "session_pct": 0})
+        self.assertIsNone(acc["cap_card"])
+        self.assertIn("22:00", acc["switch_note"])
+
+    def test_collect_access_subscription(self):
+        acc = publish.collect([])["meta"]["access"]
+        self.assertEqual(acc["profile"]["mode"], "subscription")
+        self.assertEqual(acc["page_sessions"], "subscription")
+        self.assertEqual(acc["usage"], {"session_pct": 0, "credits_used_usd": 0.0, "credits_limit_usd": 200.0})
+        self.assertIsNone(acc["cap_card"])
+
+    def test_collect_access_cap_card(self):
+        self.gateway()
+        profile.use("gw")
+        now = datetime.now(timezone.utc)
+        t = {"today": 510.0, "week": 510.0, "month": 510.0, "unknown": False, "unknown_today": False}
+        with mock.patch.object(spend, "totals", return_value=t):
+            acc = publish.collect([])["meta"]["access"]
+        self.assertEqual(acc["cap_card"], {"day": cap.state(now)["day"], "spent": 510.0, "limit": 500.0})
+
+    def test_page_has_no_key_text(self):
+        self.gateway()
+        profile.use("gw")
+        t = {"today": 1.0, "week": 1.0, "month": 1.0, "unknown": False, "unknown_today": False}
+        with mock.patch.object(spend, "totals", return_value=t):
+            blob = json.dumps(publish.collect([]))
+        for secret in ("SECRET-KEY-VALUE", "key_command", "echo SECRET", "apiKeyHelper", "llm-gateway.example.com"):
+            self.assertNotIn(secret, blob)
+
+    def test_page_shows_the_access_pieces(self):
+        for k in ("access_subscription", "access_workers", "access_page_sessions", "access_switch", "cap_card_title",
+                  "cap_raise50", "cap_raise100", "cap_pause", "usage_today", "usage_week", "usage_month", "worker_profile"):
+            self.assertIn(k, LABELS)
+            self.assertIn(f'"{k}"', PAGE)
+        self.assertIn('kind: "profile"', PAGE)
+        self.assertIn('kind: "cap"', PAGE)
 
 
 class ExplainedCardTest(unittest.TestCase):

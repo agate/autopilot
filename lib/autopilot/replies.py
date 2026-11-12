@@ -12,9 +12,10 @@ import json
 import subprocess
 from datetime import datetime, timedelta
 
-from autopilot import config, paths, profile, sessions, spend, state, usage, workers
+from autopilot import cap, config, events, paths, profile, sessions, spend, state, usage, workers
 
 NAME = "autopilot · replies"
+SWITCH_CHECK_S = 300   # with several profiles and no card waiting, a profile switch is looked for this often
 SYSTEM = ("You check one database collection with the ArtifactData tool and reply with the number of documents only. "
           "Never guess: if you cannot call the tool, reply ERROR.")
 # Every other tool is disallowed so the session stays small (about 60k cached tokens). `--tools` cannot be used:
@@ -100,7 +101,10 @@ def parse(path, url: str):
             # "Mark all read" sends one reply per autopilot that lists its cards under `decisions`.
             many = doc.get("decisions") if isinstance(doc.get("decisions"), list) else []
             dec = str(doc.get("decision") or (many[0] if many else ""))
-            out.append({"id": d.get("id"), "ap": dec.split(":", 1)[0] if ":" in dec else None})
+            item = {"id": d.get("id"), "ap": dec.split(":", 1)[0] if ":" in dec else None}
+            if doc.get("kind") is not None:   # an ask's option is the pass's business; only profile and cap replies carry it here
+                item["kind"], item["option"] = doc["kind"], doc.get("option")
+            out.append(item)
         return out
     return None
 
@@ -145,6 +149,22 @@ def check(gcfg: dict, url: str, poll_s: float = 2) -> dict:
         _cleanup(claude, short)
 
 
+def _apply(r: dict, now: datetime) -> bool:
+    """Apply a profile or cap reply directly; True when `r` was one (so it queues no pass). A bad option is logged."""
+    kind, option = r.get("kind"), str(r.get("option") or "")
+    try:
+        if kind == "profile":
+            if option in profile.names():
+                profile.use(option)
+            else:
+                events.append_global("profile_unknown", {"option": option})
+        elif kind == "cap":
+            cap.answer(option, now)
+    except (ValueError, KeyError, OSError) as e:   # the gate must keep running whatever an answer holds
+        events.append_global("reply_failed", {"kind": kind, "option": option, "error": str(e)})
+    return kind in ("profile", "cap")
+
+
 def step(gcfg: dict, gs: dict, now: datetime) -> set:
     """Run the check when it is due and return the autopilots to queue a pass for. It runs whatever the budget
     allows: a paused budget still reads answers (the gate lets a ticked autopilot's pass go, and the pass starts
@@ -164,8 +184,10 @@ def step(gcfg: dict, gs: dict, now: datetime) -> set:
         return set()
     active = _active()
     aps = waiting(active)
-    if not aps:
-        return set()
+    if not aps and cap.state(now)["card"] != "open":
+        # Nothing to answer: only a possible profile switch is worth a look, and a slower one.
+        if len(profile.names()) < 2 or (last and now - datetime.fromisoformat(last) < timedelta(seconds=SWITCH_CHECK_S - 5)):
+            return set()
     rs["last_at"] = now.isoformat()
     try:
         res = check(gcfg, url)
@@ -180,6 +202,7 @@ def step(gcfg: dict, gs: dict, now: datetime) -> set:
     seen = set(rs.get("ids") or [])
     rs["ids"] = [r["id"] for r in res["replies"]]
     new = [r for r in res["replies"] if r["id"] not in seen]
+    new = [r for r in new if not _apply(r, now)]   # a profile or cap answer is applied here, in code
     if not new:
         return set()
     named = {r["ap"] for r in new if r.get("ap") in set(active)}
