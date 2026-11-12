@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -12,11 +14,11 @@ from pathlib import Path
 from unittest import mock
 
 from tests.helpers import ROOT  # noqa: F401  (puts lib/ on sys.path)
-from assistant import cards, restore
+from assistant import cards, datadir, restore
 from assistant.cards import CardError, PlainWordsError
 from assistant.config import Config
 from assistant.index import Index
-from assistant.store import Store
+from assistant.store import Store, fcntl
 
 T0 = datetime(2026, 11, 10, 14, 30, 5, tzinfo=timezone.utc)
 
@@ -1063,6 +1065,197 @@ class JunkIndexRowTest(StoreCase):
                              [("bogus", "vendor"), (added["id"], "vendor"), (added["id"], "vendor")])
         conn.close()
         self.assertEqual([c["id"] for c in self.store.search("vendor")], [added["id"]])
+
+
+def files(folder: Path) -> dict:
+    """Every file under `folder` (links not followed) as {relative path: bytes}, and every folder as None."""
+    out = {}
+    for root, dirs, names in os.walk(folder):
+        for name in dirs + names:
+            full = Path(root) / name
+            out[str(full.relative_to(folder))] = None if full.is_dir() else full.read_bytes()
+    return out
+
+
+class LinkCase(StoreCase):
+    """A data folder holding one card, changed once (so one restore point), and a folder outside it."""
+
+    def setUp(self):
+        super().setUp()
+        self.outside = Path(tempfile.mkdtemp(prefix="ap2-outside-")).resolve()
+        self.addCleanup(shutil.rmtree, self.outside, True)
+        self.added = self.store.add(card(title="Vendor export"), by="w")
+        self.clock.tick(minutes=1)
+        self.point = self.store.update(self.added["id"], {"lane": "running"}, by="w")["audit"][-1]["restore"]
+        self.clock.tick(minutes=1)
+
+    def calls(self):
+        card_id, point = self.added["id"], self.point
+        return {"add": lambda: self.store.add(card(), by="w"),
+                "get": lambda: self.store.get(card_id),
+                "list": lambda: self.store.list(),
+                "search": lambda: self.store.search("vendor"),
+                "update": lambda: self.store.update(card_id, {"lane": "done"}, by="w"),
+                "update_checked": lambda: self.store.update_checked(card_id, {"lane": "done"}, "w", lambda c: True),
+                "propose": lambda: self.store.propose_opposite(card_id, "close_pr", ["gh", "pr"], by="w"),
+                "ask_about": lambda: self.store.ask_about(card_id, "why?", by="w"),
+                "restore": lambda: self.store.restore(point, by="user"),
+                "prune": lambda: self.store.prune(now=T0 + timedelta(days=60))}
+
+    def assert_every_call_refused(self, link: Path, target: Path, only=None):
+        """Each call raises one CardError line naming `link`, and nothing under `target` changes."""
+        before = files(target) if target.exists() else None
+        for name, call in self.calls().items():
+            if only is not None and name not in only:
+                continue
+            with self.subTest(call=name):
+                with self.assertRaisesRegex(CardError, f"^{re.escape(str(link))} is a symlink[^\n]*$"):
+                    call()
+                self.assertTrue(link.is_symlink())  # refused, never replaced
+                self.assertEqual(files(target) if target.exists() else None, before)
+
+
+class LinkedItemsTest(LinkCase):
+    def test_a_linked_items_folder_is_refused_by_every_call(self):
+        items = self.data / "items"
+        shutil.move(str(items), str(self.data / "items.real"))
+        items.symlink_to(self.outside, target_is_directory=True)
+        self.assert_every_call_refused(items, self.outside)
+        self.assertEqual(files(self.outside), {})
+
+    def test_a_dangling_items_link_is_refused_and_nothing_is_made_at_its_target(self):
+        items = self.data / "items"
+        shutil.rmtree(items)
+        target = self.outside / "gone"
+        items.symlink_to(target, target_is_directory=True)
+        self.assert_every_call_refused(items, target)
+        self.assertFalse(target.exists())
+        self.assertEqual(files(self.outside), {})
+
+
+class LinkedCardTest(LinkCase):
+    CARD_CALLS = ("add", "get", "list", "search", "update", "update_checked", "propose", "ask_about", "restore")
+
+    def test_a_linked_month_folder_is_refused_and_its_target_is_unchanged(self):
+        month = self.store.path(self.added["id"]).parent
+        target = self.outside / month.name
+        shutil.move(str(month), str(target))
+        month.symlink_to(target, target_is_directory=True)
+        self.assert_every_call_refused(month, target, only=self.CARD_CALLS)
+        (self.data / "index.sqlite").unlink()
+        with self.assertRaisesRegex(CardError, f"^{re.escape(str(month))} is a symlink"):
+            self.store.search("vendor")  # met by the rebuild too
+
+    def test_a_linked_card_file_is_refused_and_its_target_is_unchanged(self):
+        path = self.store.path(self.added["id"])
+        target = self.outside / path.name
+        shutil.move(str(path), str(target))
+        path.symlink_to(target)
+        self.assert_every_call_refused(path, self.outside, only=self.CARD_CALLS[1:])
+        (self.data / "index.sqlite").unlink()
+        with self.assertRaisesRegex(CardError, f"^{re.escape(str(path))} is a symlink"):
+            self.store.search("vendor")  # met by the rebuild too
+
+    def test_a_linked_point_file_is_refused(self):
+        path = restore.path(self.data, self.point)
+        target = self.outside / path.name
+        shutil.move(str(path), str(target))
+        path.symlink_to(target)
+        card_before = self.store.path(self.added["id"]).read_bytes()
+        self.assert_every_call_refused(path, self.outside, only=("restore",))
+        self.assertEqual(self.store.path(self.added["id"]).read_bytes(), card_before)
+
+
+class LinkedRestoreTest(LinkCase):
+    def check(self, target: Path):
+        restore_dir = self.data / "restore"
+        path = self.store.path(self.added["id"])
+        card_before = path.read_bytes()
+        self.assert_every_call_refused(restore_dir, target, only=("update", "restore", "prune", "ask_about",
+                                                                 "propose", "update_checked"))
+        self.assertEqual(path.read_bytes(), card_before)  # refused before the card write
+
+    def test_a_linked_restore_folder_is_refused_before_the_card_is_written(self):
+        restore_dir = self.data / "restore"
+        shutil.move(str(restore_dir), str(self.outside / "points"))
+        restore_dir.symlink_to(self.outside / "points", target_is_directory=True)
+        self.check(self.outside)
+
+    def test_a_dangling_restore_link_is_refused(self):
+        restore_dir = self.data / "restore"
+        shutil.rmtree(restore_dir)
+        restore_dir.symlink_to(self.outside / "gone", target_is_directory=True)
+        self.check(self.outside)
+        self.assertEqual(files(self.outside), {})
+
+
+class LinkedStoreFileTest(LinkCase):
+    NAMES = (".store.lock", "index.sqlite", "index.sqlite-journal", "index.sqlite-wal", "index.sqlite-shm",
+             ".index.stale")
+
+    def test_each_linked_store_file_is_refused_and_its_target_keeps_its_bytes(self):
+        for name in self.NAMES:
+            with self.subTest(name=name):
+                link = self.data / name
+                target = self.outside / name
+                target.write_bytes(b"v1 owns this file\n")
+                with contextlib.suppress(FileNotFoundError):
+                    link.unlink()
+                link.symlink_to(target)
+                self.assert_every_call_refused(link, self.outside)
+                self.assertEqual(target.read_bytes(), b"v1 owns this file\n")
+                link.unlink()
+                self.store.get(self.added["id"])  # the link gone, the store works again
+
+    def test_each_dangling_store_file_link_is_refused_and_nothing_is_made(self):
+        for name in self.NAMES:
+            with self.subTest(name=name):
+                link = self.data / name
+                with contextlib.suppress(FileNotFoundError):
+                    link.unlink()
+                link.symlink_to(self.outside / name)
+                self.assert_every_call_refused(link, self.outside)
+                self.assertFalse((self.outside / name).exists())
+                link.unlink()
+
+    @unittest.skipUnless(hasattr(os, "O_NOFOLLOW") and fcntl is not None, "needs O_NOFOLLOW and flock")
+    def test_the_lock_is_opened_without_following_a_link(self):
+        # A link swapped in after the check: _locked() alone (no lstat first) still refuses it.
+        link = self.data / ".store.lock"
+        target = self.outside / "lock"
+        target.write_bytes(b"v1 owns this file\n")
+        link.unlink()
+        link.symlink_to(target)
+        with self.assertRaisesRegex(CardError, f"^{re.escape(str(link))} is a symlink"):
+            with self.store._locked():
+                self.fail("the lock was taken through a link")
+        self.assertEqual(target.read_bytes(), b"v1 owns this file\n")
+
+    def test_the_stale_marker_is_made_without_following_a_link(self):
+        # A link swapped in after the check: mark_stale() alone still refuses to make the marker at its target.
+        link = self.data / ".index.stale"
+        link.symlink_to(self.outside / "stale")
+        with self.assertRaises(OSError):
+            self.store.index.mark_stale()
+        self.assertFalse((self.outside / "stale").exists())
+
+
+class LinkedDataFolderTest(unittest.TestCase):
+    def test_a_data_folder_reached_through_a_link_still_works(self):
+        real = Path(tempfile.mkdtemp(prefix="ap2-real-")).resolve()
+        self.addCleanup(shutil.rmtree, real, True)
+        holder = Path(tempfile.mkdtemp(prefix="ap2-holder-")).resolve()
+        self.addCleanup(shutil.rmtree, holder, True)
+        link = holder / "data"
+        link.symlink_to(real, target_is_directory=True)
+        for word, data in (("alpha", link), ("bravo", datadir.resolve(str(link)))):
+            with self.subTest(data=str(data)):
+                store = Store(data, cfg=Config(), clock=Clock())
+                added = store.add(card(title=f"Through a link {word}"), by="w")
+                self.assertEqual(store.get(added["id"]), added)
+                self.assertEqual([c["id"] for c in store.search(f"link {word}")], [added["id"]])
+                self.assertTrue((real / "items" / "2026-11" / f"{added['id']}.json").is_file())
+        self.assertEqual(datadir.resolve(str(link)), real)
 
 
 if __name__ == "__main__":

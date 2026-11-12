@@ -22,6 +22,7 @@ import sqlite3
 from pathlib import Path
 
 FILE = "index.sqlite"
+SUFFIXES = ("", "-journal", "-wal", "-shm")  # the database and the files SQLite keeps beside it
 STALE = ".index.stale"
 VERSION = "1"
 
@@ -43,7 +44,9 @@ class Index:
         stopped before the index caught up, so the next put() rebuilds."""
         if self.stale.exists():
             return True
-        self.stale.touch()
+        # O_NOFOLLOW: a link at the marker's name is never followed to make a file elsewhere (the store refuses
+        # one before this; this covers a link swapped in after that check)
+        os.close(os.open(str(self.stale), os.O_CREAT | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o644))
         return False
 
     def _clear_stale(self) -> None:
@@ -72,7 +75,7 @@ class Index:
         return self.rebuild()
 
     def _remove(self) -> None:
-        for suffix in ("", "-journal", "-wal", "-shm"):
+        for suffix in SUFFIXES:
             try:
                 os.unlink(f"{self.path}{suffix}")
             except FileNotFoundError:

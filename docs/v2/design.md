@@ -124,6 +124,24 @@ found and first set up is in section 12.
 └── attachments/
 ```
 
+The data folder itself may be reached through a symlink (it is resolved when it is found), but the card store
+refuses a symlink inside it where it keeps its own files: `items/`, a month folder, a card file, `restore/`, a
+point file, `.store.lock`, `index.sqlite` (and its `-journal`, `-wal`, `-shm`) and `.index.stale`. The call fails
+with one line naming the link, so a link into v1's folder cannot carry a store write out of the v2 folder.
+
+- **[decided by the builder]** A link is refused, never followed and never replaced: removing it is the user's
+  choice. Any one of these links refuses every store call, a read too, not only the calls that would touch it, so
+  the check is one short list of `lstat` calls per call. The lock and `.index.stale` are also opened with
+  `O_NOFOLLOW` where the platform has it, for a link swapped in after the check.
+- **[decided by the builder]** Inside `items/`, any link is refused when listing or rebuilding the index meets it
+  (the store reads every folder there); in a month folder only a link with a card's file name is refused (other
+  names are skipped as before). Inside `restore/`, a linked point file is refused when it is put back; pruning
+  reads one but only ever removes the link itself, so it is left as it is.
+- **[decided by the builder]** The index's temp file `.index.sqlite.<pid>.tmp` is not checked: it is removed
+  before it is made, so a link there is dropped, not followed. The other folders the store never writes (`chat/`,
+  `sessions/`, `sources/`, `routines/`, `templates/`, `attachments/`) get the same guard in a later task, from the
+  code that writes them.
+
 v1's data is in `~/.claude/autopilot-data`. Moving it is part of the migration (section 10).
 
 ### 3.5 Conversations (transcripts)
