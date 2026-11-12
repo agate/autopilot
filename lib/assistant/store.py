@@ -4,8 +4,9 @@ Every add, update and restore appends `{at, by, did, restore}` to the card's `au
 card first saves its file as a restore point (`restore.py`); the search index (`index.py`) follows each write.
 Writes are atomic (a temp file, then `os.replace`) and hold `<data>/.store.lock`, so two processes never lose
 each other's change. Nothing here writes outside the data folder: a symlink where the store keeps its own files
-(`items/`, a month folder, a card file, `restore/`, a point file, the lock, the index and its marker) is refused, never
-followed or replaced, so a link into another folder (v1's data, for one) cannot carry a write out.
+(`items/`, a month folder, a card file, `restore/`, a point file, the lock, the index and its marker) is refused,
+never followed to write and never replaced (pruning reads a linked point and removes only the link), so a link into
+another folder (v1's data, for one) cannot carry a write out.
 """
 from __future__ import annotations
 
@@ -33,7 +34,7 @@ except ImportError:  # not POSIX: one process at a time is then the caller's job
 ITEMS = "items"
 LOCK = ".store.lock"
 # The store's own names right under the data folder, checked for links once per call (`_guard`). The lock is
-# checked before it is opened; month folders, card files and point files where they are opened.
+# checked before it is opened; month folders and card files where they are opened, point files where they are put back.
 OWN = (ITEMS, restore.FOLDER, index.STALE, *(index.FILE + s for s in index.SUFFIXES))
 NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)  # 0 where the platform has none: the lstat check alone then
 
