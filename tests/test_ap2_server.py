@@ -17,6 +17,7 @@ from pathlib import Path
 from unittest import mock
 
 from tests.helpers import ROOT
+from tests.test_ap2_store import BLANK_SLOTS, NOT_BLANK_SLOTS
 
 from assistant import cards, datadir, gate, server, templates
 from assistant.config import Config, ConfigError
@@ -456,6 +457,14 @@ class ListTest(ServerCase):
         self.assertEqual(server.titles({"title": {"en": "Retry", "de": "x"}}, ("en", "zh")),
                          {"en": "Retry", "zh": "Retry"})
         self.assertIsNone(server.titles({"title": {"ja": " "}}, ("en", "zh")))
+
+    def test_titles_with_only_invisible_slots_is_none(self):
+        # cards.blank: a slot of only a byte order mark (or U+001C-U+001F, U+0085) has no words to show.
+        self.assertIsNone(server.titles({"title": {"en": "\ufeff"}}, ("en",)))
+        self.assertIsNone(server.titles({"title": {"en": "\x1c", "zh": "\ufeff "}}, ("en", "zh")))
+        self.assertIsNone(server.row({"title": "\ufeff"}, ("en",))["title"])
+        self.assertEqual(server.titles({"title": {"en": "\ufeff", "zh": "中文"}}, ("en", "zh")),
+                         {"en": "中文", "zh": "中文"})
 
     def test_state_projects_have_the_title_in_every_language(self):
         zh = Config(secondary_language="zh")
@@ -1030,6 +1039,16 @@ class ReadOnlyTest(ServerCase):
 PAGE = ROOT / "lib" / "assistant" / "builtin" / "page" / "local.html"
 
 
+def page_functions(*names) -> str:
+    """The source of each named top-level function of the page's script, for running under node."""
+    text = PAGE.read_text(encoding="utf-8")
+    out = []
+    for name in names:
+        src = text[text.index(f"  function {name}("):]
+        out.append(src[:src.index("\n  }\n") + 5])
+    return "".join(out)
+
+
 class PageTest(ServerCase):
     def test_the_page_is_served_with_its_policy(self):
         status, hdrs, body = self.call("GET", "/")
@@ -1120,10 +1139,7 @@ class PageTest(ServerCase):
 
     @unittest.skipUnless(shutil.which("node"), "needs node")
     def test_title_in_shows_one_language_only(self):
-        text = PAGE.read_text(encoding="utf-8")
-        src = text[text.index("  function titleIn("):]
-        src = src[:src.index("\n  }\n") + 5]
-        js = src + """
+        js = page_functions("blankText", "titleIn") + """
 const S = {lang: 'zh', state: {primary_language: 'en', languages: ['en', 'zh']}};
 const L = key => '[' + key + ']';
 const out = [
@@ -1139,6 +1155,9 @@ const out = [
 ];
 S.lang = 'en';
 out.push(titleIn({en: 'Retry payments', zh: '重试付款'}), titleIn({zh: '只有中文'}));
+// One blank rule with cards.blank: Python's strip() white space and U+FEFF are blank, U+200B is not.
+out.push(titleIn({en: '\\x1c', zh: '中文'}), titleIn({en: '\\x85'}), titleIn({en: '\\ufeff', zh: '中文'}),
+         titleIn('\\x1f'), titleIn({en: '\\ufeff \\x1d', zh: '\\x1e', ja: '\\u200b'}));
 S.state = {primary_language: 'ja', languages: ['ja', 'en']};
 out.push(titleIn({ja: 'J'}), titleIn({de: 'D', ja: 'J'}));
 console.log(JSON.stringify(out));
@@ -1150,7 +1169,29 @@ console.log(JSON.stringify(out));
             "[card.untitled]", "[card.untitled]", "[card.untitled]", "[card.untitled]", "[card.untitled]",
             "x", "[card.untitled]", "c-id", "E", "[card.untitled]", "a", "b",
             "Retry", "c-id", "Retry", "[card.untitled]",
-            "Retry payments", "只有中文", "J", "J"])
+            "Retry payments", "只有中文",
+            "中文", "[card.untitled]", "中文", "[card.untitled]", "\u200b",
+            "J", "J"])
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_the_page_and_python_agree_on_a_blank_title_slot(self):
+        # The same slot texts through cards.blank and the page's blankText give the same answers: criterion strings,
+        # then every single character of the Basic Multilingual Plane (what either side calls white space included).
+        texts = [*BLANK_SLOTS, *NOT_BLANK_SLOTS, *(chr(n) for n in range(0x10000)), "\U0001f600"]
+        js = page_functions("blankText") + """
+let input = '';
+process.stdin.on('data', d => { input += d; });
+process.stdin.on('end', () => { console.log(JSON.stringify(JSON.parse(input).map(blankText))); });
+"""
+        out = subprocess.run(["node", "-e", js], input=json.dumps(texts), capture_output=True, text=True,
+                             encoding="utf-8", timeout=60)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        page = json.loads(out.stdout)
+        python = [cards.blank(t) for t in texts]
+        self.assertEqual(len(page), len(python))
+        self.assertEqual([t for t, a, b in zip(texts, page, python) if a != b], [])
+        self.assertEqual(page[:len(BLANK_SLOTS) + len(NOT_BLANK_SLOTS)],
+                         [True] * len(BLANK_SLOTS) + [False] * len(NOT_BLANK_SLOTS))
 
     def test_the_pages_search_caps_match_the_servers(self):
         text = PAGE.read_text(encoding="utf-8")

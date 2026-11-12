@@ -198,6 +198,13 @@ def plain_problems(plain, languages: tuple) -> list:
     return problems
 
 
+def blank(text) -> bool:
+    """True when a title slot has no words: it is not a text, or it holds only characters that Python's
+    `str.strip()` or the page's `String.prototype.trim()` treats as white space (what `strip()` removes, plus
+    U+FEFF). The local page's `blankText` keeps the same rule, so both sides skip the same slots."""
+    return not (isinstance(text, str) and text.replace("\ufeff", "").strip())
+
+
 def title_problems(title, languages: tuple) -> list:
     """Each language an object title is missing or has empty, as `title.<language> missing|is empty`. A text title
     (or null) has none: one text is the same words in every language."""
@@ -207,7 +214,7 @@ def title_problems(title, languages: tuple) -> list:
     for lang in languages:
         if lang not in title or title[lang] is None:
             problems.append(f"title.{lang} missing")
-        elif not (isinstance(title[lang], str) and title[lang].strip()):
+        elif blank(title[lang]):
             problems.append(f"title.{lang} is empty")
     return problems
 
@@ -222,7 +229,7 @@ def title_for(card, lang: str, primary: str):
         return title
     if isinstance(title, dict):
         for key in (lang, primary, *sorted(k for k in title if isinstance(k, str))):
-            if isinstance(title.get(key), str) and title[key].strip():
+            if not blank(title.get(key)):
                 return title[key]
     return None
 

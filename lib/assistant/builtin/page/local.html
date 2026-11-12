@@ -577,6 +577,10 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     if (obj && typeof obj === 'object' && typeof obj[S.lang] === 'string') return obj[S.lang];
     return null;
   }
+  function blankText(t) {
+    // A title slot with no words: not a text, or only what Python's str.strip() or trim() removes (cards.blank).
+    return typeof t !== 'string' || !t.replace(/[\u001c-\u001f\u0085\ufeff]/g, '').trim();
+  }
   function titleIn(t, fallback) {
     // A card's title in the page's language: its slot for that language, else the primary language's (never both
     // on one screen), else its first non-blank slot in sorted key order (cards.title_for's third step), else one
@@ -585,9 +589,9 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     if (t && typeof t === 'object' && !Array.isArray(t)) {
       const primary = (S.state && S.state.primary_language) || languages()[0];
       for (const lang of [S.lang, primary, ...Object.keys(t).sort()]) {
-        if (typeof t[lang] === 'string' && t[lang].trim()) return t[lang];
+        if (!blankText(t[lang])) return t[lang];
       }
-    } else if (typeof t === 'string' && t.trim()) return t;
+    } else if (!blankText(t)) return t;
     return fallback === undefined ? L('card.untitled') : fallback;
   }
 
