@@ -2229,7 +2229,9 @@ Calls the author made without asking (check them):
      read-only apart from the cache.
   9. `ap2 spend [--mode gateway|subscription] [--json] [--transcripts P] [--data PATH]` (default `gateway`) prints
      today, this week and this month in dollars with two decimals, and, when `unknown` is set, a line saying so with
-     the unpriced model ids and the unmatched launches of today. `--json` prints the `totals()` dict. Exit 0; a
+     the unpriced model ids and the unmatched launches of today. A total clamped to `sys.float_info.max` (item 10)
+     prints as `too large to show` with no `$`, never a 309-digit amount; a finite total below the clamp prints in
+     full. `--json` prints the `totals()` dict. Exit 0; a
      ledger file that cannot be read (or a symlink) prints one `ap2: ...` line and exits 1. Any other `OSError`
      names the side that failed when the error names its file (under the transcripts folder: "cannot read the
      transcripts in <projects>"; under the data folder: the ledger), else both folders, still one line, exit 1.
@@ -2247,7 +2249,8 @@ Calls the author made without asking (check them):
         dropped from the cache. `transcripts.find` itself is unchanged.
       - No infinite totals. A sum too big for a number (about a million forged requests) is clamped: `today`,
         `week` or `month` that is not finite becomes `sys.float_info.max` (finite, over any cap) and sets
-        `unknown` (and `unknown_today` for `today`), so `ap2 spend --json` stays valid JSON.
+        `unknown` (and `unknown_today` for `today`), so `ap2 spend --json` stays valid JSON; the text output prints
+        it as `too large to show` (item 9).
   - Two fixes v1 made after its first night on real data (ported fixed, not as v1 first shipped):
     - A grace for new launches. A launch younger than 900 s that is not resolved yet or whose session has no
       transcript yet sets neither `unknown` nor `unknown_today` and is not in `unknown_launches`; its resolution is

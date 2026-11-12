@@ -580,7 +580,9 @@ def cmd_spend(args) -> int:
         _print_json(t)
         return 0
     lines = [f"{args.mode} spend (local time):"]
-    lines += [f"  {k:<6} ${t[k]:,.2f}" for k in ("today", "week", "month")]
+    # A total `totals` clamped (a sum too big for a number) is a marker, not a 309-digit amount; `unknown:` follows.
+    lines += [f"  {k:<6} too large to show" if t[k] == sys.float_info.max else f"  {k:<6} ${t[k]:,.2f}"
+              for k in ("today", "week", "month")]
     if t["unknown"]:
         lines.append("  unknown: some spend is not counted (an unpriced model, or a launch not matched to its "
                      "session)")
