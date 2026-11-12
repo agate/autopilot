@@ -480,6 +480,17 @@ class PrOfTest(unittest.TestCase):
             with self.subTest(link=link):
                 self.assertEqual(self.pr(link), {"repo": REPO, "number": 42, "url": url})
 
+    def test_a_source_that_is_not_a_map_gives_the_url_from_the_key(self):
+        github = f"https://github.com/{REPO}/pull/42"
+        missing = object()
+        cases = [github, [github], 7, True, None, {}, missing]
+        for source in cases:
+            with self.subTest(source="no source key" if source is missing else source):
+                card = {"id": "c1", "kind": "pr-review", "key": KEY}
+                if source is not missing:
+                    card["source"] = source
+                self.assertEqual(prreview.pr_of(card), {"repo": REPO, "number": 42, "url": github})
+
     def test_a_dot_in_the_repo_name_is_a_dot_not_any_character(self):
         card = {"id": "c1", "kind": "pr-review", "key": "acme/my.repo#3",
                 "source": {"name": "s", "link": "https://github.com/acme/myXrepo/pull/3"}}
