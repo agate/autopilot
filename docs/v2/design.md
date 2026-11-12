@@ -363,7 +363,7 @@ A user template, or one Claude drafts, can combine roles and write briefs. It ca
 role keeps the tools and permission floor it ships with. Which folder a role runs in comes from the card (its repo
 worktree, or the data folder).
 
-### 6.1 Review angles **[proposed]**
+### 6.1 Review angles **[decided]**
 
 What a code review checks lives in one place, and the user can extend it without code. Today it lives in two
 tables that do not know about each other: v1's PR loop (`commands/pr-loop.md`, "Roles to add beside Correctness")
@@ -392,6 +392,101 @@ the PR loop on the user's own PRs and the PR review of other people's PRs.
 - name: Accessibility & UX
   off: true            # this repo has no UI
 ```
+
+How it is built (`lib/assistant/angles.py`, the table in `review/angles.yaml`):
+
+- **[decided by the builder]** Files. Built in: `<plugin>/review/angles.yaml` (the repo root's `review/`, next to
+  `sources/`). The user's: `<data>/review/angles.yaml`. The repo's: `.autopilot/review.yaml` read from the reviewed
+  commit, never the working tree, read-only (`git rev-parse --show-toplevel` to name the file from the repo root,
+  where it is read, so a subfolder given as the repo still names the root's file, and a bare repo keeps the path
+  given; `git rev-parse` to pin the commit, `git ls-tree --full-tree` to find the file and its size from the repo
+  root, `git cat-file blob`). The path missing at that commit is no layer; any
+  other git failure (no such repo or commit, a commit name starting with `-`, a folder or link at the path) is an
+  `AngleError`. Every git call runs with `GIT_NO_LAZY_FETCH=1` (git 2.44 and later; an older git ignores it and
+  starts the fetch), `GIT_ALLOW_PROTOCOL=` (no transport at all, git 2.12 and later, so a fetch an older git starts
+  cannot reach the remote) and `GIT_TERMINAL_PROMPT=0`, so a partial clone does not get the file's blob from its
+  remote. A blob the clone lacks is refused as "not in this clone (a partial clone)" (on an older git, whose fetch
+  fails inside `ls-tree`, as "cannot list the commit's files" with git's "could not fetch ... from promisor
+  remote"); one that is there but that git lists with no size is refused as "may be corrupt". A missing user file is no layer; an empty file holds no angles. Each file is a YAML list of maps of
+  at most `sources.MAX_SOURCE` bytes (a leading BOM is dropped), read with `yamlish` (as the list under one wrapper
+  key, so line numbers stay the file's own). A file that is not a list (a map, a flow list such as `[]`, a bare
+  word, or a top-level `angles:` beside its items) is refused as "must be a list of angles".
+- **[decided by the builder]** Limits, since a repo's file comes from a PR author: a line whose `[` / `{` nest more
+  than 32 deep, or that starts with more than 32 `- ` list items (`MAX_NESTING`; a real angle needs a few), is
+  refused, naming the line, before the file is parsed, since each nested level costs the parser memory (a key path
+  per nested key, a copy of the rest of the line per item); at most 200 globs in the whole file, across every
+  `when.paths`, an `extends` without its own `when` counting the globs it takes from its base (`MAX_GLOBS`, refused
+  at the entry that passes it); at most 256 characters in one glob (`MAX_GLOB`); no glob or kind twice in one
+  `when`. The picker's time is then linear in the total length of the changed paths times the number of globs, plus
+  a cost per angle that does not grow with path length, whatever the globs: it reads each path once per glob, a few
+  integer steps per character, so a repo file adds at most 200 such reads per changed file, and up to 200 more for
+  the globs of the angles it picks, which are read once more to write their `why`. It decides every match first, without writing anything, then
+  writes a `why` only for the at most `count() - 1` angles it picks, and each PR kind's example files once per pick.
+  So its memory is linear in the total length of the changed paths plus a cost per angle that does not grow with
+  path length, and kinds-only angles, which no cap bounds, add only that per-angle cost each. Measured with 200
+  globs each kept alive to the end of every path and matching nothing: about 50 to 65 microseconds per
+  character of changed paths, so 0.5 s for four crafted files of 2,559 characters, 3 s for twenty,
+  and 13 s for one path of 256,000 characters; a picked angle whose globs match only at the very end reads the
+  paths a second time, so the worst case is about twice these. Changed paths are the caller's data and are not capped; their total
+  length sets the cost. A `why` writes out at most three reasons and only counts the rest. Brackets are counted as
+  `yamlish` reads them (its comment scan: a comment ends the line, a quote opens a string only where a value starts,
+  a bracket opens a collection only where a value starts or inside an open one), so brackets it reads as text are
+  not counted, and the count is never below its real depth.
+- **[decided by the builder]** An angle's keys: `name` (non-empty text, unique in its file, compared as written),
+  `question` and `brief` (non-empty text, which may span lines), `when`, plus `extends` and `off`. A `name`, an
+  `extends` target and a glob must be one line of text, since each is shown on one line: a control character
+  (Unicode category Cc, such as a newline, a tab or an escape), a line or paragraph separator (Zl, Zp) or a bidi
+  override or isolate (U+202A to U+202E, U+2066 to U+2069, which make text read in another order) is refused; any
+  other character is text (a joined emoji, a no-break space). A `question` or `brief` refuses the same characters
+  but a newline and a tab, since a picked angle hands them on as they are. Any other key is refused, naming the file, line and
+  key. Text from the file in an error (a key, name, kind or glob) is shown as its repr, control characters escaped,
+  cut to 80 characters. A key in `templates.WIDEN` (compared with `templates._norm`, so `allowedTools`,
+  `allowed-tools` and `allowed_tools` are one key), at any depth, is refused first with an `AngleWidenError`: an
+  angle cannot add tools or permissions. `AngleError` and `AngleWidenError` are `ConfigError`s; a broken angle file
+  stops the load with a clear error, like a broken template (D19).
+- **[decided by the builder]** `when` is `always`, or a map with `paths` (a non-empty list of globs) and/or `kinds`
+  (a non-empty list of `data`, `infra`, `api`, `ci`, `ui`, `tests`, `docs`), neither holding an entry twice. Kinds
+  come from file paths with secretary's patterns (`AREAS`, `TESTS`, `DOCS`), copied into `angles.py`; as in
+  secretary, the five code kinds are read only from files that are neither tests nor docs (`api/test_x.py` is
+  `tests`, not `api`). A glob matches the whole repo-relative path: `**` is any number of folders (a final `**` is
+  everything under its folder), `*` and `?` stay inside one path segment, and every other character is itself (`[`
+  included). A glob starting with `/` is refused, since it could never match. A glob comes from a file a PR author
+  can write, so the matcher never backtracks: each glob is compiled once per pick into a bit-parallel automaton
+  (one bit per glob character, all its states in one integer), and a path is read once, character by character, a
+  few integer steps each. An angle matches when any changed file matches one of its globs, or the PR has one of its
+  kinds.
+- **[decided by the builder]** Layers: built in, then the user's, then the repo's; the later one wins on the same
+  name. An entry with neither `extends` nor `off` is a whole angle (all of `name`, `question`, `when`, `brief`) and
+  adds or replaces; a replaced angle keeps its place in the table and a new one goes last. `extends: <name>` merges
+  the entry's fields over the angle of that name as the earlier layers left it (fields replaced, never merged
+  deeper); the result takes the entry's `name`, which may be left out and then is the `extends` name (so `- extends:
+  Portability` with one `brief:` line is enough). Extending a name no earlier layer has is refused, naming the file
+  and line (an angle added earlier in the same file does not count), and extending a name an earlier layer turned
+  off says which file and line turned it off. `off: true`, with only `name` beside it, removes that angle; an `off`
+  naming no earlier angle is not an error (a repo file can outlive a rename) and lands in the table's `unknown_off`
+  with its file and line. Correctness can be extended or replaced, never turned off; the built-in file must hold it.
+- **[decided by the builder]** Origin: every loaded angle says where it came from, `built-in`, `user`, `repo`,
+  `user, extends <name>` or `repo, extends <name>`, and the file that set it (the repo's as `<repo root>/.autopilot/
+  review.yaml at <commit>`).
+- **[decided by the builder]** The picker, `pick(table, files, mode, changed_lines)`, with `mode` `loop` or
+  `review`. Correctness always first, whatever its `when`. Then the matching angles: the repo's, then the user's,
+  then built in; inside one layer, file order (the built-in file is ordered riskiest first: data, infra, api, ci,
+  ui, tests, docs, as secretary's `AREAS`, then `TESTS`, `DOCS`). Count: the PR loop takes 2 to 4 reviewers in all
+  (Correctness plus up to 3); a PR review takes 3, or 2 when every file is docs or it changes fewer than 30 lines
+  (`SMALL_LINES`, secretary's `review_small_lines`). When only Correctness is picked, the fallback angles fill to 2:
+  Failure modes & observability, then Test value (secretary's `CODE_ROLES`), whichever is loaded and not off, as
+  loaded. Each picked angle carries `name`, `question`, `brief`, `origin`, `file` and a one-line `why`: the globs
+  or kinds that matched with up to three of their files (at most three such reasons, then `(+N more)`), `always`,
+  or `fallback`. A file's name in it has the characters a name may not hold escaped (`\n`), so it stays one line.
+- **[decided by the builder]** The built-in table merges v1's and secretary's, one angle per point of view, with
+  secretary's question for each and a short brief from both: Correctness (always); Data correctness & backfill,
+  Performance & locking (data); Blast radius & rollback, Security & least privilege (infra); API contract & backward
+  compatibility, Failure modes & observability (api); Portability, Security of secrets & permissions (ci);
+  Cross-platform parity, Accessibility & UX (ui); Test value, Flakiness & isolation (tests); Accuracy, Reader
+  clarity (docs). v1's "A tool or harness other teams use" row folds into Blast radius & rollback (its question
+  asks who else runs it) and Flakiness & isolation (its brief: a harness other teams run counts double).
+- Not built here: running the angles (the PR loop and the `pr-review` role, 6.2 and 6.3) and showing on the page
+  that a built-in angle the user changed was updated.
 
 ### 6.2 PR review cards **[proposed]**
 
@@ -637,6 +732,9 @@ archived with the card.
 - Reused from secretary by copying, not calling: the Slack and GitHub reading logic (as built-in source files and
   engine checks), the investigator, analyst and reviewer agents, the presets.
 - **[open]** Moving v1's data from `~/.claude/autopilot-data` and secretary's state into the new data folder.
+  **[decided by the builder]** The read-only part is built: `ap2 import-v1` copies each v1 project (its
+  `config.json` and `state.json`) into v2 cards without changing v1's folder, so v2 shows v1's work in shadow mode
+  (section 12, "v1 import"). Moving or deleting v1's data, and secretary's state, stay open.
 
 ## 11. Open questions, most important first
 
@@ -650,7 +748,9 @@ archived with the card.
    result file is stopped and marked paused, can resume. Check them.
 3. **Replies on the local page** resume the session immediately (8.3)?
 4. **Drafts and quotes in two languages** (3.1, proposed part).
-5. **Data migration** from v1 and secretary (10).
+5. **Data migration** from v1 and secretary (10). **Answered for the read-only part:** `ap2 import-v1` copies v1
+   projects into cards and never writes to v1's folder (section 12, "v1 import"). Moving v1's or secretary's data
+   is still open.
 
 Calls the author made without asking (check them):
 
@@ -714,12 +814,13 @@ Calls the author made without asking (check them):
   briefs) and `roles.py` (the shipped roles and their tools); the source engine: `sources.py` (loading,
   `extends:`, checks), `form.py` (the form, the path language, `{field}` patterns and derived fields) and
   `engine.py` (read, fill, check, link and key, sort, card); scan sessions: `scan.py` (the plan, the brief, the
-  save-raw hook and the take); for workers, `workers.py`, `resources.py`, `transcripts.py` and `projects.py`
-  (see the workers entry below); and the local page: `server.py` (the server, its JSON routes and the request
-  guard, run by `ap2 serve`) and `builtin/page/local.html` (the one page, inline CSS and JS, found from
-  `server.py`'s own path); and the phone page's data: `phone.py` (`build`, run by `ap2 phone build`).
-  `ap2 config [--data PATH]` prints the effective config and `data_dir` as JSON.
-  With stdout
+  save-raw hook and the take); review angles: `angles.py` (the three layers, kinds, globs and the picker,
+  design 6.1) with the built-in table in `review/angles.yaml` at the plugin root; for workers, `workers.py`,
+  `resources.py`, `transcripts.py` and `projects.py` (see the workers entry below); the local page:
+  `server.py` (the server, its JSON routes and the request guard, run by `ap2 serve`) and
+  `builtin/page/local.html` (the one page, inline CSS and JS, found from `server.py`'s own path); and the
+  phone page's data: `phone.py` (`build`, run by `ap2 phone build`). `ap2 config [--data PATH]` prints the
+  effective config and `data_dir` as JSON. With stdout
   closed, `ap2 config` sets up the folder, prints nothing and exits 0; when its reader goes away
   (`ap2 config | true`) it exits 1 with nothing on stderr; when a write fails (a full disk) it prints one line,
   `ap2: cannot write the output: ...`, and exits 1. `ap2` with no arguments prints the usage, listing the
@@ -1453,7 +1554,22 @@ Calls the author made without asking (check them):
     ports picked under the lock (when another start took the planned range meanwhile, the next free one; the tools
     found are kept, since the ports do not change which tools a folder loads). A folder that changed meanwhile (a
     parked record that moved) refuses the start ("start it again"): its tools were found elsewhere. An in-place
-    resume of a dead or parked worker still discovers under the lock, since `check` holds it for the whole pass.
+    resume of a dead or parked worker discovers outside the lock too: `check` runs in three steps. Under the lock
+    it classifies and acts on every worker as before, except that a resume (dead with its one resume left, or
+    parked and due) is only planned, after the shadow-mode check; with the lock free it checks each planned
+    resume's folder and data folder and lists its tools (a failure is kept, not raised); under the lock again it
+    finds each record by card and role and resumes it (floor, stop, launch, record), or runs today's failure path
+    (a dead worker's one resume counted, a parked worker stopped). A record that changed meanwhile (gone, a new
+    short id or folder, a close started, or a classification that no longer says dead with its resume left or
+    parked and due) is not touched: its line says it changed while its tools were listed, its floor is not
+    rewritten, and the next check looks at it again. A Ctrl-C while the tools are listed starts no resume; the
+    first step's changes are already written back.
+    **[decided by the builder]** The re-check classifies the record as it is under the second lock (its fields,
+    result and question files are read again) with the session listing of the first step, not a new one: a dead
+    session does not come back, and any new session puts a new short id on the record, which the re-check
+    compares. This saves one `claude agents` call per pass that resumes.
+    **[decided by the builder]** A changed record is skipped with a note and no count, also when its discovery
+    failed: the failure belonged to the old record, so the new one's `resumes` and slot are left alone.
     The outward MCP tools are always denied. If they cannot be listed (no init event, claude failed, could not
     start or timed out), nothing starts: the `WorkerError` says to list them in `projects/<name>.yaml` `tools`. On a dead
     worker's resume that counts as its one resume; a parked worker is stopped as when its resume cannot start. An in-place resume first
@@ -1593,6 +1709,55 @@ Calls the author made without asking (check them):
     `ap2 worker list`, `start CARD ROLE [--cwd P] [--prompt-file F] [--needs A,B] [--resume]`,
     `end CARD ROLE [--transcripts P]`, `check [--transcripts P] [--usage P]`,
     `park CARD ROLE [--note T] [--usage P]`, `answer CARD TEXT...`, `finish CARD [--transcripts P]`.
+- **[decided by the builder]** v1 import (10, 11 question 5), read-only, in `importv1.py`.
+  - Command: `ap2 import-v1 [--data PATH] [--from DIR] [--project NAME ...] [--dry-run]`. `--from` defaults to
+    v1's own data root (`AUTOPILOT_DATA`, else `~/.claude/autopilot-data`, v1's `paths.data_root()`). A project is
+    every `<from>/projects/<name>/` holding `config.json`, plus a legacy `<from>/<name>/config.json` whose
+    `projects/<name>/config.json` does not exist (v1's `ap_dir` rule); `<name>` must pass v1's `valid_name`; a
+    folder that cannot be looked into counts as found, so it is refused alone; a project folder whose real place
+    cannot be found (a link through a folder the import cannot look into) stops the import with one line, nothing
+    written, because an overlap with the data folder cannot be ruled out; a `projects` link to a place that does
+    not exist stops the import with one line too. `--project` (repeatable) limits
+    it; a name not found, a missing `--from` folder, or a data folder and `--from` (and its projects folder and
+    each project folder found, `--project` or not, symlinks followed) where either is inside the other (compared
+    as `datadir` does: letter case folded, then by file identity) is one `ap2: ...` line, exit 1, nothing written.
+  - Read-only for real: v1's files are read with `open(...).read()` and `json.loads`, never through v1's
+    `state.load` or `mutate` (they take a lock file inside v1's folder). Nothing is created or changed under
+    `--from`.
+  - Cards (feed `v1-import`, audit `by: v1-import`, each with `project: <name>`): a `project` card
+    (`key: v1:<name>`, title the name, `lane: done` when the project has tasks and every one is `done` or
+    `skipped`, else `running`; `source.record` keeps `repo`, `branch_pattern`, `branch_prefix` and the folder); a
+    `code` card per task under it (`key: v1:<name>:<task id>`, `status` v1's, lanes `todo` -> planned,
+    `in_progress`/`in_review` -> running, `blocked` -> needs, `done`/`skipped` -> done; `P1` when `critical`, else
+    `P2`; `origin: found` when v1's is, else `source`; `source.record` keeps `pr`, `branch`, `depends_on`,
+    `link`); a `question` card per open `ask` or `gate` decision (`key: v1:<name>:<decision id>`, `lane: needs`,
+    `ask: {type: answer | approve, from: v1}`, under its task's card, else the project's). Other decisions make no
+    card and are counted in the report's `not_imported`. A question card made while its decision was open is
+    closed (`lane: done`, `ask: null`) once v1 settles it; a question card whose decision has left state.json (v1
+    archives only settled decisions) is closed the same way.
+  - Text: a v1 text `{en, zh, ...}` gives each configured language its own text, else the base language
+    (`zh-Hans` -> `zh`), else `en`, else its first string. A label `{key, args}` is filled with `str.format_map`
+    (a placeholder without an argument stays as written, as v1's page does; a template longer than `MAX_LABEL`
+    (1,000) characters is shown as its key, before it is parsed; a template with a format spec, conversion, index
+    or attribute, one that does not parse, or one that would fill past `MAX_LABEL` characters, is shown as
+    written) from the package's `templates/labels.<lang>.json` with the v1 folder's `labels.<lang>.json` on top
+    (where v1 keeps its page translations), falling back to `en`, then to the key. `title` is the primary
+    language's text. Plain words come from fixed phrases (`importv1.PHRASES`, `en` and `zh`): `what` is the title,
+    `where` names the project (and task, with its v1 status), `do` says it is a read-only copy and to act on v1's
+    page. A configured language with no phrases is refused before anything is written.
+  - Re-run: the same key (among this feed's cards) updates `title`, `plain`, `lane`, `status`, `ask` and
+    `source` when they changed, and leaves the card alone when nothing did. A card is never removed (a task gone
+    from v1 keeps its card). `--dry-run` writes nothing, not even the data folder's layout, and reports
+    `would_add` (the card, with `parent` left out while its parent is only a would-add too) or `would_change`.
+  - Report on stdout: `{from, dry_run, projects: [{name, folder, cards: [{key, kind, action: add | update |
+    unchanged, card}], not_imported: {decisions}}], refused: [{name, folder, reason}]}`. Every card of a project
+    is checked as the store will check it before any is written, so a project whose files cannot be read
+    (missing, bad JSON, not an object, a state.json without `tasks` or `decisions`, a task or decision without an
+    id, an id used twice, an unknown task status, text the store refuses, a value nested deeper than the store
+    writes) is listed under `refused` and the others still import; the command then prints one `ap2: ...` line and
+    exits 1 after the report.
+  - Writes only inside the data folder, so it runs in shadow mode (no `require_live`). Not imported:
+    `events.jsonl`, reports, run folders, and `<data>/projects/<name>.yaml` (not written from `config.json`).
 - How the local server pushes updates to an open page (polling is fine).
   - **[decided by the builder]** Polling: the page asks `/api/state` every 10 seconds and redraws the top bar,
     the rail and the open list, so the heartbeat and new cards show without a reload.
