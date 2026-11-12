@@ -842,6 +842,10 @@ class HardeningTest(SpendCase):
         self.transcript.parent.mkdir(parents=True, exist_ok=True)
         self.transcript.write_text("".join(lines))
 
+    def test_the_caps_are_the_values_the_design_names(self):
+        # The other tests patch the caps down; these are the real ones (16 MiB a line, 1 GiB a file).
+        self.assertEqual((spend.MAX_LINE_BYTES, spend.MAX_FILE_BYTES), (16 << 20, 1 << 30))
+
     def test_a_line_over_the_cap_is_one_unknown_request_and_the_rest_keep_their_cost(self):
         self.patch(spend, "MAX_LINE_BYTES", self.CAP)
         self.write(self.line("req_a"), self.line("req_long", self.CAP + 1), self.line("req_b"))
@@ -1349,7 +1353,7 @@ class SpendCliTest(unittest.TestCase):
         self.assertTrue(err.startswith(f"ap2: cannot read the transcripts in {self.projects}: "), err)
         self.assertNotIn("spend ledger", err)
 
-    def test_a_ledger_error_names_the_ledger_and_an_unnamed_error_names_both(self):
+    def test_a_ledger_error_names_the_ledger_and_any_other_error_names_both(self):
         for name, says, not_says in ((str(self.data / "spend" / "cache.json"), "spend ledger", "transcripts"),
                                      (None, "transcripts", None), ("/elsewhere/x.jsonl", "transcripts", None)):
             bad = OSError(5, "Input/output error", name) if name else OSError("disk gone")
