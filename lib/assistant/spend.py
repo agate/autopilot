@@ -323,7 +323,7 @@ def _files(main: Path) -> list:
             names = sorted(e.name for e in it if fnmatch.fnmatchcase(e.name, "agent-*.jsonl"))
     except (FileNotFoundError, NotADirectoryError):
         return [main]
-    except OSError:  # there but not listable (made chmod 0o600)
+    except OSError:  # there but not listable (made chmod 0o300 or 000)
         return [main, _Unreadable(folder)]
     out = [main]
     for name in names:

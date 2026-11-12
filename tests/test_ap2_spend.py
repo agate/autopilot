@@ -1020,6 +1020,11 @@ class HardeningTest(SpendCase):
 
     def test_a_line_whose_request_id_is_the_unreadable_key_is_a_priced_request_and_cached(self):
         # A worker writes its own transcript: an id it picks never reads as a key the parser makes.
+        by_msg = dict(NEW, message=dict(NEW["message"], id=spend.UNREADABLE))
+        by_msg.pop("requestId", None)  # no request id: keyed by its message id, escaped the same way
+        self.write(json.dumps(by_msg) + "\n")  # alone: with the line below it would be the same request
+        items = spend._parse_file(self.transcript, spend.prices(self.data))
+        self.assertEqual([(i["id"], round(i["usd"], 6)) for i in items], [("~~unreadable", 1.0)])
         self.write(self.line(spend.UNREADABLE), self.line("~0"))
         items = spend._parse_file(self.transcript, spend.prices(self.data))
         self.assertEqual([i["id"] for i in items], ["~~unreadable", "~~0"])
@@ -1064,20 +1069,22 @@ class HardeningTest(SpendCase):
 
         def stat_(p, *a, **kw):  # only the transcript cannot be checked; every other path is stat'ed as usual
             if p == self.transcript:
-                raise OSError(5, "Input/output error", str(p))
+                raise err
             return real(p, *a, **kw)
         unknown = {spend.UNREADABLE: [None, None, ""]}
-        with mock.patch.object(Path, "stat", stat_):
-            c, seen = {"files": {}}, set()
-            self.assertEqual(spend._cached_reqs(c, self.transcript, table, 0.0, seen), unknown)
-            self.assertNotIn(str(self.transcript), c["files"])
-            self.assertNotIn(str(self.transcript), seen)
-            st = real(self.transcript)
-            held = {"req_1": [1.0, 2.0]}  # an entry from before, its stamp still the file's
-            c = {"files": {str(self.transcript): {"stamp": [st.st_mtime_ns, st.st_size], "reqs": held}}}
-            seen = set()
-            self.assertEqual(spend._cached_reqs(c, self.transcript, table, 0.0, seen), unknown)
-            self.assertNotIn(str(self.transcript), seen)  # not seen: the save drops it
+        for err in (PermissionError(13, "Permission denied", str(self.transcript)),
+                    OSError(5, "Input/output error", str(self.transcript))):
+            with self.subTest(err=err.errno), mock.patch.object(Path, "stat", stat_):
+                c, seen = {"files": {}}, set()
+                self.assertEqual(spend._cached_reqs(c, self.transcript, table, 0.0, seen), unknown)
+                self.assertNotIn(str(self.transcript), c["files"])
+                self.assertNotIn(str(self.transcript), seen)
+                st = real(self.transcript)
+                held = {"req_1": [1.0, 2.0]}  # an entry from before, its stamp still the file's
+                c = {"files": {str(self.transcript): {"stamp": [st.st_mtime_ns, st.st_size], "reqs": held}}}
+                seen = set()
+                self.assertEqual(spend._cached_reqs(c, self.transcript, table, 0.0, seen), unknown)
+                self.assertNotIn(str(self.transcript), seen)  # not seen: the save drops it
 
     def test_a_transcript_file_whose_open_fails_with_another_error_is_one_unknown_request(self):
         self.put()
