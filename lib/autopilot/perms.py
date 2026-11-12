@@ -162,10 +162,11 @@ def discover(claude_bin: str, cwd: str, settings, ap=None, profile=None) -> tupl
                           "--verbose", "--settings", str(settings)], cwd=cwd, capture_output=True, text=True, timeout=180,
                          stdin=subprocess.DEVNULL)
     if profile is not None:
+        sid = session_from_stream(out.stdout)
         try:
-            spend.record_session(session_from_stream(out.stdout), "discover", ap, profile)
-        except Exception:  # noqa: BLE001 - spend bookkeeping must not fail discovery
-            pass
+            spend.record_session(sid, "discover", ap, profile)
+        except Exception as e:  # noqa: BLE001 - spend bookkeeping must not fail discovery
+            workers._spend_failed("record", sid, "discover", ap, profile, e)
     return parse_discovery(out.stdout), servers_from_stream(out.stdout)
 
 
@@ -261,8 +262,8 @@ def run_one_off(ap: str, decision_id: str) -> str:
         sid = ""
     try:
         spend.record_session(sid, "oneoff", ap, prof)
-    except Exception:  # noqa: BLE001 - spend bookkeeping must not fail an approved action
-        pass
+    except Exception as e:  # noqa: BLE001 - spend bookkeeping must not fail an approved action
+        workers._spend_failed("record", sid, "oneoff", ap, prof, e)
     events.append(ap, "oneoff_done", {"decision": decision_id, "tool": action["tool"], "exit": code,
                                       "output": stdout[-1500:], "error": stderr[-1500:]})
     if code != 0:

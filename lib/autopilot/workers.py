@@ -88,18 +88,33 @@ def _launch(argv: list, cwd: str, env: dict) -> str:
 
 
 def _settle(short: str) -> None:
-    """Price a finished session. Never raises: pricing must not stop a cleanup."""
+    """Price a finished session. Never raises: pricing must not stop a cleanup. A failure is logged."""
     try:
         spend.settle(short)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001
+        _spend_failed("settle", short, None, None, None, e)
 
 
 def _record(short: str, kind: str, ap, p: dict) -> None:
     try:
         spend.record_launch(short, kind, ap, p)
-    except Exception:  # noqa: BLE001 - spend bookkeeping must not undo a started session
+    except Exception as e:  # noqa: BLE001 - spend bookkeeping must not undo a started session
+        _spend_failed("record", short, kind, ap, p, e)
+
+
+def _spend_failed(op: str, short, kind, ap, p, err: Exception) -> None:
+    """Log a spend bookkeeping failure. A gateway launch that could not be recorded gets a launch row that never
+    matches a session, so the totals show unknown cost (which holds the daily cap) instead of $0."""
+    try:
+        events.append_global("spend_record_failed", {"op": op, "short": short, "kind": kind, "ap": ap,
+                                                     "error": f"{type(err).__name__}: {err}"[:300]})
+    except Exception:  # noqa: BLE001 - nothing more to do
         pass
+    if op == "record" and (p or {}).get("mode") == "gateway":
+        try:
+            spend.record_session("", kind if kind in spend.KINDS else "worker", ap, p)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 BLOCKING = ("cap", "key", "profile")

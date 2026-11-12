@@ -395,6 +395,35 @@ class TotalsTest(SpendCase):
         self.assertEqual(spend.totals(NOW)["unknown_models"], [])   # its request is dated yesterday
         self.assertEqual(spend.totals(datetime(2026, 11, 10, 20, 0, tzinfo=TZ))["unknown_models"], ["claude-nonesuch-9"])
 
+    def events(self):
+        f = self.data / "events-global.jsonl"
+        return [json.loads(x) for x in f.read_text().splitlines()] if f.exists() else []
+
+    def test_a_failed_record_is_logged_and_a_gateway_launch_counts_as_unknown(self):
+        from autopilot import workers
+        with mock.patch.object(spend, "record_launch", side_effect=OSError("disk full")):
+            workers._record(SHORT, "worker", "checkout", profile())
+        ev = [e for e in self.events() if e["type"] == "spend_record_failed"]
+        self.assertEqual(len(ev), 1)
+        self.assertIn("disk full", ev[0]["data"]["error"])
+        t = spend.totals(NOW)
+        self.assertEqual((t["unknown"], t["unknown_today"]), (True, True))
+        self.assertEqual(spend.totals(NOW, mode="subscription")["unknown"], False)
+
+    def test_a_failed_subscription_record_is_logged_only(self):
+        from autopilot import workers
+        with mock.patch.object(spend, "record_launch", side_effect=OSError("disk full")):
+            workers._record(SHORT, "worker", None, profile("sub", "subscription"))
+        self.assertEqual([e["type"] for e in self.events()], ["spend_record_failed"])
+        self.assertFalse((self.data / "spend" / "launches.jsonl").exists())   # no fallback row: no cap to keep
+
+    def test_a_failed_settle_is_logged(self):
+        from autopilot import workers
+        with mock.patch.object(spend, "settle", side_effect=ValueError("bad cache")):
+            workers._settle(SHORT)
+        ev = [e for e in self.events() if e["type"] == "spend_record_failed"]
+        self.assertEqual((len(ev), ev[0]["data"]["op"]), (1, "settle"))
+
     def test_record_launch_rejects_unknown_kind(self):
         with self.assertRaises(ValueError):
             spend.record_launch(SHORT, "bogus", None, profile())
