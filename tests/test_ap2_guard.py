@@ -1555,11 +1555,12 @@ class DecideTest(unittest.TestCase):
                     "trap 'rm -f /tmp/x' EXIT; python3 run.py > $AP2_RUN_DIR/y", "trap - EXIT",
                     "grep -rn trap lib > $AP2_RUN_DIR/t.txt", f"{PKG}/bin/ap2 card note C1 --text 'trap fixed'"],
                    deny=False)
-        # `ap2` and blanks before a `(` is a function definition's name.
-        for word in ("ap2 (){", "ap2  ()", "ap2\t()", "ap2()"):
+        # `ap2` and blanks before a `()` is a function definition's name; blanks before a `(` that opens prose is
+        # none.
+        for word in ("ap2 (){", "ap2  ()", "ap2\t()", "ap2()", "ap2 ( )"):
             with self.subTest(word=word):
                 self.assertTrue(guard._ap2_bound(word))
-        for word in ("ap2 card", "ap2x (", "fix ap2 guard"):
+        for word in ("ap2 card", "ap2x (", "fix ap2 guard", "teach ap2 (the CLI) a flag", "ap2 (v2)", "ap2 ("):
             with self.subTest(word=word):
                 self.assertFalse(guard._ap2_bound(word))
 
@@ -1568,10 +1569,45 @@ class DecideTest(unittest.TestCase):
         # zsh's and bash's readings are searched with their quotes taken out (`"ant"` after a `$'...'`).
         self.check(["cp /tmp/src ~/Documents/Assis$'t\\0x'\"ant\"/config.yaml",
                     "cp /tmp/src ~/Documents/\"Assis\"$'t\\0x'ant/config.yaml",
-                    # zsh's `\\u` reads four hex digits (`\\u006e` is `n`, then `\\C` at the end is nothing),
-                    # `\\U` eight.
+                    # zsh reads `\\u` and `\\U` (`\\u006e` is `n`, then `\\C` at the end is nothing); a `\\` follows
+                    # the digits, so these rows do not pin the width (the fifteenth round's rows do).
                     "cp /tmp/src ~/Documents/Assista$'\\u006e\\C't/config.yaml",
                     "cp /tmp/src ~/Documents/Assista$'\\U0000006e\\C't/config.yaml"], deny=True)
+
+    def test_finding_rows_of_the_fifteenth_round_pin_their_rules(self):
+        """Rows that fail when the rule they name is taken out."""
+        # zsh's `read -A commands` fills the command hash table from the words it reads (`commands[ap2]` is then
+        # `/bin/cp`): a name table as a plain word counts where a setter runs.
+        self.check([f"read -A commands <<< 'ap2 /bin/cp'\nap2 src.txt {DATA}/config.yaml",
+                    "read -A commands <<< 'ap2 /bin/cp'; ap2 src.txt $AP2_DATA/out2.txt",
+                    "read -A commands <<'EOF'\nap2 /bin/cp\nEOF\nap2 src.txt $AP2_DATA/out1.txt",
+                    "echo 'ap2 /bin/cp' | read -A commands; ap2 src.txt $AP2_DATA/out6.txt",
+                    "read -A functions <<< 'ap2 cp'; ap2 src.txt $AP2_DATA/config.yaml",
+                    "read -A aliases <<< 'ap2 cp'; ap2 src.txt $AP2_DATA/config.yaml"], deny=True)
+        self.check(["read -r line < $AP2_RUN_DIR/x", "read -A arr <<< 'a b'; echo $arr > $AP2_RUN_DIR/y"], deny=False)
+        # `\\u` reads four hex digits: `\\u006fc` is `o` then `c` (a wider read would make one code of `006fc`).
+        self.check(["cp /tmp/src ~/D$'\\u006fc\\C'uments/Assistant/config.yaml"], deny=True)
+        # Each setter sets the search path by the name it takes.
+        tail = "; ap2 /tmp/src $AP2_DATA/config.yaml"
+        self.check(["echo 1 | select PATH in /tmp/b; do ap2 /tmp/src $AP2_DATA/config.yaml; break; done",
+                    "declare \"PATH=/tmp/b\"" + tail, "typeset \"PATH=/tmp/b\"" + tail,
+                    "readonly \"PATH=/tmp/b\"" + tail, "print -v PATH /tmp/b" + tail, "getopts b PATH -b" + tail],
+                   deny=True)
+        self.check(["getopts b PATH -b; echo ok > $AP2_RUN_DIR/opts.txt"], deny=False)
+        # `ap2` and blanks before a `(` that opens prose binds nothing: a commit message, a journal line or a PR body
+        # before an `ap2` call keeps it trusted.
+        self.check([f"git commit -m 'feat: teach ap2 (the CLI) a flag' && ap2 card show C1 --data $AP2_DATA",
+                    f"git commit -m \"feat: teach ap2 (the CLI) a flag\" && {PKG}/bin/ap2 card show C1 --data "
+                    "\"$AP2_DATA\"",
+                    f"echo \"- ap2 (v2) note posted\" >> $AP2_RUN_DIR/journal.md && {PKG}/bin/ap2 card list --data "
+                    "$AP2_DATA > $AP2_RUN_DIR/cards.json",
+                    f"gh pr create --title x --body \"Adds a guard to ap2 (v2).\" && {PKG}/bin/ap2 card note C1 "
+                    f"--text done --data {DATA}",
+                    f"rg -n 'ap2 (' docs; {PKG}/bin/ap2 card list --data $AP2_DATA",
+                    f"{PKG}/bin/ap2 card note C1 --text \"ap2 (v2) at $(git rev-parse --short HEAD)\" --data "
+                    "$AP2_DATA"], deny=False)
+        self.check(["eval 'ap2 ( ) { cp \"$@\"; }'; ap2 /tmp/src $AP2_DATA/config.yaml",
+                    "x='ap2 () { cp \"$@\"; }'; ap2 /tmp/src $AP2_DATA/config.yaml"], deny=True)
 
     def test_each_run_directory_mention_in_a_word_is_judged_on_its_own(self):
         """A quoted journal line can name the run directory twice: each mention that stays inside it is fine, and a

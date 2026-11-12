@@ -2192,8 +2192,9 @@ Calls the author made without asking (check them):
       or not, in any position, is one of the rebinding words above, a `.` that is a segment's first word, a
       command word or follows a keyword or a closer, `ap2` as a name being bound: the word `ap2` itself after
       quote removal (`hash -p /bin/cp ap2`, `autoload -U ap2`, `typeset -fu ap2`, `functions -c f ap2`), a path to
-      a file named `ap2` (`/tmp/b/ap2`), or a word holding `ap2=`, `ap2+=`, `ap2(` (also with blanks before the
-      `(`: `ap2 () { ... }` in a quoted action) or `[ap2]` (`alias ap2=cp`, `hash ap2=/bin/cp`, `commands[ap2]`);
+      a file named `ap2` (`/tmp/b/ap2`), or a word holding `ap2=`, `ap2+=`, `ap2(`, `ap2 ()` (blanks before a
+      `()`: `ap2 () { ... }` in a quoted action; prose such as `'teach ap2 (the CLI) a flag'` or `"ap2 (v2)"` is
+      none) or `[ap2]` (`alias ap2=cp`, `hash ap2=/bin/cp`, `commands[ap2]`);
       not the command word of an `ap2` segment, nor its arguments after it when the segment runs nothing else
       (`ap2 card note C1 --text "ap2"` stays trusted), and not `ap2` inside a longer word, so a commit message
       `git commit -m 'fix(v2): ap2 guard ...'` or `echo 'posting via ap2'` before an `ap2` call keeps it trusted
@@ -2201,8 +2202,9 @@ Calls the author made without asking (check them):
       `commands[`, `aliases[`, ..., not after a name character, `-` or `.`; and zsh's `${PATH::=...}`, also inside
       `"..."`); a search-path setting (an unquoted `PATH=`, `path+=(`, `path[1]=`, `FPATH=`, `fpath=`, ..., not
       after a name character, `-` or `.`, so `PYTHONPATH=src`, `--path=x` and `sys.path=` are none; or the search
-      path's name, plain or in an assignment quoted or not, in a segment
-      where one of the setter commands above runs: `for PATH in ./b`, `read PATH <<< ./b`, `export "PATH=..."`; a plain
+      path's name, plain or in an assignment quoted or not, or one of zsh's name tables as a plain word, in a segment
+      where one of the setter commands above runs: `for PATH in ./b`, `read PATH <<< ./b`, `export "PATH=..."`,
+      `read -A commands <<< 'ap2 /bin/cp'` (zsh fills the command hash table from the words it reads); a plain
       `path` argument, as in `git log -- path`, and a quoted pattern, `rg -n "path=" <pkg>/lib`, are none); a
       `$'...'` it cannot decode; or a function definition. A heredoc body line is data, but in an unquoted body
       a name table counts (the shell expands `${commands[ap2]::=...}` there). When `ap2` is not trusted, an `ap2`

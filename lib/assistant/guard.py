@@ -37,9 +37,9 @@ unquoted extglob opener outside arithmetic, is denied when it names a guarded pa
 exemption only when nothing in the command, in any position and in every reading, can make the name run something
 else (`_ap2_trusted`: a word `alias`, `hash`, `source`, `eval`, `function`, ..., a `.` that may run, `ap2` as a name
 being bound outside an `ap2` call's own words (the word `ap2`, `ap2=`, `[ap2]`, ...; not `ap2` in a commit message), a
-name table such as `${commands[ap2]::=...}`, an unquoted `PATH=...` or a search-path name a setter such as `read`
-takes, a function definition, a `$'...'` it cannot decode); else an `ap2` segment that names a guarded path is
-denied. A command that may make any
+name table such as `${commands[ap2]::=...}`, an unquoted `PATH=...` or a search-path or name-table name a setter
+such as `read` takes (`read -A commands`), a function definition, a `$'...'` it cannot decode); else an `ap2`
+segment that names a guarded path is denied. A command that may make any
 name run something else (a function definition, `alias`, `hash`, `source` or `autoload` where it may run as a
 command, after redirects, assignments, `command --`, a substitution that may expand to nothing or inside `<(...)`
 too, or as any word after an unquoted `)`, `]]` or `}` of its segment, `PATH=...`, `fpath=...`, zsh's
@@ -1784,6 +1784,9 @@ _TABLE_ANY = re.compile(r"(?<![A-Za-z0-9_.-])" + _TABLE_NAMES + r"(?:\[|\+?=)|\$
 # name character, `-` or `.`: `PYTHONPATH=src`, `--path=x` and `sys.path=` are none), and as a plain word.
 _PATH_SET = re.compile(r"(?<![A-Za-z0-9_.-])(?:PATH|path|FPATH|fpath)(?:\[|\+?=)")
 _PATH_WORDS = frozenset(("PATH", "path", "FPATH", "fpath"))
+# zsh's name tables as plain words a setter takes: `read -A commands <<< 'ap2 /bin/cp'` fills the command hash table
+# (`commands[ap2]` is then `/bin/cp`), and so may `typeset -A functions ...` or `for aliases in ...`.
+_TABLE_WORDS = frozenset(("functions", "aliases", "galiases", "saliases", "commands"))
 # The commands that set a variable named by a word (`for PATH in ./b`, `read PATH`, `printf -v PATH ...`, `export
 # "PATH=..."`, `env "PATH=..." cmd`, zsh's `set -A path ...`), or run a quoted text that can (`trap '...' DEBUG`).
 _PATH_SETTERS = frozenset(("for", "select", "read", "declare", "typeset", "export", "local", "readonly", "integer",
@@ -1794,20 +1797,21 @@ _PATH_SETTERS = frozenset(("for", "select", "read", "declare", "typeset", "expor
 def _sets_path(p, w) -> bool:
     """Whether the word `w` of the `_Parsed` segment `p` may set the search path or zsh's function path: an
     assignment to one whose `=` or `[` no quote made text (`_Word.mask`; a quoted `"path="` is a plain argument, as
-    in `rg "path=" lib`), or, in a segment where one of `_PATH_SETTERS` runs (`_Parsed.setter`), such a name as a
-    plain word or an assignment quoted or not (`git log -- path` names a file, and so does `git grep set -- path`)."""
+    in `rg "path=" lib`), or, in a segment where one of `_PATH_SETTERS` runs (`_Parsed.setter`), such a name or one
+    of zsh's name tables (`_TABLE_WORDS`: `read -A commands`) as a plain word, or an assignment quoted or not (`git
+    log -- path` names a file, and so does `git grep set -- path`)."""
     for m in _PATH_SET.finditer(w):
         if w.mask is None or w.mask[m.end() - 1] != _HIDE:
             return True
-    return p.setter and (w in _PATH_WORDS or bool(_PATH_SET.search(w)))
+    return p.setter and (w in _PATH_WORDS or w in _TABLE_WORDS or bool(_PATH_SET.search(w)))
 
 
 # `ap2` as a name being bound, in a word with its quotes removed: the word `ap2` (`hash -p /bin/cp ap2`, `autoload
-# -U ap2`, `typeset -fu ap2`), a path to a file named `ap2` (`/tmp/b/ap2`), or `ap2=`, `ap2+=`, `ap2(` with or
-# without blanks before the `(` (`ap2()`, `ap2 () { ... }` in a quoted action) and `[ap2]` inside a word (`alias
-# ap2=cp`, `hash ap2=/bin/cp`, `commands[ap2]`); not `ap2` inside prose (`'fix: ap2 guard'`), `AP2_DATA`,
-# `test_ap2_x` or `ap2x`.
-_AP2_BOUND = re.compile(r"(?<![A-Za-z0-9_])ap2(?:\+?=|[ \t]*\()|\[ap2\]")
+# -U ap2`, `typeset -fu ap2`), a path to a file named `ap2` (`/tmp/b/ap2`), or `ap2=`, `ap2+=`, `ap2(`, `ap2 ()`
+# (blanks before a `()`, blanks inside it too: `ap2 () { ... }` in a quoted action) and `[ap2]` inside a word
+# (`alias ap2=cp`, `hash ap2=/bin/cp`, `commands[ap2]`); not `ap2` inside prose (`'fix: ap2 guard'`, `'teach ap2
+# (the CLI) a flag'`, `"ap2 (v2)"`), `AP2_DATA`, `test_ap2_x` or `ap2x`.
+_AP2_BOUND = re.compile(r"(?<![A-Za-z0-9_])ap2(?:\+?=|\(|[ \t]+\([ \t]*\))|\[ap2\]")
 
 
 def _ap2_bound(w: str) -> bool:
