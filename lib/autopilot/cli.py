@@ -12,6 +12,7 @@ _MODULES = [
     "autopilot.gate", "autopilot.dispatch", "autopilot.mergecheck", "autopilot.snapshot",
     "autopilot.guard", "autopilot.perms", "autopilot.publish", "autopilot.checkpkg",
     "autopilot.doctor", "autopilot.status", "autopilot.install", "autopilot.access", "autopilot.park",
+    "autopilot.profile",
 ]
 
 
@@ -41,6 +42,8 @@ FAST = {"hook-prompt": "autopilot.snapshot", "hook-guard": "autopilot.guard",
 
 
 def main(argv: list) -> int:
+    from autopilot import profile
+    profile.migrate_from_config()
     if argv and argv[0] in FAST:
         importlib.import_module(FAST[argv[0]])
     else:

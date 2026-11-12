@@ -8,7 +8,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 
-from autopilot import budget, cli, config, dispatch, events, lock, nextwork, ops, paths, park, refresh, replies, sessions, state, workers
+from autopilot import budget, cli, config, dispatch, events, lock, nextwork, ops, paths, park, profile, refresh, replies, sessions, state, workers
 
 
 def report_due(times: list, last_slot, now: datetime):
@@ -276,6 +276,7 @@ def _epoch(iso: str):
 
 
 def run(now: datetime = None, dispatch_fn=None) -> int:
+    profile.migrate_from_config()
     gcfg = config.load_global()
     if lock.held(paths.data_root() / "lock"):
         return 0

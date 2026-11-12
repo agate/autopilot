@@ -18,7 +18,7 @@ that setting.
 | `gate_interval_s` | `60` | How often the background gate wakes, in seconds. Takes effect after `ap install`. |
 | `reply_check.every_s` | `60` | How often to read answers from the page, in seconds. 0 turns it off. |
 | `reply_check.quiet` | `["22:00", "06:00"]` | No answer reads between these two times (this computer's clock); the forced pass picks answers up then. |
-| `reply_check.model` | `"haiku"` | Model for the answer read. |
+| `reply_check.model` | `"haiku"` | Model for the answer read; moved to the subscription profile (`ap profile show subscription`). |
 | `reply_check.timeout_s` | `120` | Give up on one answer read after this many seconds. |
 | `page_refresh_min` | `30` | Refresh the page at least this often, in minutes, even when nothing changed, so usage numbers and times stay current. A real change refreshes it within a few minutes. 0 turns the periodic refresh off. |
 | `report_times` | `["09:00", "17:00", "21:00"]` | When reports are written, local time. An autopilot can set its own. |
@@ -27,10 +27,11 @@ that setting.
 | `self_review.remind_at` | `10` | Remind once this many routine decisions the autopilot made by itself are unread: one line in the reports and on the page. 0 turns it off. |
 | `self_review.remind_days` | `3` | Also remind once the oldest unread routine decision is this many days old. 0 turns it off. |
 | `permission_mode` | `"auto"` | Claude Code permission mode for the dispatcher and workers. |
+| `active_profile` | `"subscription"` | Access profile the dispatcher and workers run on; manage them with `ap profile`. |
 | `page_host` | `"claude.ai"` | Where the page is published. |
-| `models.dispatcher` | `null` | Model for dispatcher passes; null uses Claude Code's default. |
-| `models.worker` | `null` | Model for workers; null uses Claude Code's default. |
-| `worker_effort` | `"xhigh"` | Effort level for workers. |
+| `models.dispatcher` | `null` | Model for dispatcher passes; null uses Claude Code's default; moved to the subscription profile (`ap profile show subscription`). |
+| `models.worker` | `null` | Model for workers; null uses Claude Code's default; moved to the subscription profile (`ap profile show subscription`). |
+| `worker_effort` | `"xhigh"` | Effort level for workers; moved to the subscription profile (`ap profile show subscription`). |
 | `dispatch_timeout_s` | `1800` | Stop a dispatcher pass that runs longer than this many seconds. |
 | `worktree_root` | `"~/worktrees"` | Folder where task worktrees are created. |
 | `reader_lang` | `"en"` | The reader's language for the page and reports; set at the first init. |
