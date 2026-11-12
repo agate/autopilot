@@ -854,6 +854,14 @@ class HardeningTest(SpendCase):
         self.assertAlmostEqual(t["month"], 2.0)
         self.assertEqual((t["unknown"], t["unknown_today"]), (True, True))
 
+    def test_a_line_over_the_cap_still_counts_toward_the_line_numbers_after_it(self):
+        self.patch(spend, "MAX_LINE_BYTES", self.CAP)
+        bare = dict(NEW, message={k: v for k, v in NEW["message"].items() if k != "id"})
+        bare.pop("requestId", None)  # no request id and no message id: keyed by its line number
+        self.write(self.line("req_a"), self.line("req_long", self.CAP + 1), json.dumps(bare) + "\n")
+        items = spend._parse_file(self.transcript, spend.prices(self.data))
+        self.assertEqual([(i["id"], i["usd"] is None) for i in items], [("req_a", False), ("~1", True), ("~2", False)])
+
     def test_a_line_at_the_cap_is_parsed_and_a_long_last_line_is_skipped(self):
         self.patch(spend, "MAX_LINE_BYTES", self.CAP)
         last = self.line("req_end", 3 * self.CAP + 7)[:-1]  # several chunks long, and no newline at the end
@@ -903,12 +911,16 @@ class HardeningTest(SpendCase):
 
     def test_a_file_that_grows_past_the_cap_keeps_the_requests_read_before_it(self):
         self.write(self.line("req_a"), self.line("req_b"))
-        real = spend._lines
+        table = spend.prices(self.data)
+        self.patch(spend, "MAX_FILE_BYTES", len(self.line("req_a")) + 1)  # the cap falls inside the second line
+        real = os.fstat
 
-        def lines(f, cap, limit):  # the cap falls inside the second line, as if the file grew while it was read
-            return real(f, cap, len(self.line("req_a")) + 1)
-        self.patch(spend, "_lines", lines)
-        items = spend._parse_file(self.transcript, spend.prices(self.data))
+        def fstat(fd):  # the size check sees a tiny file, as if the file grew after it was checked
+            st = list(real(fd))
+            st[6] = 1
+            return os.stat_result(st)
+        self.patch(spend.os, "fstat", fstat)
+        items = spend._parse_file(self.transcript, table)
         self.assertEqual([i["id"] for i in items], ["req_a", "~file"])
         self.assertEqual(round(items[0]["usd"], 6), 1.0)
         self.assertIsNone(items[1]["usd"])
