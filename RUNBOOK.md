@@ -192,6 +192,11 @@ rejects one that does not.
 6. **Replies.** Read the page's `replies` collection with `ArtifactData` (`ap publish url` prints the
    page). Each reply has `decision` (`<ap>:<D-id>`), `option` or `text`, and `by`. First record every
    answer, then tell the page, then act on them:
+   - A reply with a `kind` (`profile` or `cap`: a profile switch or a daily-cap answer) is no card answer:
+     never `ap decision resolve` it. Run `ap reply-kind '<the reply document as JSON>'` with it (the
+     same code the minute check uses; it applies each reply once and prints what it did). When it exits 0,
+     delete that reply document in the same `ArtifactData` batch that tells the page (below). Exit 1: leave
+     the reply for the next pass.
    - `option: "undo"` on a `self` card: `ap decision resolve <ap> <D-id> --answer undo --status undone --handling`.
      It works on a card the user already marked read, too, even once the archive took it.
    - `option: "keep"` on a `self` card (OK: read, it stands), or a reply with a `decisions` list (the
@@ -250,7 +255,8 @@ rejects one that does not.
     `ap decision keep <ap> <D-id> ...` instead, never `--handling`), then
     `ap publish diff --only decisions`, its rows in one `ArtifactData` batch, and
     `ap publish mark --only decisions`. Do not act on it, do not run `ap decision handled`, and leave
-    the reply where it is: the next pass reads it again (`unchanged`) and acts. Run `ap tick <ap>`
+    the reply where it is: the next pass reads it again (`unchanged`) and acts. A new reply with a `kind`
+    gets `ap reply-kind` as in step 6 instead, and is deleted in that same batch once the command exits 0. Run `ap tick <ap>`
     ONLY when this re-read found at least one new answer; otherwise never queue a pass from a pass (an
     unneeded tick makes passes run back to back and spend the budget for nothing).
     Then run `ap archive <ap>` for each autopilot, and:

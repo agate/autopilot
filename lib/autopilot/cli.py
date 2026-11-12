@@ -12,7 +12,7 @@ _MODULES = [
     "autopilot.gate", "autopilot.dispatch", "autopilot.mergecheck", "autopilot.snapshot",
     "autopilot.guard", "autopilot.perms", "autopilot.publish", "autopilot.checkpkg",
     "autopilot.doctor", "autopilot.status", "autopilot.install", "autopilot.access", "autopilot.park",
-    "autopilot.profile",
+    "autopilot.profile", "autopilot.replies",
 ]
 
 

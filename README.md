@@ -20,7 +20,7 @@ call. When you have questions, you open one (`/autopilot <name>`).
 
 | Part | What it is | Uses tokens |
 |------|------------|-------------|
-| The check (`ap gate`) | Plain code that a launchd login item runs every minute and after each restart. It fingerprints finished work, dead workers, ready tasks against free slots, CI and reviews on open PRs, and your watch commands | No, except one tiny Haiku read of your page's answers (06:00–22:00, only while a card can be answered) |
+| The check (`ap gate`) | Plain code that a launchd login item runs every minute and after each restart. It fingerprints finished work, dead workers, ready tasks against free slots, CI and reviews on open PRs, and your watch commands | No, except one tiny Haiku read of your page's answers (outside the quiet hours, `reply_check.quiet`, only while a card can be answered; in the quiet hours only while the daily-cap card is open) |
 | A pass | A new background Claude session, started when the fingerprint changed or 30 minutes passed. It reads `RUNBOOK.md`, your rules and the state file, handles finished work, fills free worker slots, writes reports, publishes the page, and exits. One at a time, under a lock | Yes |
 | Workers | Background sessions, one per task and role (implement, review, PR loop), each in its own git worktree. Each writes a report and kicks the check when done | Yes |
 | A talk session | Any Claude Code session where you type `/autopilot <name>`. A hook adds a fresh snapshot to every message | Yes, while you chat |
@@ -164,7 +164,9 @@ commands that print a key, never the key.
 - **Key health.** If the key command fails, no new worker starts and the page shows the error with its
   fix. It never falls back to the subscription. Fix the key, or run `ap profile rotate <name>`.
 - **Switching from the page.** The answer check applies the switch. It takes up to about 5 minutes (about 1 when a card
-  is waiting). In the quiet hours (`reply_check.quiet`) only the forced pass reads answers, so it can take up to 30 minutes.
+  is waiting). In the quiet hours (`reply_check.quiet`) the next forced pass applies it, so it can take up to
+  `forced_pass_min` minutes. A cap answer takes effect within a minute, also in the quiet hours: the check keeps
+  reading while the cap card is open. With `reply_check.every_s` at 0, passes apply both.
   Switching with `ap profile use` is immediate.
 
 ## What it may do on its own
@@ -230,7 +232,7 @@ reaches you unless you changed that setting. The full list is in
 | `budget.park_pct` | `90` | Running workers stop and wait once any usage window reaches this percent, and continue after it resets |
 | `forced_pass_min` | `30` | Run a pass at least this often, in minutes, even when nothing changed |
 | `gate_interval_s` | `60` | How often the check wakes, in seconds; takes effect after `ap install` |
-| `reply_check.quiet` | `["22:00", "06:00"]` | No answer reads between these times; the forced pass picks answers up then |
+| `reply_check.quiet` | `["22:00", "06:00"]` | No answer reads between these times, except while the daily-cap card is open; the forced pass picks answers up then |
 | `report_times` | `["09:00", "17:00", "21:00"]` | When reports are written, local time |
 | `worktree_root` | `"~/worktrees"` | Where task worktrees are created |
 | `permission_mode` | `"auto"` | Claude Code permission mode for passes and workers |

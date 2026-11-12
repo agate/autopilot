@@ -338,6 +338,23 @@ class AccessTest(unittest.TestCase):
         self.assertIsNone(acc["cap_card"])
         self.assertIn("22:00", acc["switch_note"])
 
+    def test_switch_note_reads_the_quiet_window(self):
+        g = config.load_global()
+        g["reply_check"] = dict(g["reply_check"], quiet=["21:30", "07:15"])
+        config.save_global(g)
+        note = publish.collect([])["meta"]["access"]["switch_note"]
+        self.assertIn("21:30", note)
+        self.assertIn("07:15", note)
+        self.assertNotIn("22:00", note)
+        g["reply_check"] = dict(g["reply_check"], every_s=0)
+        config.save_global(g)
+        self.assertIn("within 30 minutes", publish.collect([])["meta"]["access"]["switch_note"])
+        # The page builds the same text from meta.reply_check, never from fixed hours.
+        for key in ("access_switch_note", "access_switch_note_quiet", "access_switch_note_off", "cap_pending",
+                    "cap_pending_off"):
+            self.assertNotIn("22:00", LABELS[key], key)
+        self.assertIn("S.meta.reply_check", js_fn("switchNote"))
+
     def test_collect_access_subscription(self):
         acc = publish.collect([])["meta"]["access"]
         self.assertEqual(acc["profile"]["mode"], "subscription")
@@ -375,8 +392,8 @@ class AccessTest(unittest.TestCase):
         self.assertNotIn("bad", [p["name"] for p in acc["profiles"]])
         self.assertEqual(acc["broken_profiles"], [{"name": "bad", "error": "unreadable"}])
 
-    def test_pending_switch_clears_on_any_change_or_after_35_minutes(self):
-        self.assertIn("SWITCH_PENDING_MS = 35 * 60 * 1000", PAGE)
+    def test_pending_switch_clears_on_any_change_or_after_the_forced_pass(self):
+        self.assertIn("((S.meta.reply_check || {}).forced_pass_min || 30) * 60000 + 5 * 60000", PAGE)
         self.assertIn("acc.profile.name !== pendingSwitch.from", PAGE)
 
     def test_page_has_no_key_text(self):

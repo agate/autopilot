@@ -62,10 +62,11 @@ Read the whole configuration back in plain words. On the user's yes:
    is waiting on the page.
 6. The background check. Run `ap install --check`. If it prints `installed`, go on. Otherwise ask one
    multiple-choice question: install it now? Say in plain words what it is: a login item that runs
-   `ap gate` every minute and after each restart; the gate's own checks use no tokens; from 06:00 to
-   22:00 it also reads the page's answers once a minute with a tiny Haiku session (about $0.0008 a read
-   at list price, only while a card can be answered, so answers take effect within a minute; at night
-   the 30-minute pass picks them up); it starts the passes that do use the user's Claude usage;
+   `ap gate` every minute and after each restart; the gate's own checks use no tokens; outside the quiet
+   hours (`reply_check.quiet`, 22:00 to 06:00 by default) it also reads the page's answers once a minute
+   with a tiny Haiku session (about $0.0008 a read at list price, only while a card can be answered, so
+   answers take effect within a minute; in the quiet hours the forced pass picks them up, except a
+   daily-cap answer, which is still read within a minute); it starts the passes that do use the user's Claude usage;
    `ap uninstall` removes it. Options: install now (recommended) / not now.
    - Install now: run `ap install` with the Bash tool. If Claude Code shows a permission prompt, the
      user approves it there. If the call is refused or blocked, do not retry it or find another way:

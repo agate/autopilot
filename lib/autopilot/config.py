@@ -49,7 +49,7 @@ DESCRIBE: dict = {
     "forced_pass_min": "Run a dispatcher pass at least this often, in minutes, even when nothing changed.",
     "gate_interval_s": "How often the background gate wakes, in seconds. Takes effect after `ap install`.",
     "reply_check.every_s": "How often to read answers from the page, in seconds. 0 turns it off.",
-    "reply_check.quiet": "No answer reads between these two times (this computer's clock); the forced pass picks answers up then.",
+    "reply_check.quiet": "No answer reads between these two times (this computer's clock), except while the daily-cap card is open; the forced pass picks answers up then.",
     "reply_check.model": "Model for the answer read; moved to the subscription profile (`ap profile show subscription`).",
     "reply_check.timeout_s": "Give up on one answer read after this many seconds.",
     "page_refresh_min": "Refresh the page at least this often, in minutes, even when nothing changed, so usage numbers and times stay current. A real change refreshes it within a few minutes. 0 turns the periodic refresh off.",

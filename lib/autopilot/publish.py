@@ -103,10 +103,22 @@ def _evidence(ap: str, task: str, assets: dict):
     return ev
 
 
-SWITCH_NOTE = ("Switching takes up to about 5 minutes (about 1 when a card is waiting) and up to 30 minutes between 22:00 and 06:00.")
+def switch_note(gcfg: dict) -> str:
+    """When a switch chosen on the page takes effect, from `reply_check` (the page builds the same text from
+    meta.reply_check with the labels access_switch_note*)."""
+    rc, lab = gcfg.get("reply_check") or {}, text.labels()
+    minutes = gcfg.get("forced_pass_min") or 30
+    if not rc.get("every_s"):
+        return lab["access_switch_note_off"].replace("{min}", str(minutes))
+    out = lab["access_switch_note"]
+    q = rc.get("quiet") or []
+    if len(q) == 2:
+        out += " " + lab["access_switch_note_quiet"].replace("{start}", q[0]).replace("{end}", q[1]) \
+            .replace("{min}", str(minutes))
+    return out
 
 
-def _access(cur: dict, now: datetime) -> dict:
+def _access(cur: dict, now: datetime, gcfg: dict = None) -> dict:
     """What the page shows about the access profile: the active one, the choices, usage by mode and the cap
     card. Never a key, a key command, a gateway address or anything else from the profile's secrets."""
     p, b, spent = cur["profile"], cur["budget"], cur["spent"]
@@ -114,7 +126,8 @@ def _access(cur: dict, now: datetime) -> dict:
     session_pct = None if session is None else int(round(session))
     acc = {"profile": {k: p.get(k) for k in ("name", "label", "mode", "model", "effort")},
            "page_sessions": "subscription",
-           "profiles": [], "broken_profiles": [], "cap_card": None, "switch_note": SWITCH_NOTE}
+           "profiles": [], "broken_profiles": [], "cap_card": None,
+           "switch_note": switch_note(gcfg or config.load_global())}
     for n in profile.names():   # one unreadable profile file must not break the whole page
         try:
             q = profile.load(n)
@@ -144,7 +157,7 @@ def collect(aps: list) -> dict:
     cur = budget.current(gcfg, datetime.now(timezone.utc))
     out["meta"]["budget"] = {"budget": cur["budget"], "allowance": cur["workers"], "passes": cur["passes"],
                              "spent": cur["spent"]}
-    out["meta"]["access"] = _access(cur, datetime.now(timezone.utc))
+    out["meta"]["access"] = _access(cur, datetime.now(timezone.utc), gcfg)
     active = config.active_aps()
     out["meta"]["cap"] = {"max_workers": gcfg["max_workers"], "active": len(active),
                           "warning": gcfg["max_workers"] < len(active)}

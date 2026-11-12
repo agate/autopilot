@@ -82,7 +82,7 @@ Map the user's words to `ap profile` and confirm in one line:
   always use the subscription.
 - Never print what a key command prints. Pass the command line as the user gave it, and show only
   `ap profile show` output, which holds commands, never keys.
-- A switch made from the page takes up to about 5 minutes (about 1 when a card is waiting); during the quiet hours up to 30 minutes. `ap profile use` is immediate.
+- A switch made from the page takes up to about 5 minutes (about 1 when a card is waiting); in the quiet hours (`reply_check.quiet`) up to `forced_pass_min` minutes. A cap answer takes effect within a minute. `ap profile use` is immediate.
 - A key problem shows as `key_error` on the page with its fix. Do not work around it by switching
   profiles unless the user asks.
 

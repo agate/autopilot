@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from datetime import datetime, timedelta
 
-from autopilot import cap, config, events, paths, profile, sessions, spend, state, usage, workers
+from autopilot import cap, cli, config, events, paths, profile, sessions, spend, state, usage, workers
 
 NAME = "autopilot · replies"
 SWITCH_CHECK_S = 300   # with several profiles and no card waiting, a profile switch is looked for this often
@@ -150,42 +151,96 @@ def check(gcfg: dict, url: str, poll_s: float = 2) -> dict:
         _cleanup(claude, short)
 
 
-def _ignore(r: dict, why: str) -> None:
+KINDS = ("profile", "cap")
+APPLIED_KEPT = 500   # profile and cap reply ids already applied, newest last
+
+
+def _applied_file():
+    return paths.data_root() / "replies-applied.json"
+
+
+def _applied() -> list:
+    try:
+        ids = json.loads(_applied_file().read_text()).get("ids")
+    except (OSError, ValueError, AttributeError):
+        return []
+    return [str(i) for i in ids] if isinstance(ids, list) else []
+
+
+def _mark_applied(rid: str) -> None:
+    ids = [i for i in _applied() if i != rid] + [rid]
+    config._write(_applied_file(), {"ids": ids[-APPLIED_KEPT:]})
+
+
+def _ignore(r: dict, why: str) -> str:
     events.append_global("cap_reply_ignored", {"reason": why, "option": r.get("option"), "day": r.get("day")})
+    return f"ignored: {why}"
 
 
-def _apply(r: dict, now: datetime) -> bool:
-    """Apply a profile or cap reply directly; True when `r` was one (so it queues no pass). A bad option is logged."""
+def _apply(r: dict, now: datetime) -> str:
+    """Apply one profile or cap reply and say what happened. A bad answer is logged and reported, never raised;
+    only a failure to write (OSError) raises, so the reply can be tried again."""
     kind, option = r.get("kind"), str(r.get("option") or "")
     try:
         if kind == "profile":
-            if option in profile.names():
-                profile.use(option)
-            else:
+            if option not in profile.names():
                 events.append_global("profile_unknown", {"option": option})
-        elif kind == "cap":
-            st = cap.state(now)
-            if r.get("day") != st["day"]:
-                _ignore(r, "not today's card")
-            elif st["card"] != "open":
-                _ignore(r, "the card is not open")
-            else:
-                cap.answer(option, now)
-    except (ValueError, KeyError, OSError) as e:   # the gate must keep running whatever an answer holds
+                return f"ignored: no profile named {option!r}"
+            profile.use(option)
+            return f"applied: profile {option}"
+        st = cap.state(now)
+        if r.get("day") != st["day"]:
+            return _ignore(r, "not today's card")
+        if st["card"] != "open":
+            return _ignore(r, "the card is not open")
+        cap.answer(option, now)
+        return f"applied: cap {option}"
+    except (ValueError, KeyError) as e:   # the gate must keep running whatever an answer holds
         events.append_global("reply_failed", {"kind": kind, "option": option, "error": str(e)})
-    return kind in ("profile", "cap")
+        return f"refused: {e}"
+
+
+def apply_kind(r: dict, now: datetime) -> str:
+    """The one path a profile or cap reply takes, from the minute check and from `ap reply-kind` in a pass: each
+    reply id is applied once, whoever reads it first."""
+    if r.get("kind") not in KINDS:
+        raise ValueError("not a profile or cap reply (it has no kind: profile or kind: cap)")
+    rid = str(r.get("id") or "")
+    if rid and rid in _applied():
+        return "already applied"
+    try:
+        out = _apply(r, now)
+    except OSError as e:
+        events.append_global("reply_failed", {"kind": r.get("kind"), "option": r.get("option"), "error": str(e)})
+        raise
+    if rid:
+        _mark_applied(rid)
+    return out
+
+
+def _quiet_window(gcfg: dict):
+    return (gcfg.get("reply_check") or {}).get("quiet")
+
+
+def _cap_card_open(now: datetime) -> bool:
+    try:
+        return profile.active().get("mode") == "gateway" and cap.state(now)["card"] == "open"
+    except Exception:  # noqa: BLE001 - an unreadable active profile has no cap card
+        return False
 
 
 def step(gcfg: dict, gs: dict, now: datetime) -> set:
     """Run the check when it is due and return the autopilots to queue a pass for. It runs whatever the budget
     allows: a paused budget still reads answers (the gate lets a ticked autopilot's pass go, and the pass starts
-    no workers). Keeps its own
-    bookkeeping in gs["replies"]: last_at, ok_at, ids (the reply ids seen last time), errors, error."""
+    no workers). In the quiet hours it runs only while the cap card is open (money is at stake): it applies
+    profile and cap answers then, and leaves other answers for after the quiet hours or the forced pass. Keeps its
+    own bookkeeping in gs["replies"]: last_at, ok_at, ids (the reply ids seen last time), errors, error."""
     from autopilot import publish
     rc = gcfg.get("reply_check") or {}
     every = rc.get("every_s") or 0
     rs = gs.setdefault("replies", {})
-    if not every or quiet(now, rc.get("quiet")):
+    night = quiet(now, _quiet_window(gcfg))
+    if not every or (night and not _cap_card_open(now)):
         return set()
     last = rs.get("last_at")
     if last and now - datetime.fromisoformat(last) < timedelta(seconds=every - 5):
@@ -195,11 +250,16 @@ def step(gcfg: dict, gs: dict, now: datetime) -> set:
         return set()
     active = _active()
     aps = waiting(active)
-    if profile.active().get("mode") != "gateway":
+    try:
+        gateway = profile.active().get("mode") == "gateway"
+        several = len(profile.names()) >= 2
+    except Exception:  # noqa: BLE001 - a broken profile file must not stop the gate; a switch may fix it
+        gateway, several = False, True
+    if not gateway:
         cap.close_card(now)   # no daily cap here: an open card must not keep the one-minute check running
     if not aps and cap.state(now)["card"] != "open":
         # Nothing to answer: only a possible profile switch is worth a look, and a slower one.
-        if len(profile.names()) < 2 or (last and now - datetime.fromisoformat(last) < timedelta(seconds=SWITCH_CHECK_S - 5)):
+        if not several or (last and now - datetime.fromisoformat(last) < timedelta(seconds=SWITCH_CHECK_S - 5)):
             return set()
     rs["last_at"] = now.isoformat()
     try:
@@ -213,14 +273,54 @@ def step(gcfg: dict, gs: dict, now: datetime) -> set:
     rs.update(errors=0, ok_at=now.isoformat())
     rs.pop("error", None)
     seen = set(rs.get("ids") or [])
-    rs["ids"] = [r["id"] for r in res["replies"]]
     new = [r for r in res["replies"] if r["id"] not in seen]
     # A profile or cap answer is applied here, in code, oldest first (the list order is not the click order).
-    acc = sorted((r for r in new if r.get("kind") in ("profile", "cap")), key=lambda r: str(r.get("at") or ""))
+    acc = sorted((r for r in new if r.get("kind") in KINDS), key=lambda r: str(r.get("at") or ""))
+    failed = set()
     for r in acc:
-        _apply(r, now)
-    new = [r for r in new if r.get("kind") not in ("profile", "cap")]
+        try:
+            apply_kind(r, now)
+        except OSError:
+            failed.add(r["id"])   # not seen: the next check tries it again
+    new = [r for r in new if r.get("kind") not in KINDS]
+    if night:
+        # Other answers wait: they stay unseen, so the first check after the quiet hours queues their pass.
+        rs["ids"] = sorted((seen & {r["id"] for r in res["replies"]}) | ({r["id"] for r in acc} - failed))
+        return set()
+    rs["ids"] = [r["id"] for r in res["replies"] if r["id"] not in failed]
     if not new:
         return set()
     named = {r["ap"] for r in new if r.get("ap") in set(active)}
     return named if len(named) == len(new) else named | set(aps)
+
+
+def _doc(raw: str) -> dict:
+    """A reply document as the pass read it: {"id", "data": {...}} or the fields at the top level."""
+    d = json.loads(raw)
+    if not isinstance(d, dict):
+        raise ValueError("a reply document is a JSON object")
+    data = d.get("data") if isinstance(d.get("data"), dict) else {}
+    out = {**{k: v for k, v in d.items() if k != "data"}, **data}
+    if "id" in d:
+        out["id"] = d["id"]
+    return out
+
+
+@cli.command("reply-kind")
+def _reply_kind(args: list) -> int:
+    """`ap reply-kind '<reply doc json>'`: apply one profile or cap reply in a pass, the way the minute check
+    does. Exit 0 when the reply is done with (applied, ignored, refused or applied before): delete it then."""
+    if len(args) != 1:
+        print("usage: ap reply-kind '<reply document JSON>'", file=sys.stderr)
+        return 2
+    try:
+        r = _doc(args[0])
+        out = apply_kind(r, datetime.now().astimezone())
+    except ValueError as e:
+        print(f"ap reply-kind: {e}", file=sys.stderr)
+        return 2
+    except OSError as e:
+        print(f"ap reply-kind: could not apply it ({e}); keep the reply and try again next pass", file=sys.stderr)
+        return 1
+    print(out)
+    return 0

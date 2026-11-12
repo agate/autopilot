@@ -228,7 +228,7 @@ class StepTest(Env):
         self.assertEqual(replies.step(config.load_global(), {}, self.NOON), {"checkout"})
 
 
-class SwitchTest(Env):
+class SwitchBase(Env):
     def setUp(self):
         super().setUp()
         profile.save({"name": "g", "mode": "gateway", "model": "m", "small_model": "s", "daily_cap_usd": 100,
@@ -236,6 +236,11 @@ class SwitchTest(Env):
         for f in (self.data / "projects").glob("*/settings.json"):   # a real settings file always has permissions
             f.write_text(json.dumps({"permissions": {"allow": [], "deny": []}}))
 
+    def cap_reply(self, option="raise50", day=None, at="2026-01-02T12:00:00Z", rid="r1"):
+        return {"id": rid, "ap": None, "kind": "cap", "option": option, "day": day or cap.state(self.NOON)["day"], "at": at}
+
+
+class SwitchTest(SwitchBase):
     def test_step_applies_profile_reply_without_pass(self):
         self.result = {"ok": True, "replies": [{"id": "r1", "ap": None, "kind": "profile", "option": "g"}]}
         self.assertEqual(replies.step(config.load_global(), {}, self.NOON), set())
@@ -274,9 +279,6 @@ class SwitchTest(Env):
         self.assertIn("reply_failed", ev)
         self.assertIn("unknown option", ev)
         self.assertNotIn("cap_reply_ignored", ev)
-
-    def cap_reply(self, option="raise50", day=None, at="2026-01-02T12:00:00Z", rid="r1"):
-        return {"id": rid, "ap": None, "kind": "cap", "option": option, "day": day or cap.state(self.NOON)["day"], "at": at}
 
     def test_parse_carries_day_and_at(self):
         d = Path(tempfile.mkdtemp())
@@ -335,6 +337,74 @@ class SwitchTest(Env):
         (self.data / "profiles" / "g.json").unlink()
         replies.step(config.load_global(), {}, self.NOON)
         self.assertEqual(self.calls, [])
+
+
+class QuietCapTest(SwitchBase):
+    NIGHT = datetime(2026, 1, 2, 23, 0).astimezone()
+
+    def test_quiet_hours_still_read_answers_while_a_cap_card_is_open(self):
+        profile.use("g")
+        cap.open_card(self.NIGHT)
+        ops.decision_add("checkout", dec())
+        self.result = {"ok": True, "replies": [self.cap_reply("raise50", day=cap.state(self.NIGHT)["day"]),
+                                               {"id": "r2", "ap": "checkout"}]}
+        gs = {}
+        self.assertEqual(replies.step(config.load_global(), gs, self.NIGHT), set())   # no pass at night
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(cap.state(self.NIGHT)["raise_pct"], 50)
+        # The ask answer read at night was not taken as seen: it queues its pass once the quiet hours end.
+        morning = datetime(2026, 1, 3, 9, 0).astimezone()
+        self.result = {"ok": True, "replies": [{"id": "r2", "ap": "checkout"}]}
+        self.assertEqual(replies.step(config.load_global(), gs, morning), {"checkout"})
+
+    def test_quiet_hours_without_a_cap_card_read_nothing(self):
+        profile.use("g")
+        self.assertEqual(replies.step(config.load_global(), {}, self.NIGHT), set())
+        self.assertEqual(self.calls, [])
+
+
+class ReplyKindTest(SwitchBase):
+    def run_cli(self, *args):
+        import contextlib
+        import io
+        from autopilot import cli
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli.main(["reply-kind", *args])
+        return code, out.getvalue() + err.getvalue()
+
+    def test_applies_a_cap_reply_like_the_check(self):
+        profile.use("g")
+        cap.open_card(datetime.now().astimezone())   # the command reads the clock: today's card
+        doc = {"id": "r1", "data": {"kind": "cap", "option": "raise50", "day": cap.state()["day"], "at": "T1"}}
+        code, out = self.run_cli(json.dumps(doc))
+        self.assertEqual(code, 0)
+        self.assertIn("applied", out)
+        self.assertEqual(cap.state()["raise_pct"], 50)
+        code, out = self.run_cli(json.dumps(doc))   # the same reply again: applied once only
+        self.assertEqual((code, "already applied" in out), (0, True))
+
+    def test_a_reply_the_check_applied_is_not_applied_again(self):
+        self.result = {"ok": True, "replies": [{"id": "r1", "ap": None, "kind": "profile", "option": "g"}]}
+        replies.step(config.load_global(), {}, self.NOON)
+        profile.use("subscription")
+        code, out = self.run_cli(json.dumps({"id": "r1", "kind": "profile", "option": "g"}))
+        self.assertEqual((code, "already applied" in out), (0, True))
+        self.assertEqual(profile.active()["name"], "subscription")
+
+    def test_profile_switch_and_the_card_rules(self):
+        code, out = self.run_cli(json.dumps({"id": "r1", "kind": "profile", "option": "g"}))
+        self.assertEqual((code, profile.active()["name"]), (0, "g"))
+        code, out = self.run_cli(json.dumps({"id": "r2", "kind": "cap", "option": "raise50", "day": "1999-01-01"}))
+        self.assertEqual(code, 0)
+        self.assertIn("not today's card", out)
+        code, out = self.run_cli(json.dumps({"id": "r3", "kind": "profile", "option": "nope"}))
+        self.assertEqual(code, 0)
+        self.assertIn("ignored", out)
+
+    def test_refuses_a_doc_that_is_not_a_profile_or_cap_reply(self):
+        self.assertEqual(self.run_cli(json.dumps({"id": "r1", "decision": "checkout:D-1", "option": "a"}))[0], 2)
+        self.assertEqual(self.run_cli("{nope")[0], 2)
 
 
 class FakeClaudeTest(Env):

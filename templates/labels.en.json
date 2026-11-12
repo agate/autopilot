@@ -183,7 +183,7 @@
   "access_workers": "Workers: Gateway · {label}",
   "access_page_sessions": "Page sessions: Subscription",
   "access_switch": "Switch profile",
-  "access_switch_note": "Switching takes up to about 5 minutes (about 1 when a card is waiting) and up to 30 minutes between 22:00 and 06:00.",
+  "access_switch_note": "Switching takes up to about 5 minutes (about 1 when a card is waiting).",
   "access_switch_pending": "Switching to {name}. {note}",
   "access_current": "in use",
   "access_key_error": "Gateway key not working: {error}. New workers are paused.",
@@ -193,7 +193,7 @@
   "cap_raise50": "Raise today's limit by 50%",
   "cap_raise100": "Raise today's limit by 100%",
   "cap_pause": "Pause all autopilots",
-  "cap_pending": "Answer sent: {answer}. It takes effect within a minute, up to 30 minutes between 22:00 and 06:00.",
+  "cap_pending": "Answer sent: {answer}. It takes effect within a minute.",
   "usage_today": "Today",
   "usage_week": "This week",
   "usage_month": "This month",
@@ -201,5 +201,8 @@
   "usage_page_session": "5-hour window (page sessions)",
   "worker_profile": "Profile: {profile}",
   "cap_card_body_unknown": "Today's cost could not be priced, so no new workers start. Raise the limit or pause.",
-  "profile_broken": "Could not read profile: {names}."
+  "profile_broken": "Could not read profile: {names}.",
+  "access_switch_note_quiet": "Between {start} and {end} (this computer's clock) the next dispatcher pass applies it, within {min} minutes.",
+  "access_switch_note_off": "The next dispatcher pass applies a switch, within {min} minutes.",
+  "cap_pending_off": "Answer sent: {answer}. The next dispatcher pass applies it, within {min} minutes."
 }
