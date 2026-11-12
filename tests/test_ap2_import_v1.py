@@ -618,6 +618,56 @@ class ImportV1Test(unittest.TestCase):
         self.assertEqual(card["title"], {"en": "D1", "zh": "D1"})
         cards.check_title(card, ("en", "zh"))
 
+    def close_with_old_words(self, what, title) -> tuple:
+        """The import's report action for D1 and the card it leaves, after D1's stored card is given `what` as its
+        `plain.what` and `title` as its title, and D1 then leaves state.json."""
+        self.set_config("secondary_language: zh\n")
+        self.ok("--project", "shop")
+        d1 = self.by_key()["v1:shop:D1"]
+        path = Store(self.data).path(d1["id"])
+        old = json.loads(path.read_text(encoding="utf-8"))
+        old["plain"]["what"] = what  # a hand-edited old card
+        old["title"] = title
+        path.write_text(json.dumps(old), encoding="utf-8")
+        self.edit_state("projects/shop", lambda s: s["decisions"].pop(0))
+        report = self.ok("--project", "shop")
+        return self.actions(report)["v1:shop:D1"], self.by_key()["v1:shop:D1"]
+
+    def test_a_question_card_with_invisible_old_words_is_closed_with_its_title(self):
+        # cards.blank: old plain.what words of only U+FEFF have no words, so the old title is used instead.
+        action, card = self.close_with_old_words({"en": "\ufeff", "zh": "\ufeff"},
+                                                 {"en": "Old words", "zh": "旧的话"})
+        self.assertEqual(action, "update")
+        self.assertEqual((card["lane"], card["ask"]), ("done", None))
+        self.assertEqual(card["plain"]["what"], {"en": "Old words", "zh": "旧的话"})
+        self.assertEqual(card["title"], {"en": "Old words", "zh": "旧的话"})
+        cards.check_title(card, ("en", "zh"))
+
+    def test_a_question_card_with_invisible_old_words_and_title_is_closed_with_the_decision_id(self):
+        for title in ("\ufeff", {"en": "\ufeff", "zh": "\ufeff"}):
+            with self.subTest(title=title):
+                self.setUp()  # a fresh temp v1 and data folder: D1 must still be in state.json
+                action, card = self.close_with_old_words({"en": "\ufeff", "zh": "\ufeff"}, title)
+                self.assertEqual(action, "update")
+                self.assertEqual(card["plain"]["what"], {"en": "D1", "zh": "D1"})
+                self.assertEqual(card["title"], {"en": "D1", "zh": "D1"})
+                cards.check_title(card, ("en", "zh"))
+
+    def test_a_closed_question_skips_each_invisible_old_words_slot_alone(self):
+        make = importv1._Maker("shop", self.v1 / "projects" / "shop", ("en", "zh"), importv1.Labels(self.v1))
+        title = {"en": "Old words", "zh": "旧的话"}
+        for what, want in (({"en": "\ufeff", "zh": "有字"}, {"en": "Old words", "zh": "有字"}),
+                           ({"en": "有字", "zh": "\ufeff \ufeff"}, {"en": "有字", "zh": "旧的话"}),
+                           # Words next to U+FEFF are words: the slot is kept as it is.
+                           ({"en": "\ufeffKept", "zh": "有字"}, {"en": "\ufeffKept", "zh": "有字"})):
+            with self.subTest(what=what):
+                old = {"key": "v1:shop:D1", "kind": "question", "title": title, "plain": {"what": what},
+                       "parent": "abc", "source": {"name": "v1-import", "record": {}}}
+                card = make.closed(old)["card"]
+                self.assertEqual(card["plain"]["what"], want)
+                self.assertEqual(card["title"], want)
+                cards.check_title(card, ("en", "zh"))
+
     def test_a_question_card_the_old_import_closed_moves_to_one_text_per_language_once(self):
         self.set_config("secondary_language: zh\n")
         self.ok("--project", "shop")
