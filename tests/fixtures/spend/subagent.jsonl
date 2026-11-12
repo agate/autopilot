@@ -1,0 +1,1 @@
+{"type": "assistant", "requestId": "req_sub", "timestamp": "2026-11-10T15:05:00Z", "message": {"model": "claude-haiku-4-5[1m]", "usage": {"input_tokens": 500, "output_tokens": 500, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0, "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 0}}}}

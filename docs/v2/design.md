@@ -1023,7 +1023,8 @@ Calls the author made without asking (check them):
   `prloop.py` (the loop's record, the decision, the one check of the fix and the card's fields, design 6.3);
   for workers, `workers.py`, `resources.py`, `transcripts.py` and `projects.py` (see the workers entry below);
   access profiles: `profiles.py` (the store, the overlay and merge, `ap2 profile`; see the access profiles entry
-  below); the local page:
+  below); the spend ledger: `spend.py` with the shipped `prices.json` next to it (`ap2 spend`; see the spend
+  ledger entry below); the local page:
   `server.py` (the server, its JSON routes and the request guard, run by `ap2 serve`) and
   `builtin/page/local.html` (the one page, inline CSS and JS, found from `server.py`'s own path); and the
   phone page's data: `phone.py` (`build`, run by `ap2 phone build`). `ap2 config [--data PATH]` prints the
@@ -1935,6 +1936,8 @@ Calls the author made without asking (check them):
     `ap2 worker list`, `start CARD ROLE [--cwd P] [--prompt-file F] [--needs A,B] [--resume]`,
     `end CARD ROLE [--transcripts P]`, `check [--transcripts P] [--usage P]`,
     `park CARD ROLE [--note T] [--usage P]`, `answer CARD TEXT...`, `finish CARD [--transcripts P]`.
+    `ap2 spend [--mode M] [--json] [--transcripts P] [--data PATH]` prints what workers cost (see the spend ledger
+    entry below).
 - **[decided by the builder]** Access profiles (slice 1 of the port of v1's access profiles): the store,
   `ap2 profile`, and every worker start and resume on the active profile. Ported from v1's `lib/autopilot/profile.py`
   into `lib/assistant/profiles.py`, never imported (v1's version writes v1's data folder). v1 and v2 keep separate
@@ -2025,10 +2028,79 @@ Calls the author made without asking (check them):
     name at all: unreadable, bad JSON or no string `name`). `add` refuses a name that exists (`subscription` included)
     and the gateway flags on a `--subscription` profile, and prints the saved profile. `list` and `show` create
     nothing; `add`, `use` and `remove` write only inside the data folder, so they work in shadow mode.
-  - Not in this slice: the spend ledger, the daily cap and its card, key health, refresh and rotation (`rotate`),
-    and the page's badge and switch. Until the cap lands, a gateway worker has no daily cap: acceptable because v2
+  - Not in this slice: the spend ledger (its own entry below), the daily cap and its card, key health, refresh and
+    rotation (`rotate`), and the page's badge and switch. Until the cap lands, a gateway worker has no daily cap: acceptable because v2
     is not installed and runs no unattended loop, and workers start only in live mode, by hand. Until then a
     gateway worker still parks at the subscription's park line (it stops work, never spends more).
+- **[decided by the builder]** Spend ledger (slice 2 of the port of v1's access profiles): a gateway shows no
+  dollars, so v2 adds up what its own workers cost. Ported from v1's `lib/autopilot/spend.py` into
+  `lib/assistant/spend.py`, never imported (v1's version keeps v1's ledger). v1 and v2 totals are separate: v2
+  replaces v1. This slice only counts money; nothing reads the totals to block anything yet (the daily cap is next).
+  1. Own module. `spend.py` keeps v1's request pricing: the last usage per requestId (or message id) wins, so
+     streaming duplicates count once; synthetic all-zero lines are skipped; a model key drops a trailing `[...]`
+     (`[1m]`) and `-YYYYMMDD`; the `over_100k` tier applies when the prompt is over 100,000 tokens; a line without a
+     usable timestamp is unknown spend, never dropped. A session's subagents
+     (`<transcript dir>/<session id>/subagents/agent-*.jsonl`) count with it. It keeps v1's per-file cache keyed by
+     `(mtime_ns, size)`, the request-owner dedupe across resumed copies (a request belongs to the session that has
+     it first), settle, and `totals(data, projects, now, mode, listing)` with exactly the keys `today`, `week` (from
+     Monday), `month` (calendar), `unknown`, `unknown_today`, `unknown_models`, `unknown_launches`. A week that
+     started last month counts its days from last month too; `month` and `unknown` stay calendar-month. An aware `now`
+     cuts the days at its fixed offset; a naive or missing one (`ap2 spend`) puts each moment on its day by this
+     computer's local rules at that moment, so a daylight saving change keeps a request on its local day. It drops v1's
+     `remember` / `remembered` (no prompt hook reads totals yet), v1's `record_session` for `-p` runs and its
+     legacy per-day settled lines (v2 records no `-p` run and has no old ledger). Every function takes the data
+     folder (and the transcripts folder where it reads transcripts) and the time (`now`, `at`), so tests use temp
+     folders and pass the time; there is no module clock.
+  2. Where it is kept. `<data>/spend/launches.jsonl`, `settled.jsonl` and `cache.json` (written by a temp file
+     `cache.json.<pid>.tmp` and `os.replace`). `spend/` is made on the first write, so `datadir.FOLDERS` is
+     unchanged. A symlink at `spend/`, at one of its files or at `<data>/prices.json` is refused (lstat, as
+     `profiles._no_link`), and appends open with `O_NOFOLLOW`. A line that is not a JSON object is skipped; a file
+     that cannot be read raises `SpendError` (a `ConfigError`); a broken cache is rebuilt.
+  3. Launch rows carry the session id when v2 has it. `record_launch(data, short, kind, project, profile,
+     session_id="", at=None)` appends `{"short", "session", "kind", "project", "profile", "mode", "at"}` (`at` local
+     ISO time with its offset). v2 learns the session id right after `_launch` (`_session_id(short)`), so the row has
+     it in most cases; when it is "" the short id is resolved later from one `claude agents` listing per `totals`
+     call, at most every 600 s per short id (every 60 s while its launch is younger than 900 s), never once the
+     launch is older than 2 days. The listing is a function the caller passes (`listing=`; none resolves nothing):
+     the workers pass `claude agents` of their own claude, `ap2 spend` the `claude` on PATH, tests a stub. A row with
+     a session id never asks the listing.
+  4. Kinds. `KINDS` is v1's tuple (`worker`, `dispatcher`, `replies`, `refresh`, `discover`, `oneoff`), so later
+     slices keep the row format; an unknown kind raises ValueError. Only `worker` is recorded today. The tool
+     discovery (`_discover`) is not recorded: it is killed at its init event, before any model request, so it costs
+     nothing.
+  5. Prices. `lib/assistant/prices.json` is v1's file byte for byte (its `as_of` and `source` kept). A model is
+     overridden one at a time by an optional `<data>/prices.json` shaped like its `models` (not a `config.yaml`
+     key: those keys are pinned). A half-filled price counts as no price (unknown), never as $0; an override that is
+     not a JSON object raises `SpendError`. Workers may not edit it: `spend/**` and `prices.json` are in `PROTECTED`.
+  6. Settle before stop and rm. `_kill(short, session_id="")` settles the session right after its `claude stop`
+     returns, and also when the stop raised (a stop that may have landed); `_close` and `_stop` pass the record's
+     session id (the old session a resume replaces is settled by it).
+     `finish()` settles each session id right before its `transcripts.remove_original` call, in live mode (where
+     the rm runs), so a removed transcript's spend is already kept. `settle(data, projects, short="", session_id="")`
+     keys by the session id when it has one, else the launch rows', the cache's, then the listing's; it writes the
+     session's requests as one `settled.jsonl` row, and the latest settle of a session wins. A settled row names
+     its short id and its session, so `totals` matches a launch row written without the session id to it, also
+     once the listing no longer shows the session and whatever the cache holds.
+  7. Bookkeeping never breaks a worker. Recording and settling never raise into `start`, `_resume_dead`, `_kill`
+     or `finish`: a failure prints one line to stderr (`ap2: spend ledger: <op> failed for <id>: <error>`, at most
+     300 characters, the exception's own text, never a key or an env value). A launch whose row could not be written
+     is lost to the ledger (nothing else can be done); a settle that cannot find the transcript writes an
+     `unsettled` row and the session stays unknown spend in `totals` (v1's rule).
+  8. Shadow mode. The ledger writes only inside the data folder, so it works in shadow mode; `ap2 spend` is
+     read-only apart from the cache.
+  9. `ap2 spend [--mode gateway|subscription] [--json] [--transcripts P] [--data PATH]` (default `gateway`) prints
+     today, this week and this month in dollars with two decimals, and, when `unknown` is set, a line saying so with
+     the unpriced model ids and the unmatched launches of today. `--json` prints the `totals()` dict. Exit 0; a
+     ledger file that cannot be read (or a symlink) prints one `ap2: ...` line and exits 1.
+  - Two fixes v1 made after its first night on real data (ported fixed, not as v1 first shipped):
+    - A grace for new launches. A launch younger than 900 s that is not resolved yet or whose session has no
+      transcript yet sets neither `unknown` nor `unknown_today` and is not in `unknown_launches`; its resolution is
+      retried every 60 s. Past the grace v1's rule stands: unknown, never $0.
+    - A resumed copy's history is not new spend. `claude --resume` with flags writes a new transcript (a new
+      session id) that starts with the old conversation, with the old timestamps and requestIds. A request whose
+      timestamp is earlier than the first launch of the session holding it, minus 300 s, is a copy: it is not
+      counted for that session and does not make spend unknown (the same for settled requests). The first launch
+      decides, not the last, so a session launched twice keeps its own requests. The request-owner dedupe stays.
 - **[decided by the builder]** v1 import (10, 11 question 5), read-only, in `importv1.py`.
   - Command: `ap2 import-v1 [--data PATH] [--from DIR] [--project NAME ...] [--dry-run]`. `--from` defaults to
     v1's own data root (`AUTOPILOT_DATA`, else `~/.claude/autopilot-data`, v1's `paths.data_root()`). A project is
