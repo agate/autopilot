@@ -73,6 +73,22 @@ def step_keys(step):
     return keys
 
 
+def unreadable_lines(lines, pad):
+    """The lines at exactly `pad` spaces that `KEY` cannot read, blank and comment lines skipped.
+
+    At a mapping's key indent such a line is still a key to GitHub: an anchor (`&a if: false`), a tag
+    (`!!str if: false`), an explicit key (`? if` with `: false` below it), a merge key (`<<: *a`) or a `- ` item.
+    Lines nested deeper (under `with:`, `env:`, inside a `run: |` block) are not the mapping's own keys."""
+    out = []
+    for line in lines:
+        text = line.strip()
+        if not text or text.startswith("#") or indent(line) != pad:
+            continue
+        if not re.match(rf"^ {{{pad}}}{KEY}$", line):
+            out.append(text)
+    return out
+
+
 # Either key turns a red run into a green check: `continue-on-error` lets the job or step fail quietly,
 # and `if:` can skip it.
 SWITCHES = ("if", "continue-on-error")
@@ -85,7 +101,9 @@ def job_switch_problems(text):
     block = job_block(text, JOB)
     if block is None:
         return [f"no `{JOB}:` job"]
-    return [f"the `{JOB}` job sets `{k}: {v}`" for k, v in job_keys(block) if k in SWITCHES]
+    # A key line the check cannot read must fail it, not pass it.
+    return ([f"the `{JOB}` job sets `{k}: {v}`" for k, v in job_keys(block) if k in SWITCHES]
+            + [f"cannot read the job-level line '{l}'" for l in unreadable_lines(block, 4)])
 
 
 def step_switch_problems(text, marker):
@@ -100,7 +118,10 @@ def step_switch_problems(text, marker):
     if keys is None:
         # Keys the check cannot read must fail it, not pass it.
         return [f"cannot read the keys of the `{marker}` step"]
-    return [f"the `{marker}` step sets `{k}: {v}`" for k, v in keys if k in SWITCHES]
+    pad = len(re.match(r"^ *- *", found[0][0])[0])
+    return ([f"the `{marker}` step sets `{k}: {v}`" for k, v in keys if k in SWITCHES]
+            + [f"cannot read the step-level line '{l}' of the `{marker}` step"
+               for l in unreadable_lines(found[0][1:], pad)])
 
 
 class CiWorkflowTest(unittest.TestCase):
@@ -308,6 +329,51 @@ class SwitchCheckTest(unittest.TestCase):
     def test_job_level_switch_after_the_steps_is_a_problem(self):
         copy = insert_after(self.text, RUN_COMMAND, "    continue-on-error: true")
         self.assertEqual(job_switch_problems(copy), ["the `unittest` job sets `continue-on-error: true`"])
+
+    # A key line the check cannot read (an anchor, a tag, an explicit `? ` key, a merge key) can still carry a
+    # switch, so it must fail the check, not be skipped.
+
+    def test_an_unreadable_job_level_line_is_a_problem(self):
+        for lines in (["    &a if: false"], ["    !!str if: false"], ["    ? if", "    : false"],
+                      ["    <<: *defaults"], ["    - if: false"]):
+            with self.subTest(lines=lines):
+                copy = self.text
+                for at, line in zip(["  unittest:"] + lines, lines):
+                    copy = insert_after(copy, at, line)
+                problems = job_switch_problems(copy)
+                self.assertGreaterEqual(len(problems), 1)
+                self.assertIn(f"cannot read the job-level line '{lines[0].strip()}'", problems)
+
+    def test_an_unreadable_line_on_the_setup_python_step_is_a_problem(self):
+        for lines in (["        &a if: false"], ["        !!str continue-on-error: true"],
+                      ["        ? if", "        : false"]):
+            with self.subTest(lines=lines):
+                copy = self.text
+                for at, line in zip([SETUP_PYTHON] + lines, lines):
+                    copy = insert_after(copy, at, line)
+                problems = step_switch_problems(copy, SETUP_PYTHON)
+                self.assertGreaterEqual(len(problems), 1)
+                self.assertIn(f"cannot read the step-level line '{lines[0].strip()}' of the `{SETUP_PYTHON}` step",
+                              problems)
+
+    def test_an_unreadable_line_on_the_run_step_is_a_problem(self):
+        copy = insert_after(self.text, RUN_COMMAND, "        &a if: false")
+        self.assertEqual(step_switch_problems(copy, RUN_COMMAND),
+                         [f"cannot read the step-level line '&a if: false' of the `{RUN_COMMAND}` step"])
+
+    def test_an_unreadable_line_nested_deeper_is_not_a_problem(self):
+        copy = insert_after(self.text, "python-version: ${{ matrix.python-version }}", "          &v x: 1")
+        copy = insert_after(copy, 'USER: ""', "          !!str if: false")
+        copy = insert_after(copy, "fail-fast: false", "      &m x: 1")
+        self.assertEqual(step_switch_problems(copy, SETUP_PYTHON), [])
+        self.assertEqual(step_switch_problems(copy, RUN_COMMAND), [])
+        self.assertEqual(job_switch_problems(copy), [])
+
+    def test_an_unreadable_line_on_another_step_is_not_blamed_on_the_checked_steps(self):
+        copy = insert_after(self.text, "run: python --version", "        &a if: false")
+        self.assertEqual(step_switch_problems(copy, RUN_COMMAND), [])
+        self.assertEqual(step_switch_problems(copy, SETUP_PYTHON), [])
+        self.assertEqual(job_switch_problems(copy), [])
 
     def test_a_missing_job_or_step_is_a_problem(self):
         # A renamed job or step must not make the check pass with nothing to look at.
