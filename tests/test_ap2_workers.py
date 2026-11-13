@@ -31,7 +31,7 @@ except ImportError:  # not POSIX
     fcntl = None
 
 from tests.helpers import ROOT
-from tests.test_ap2_apistop import LIMIT_TEXT, error_line, limit_line, refused_line, reply
+from tests.test_ap2_apistop import LIMIT_TEXT, REFUSED_TEXT, error_line, limit_line, refused_line, reply
 from tests.test_ap2_store import card
 from tests.test_ap2_store import plain as plain_words
 from tests import test_ap2_prreview as prr
@@ -177,6 +177,15 @@ class PortsTest(WorkerCase):
         self.assertEqual(last["env"]["AP2_PORTS"], "7200-7209")
         self.assertIn(["stop", a["short_id"]], [c["argv"] for c in self.calls()])
         self.assertEqual(len([r for r in resources.Registry(self.data).read() if r["card"] == a["card"]]), 1)
+
+    def test_a_park_note_with_a_lone_surrogate_is_kept_escaped(self):
+        # The worker's own `ap2 worker park --note`: a byte that is not UTF-8 in its argv reads as a lone
+        # surrogate, and kept raw it would fail the worker list's write-back.
+        w = self.workers()
+        a = self.start(w)
+        parked = w.park(a["card"], "implement", "halfway \udcff", usage_file=usage_file(self.tmp / "u.json", 95))
+        self.assertEqual(parked["note"], "halfway \\udcff")
+        self.assertEqual(resources.Registry(self.data).read()[0]["parked"]["note"], "halfway \\udcff")
 
     def test_a_parked_worker_with_a_resource_at_the_cap_resumes_into_its_own_slot(self):
         w = self.workers(max_workers=2)
@@ -1280,6 +1289,9 @@ class NobodyWaitsTest(WorkerCase):
 
     def test_a_question_text_that_is_nan_is_not_read(self):
         self.assert_question_text_not_read('{"text": NaN}')
+
+    def test_an_empty_question_text_is_not_read(self):
+        self.assert_question_text_not_read('{"text": ""}')
 
     def test_a_question_text_that_is_a_number_or_true_is_not_read(self):
         for body in ('{"text": 5}', '{"text": true}'):
@@ -2790,6 +2802,27 @@ class ShortIdOnRecordTest(WorkerCase):
         self.assertEqual(len(self.bg_calls()), 2)  # the copy runs
         self.assertNotEqual(rec["short_id"], a["short_id"])
         self.assertEqual((rec["short_id"], rec["session_id"], rec["resumes"]), (self.newest_short(), "", 1))
+
+    def test_a_listed_session_id_that_is_not_a_session_id_is_not_kept(self):
+        # The listing's id for the resumed copy is not a session id (here a lone surrogate): kept raw, it would
+        # fail the worker list's write-back on every check, so the copy would never be on record.
+        w = self.workers()
+        a = self.start(w)
+        self.drop_agent(a["short_id"])
+        real = v1_sessions.list_all
+
+        def forged(claude):
+            rows = real(claude)
+            return None if rows is None else [dict(r, sessionId="\ud800") for r in rows]
+
+        with mock.patch.object(workers_mod.v1_sessions, "list_all", side_effect=forged):
+            out = w.check()
+        self.assertEqual((out[0]["state"], out[0]["did"]), ("dead", "resumed"))
+        rec = resources.Registry(self.data).read()[0]
+        self.assertEqual((rec["short_id"], rec["session_id"]), (self.newest_short(), ""))
+        with mock.patch.object(workers_mod.v1_sessions, "list_all", side_effect=forged):
+            w.check()  # nothing raised: the next check does not keep it either
+        self.assertEqual(resources.Registry(self.data).read()[0]["session_id"], "")
 
 
 class FinishRetryTest(WorkerCase):
@@ -4579,6 +4612,43 @@ class PrReviewDonePathTest(PrReviewCase):
         self.assert_kept_as_a_draft(cid, out)
         self.assertEqual(out[0]["did"], "parked")
         self.assertEqual(resources.Registry(self.data).read()[0]["parked"]["reason"], "limit")
+
+    def reviewed_then_said(self, cid, line):
+        """The worker writes a valid report and ends its turn; then a process it left behind appends `line` (an
+        API error line made at that time) to its transcript, outside the data folder."""
+        w = self.workers()
+        w.check()  # fills in its session id
+        rec = resources.Registry(self.data).read()[0]
+        self.the_worker_reviews(cid)
+        self.clock.advance(1)
+        say(self.fake_home, rec["session_id"], line(iso(self.clock())))
+        return w
+
+    def test_a_limit_line_with_a_lone_surrogate_parks_with_its_note_escaped(self):
+        # Kept raw, the text would fail the worker list's write-back on every check: no review applied, no ask, no
+        # auto-start for any card.
+        cid = self.started()
+        w = self.reviewed_then_said(cid, lambda at: error_line("\ud800 usage limit reached", at, apiErrorStatus=429))
+        out = w.check()
+        self.assertEqual([(e["card"], e["state"], e["did"]) for e in out], [(cid, "parked", "parked")])
+        parked = resources.Registry(self.data).read()[0]["parked"]
+        self.assertEqual((parked["reason"], parked["note"]), ("limit", "\\ud800 usage limit reached"))
+        self.assertEqual([(e["card"], e["state"]) for e in w.check()], [(cid, "parked")])
+
+    def test_a_refusal_with_a_lone_surrogate_whose_stop_fails_keeps_an_escaped_mark(self):
+        cid = self.started()
+        text = f"{REFUSED_TEXT} \ud800"
+        w = self.reviewed_then_said(cid, lambda at: refused_line(
+            at, message={"model": "<synthetic>", "content": [{"type": "text", "text": text}]}))
+        with StoppedLeavesTheListTest.stop_times_out():
+            out = w.check()
+        self.assertEqual([(e["card"], e["error"]) for e in out], [(cid, "TimeoutExpired")])
+        mark = resources.Registry(self.data).read()[0]["closing"]
+        self.assertEqual((mark["path"], mark["note"]), ("refused", f"{REFUSED_TEXT} \\ud800"))
+        out = w.check()  # the stop works now: the pause is finished, and nothing raises
+        self.assertEqual([(e["card"], e["did"]) for e in out], [(cid, "paused")])
+        self.assertEqual(resources.Registry(self.data).read(), [])
+        self.assertEqual(self.get(cid)["ask"]["reason"], "gateway_refused")
 
     # criterion 7
     def test_new_commits_start_a_delta_on_the_next_check(self):

@@ -742,7 +742,14 @@ class Workers:
 
     def _session_id(self, short: str) -> str:
         """The session id of the session with this short id, or "" when the listing does not show it yet."""
-        return (v1_sessions.find_by_id(short, v1_sessions.list_all(self.claude)) or {}).get("sessionId") or ""
+        return self._listed_id(v1_sessions.find_by_id(short, v1_sessions.list_all(self.claude)))
+
+    @staticmethod
+    def _listed_id(s) -> str:
+        """A listed session's `sessionId` when it is a session id (`transcripts.SESSION_ID`), else "": anything
+        else (a lone surrogate, say) kept on the worker list or the card would fail its write."""
+        sid = (s or {}).get("sessionId")
+        return sid if isinstance(sid, str) and transcripts.SESSION_ID.match(sid) else ""
 
     def _argv(self, role: str, name: str, settings: Path, prompt: str, profile: dict, resume_id: str = "") -> list:
         """The `claude --bg` command. A fresh start takes the profile's model (`--model`, when it has one) and effort
@@ -1088,7 +1095,9 @@ class Workers:
         p = v1_budget.parking(b, {"budget": PARK_RULES})
         if p is None:
             raise WorkerError("usage is under the park line (or unknown): keep working, do not park")
-        rec = dict(p, reason="quota", note=note, parked_at=cards.stamp(now))
+        # The worker's own note: a byte that is not UTF-8 in its argv reads as a lone surrogate (`_safe_text`).
+        rec = dict(p, reason="quota", note=self._safe_text(note) if isinstance(note, str) else "",
+                   parked_at=cards.stamp(now))
         with self.registry.locked() as records:
             w = self._find(records, card_id, role)
             if w is None:
@@ -1215,9 +1224,11 @@ class Workers:
         stop = apistop.stop(t, since)
         if stop is None:
             return False
+        # The transcript is outside the data folder: a process the worker left behind can write its last line.
+        note = self._safe_text(stop["text"])
         if stop["kind"] == "gateway_refused":
             why = "a gateway's safety guard refused this conversation; paused, resume it on the subscription"
-            entry.update(self._finish_close(rec, records, self._mark("refused", why, note=stop["text"]), by))
+            entry.update(self._finish_close(rec, records, self._mark("refused", why, note=note), by))
             return True
         try:
             before = 0 if replied else max(int(rec.get("limit_parks") or 0), 0)  # a reply in this run: count again
@@ -1231,7 +1242,7 @@ class Workers:
             resume_at = now + apistop.backoff(n)
         if rec.get("blocked_since"):
             self._close_worker_asks(rec["card"], rec["role"], by, kinds=("attach",))  # parked: no prompt to answer
-        rec.update(parked={"reason": "limit", "note": stop["text"], "resets_at": reset.isoformat() if reset else None,
+        rec.update(parked={"reason": "limit", "note": note, "resets_at": reset.isoformat() if reset else None,
                            "resume_at": resume_at.isoformat(), "parked_at": cards.stamp(now), "kind": None,
                            "model": None, "percent": None},
                    limit_parks=n, idle_since=None, blocked_since=None)
@@ -1522,7 +1533,7 @@ class Workers:
     def _fill_session_id(self, rec: dict, listing, by: str) -> None:
         """The listing did not show the worker's session when it started: take its id from this listing, on the
         record and the card, so a later stop saves and archives it and a later resume continues it."""
-        sid = (v1_sessions.find_by_id(rec.get("short_id"), listing) or {}).get("sessionId") or ""
+        sid = self._listed_id(v1_sessions.find_by_id(rec.get("short_id"), listing))
         if sid:
             self._save_session(rec["card"], rec["role"], by, id=sid)
             rec["session_id"] = sid

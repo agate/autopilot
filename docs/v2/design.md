@@ -758,7 +758,10 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   worker's report, so it is escaped where it is not valid Unicode and cut to 2000 characters
   (`workers.WORKER_TEXT_MAX`; a question's text is escaped the same way but never cut, as the question is often at
   its end); an ask the card still refuses is set again with a fixed
-  text that carries nothing from the worker, so a failed `apply` always holds the card. `sync` runs only after an
+  text that carries nothing from the worker, so a failed `apply` always holds the card. Other worker-derived text
+  is escaped the same way before it is kept: an API-stop transcript text (the note of a limit park or of a gateway
+  refusal's close, as a process the worker left behind can write that line), a park's note, and a listed session
+  id, which is kept only when it is a session id. `sync` runs only after an
   `apply` that worked, and a failed one is a note (the review stays applied). That ask is the role's own worker ask
   (8.2): any start of the role and `finish` close it, and so does a `check` that finds the card reviewed at its
   head (the user applied it by hand). A `sync` that sees `new_commits` writes the new `pr.head_sha`, so the next
