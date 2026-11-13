@@ -1557,6 +1557,45 @@ const opts = ['raise50', 'raise100', 'pause'];
                 self.assertEqual(len([c for c in calls if c[0] == "post"]), 1)
 
     @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_a_refused_answer_says_why_and_a_good_one_redraws_the_card_on_screen(self):
+        # A 409 or 500 shows a label and the server's reason and turns the buttons back on, so the user can try
+        # again; a good answer redraws the card only when that card is the one on screen.
+        out = self.run_access(page_functions("capStopNote", "capSection") + self.DOM_STUBS + """
+const calls = [];
+let post = null;
+const poll = async () => {}, loadList = async () => {};
+const loadCard = async id => { calls.push(id); };
+const fail = status => async () => { throw Object.assign(new Error('REASON'), {status}); };
+(async () => {
+  const runs = {};
+  S.route = null;
+  for (const [name, p] of [['stale', fail(409)], ['failed', fail(500)]]) {
+    post = p;
+    const sec = capSection({id: 'C1', kind: 'cap'}, ['raise50', 'pause']);
+    const buttons = find(sec, 'button');
+    await buttons[0].attrs.onclick();
+    const status = sec.kids[2];
+    runs[name] = {hidden: status.hidden, cls: status.className, text: flat(status.kids),
+                  disabled: buttons.map(b => b.disabled)};
+  }
+  post = async () => ({});
+  for (const [name, route] of [['here', {name: 'card', arg: 'C1'}], ['other', {name: 'card', arg: 'OTHER'}]]) {
+    S.route = route;
+    calls.length = 0;
+    await find(capSection({id: 'C1', kind: 'cap'}, ['raise50']), 'button')[0].attrs.onclick();
+    runs[name] = calls.slice();
+  }
+  console.log(JSON.stringify(runs));
+})();
+""")
+        self.assertEqual(out["stale"], {"hidden": False, "cls": "warn", "text": ["[cap.stale]", "REASON"],
+                                        "disabled": [False, False]})
+        self.assertEqual(out["failed"], {"hidden": False, "cls": "warn", "text": ["[cap.failed] REASON"],
+                                         "disabled": [False, False]})
+        self.assertEqual(out["here"], ["C1"])
+        self.assertEqual(out["other"], [])
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
     def test_an_answer_whose_workers_did_not_all_stop_says_so_in_a_neutral_line(self):
         # A 200 with workers that did not stop (`failed`), another stop under way (`busy`) or a worker list it could
         # not read (`stop_error`): the status box shows a neutral line (the card is answered), never "Not answered:".
@@ -1646,6 +1685,31 @@ const note = {id: 'X', reply: {answered: 'pause', stopped: [], failed: ['w-1']}}
             with self.subTest(name):
                 self.assertNotIn("[cap.not_stopped]", json.dumps(out[name]))
                 self.assertEqual(out[name][-1], [])
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_the_open_card_is_redrawn_when_the_cap_card_opens_again(self):
+        # Answered on the page, the card is drawn without buttons; when spend passes the raised limit the same card
+        # opens again, and the 10-second tick redraws the card on screen so its buttons come back.
+        out = self.run_access(page_functions("capKey", "tick") + """
+const cap = (card, raise_pct) => ({access: {cap: {card, card_id: 'X', raise_pct}}});
+let states = [];
+const poll = async () => { S.state = states.shift(); };
+const loads = [];
+const loadList = async () => {}, loadCard = async id => { loads.push(id); };
+(async () => {
+  const runs = {};
+  for (const [name, route, before, after] of [
+      ['reopened', {name: 'card', arg: 'X'}, cap('answered', 50), cap('open', 50)],
+      ['same', {name: 'card', arg: 'X'}, cap('open', 50), cap('open', 50)],
+      ['lane', {name: 'lane', arg: 'needs'}, cap('answered', 50), cap('open', 50)]]) {
+    S.route = route; S.state = before; states = [after]; loads.length = 0;
+    await tick();
+    runs[name] = loads.slice();
+  }
+  console.log(JSON.stringify(runs));
+})();
+""")
+        self.assertEqual(out, {"reopened": ["X"], "same": [], "lane": []})
 
     @unittest.skipUnless(shutil.which("node"), "needs node")
     def test_a_cap_state_that_cannot_be_read_is_a_red_line_and_a_settings_error(self):
@@ -1750,6 +1814,11 @@ const rows = usageRows({mode: 'gateway', windows: [], gateway: {today: 1, limit:
 console.log(JSON.stringify(rows.filter(r => r.label === '[usage.counted]').map(r => r.value)));
 """)
         self.assertEqual(counted, ["ago:300"])
+        # The two window kinds Claude Code names get a label in the page's language; any other kind shows as it is.
+        names = self.run_access("""
+console.log(JSON.stringify(['seven_day', 'five_hour', 'opus_week'].map(kind => windowName({kind}))));
+""")
+        self.assertEqual(names, ["[usage.seven_day]", "[usage.five_hour]", "opus_week"])
         labels = self.labels()
         self.assertEqual(labels["en"]["usage.today_short"], "{spent} / {limit} today")
         css = re.search(r"<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"), re.S).group(1)

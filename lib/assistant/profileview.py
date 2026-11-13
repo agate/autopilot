@@ -1,6 +1,7 @@
 """What the pages show about access (design section 12, access on the pages): which profile pays for the workers, the
 other profiles to switch to, a key or profile that does not work, today's cap card and pause, and the usage that
-matters in that mode. The local page's `/api/state` and the phone data (`phone.build`) use `summary` as it is.
+matters in that mode. The local page's `/api/state` uses `summary` as it is; the phone data (`phone.build`) uses it
+with its path texts scrubbed.
 
 Everything here is a read of what the other modules keep, made with their own readers: `profiles.active` and
 `profiles.names` / `load`, `keys.cached_error` (the cached key record: no key command runs), `cap.state`,

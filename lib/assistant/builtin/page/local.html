@@ -1329,11 +1329,19 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     drawTop();
     drawRail();
   }
+  function capKey(st) {
+    // What the open card's cap buttons depend on: today's cap card, its state and the raise.
+    const c = st && st.access && st.access.cap;
+    return c ? [c.card, c.card_id, c.raise_pct].join('|') : '';
+  }
   async function tick() {
     // Every 10 seconds: the heartbeat, the counts and the open list, without a reload.
+    const cap = capKey(S.state);
     await poll();
     const r = S.route;
     if (r.name === 'lane' || r.name === 'search' || r.name === 'project' || r.name === 'card') await loadList();
+    // The cap card opened again (or was answered elsewhere): redraw the card on screen, so its buttons match.
+    if (r.name === 'card' && capKey(S.state) !== cap) await loadCard(r.arg);
   }
 
   $('search').addEventListener('keydown', e => {

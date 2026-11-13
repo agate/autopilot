@@ -3214,12 +3214,12 @@ Calls the author made without asking (check them):
   8. Workers cannot edit the key state: `profile-key.json` and `profile-refresh.json` are in `PROTECTED`, so every
      worker floor Edit-denies them (a worker must not mark a failing key as working).
 - **[decided by the builder]** Access on the pages (slice 5 of the port of v1's access profiles: v1 showed it through
-  `meta.access` in the published page and page replies; v2's local page is a server on this Mac, so the two answers
-  are POST routes that call the same functions the command line calls, and the phone data gets the same facts read
-  only). Each numbered choice is reversible.
+  `meta.access` in the published page and page replies; v2's local page is a server on this Mac, so the cap card's
+  answer is a POST route that calls the same function the command line calls (the profile switch is its own later
+  task, choice 5), and the phone data gets the same facts read only). Each numbered choice is reversible.
   1. **[decided by the builder]** One read for both pages: `profileview.summary(data, now, usage_file)` in
-     `lib/assistant/profileview.py` returns `{"access", "usage"}`, used as they are by `/api/state` and
-     `phone.build`. `access`: `{profile: {name, label, mode, model, effort, daily_cap_usd} | null, profile_error,
+     `lib/assistant/profileview.py` returns `{"access", "usage"}`, used as they are by `/api/state`, and
+     by `phone.build` with its path texts scrubbed (choice 7). `access`: `{profile: {name, label, mode, model, effort, daily_cap_usd} | null, profile_error,
      page_sessions: "subscription", profiles: [{name, label, mode, needs_choice}], broken_profiles: [{name, error}],
      key_error, cap: {day, card, card_id, limit, raise_pct, paused, pause}}`. `profile_error` is the ProfileError
      text of `profiles.active` (it holds `profiles.FIX`); then `profile` is null. `key_error` (gateway only) is
@@ -3324,8 +3324,8 @@ Calls the author made without asking (check them):
      from v1's English words, each with its `zh` text. The window kinds `five_hour` and `seven_day` get labels; any
      other kind shows as it is. The cap answer's notes (`cap.not_stopped`, `cap.stop_busy`, `cap.stop_error`) and
      the cap state error (`access.cap_error`) are in both tables too.
-  - Lessons 3: 3.1 (values never cut) is choice 6 and its tests (`$512.00 / $500.00` and `$2,300.00`, checked in
-    the page's CSS and at 1280 px and 390 px wide). 3.2 (republish the phone page when the HTML it would build
+  - Lessons 3: 3.1 (values never cut) is choice 6 and its tests (`$512.00 / $500.00` and `$2,300.00`, and the
+    values' CSS); the 1280 px and 390 px layouts were checked by screenshot, not by a test. 3.2 (republish the phone page when the HTML it would build
     differs from the published one, keeping a hash of the published page) needs a phone publish step v2 does not
     have yet: later work, with the phone page's buttons, the profile switch (choice 5) and a "lift the pause"
     button on the local page.
