@@ -2190,7 +2190,18 @@ class TranscriptsTest(WorkerCase):
             out.append(transcripts.archive(self.data, cfg, a["card"], "implement", a["session_id"],
                                            self.fake_home / "projects"))
 
-        with mock.patch.object(transcripts, "find", return_value=fifo):
+        opened = []
+        real_open = os.open
+
+        def record_open(path, *args, **kw):
+            fd = real_open(path, *args, **kw)
+            if Path(path) == fifo:
+                opened.append(fd)
+            return fd
+
+        with mock.patch.object(transcripts, "find", return_value=fifo), \
+                mock.patch.object(transcripts.os, "open", side_effect=record_open), \
+                mock.patch.object(transcripts.os, "close", wraps=os.close) as close:
             t = threading.Thread(target=archive, daemon=True)
             t.start()
             t.join(10)
@@ -2200,11 +2211,30 @@ class TranscriptsTest(WorkerCase):
             t.join(10)
         self.assertFalse(hung, "the archive waited on the FIFO")
         self.assertEqual(out, [None])
+        self.assertEqual(len(opened), 1)
+        close.assert_any_call(opened[0])  # the FIFO's descriptor is closed, not left open
         folder = self.data / "sessions" / a["card"]
         self.assertEqual([p.name for p in folder.iterdir() if ".jsonl" in p.name], [])  # no copy, no temp file
         # A regular transcript is still archived.
         got = transcripts.archive(self.data, cfg, a["card"], "implement", a["session_id"], self.fake_home / "projects")
         self.assertEqual(gzip.decompress(got.read_bytes()), self.original(a).read_bytes())
+
+    def test_a_transcript_that_is_a_symlink_is_not_archived_and_its_target_is_untouched(self):
+        # A process the worker left can put a symlink where the transcript was: it is not followed, so no file
+        # outside the projects folder is read into the archive.
+        a = self.start()
+        cfg = Config(mode="live", keep_transcripts="always")
+        original = self.original(a)
+        outside = self.tmp / "outside.txt"
+        outside.write_text("not a transcript\n", encoding="utf-8")
+        original.unlink()
+        original.symlink_to(outside)
+        got = transcripts.archive(self.data, cfg, a["card"], "implement", a["session_id"], self.fake_home / "projects")
+        self.assertIsNone(got)
+        folder = self.data / "sessions" / a["card"]
+        self.assertEqual([p.name for p in folder.iterdir() if ".jsonl" in p.name], [])  # no copy, no temp file
+        self.assertEqual(outside.read_text(encoding="utf-8"), "not a transcript\n")
+        self.assertTrue(original.is_symlink())
 
     def test_never_keeps_only_the_summary_files(self):
         w = self.workers(cfg=Config(mode="live", keep_transcripts="never"))

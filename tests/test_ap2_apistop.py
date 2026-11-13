@@ -203,6 +203,16 @@ class TailTest(Case):
         self.transcript([limit_line()])  # a regular transcript still reads
         self.assertEqual(len(self.tail()["errors"]), 1)
 
+    def test_a_transcript_that_is_a_symlink_is_none(self):
+        # A symlink where the transcript should be is not followed: the file it points to is not read.
+        outside = Path(tempfile.mkdtemp(prefix="ap2-apistop-outside-")).resolve()
+        self.addCleanup(shutil.rmtree, outside, True)
+        target = outside / "elsewhere.jsonl"
+        target.write_text(json.dumps(limit_line()) + "\n", encoding="utf-8")
+        (self.folder / f"{SID}.jsonl").symlink_to(target)
+        self.assertIsNone(self.tail())
+        self.assertEqual(target.read_text(encoding="utf-8"), json.dumps(limit_line()) + "\n")
+
     def test_a_line_with_a_naive_or_bad_time(self):
         self.transcript([limit_line(at="nonsense")])
         self.assertIsNone(self.tail()["errors"][0]["at"])
