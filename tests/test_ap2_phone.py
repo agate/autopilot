@@ -7,6 +7,7 @@ import shutil
 import socket
 import subprocess
 import tempfile
+import time
 import types
 import unittest
 from collections import Counter
@@ -650,6 +651,16 @@ class ReadOnlyTest(PhoneCase):
 # --- access and usage, read only ---------------------------------------------------------------------------------
 
 class PhoneAccessTest(PhoneCase):
+    def setUp(self):
+        # A zone whose day differs from UTC's at NOW, so a cap day read in UTC is the wrong day. Cleanups run
+        # last-first: the second tzset runs after the zone is put back.
+        self.addCleanup(time.tzset)
+        tz = mock.patch.dict(os.environ, {"TZ": "Pacific/Kiritimati"})
+        tz.start()
+        self.addCleanup(tz.stop)
+        time.tzset()
+        super().setUp()
+
     def test_phone_data_has_access_and_usage(self):
         self.gateway()
         profiles.use(self.data, "g")
@@ -694,6 +705,13 @@ class PhoneAccessTest(PhoneCase):
         a = self.build()["access"]
         self.assertIn("<data>/profiles/x.json", a["profile_error"])
         self.assertIn("<data>/cap-state.json is a symlink", a["cap"]["error"])
+        self.assertNotIn(str(self.tmp), json.dumps(a))
+        # A profiles folder that is a symlink: the profile list cannot be read, and its error names the path.
+        aside = self.tmp / "profiles-aside"
+        (self.data / profiles.FOLDER).rename(aside)
+        (self.data / profiles.FOLDER).symlink_to(aside)
+        a = self.build()["access"]
+        self.assertTrue(a["error"].startswith("<data>/"), a["error"])
         self.assertNotIn(str(self.tmp), json.dumps(a))
 
 

@@ -23,6 +23,7 @@ from tests.test_ap2_store import BLANK_SLOTS, NOT_BLANK_SLOTS
 from assistant import cap, cards, datadir, gate, profiles, server, templates
 from assistant.config import Config, ConfigError
 from assistant.engine import Engine
+from assistant.resources import WorkerError
 from assistant.store import Store
 
 FIXTURES = ROOT / "tests" / "fixtures" / "ap2"
@@ -1079,6 +1080,13 @@ def open_cap_card(case, cause="spent") -> str:
 
 class CapAnswerRouteTest(ServerCase):
     def setUp(self):
+        # A zone whose day differs from UTC's at START, so a cap day read in UTC is the wrong day. Cleanups run
+        # last-first: the second tzset runs after the zone is put back.
+        self.addCleanup(time.tzset)
+        tz = mock.patch.dict(os.environ, {"TZ": "Pacific/Kiritimati"})
+        tz.start()
+        self.addCleanup(tz.stop)
+        time.tzset()
         super().setUp()
         profiles.save(self.data, gateway_profile("g"))
         profiles.use(self.data, "g")
@@ -1161,6 +1169,14 @@ class CapAnswerRouteTest(ServerCase):
         self.assertEqual(body["stopped"], ["w1"])
         self.assertNotIn("note", body)
         self.assertTrue((self.data / cap.PAUSED).exists())
+
+    def test_a_damaged_worker_list_in_live_mode_is_a_500(self):
+        self.start(cfg=Config(mode="live"))
+        err = WorkerError("<data>/workers.json: cannot read the worker list")
+        with mock.patch("assistant.workers.Workers.cap_stop", side_effect=err):
+            status, _, body = self.answer("pause")
+        self.assertEqual(status, 500, body)
+        self.assertIn("<data>/workers.json: cannot read the worker list", body["error"])
 
     def test_two_answers_at_once_raise_once(self):
         self.start()
@@ -1398,6 +1414,9 @@ console.log(JSON.stringify([
         text = PAGE.read_text(encoding="utf-8")
         self.assertIn('<span id="access" class="access"></span>', text)
         self.assertIn("parts.push(h('a', {class: b.cls, href: '#/settings', text: b.text}));", text)
+        # The top bar draws the badge on each state, and the settings screen opens with the access set.
+        self.assertIn("    drawAccess();\n    const sw = $('lang-switch');", text)
+        self.assertIn("body.replaceChildren(h('div', {class: 'sets'}, accessSet(),", text)
 
     @unittest.skipUnless(shutil.which("node"), "needs node")
     def test_key_and_profile_errors_show_a_label_and_the_server_text(self):
@@ -1448,6 +1467,8 @@ console.log(JSON.stringify([
         self.assertIn("await post('/api/cap/answer', {card_id: card.id, option});", text)
         self.assertIn("if (e.status === 409) status.replaceChildren(h('p', {text: L('cap.stale')}), "
                       "h('p', {class: 'mono', text: e.message}));", text)
+        self.assertIn("const capAnswers = capOptions(c, S.state && S.state.access);\n"
+                      "    if (capAnswers.length) det.append(capSection(c, capAnswers));", text)  # the card view
         self.assertEqual(set(cap.ANSWERS), {"raise50", "raise100", "accept_unknown", "pause"})
 
     @unittest.skipUnless(shutil.which("node"), "needs node")

@@ -42,6 +42,7 @@ from urllib.parse import parse_qs, unquote
 from assistant import cap, cards, config, datadir, gate, index, profileview, templates
 from assistant.cards import CardError
 from assistant.config import ConfigError
+from assistant.resources import WorkerError
 from assistant.sources import Loader, SourceError
 from assistant.store import LOCK, Store
 
@@ -694,13 +695,13 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(offered, list) or option not in offered:
                 raise HTTPError(409, f"{option} is not an answer on this cap card (it offers "
                                      f"{', '.join(str(o) for o in offered or []) or 'none'})")
-            w = None
-            if cfg.mode == "live":  # the pause stops workers in live mode only, as `ap2 cap answer`
-                from assistant.workers import Workers
-                w = Workers(data, cfg=cfg)
             try:
+                w = None
+                if cfg.mode == "live":  # the pause stops workers in live mode only, as `ap2 cap answer`
+                    from assistant.workers import Workers
+                    w = Workers(data, cfg=cfg)
                 return 200, cap.answer(data, option, now, workers=w)
-            except (ConfigError, CardError, OSError) as e:
+            except (ConfigError, CardError, OSError, WorkerError) as e:  # WorkerError: a damaged worker list
                 raise HTTPError(500, str(e)) from e
 
     # -- GET /api/sources, /api/templates, /api/settings ---------------------------------------------------------

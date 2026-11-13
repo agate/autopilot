@@ -1737,7 +1737,14 @@ class LastCountTest(unittest.TestCase):
         for raw in ("not json", "[]", "{}", json.dumps({"at": "x", "day": "2026-11-11", "today": "1"}),
                     json.dumps({**self.t, "at": "x", "day": "2026-11-11", "week": True}), "\udcff",
                     json.dumps({**self.t, "at": "x", "day": "2026-11-11", "today": float("inf")}),
-                    json.dumps({**self.t, "at": "x", "day": "2026-11-11", "month": float("nan")})):
+                    json.dumps({**self.t, "at": "x", "day": "2026-11-11", "month": float("nan")}),
+                    json.dumps({**self.t, "at": "x", "day": "2026-11-11", "today": 10**400}),  # too big for a float
+                    # Each of these is valid but for one field.
+                    json.dumps({**self.t, "day": "2026-11-11"}),
+                    json.dumps({**self.t, "at": "x", "day": None}),
+                    json.dumps({**self.t, "at": "x", "day": "2026-11-11", "unknown": "yes"}),
+                    json.dumps({**self.t, "at": "x", "day": "2026-11-11", "unknown_models": [1]}),
+                    json.dumps({**self.t, "at": "x", "day": "2026-11-11", "unknown_launches": True})):
             with self.subTest(raw):
                 f.write_text(raw, encoding="utf-8", errors="surrogateescape")
                 self.assertIsNone(spend.last(self.data))

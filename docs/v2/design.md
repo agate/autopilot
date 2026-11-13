@@ -3240,9 +3240,9 @@ Calls the author made without asking (check them):
      `unknown_today` null and the page says "not counted yet today" (week and month still from it). `spend/**` is
      in `PROTECTED`, so workers cannot edit it.
   3. **[decided by the builder]** The cap card's buttons: `POST /api/cap/answer` `{"card_id", "option"}`, with the
-     question's body rules (JSON, at most 64 KiB, this page's `Origin` only; the checks are one helper,
-     `_json_body`, used by both POSTs with the same status codes). Under the server's write lock it reads
-     `cap.state` at the server's local day: the card must be today's open one (`card == "open"`, the same
+     question's body rules (JSON, at most 64 KiB, this page's `Origin` only; the checks are two helpers,
+     `_check_origin` and `_json_body`, used by both POSTs with the same status codes). Under the server's write
+     lock it reads `cap.state` at the server's local day: the card must be today's open one (`card == "open"`, the same
      `card_id`), else 409 "this cap card is no longer open" and nothing changes (v1 ignored stale cap replies);
      `option` must be one of that card's `ask.options`, else 409 (so `accept_unknown` cannot answer a `spent`
      card); an option that is no answer at all is 400. Then `cap.answer(data, option, now, workers=w)`, `w` being

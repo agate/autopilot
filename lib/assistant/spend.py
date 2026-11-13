@@ -125,6 +125,14 @@ def remember(data, t: dict, now: Optional[datetime]) -> None:
     write_json(f, rec)
 
 
+def _finite(n) -> bool:
+    """True when `n` is a finite number; an integer too big for a float (10**400) is not."""
+    try:
+        return math.isfinite(n)
+    except OverflowError:
+        return False
+
+
 def last(data) -> Optional[dict]:
     """What `remember` kept last, or None when it is missing, unreadable, not the shape `remember` writes, or a
     symlink (the file or the spend folder). Never raises."""
@@ -136,7 +144,7 @@ def last(data) -> Optional[dict]:
     if not isinstance(raw, dict) or not all(isinstance(raw.get(k), str) for k in ("at", "day")):
         return None
     for k in ("today", "week", "month"):
-        if not _number(raw.get(k)) or not math.isfinite(raw[k]):  # json.loads reads Infinity and NaN
+        if not _number(raw.get(k)) or not _finite(raw[k]):  # json.loads reads Infinity and NaN
             return None
     if not (isinstance(raw.get("unknown"), bool) and isinstance(raw.get("unknown_today"), bool)):
         return None
