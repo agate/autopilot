@@ -1718,22 +1718,32 @@ const cap = (card, raise_pct) => ({access: {cap: {card, card_id: 'X', raise_pct}
 let states = [];
 const poll = async () => { S.state = states.shift(); };
 const loads = [];
-const loadList = async () => {}, loadCard = async id => { loads.push(id); };
+let onList = null;  // what the user does while the list loads
+const loadList = async () => { if (onList) onList(); }, loadCard = async id => { loads.push(id); };
 (async () => {
   const runs = {};
-  for (const [name, route, before, after] of [
+  for (const [name, route, before, after, act] of [
       ['reopened', {name: 'card', arg: 'X'}, cap('answered', 50), cap('open', 50)],
       ['same', {name: 'card', arg: 'X'}, cap('open', 50), cap('open', 50)],
       ['lane', {name: 'lane', arg: 'needs'}, cap('answered', 50), cap('open', 50)],
-      ['other card', {name: 'card', arg: 'Y'}, cap('answered', 50), cap('open', 50)]]) {
-    S.route = route; S.state = before; states = [after]; loads.length = 0;
+      ['other card', {name: 'card', arg: 'Y'}, cap('answered', 50), cap('open', 50)],
+      // The day ends while the cap card is on screen: its buttons must go (the card named before the poll).
+      ['day over', {name: 'card', arg: 'X'}, cap('open', 0), {access: {cap: {card: null, card_id: null, raise_pct: 0}}}],
+      // A new cap card opens while it is already on screen: its buttons must come (the card named after the poll).
+      ['new card', {name: 'card', arg: 'Z'}, {access: {cap: {card: null, card_id: null, raise_pct: 0}}},
+       {access: {cap: {card: 'open', card_id: 'Z', raise_pct: 0}}}],
+      // The user clicks a lane while the list loads: the tick must not bring the cap card back.
+      ['left during the list', {name: 'card', arg: 'X'}, cap('answered', 50), cap('open', 50),
+       () => { S.route = {name: 'lane', arg: 'planned'}; }]]) {
+    S.route = route; S.state = before; states = [after]; loads.length = 0; onList = act || null;
     await tick();
     runs[name] = loads.slice();
   }
   console.log(JSON.stringify(runs));
 })();
 """)
-        self.assertEqual(out, {"reopened": ["X"], "same": [], "lane": [], "other card": []})
+        self.assertEqual(out, {"reopened": ["X"], "same": [], "lane": [], "other card": [], "day over": ["X"],
+                               "new card": ["Z"], "left during the list": []})
 
     @unittest.skipUnless(shutil.which("node"), "needs node")
     def test_a_cap_state_that_cannot_be_read_is_a_red_line_and_a_settings_error(self):

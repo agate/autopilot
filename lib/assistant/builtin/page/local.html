@@ -1350,7 +1350,8 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     if (r.name === 'lane' || r.name === 'search' || r.name === 'project' || r.name === 'card') await loadList();
     // The cap card opened again (or was answered elsewhere): redraw it when it is the card on screen, so its
     // buttons match. Any other card is left alone (a redraw would wipe a question being typed).
-    if (r.name === 'card' && capKey(S.state) !== cap && (r.arg === before || r.arg === capId(S.state))) {
+    // Only when the route is still the one this tick started on: a click while the list loaded moved on.
+    if (S.route === r && r.name === 'card' && capKey(S.state) !== cap && (r.arg === before || r.arg === capId(S.state))) {
       await loadCard(r.arg);
     }
   }
