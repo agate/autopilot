@@ -24,8 +24,9 @@ def job_block(text, name):
         return None
     block = []
     for line in lines[start + 1:]:
-        # A comment line, at any indent, does not end the job.
-        if line.strip() and not line.strip().startswith("#") and indent(line) <= 2:
+        # Only a readable key at 0 or 2 spaces (the next job, or a top-level key) ends the job. A comment line, or
+        # any other line at 2 spaces or less (such as the rest of a quoted string), does not.
+        if re.match(rf"^(?:  )?{KEY}$", line):
             break
         block.append(line)
     return block
@@ -48,7 +49,8 @@ def job_keys(block):
 def steps(block):
     """Each step of the job as its own list of lines, split on the `- ` that opens it.
 
-    A job-level key after the steps (a line at 6 spaces or less, not a `- ` or a comment) ends the last step."""
+    A readable job-level key at 4 spaces after the steps ends the last step. Any other line at 6 spaces or less
+    (a comment, the rest of a quoted string) keeps it open."""
     out = []
     in_step = False
     for line in block:
@@ -59,7 +61,7 @@ def steps(block):
         elif not text or indent(line) > 6:
             if in_step:
                 out[-1].append(line)
-        elif not text.startswith("#"):
+        elif re.match(rf"^    {KEY}$", line):
             in_step = False
     return out
 
@@ -345,6 +347,57 @@ class SwitchCheckTest(unittest.TestCase):
                 copy = self.text.rstrip("\n") + "\n" + "\n".join(lines) + "\n"
                 self.assertEqual(step_switch_problems(copy, RUN_COMMAND), [])
                 self.assertEqual(job_switch_problems(copy), [])
+
+    def test_a_string_running_onto_a_shallow_line_does_not_end_the_step(self):
+        # The rest of a quoted string may sit at 6 spaces or less; GitHub still reads the keys after it as the step's.
+        for marker, after, lines in (
+                (SETUP_PYTHON, "python-version: ${{ matrix.python-version }}",
+                 ['        name: "Set up', '      Python"', "        continue-on-error: true"]),
+                (RUN_COMMAND, RUN_COMMAND,
+                 ['        working-directory: "', '      ."', "        continue-on-error: true"])):
+            with self.subTest(marker=marker):
+                copy = insert_after(self.text, after, "\n".join(lines))
+                self.assertEqual(step_switch_problems(copy, marker),
+                                 [f"the `{marker}` step sets `continue-on-error: true`"])
+
+    def test_a_string_running_onto_a_shallow_line_does_not_end_the_job(self):
+        # The rest of a quoted string may sit at 2 spaces or less; GitHub still reads the keys after it as the job's.
+        copy = insert_after(self.text, "timeout-minutes: 15", '    name2: "x\n  y"\n    continue-on-error: true')
+        self.assertEqual(job_switch_problems(copy), ["the `unittest` job sets `continue-on-error: true`"])
+
+    def test_a_next_job_is_not_blamed_on_the_unittest_job(self):
+        copy = (self.text.rstrip("\n")
+                + "\n  other:\n    if: false\n    steps:\n      - run: x\n        continue-on-error: true\n")
+        self.assertEqual(job_switch_problems(copy), [])
+        self.assertEqual(step_switch_problems(copy, RUN_COMMAND), [])
+
+    def test_a_comment_inside_a_step_does_not_end_it(self):
+        for comment in ("#        timeout-minutes: 5", "      # note", "    # note"):
+            with self.subTest(comment=comment):
+                copy = insert_after(self.text, SETUP_PYTHON, comment)
+                copy = insert_after(copy, comment, "        if: false")
+                self.assertEqual(step_switch_problems(copy, SETUP_PYTHON),
+                                 [f"the `{SETUP_PYTHON}` step sets `if: false`"])
+
+    def test_a_blank_line_inside_a_step_does_not_end_it(self):
+        copy = insert_after(self.text, SETUP_PYTHON, "")
+        copy = insert_after(copy, "python-version: ${{ matrix.python-version }}", "        &a if: false")
+        self.assertEqual(step_switch_problems(copy, SETUP_PYTHON),
+                         [f"cannot read the step-level line '&a if: false' of the `{SETUP_PYTHON}` step"])
+
+    def test_the_step_pad_follows_the_dash_line(self):
+        copy = self.text.replace("      - uses: actions/setup-python@v5\n        with:\n          python-version",
+                                 "      -   uses: actions/setup-python@v5\n          with:\n            python-version")
+        self.assertNotEqual(copy, self.text)
+        copy = insert_after(copy, SETUP_PYTHON, "          &a if: false")
+        self.assertEqual(step_switch_problems(copy, SETUP_PYTHON),
+                         [f"cannot read the step-level line '&a if: false' of the `{SETUP_PYTHON}` step"])
+
+    def test_a_whitespace_only_line_is_not_a_problem(self):
+        copy = insert_after(self.text, "runs-on: ubuntu-latest", "    ")
+        copy = insert_after(copy, SETUP_PYTHON, "        ")
+        self.assertEqual(job_switch_problems(copy), [])
+        self.assertEqual(step_switch_problems(copy, SETUP_PYTHON), [])
 
     # A key line the check cannot read (an anchor, a tag, an explicit `? ` key, a merge key) can still carry a
     # switch, so it must fail the check, not be skipped.
