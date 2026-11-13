@@ -181,9 +181,20 @@ class GuardTest(unittest.TestCase):
     def test_guard_reads_a_joined_ap_line_with_a_comment_like_any_other(self):
         # the joined reading glues the lines after the comment onto the `ap` line, so it is not exempt
         for cmd in ("ap note v2 x # see below \\\ncp /tmp/evil.yaml \\\n~/.claude/autopilot-data/config.yaml",
-                    "ap note v2 x # \\\nrm -rf \\\n~/.claude/autopilot-data/projects"):
+                    "ap note v2 x # \\\nrm -rf \\\n~/.claude/autopilot-data/projects",
+                    "ap note v2 x #\\\ncp /tmp/evil.yaml \\\n~/.claude/autopilot-data/config.yaml",
+                    "ap note v2 x\t# see \\\ncp /tmp/evil.yaml \\\n~/.claude/autopilot-data/config.yaml",
+                    # the glued line repeated on its own (a comment line in bash) does not make it exempt
+                    "ap x # \\\ncp a \\\n~/.claude/autopilot-data/y\nap x # cp a ~/.claude/autopilot-data/y"):
             self.assertIsNotNone(guard.decide(bash(cmd), self.W), cmd)
         self.assertIsNone(guard.decide(bash('ap task set v2 PROJ-1 note="see #3" \\\nstatus=done'), self.W))
+
+    def test_guard_allows_a_one_line_ap_call_with_a_hash(self):
+        # no continuation is joined into these, so they stay exempt
+        for cmd in ('ap journal add v2 X "PR #101: rm stale lock under ~/.claude/autopilot-data/locks"',
+                    'ap task note v2 X "fix #12: moved ~/.claude/autopilot-data/a -> ~/.claude/autopilot-data/b"',
+                    'ap note v2 "see #3: cp notes into ~/.claude/autopilot-data/x"'):
+            self.assertIsNone(guard.decide(bash(cmd), self.W), cmd)
 
     def test_guard_checks_an_open_mode_with_escaped_quotes(self):
         cmd = 'python3 -c "import json; json.dump({}, open(\\"$AUTOPILOT_DATA/x.json\\", \\"w\\"))"'

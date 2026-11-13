@@ -65,10 +65,10 @@ def _writes(text: str) -> bool:
                 or _opens_to_write(text))
 
 
-def _join(cmd: str) -> str:
-    """`cmd` with each line continuation taken out: a `\\` + newline whose backslash is not itself escaped, read
-    pair by pair from the left (`\\\\` + newline is a literal backslash, and the newline still ends the line)."""
-    return _ESCAPE.sub(lambda m: "" if m.group(1) == "\n" else m.group(0), cmd)
+def _join(cmd: str, glue: str = "") -> str:
+    """`cmd` with each line continuation replaced by `glue`: a `\\` + newline whose backslash is not itself escaped,
+    read pair by pair from the left (`\\\\` + newline is a literal backslash, and the newline still ends the line)."""
+    return _ESCAPE.sub(lambda m: glue if m.group(1) == "\n" else m.group(0), cmd)
 
 
 def _harmless(text: str) -> str:
@@ -102,8 +102,13 @@ def decide(payload: dict, env) -> dict:
         if seg.strip() and not _is_ap(seg) and _denies(seg, marks):
             return _deny()
     # bash may or may not join a `\` + newline (not after a `#`), so the lines are read both split and joined. A `\`
-    # ending a comment does not continue the line, so a joined `ap` segment with a `#` is read like any other.
-    readings = [(s, True) for s in _SPLIT.split(cmd)] + [(s, "#" not in s) for s in _SPLIT.split(_join(cmd))]
+    # ending a comment does not continue the line, so an `ap` segment with a `#` that a continuation was joined into
+    # (marked by a NUL glue) is read like any other.
+    readings = [(s, True) for s in _SPLIT.split(cmd)]
+    for s in _SPLIT.split(_join(cmd, "\0")):
+        joined = "\0" in s
+        s = s.replace("\0", "")
+        readings.append((s, not (joined and "#" in s)))
     for seg, may_be_ap in readings:
         if not seg.strip() or (may_be_ap and _is_ap(seg)):
             continue
