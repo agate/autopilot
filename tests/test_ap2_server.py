@@ -1508,9 +1508,8 @@ console.log(JSON.stringify([
         self.assertIn("await post('/api/cap/answer', {card_id: card.id, option});", text)
         self.assertIn("if (e.status === 409) status.replaceChildren(h('p', {text: L('cap.stale')}), "
                       "h('p', {class: 'mono', text: e.message}));", text)
-        self.assertIn("const capAnswers = capOptions(c, S.state && S.state.access);\n"
-                      "    if (S.capNote && S.capNote.id !== c.id) S.capNote = null;", text)  # the card view
-        self.assertIn("    if (capAnswers.length) det.append(capSection(c, capAnswers));\n", text)
+        self.assertIn("    const area = capArea(c);  // the cap card's answer buttons, or the note of its answer\n"
+                      "    if (area) det.append(area);\n", text)  # the card view draws capArea
         self.assertEqual(set(cap.ANSWERS), {"raise50", "raise100", "accept_unknown", "pause"})
 
     # A plain-object `h` (tag, attrs, kids) and `flat`, every text of a tree in order, for running the page's
@@ -1638,8 +1637,6 @@ S.route = null;
         for got in (failed, busy, stop_error):
             self.assertNotIn("[cap.failed]", " ".join(got["text"]))
         text = PAGE.read_text(encoding="utf-8")
-        self.assertIn("    if (capAnswers.length) det.append(capSection(c, capAnswers));\n"
-                      "    else if (S.capNote) det.append(capNoteSection(S.capNote.reply));", text)
         labels = self.labels()
         for key in ("cap.not_stopped", "cap.stop_busy", "cap.stop_error"):
             with self.subTest(key):
@@ -1687,6 +1684,32 @@ const note = {id: 'X', reply: {answered: 'pause', stopped: [], failed: ['w-1']}}
                 self.assertEqual(out[name][-1], [])
 
     @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_the_card_view_shows_the_buttons_or_its_own_answers_note(self):
+        # capArea: the buttons on today's open cap card; after the page's answer, that answer's note; the card
+        # opening again drops the note, so a later answer from elsewhere never shows the earlier answer's note.
+        out = self.run_access(page_functions("capStopNote", "capNoteSection", "capSection", "capArea")
+                              + self.DOM_STUBS + """
+const post = async () => ({}), poll = async () => {}, loadList = async () => {}, loadCard = async () => {};
+const card = {id: 'X', kind: 'cap', ask: {from: 'cap', options: ['raise50', 'pause']}};
+const at = state => ({access: {cap: {card: state, card_id: 'X'}}});
+const show = () => { const a = capArea(card); return a ? flat(a) : []; };
+const note = {id: 'X', reply: {answered: 'pause', stopped: [], failed: ['w-1']}};
+const runs = {};
+S.state = at('open'); S.capNote = null; runs.open = show();
+S.state = at('answered'); S.capNote = note; runs.answered = show();
+S.state = at('open'); runs.reopened = show(); runs.noteAfterReopen = S.capNote;
+S.state = at('answered'); runs.answeredElsewhere = show();
+S.state = at('answered'); S.capNote = {id: 'Y', reply: note.reply}; runs.otherCardsNote = show();
+console.log(JSON.stringify(runs));
+""")
+        self.assertIn("[cap.raise50]", out["open"])
+        self.assertEqual(out["answered"], ["[cap.title]", "[cap.not_stopped]", "w-1"])
+        self.assertIn("[cap.raise50]", out["reopened"])
+        self.assertIsNone(out["noteAfterReopen"])
+        self.assertEqual(out["answeredElsewhere"], [])
+        self.assertEqual(out["otherCardsNote"], [])
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
     def test_the_open_card_is_redrawn_when_the_cap_card_opens_again(self):
         # Answered on the page, the card is drawn without buttons; when spend passes the raised limit the same card
         # opens again, and the 10-second tick redraws the card on screen so its buttons come back.
@@ -1701,7 +1724,8 @@ const loadList = async () => {}, loadCard = async id => { loads.push(id); };
   for (const [name, route, before, after] of [
       ['reopened', {name: 'card', arg: 'X'}, cap('answered', 50), cap('open', 50)],
       ['same', {name: 'card', arg: 'X'}, cap('open', 50), cap('open', 50)],
-      ['lane', {name: 'lane', arg: 'needs'}, cap('answered', 50), cap('open', 50)]]) {
+      ['lane', {name: 'lane', arg: 'needs'}, cap('answered', 50), cap('open', 50)],
+      ['other card', {name: 'card', arg: 'Y'}, cap('answered', 50), cap('open', 50)]]) {
     S.route = route; S.state = before; states = [after]; loads.length = 0;
     await tick();
     runs[name] = loads.slice();
@@ -1709,7 +1733,7 @@ const loadList = async () => {}, loadCard = async id => { loads.push(id); };
   console.log(JSON.stringify(runs));
 })();
 """)
-        self.assertEqual(out, {"reopened": ["X"], "same": [], "lane": []})
+        self.assertEqual(out, {"reopened": ["X"], "same": [], "lane": [], "other card": []})
 
     @unittest.skipUnless(shutil.which("node"), "needs node")
     def test_a_cap_state_that_cannot_be_read_is_a_red_line_and_a_settings_error(self):

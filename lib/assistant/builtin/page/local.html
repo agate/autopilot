@@ -918,6 +918,15 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     return h('section', {class: 'sec capans', 'data-block': 'cap_answer'}, h('h3', {text: L('cap.title')}),
       h('div', {class: 'btnrow'}, buttons), status);
   }
+  function capArea(c) {
+    // The card view's cap part: the answer buttons on today's open cap card, else the note of the page's own answer
+    // on that card (a neutral line), else nothing. The note is for the card it was answered on, and an answer of
+    // that card: another card drops it, and so does the card opening again (that earlier answer is over).
+    const answers = capOptions(c, S.state && S.state.access);
+    if (S.capNote && (S.capNote.id !== c.id || answers.length)) S.capNote = null;
+    if (answers.length) return capSection(c, answers);
+    return S.capNote ? capNoteSection(S.capNote.reply) : null;
+  }
   function accessSet() {
     // The Settings screen's first box: the profile, the profiles that do not load, and the full usage.
     const st = S.state || {}, a = st.access;
@@ -1143,10 +1152,8 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
         return [h('dt', {text: L('plain.' + line)}), h('dd', {class: t === null ? 'muted' : null, text: t === null ? L('plain.missing') : t})];
       }))));
     if (d.template_error) det.append(h('div', {class: 'warn'}, h('p', {text: L('card.template_error')}), h('p', {class: 'mono', text: d.template_error})));
-    const capAnswers = capOptions(c, S.state && S.state.access);
-    if (S.capNote && S.capNote.id !== c.id) S.capNote = null;  // the note is for the card it was answered on
-    if (capAnswers.length) det.append(capSection(c, capAnswers));
-    else if (S.capNote) det.append(capNoteSection(S.capNote.reply));
+    const area = capArea(c);  // the cap card's answer buttons, or the note of its answer
+    if (area) det.append(area);
     for (const block of d.view) {
       if (block === 'source_block') { if (d.source_block) det.append(sourceSection(d.source_block)); }
       else if (block === 'children') det.append(rowsSection('children', d.children));
@@ -1336,12 +1343,16 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
   }
   async function tick() {
     // Every 10 seconds: the heartbeat, the counts and the open list, without a reload.
-    const cap = capKey(S.state);
+    const cap = capKey(S.state), capId = st => st && st.access && st.access.cap && st.access.cap.card_id;
+    const before = capId(S.state);
     await poll();
     const r = S.route;
     if (r.name === 'lane' || r.name === 'search' || r.name === 'project' || r.name === 'card') await loadList();
-    // The cap card opened again (or was answered elsewhere): redraw the card on screen, so its buttons match.
-    if (r.name === 'card' && capKey(S.state) !== cap) await loadCard(r.arg);
+    // The cap card opened again (or was answered elsewhere): redraw it when it is the card on screen, so its
+    // buttons match. Any other card is left alone (a redraw would wipe a question being typed).
+    if (r.name === 'card' && capKey(S.state) !== cap && (r.arg === before || r.arg === capId(S.state))) {
+      await loadCard(r.arg);
+    }
   }
 
   $('search').addEventListener('keydown', e => {
