@@ -717,9 +717,10 @@ class Handler(BaseHTTPRequestHandler):
                 w = None
                 if cfg.mode == "live":  # the pause stops workers in live mode only, as `ap2 cap answer`
                     from assistant.workers import Workers
-                    w = _CapStop(Workers(data, cfg=cfg))  # a WorkerError here: nothing written yet, a 500
+                    w = _CapStop(Workers(data, cfg=cfg))  # Workers() failing: nothing written yet, a 500
                 return 200, cap.answer(data, option, now, workers=w)
-            except (ConfigError, CardError, OSError, WorkerError) as e:  # WorkerError: a damaged worker list
+            # WorkerError: a safety net for any other one raised before the writes (cap_stop's own becomes a 200)
+            except (ConfigError, CardError, OSError, WorkerError) as e:
                 raise HTTPError(500, str(e)) from e
 
     # -- GET /api/sources, /api/templates, /api/settings ---------------------------------------------------------

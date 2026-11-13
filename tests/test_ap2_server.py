@@ -1204,7 +1204,7 @@ class CapAnswerRouteTest(ServerCase):
         self.assertTrue((self.data / cap.PAUSED).exists())
         self.assertEqual(cap.state(self.data, self.clock().astimezone())["card"], "answered")
 
-    def test_a_worker_list_that_cannot_be_opened_in_live_mode_is_a_500_with_nothing_written(self):
+    def test_a_worker_setup_error_in_live_mode_is_a_500_with_nothing_written(self):
         self.start(cfg=Config(mode="live"))
         before = tree(self.data)
         err = WorkerError("<data>/workers.json: cannot open the worker list")
@@ -1265,7 +1265,10 @@ def page_functions(*names) -> str:
     text = PAGE.read_text(encoding="utf-8")
     out = []
     for name in names:
-        src = text[text.index(f"  function {name}("):]
+        head = f"  function {name}("
+        if head not in text:
+            head = f"  async function {name}("
+        src = text[text.index(head):]
         out.append(src[:src.index("\n  }\n") + 5])
     return "".join(out)
 
@@ -1607,6 +1610,42 @@ S.route = null;
                          "Answered, but these workers did not stop yet (the next check tries again):")
         self.assertEqual(labels["en"]["cap.stop_error"],
                          "Answered and paused, but the running workers could not be stopped:")
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_a_cap_note_is_dropped_once_the_page_leaves_its_card(self):
+        # The note of a pause answer is for the card it was answered on: a lane, Settings or another card in between
+        # drops it, so coming back to that card later draws no stale note; a redraw of the same card keeps it.
+        out = self.run_access(page_functions("capStopNote", "capNoteSection", "show") + self.DOM_STUBS + """
+const LANES = ['needs'];
+let next = null;
+const parseRoute = () => next;
+const drawRail = () => {}, panes = () => {}, loadList = async () => {};
+const $ = () => ({});
+const drawn = [];
+const redraw = () => drawn.push(S.capNote ? flat(capNoteSection(S.capNote.reply)) : []);
+const drawCard = c => { if (c) redraw(); };
+const loadCard = async () => redraw();  // the card redraw: the note under the card's answer section
+const drawSources = async () => {}, drawTemplates = async () => {}, drawSettings = async () => {};
+const note = {id: 'X', reply: {answered: 'pause', stopped: [], failed: ['w-1']}};
+(async () => {
+  const runs = {};
+  for (const [name, away] of [['same', null], ['lane', {name: 'lane', arg: 'needs'}],
+                              ['settings', {name: 'settings', arg: null}], ['other', {name: 'card', arg: 'Y'}]]) {
+    S.capNote = note;
+    drawn.length = 0;
+    if (away) { next = away; await show(); }
+    next = {name: 'card', arg: 'X'};
+    await show();
+    runs[name] = drawn.slice();
+  }
+  console.log(JSON.stringify(runs));
+})();
+""")
+        self.assertEqual(out["same"], [["[cap.title]", "[cap.not_stopped]", "w-1"]])
+        for name in ("lane", "settings", "other"):
+            with self.subTest(name):
+                self.assertNotIn("[cap.not_stopped]", json.dumps(out[name]))
+                self.assertEqual(out[name][-1], [])
 
     @unittest.skipUnless(shutil.which("node"), "needs node")
     def test_a_cap_state_that_cannot_be_read_is_a_red_line_and_a_settings_error(self):

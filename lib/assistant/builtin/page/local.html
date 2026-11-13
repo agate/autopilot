@@ -1299,6 +1299,9 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
   function drawAll() { drawStatic(); drawTop(); drawRail(); drawList(); }
   async function show() {
     const r = S.route = parseRoute();
+    // A cap note is for the card it was answered on, right after the answer: leaving that card drops it, so a
+    // later visit draws no stale note (a lane or Settings, Sources, Templates never reach drawCard's check).
+    if (S.capNote && !(r.name === 'card' && r.arg === S.capNote.id)) S.capNote = null;
     drawRail();
     if (r.name === 'lane' || r.name === 'search' || r.name === 'project' || r.name === 'card') {
       panes('list', 'card');

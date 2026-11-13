@@ -3262,10 +3262,10 @@ Calls the author made without asking (check them):
      `option` must be one of that card's `ask.options`, else 409 (so `accept_unknown` cannot answer a `spent`
      card); an option that is no answer at all is 400. Then `cap.answer(data, option, now, workers=w)`, `w` being
      `Workers(data, cfg)` in live mode and None in shadow mode, exactly as `ap2 cap answer`: `cap.answer` stays the
-     one entry. The reply is 200 with its dict; a CapError naming a file, a damaged card, or a worker list that
-     `Workers(data, cfg)` cannot open (before anything is written) is 500. A worker list that `cap_stop` cannot
-     read (live `pause` only) comes after `paused.json` and the answer are written, so it is no 500 (the page would
-     say "Not answered:" for a card that is answered): the server hands `cap.answer` a small adapter whose
+     one entry. The reply is 200 with its dict; a CapError naming a file, a damaged card, or a failure building
+     `Workers(data, cfg)` (before anything is written) is 500. A worker list that `cap_stop` cannot read (live
+     `pause` only) comes after `paused.json` and the answer are written, so it is no 500 (the page would say "Not
+     answered:" for a card that is answered): the server hands `cap.answer` a small adapter whose
      `cap_stop()` calls the real one and turns a WorkerError into `{"stopped": [], "failed": [], "stop_error":
      <its text>}`, and the reply is 200 with the answer, `paused: true` and `stop_error`. `cap.answer` stays the
      one entry and `ap2 cap answer` is unchanged. The page draws the buttons only on
