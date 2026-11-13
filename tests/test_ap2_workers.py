@@ -382,7 +382,8 @@ class ProjectSetupTest(WorkerCase):
         self.assertIn(f"Edit(/{self.data}/gate.json)", deny)
         self.assertIn(f"Edit(/{self.data}/routines/**)", deny)
         self.assertIn("Bash(gh pr comment:*)", deny)
-        self.assertEqual(settings["permissions"]["allow"], [f"Bash({ROOT / 'bin' / 'ap2'} worker park:*)"])
+        self.assertEqual(settings["permissions"]["allow"],
+                         [f"Bash({ROOT / 'bin' / 'ap2'} worker park {cid} implement:*)"])
         # The park hook runs before every tool call of the worker and its subagents (v1's `perms.park_hook` shape),
         # first; then the Bash guard (`ap2 hook-guard`) before every Bash call.
         hooks = {"PreToolUse": [
@@ -3821,6 +3822,16 @@ class PrReviewRoleTest(PrReviewCase):
                 self.assertIn(rule, ro["permissions"]["deny"])
                 self.assertNotIn(rule, base["permissions"]["deny"])
 
+    def test_the_floor_allows_only_the_workers_own_park(self):
+        # Allowed by rule, the park skips the classifier: the rule names the worker's own card and role, so parking
+        # another card is judged like any other command (and `ap2 worker park` refuses it in a worker's session).
+        cid = "c-20260105-090000-abcdef"
+        env = {"AP2_ROLE": "pr-review", "AP2_CARD": cid, "AP2_RUN_DIR": str(transcripts.run_dir(self.data, cid))}
+        ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env)
+        self.assertEqual(ro["permissions"]["allow"], [f"Bash({ROOT / 'bin' / 'ap2'} worker park {cid} pr-review:*)"])
+        self.assertEqual(workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, {})["permissions"]["allow"],
+                         [])  # no card in the env: no park is allowed by rule
+
     def test_the_floor_denies_the_ap2_commands_a_review_does_not_run(self):
         env = {"AP2_RUN_DIR": str(transcripts.run_dir(self.data, "c-20260105-090000-abcdef"))}
         base = workers_mod.floor("implement", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
@@ -4154,8 +4165,11 @@ class PrReviewDonePathTest(PrReviewCase):
         self.assertIn(f"run `ap2 review check {cid}`, then `ap2 review apply {cid}`", ask["text"])
         self.assertNotIn("verdict", self.get(cid))
         self.assertEqual(self.get(cid)["sessions"]["pr-review"]["closed"], "done")
-        # The ask holds the next auto-start back: no loop.
+        # The ask holds the next auto-start back: no loop. The card is not reviewed at its head, so a check keeps
+        # the ask open, and the check after it starts no new paid review either.
         self.assertEqual(self.workers().check(), [])
+        self.assertEqual(self.get(cid)["ask"]["reason"], workers_mod.APPLY_FAILED)
+        self.workers().check()
         self.assertEqual(len(self.review_starts()), 1)
         # A start by hand is the user's new try: it closes that ask, as every start closes the role's own asks.
         self.workers().start(cid, "pr-review", cwd=transcripts.run_dir(self.data, cid), prompt="Again.")

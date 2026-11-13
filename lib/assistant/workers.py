@@ -268,8 +268,10 @@ def floor(role: str, project: dict, data: Path, env: dict, profile: Optional[dic
     deny += [f"Edit(/{data}/{name})" for name in PROTECTED]
     deny += [f"Edit(/{package_root()}/**)"] + list(v1_perms.BASH_DENY)
     # The park command is the one step a parking worker takes; the auto-mode classifier must not judge it (v1 does
-    # the same for `ap worker park`).
-    allow = [f"Bash({package_root() / 'bin' / 'ap2'} worker park:*)"]
+    # the same for `ap worker park`). Only the worker's own park (its card, `AP2_CARD` in `env`, and role): parking
+    # another card is judged like any other command. No card in `env`: no park is allowed by rule.
+    card = env.get("AP2_CARD")
+    allow = [f"Bash({package_root() / 'bin' / 'ap2'} worker park {card} {role}:*)"] if card else []
     # The park hook (`ap2 hook-park`, parkhook.py) runs before every tool call of the worker and its subagents and
     # denies all but that command while usage is at the park line (v1's `perms.park_hook` shape). Then the Bash
     # guard (`ap2 hook-guard`, guard.py) denies a shell write into the data folder (but the worker's own run

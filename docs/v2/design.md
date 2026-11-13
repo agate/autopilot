@@ -802,8 +802,12 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   which the floor allows by rule; deny wins over allow, so it is not denied); the `hook-*` commands are left alone:
   `review apply`, `review sync`, every `card` and `worker` command but those two, and every other command
   (`config`, `search`, `restore`, `source`, `scan`, `gate`, `template`, `profile`, `spend`, `cap`, `serve`, `phone`,
-  `import-v1`). Each is written in two spellings, `Bash(ap2 <command>:*)` and `Bash(<package>/bin/ap2
-  <command>:*)` (`workers.floor`). They are best effort: they match the command's text, so a spelling such as
+  `import-v1`). In a worker's own session (`AP2_ROLE` set), `review plan`, `review check` and `worker park` refuse
+  a card (for the park, a card and role) that is not the worker's own (`AP2_CARD`, `AP2_ROLE`), the park reads the
+  real usage file and ignores `--usage`, and the floor's park allow rule names only the worker's own card and role,
+  so an injected review cannot rewrite another card's plan or park any worker until a date it made up; a user at a
+  terminal (no `AP2_ROLE`) still runs them on any card. Each is written in two spellings, `Bash(ap2 <command>:*)`
+  and `Bash(<package>/bin/ap2 <command>:*)` (`workers.floor`). They are best effort: they match the command's text, so a spelling such as
   `"$(echo ap2)" cap` gets past them; full enforcement is the deferred sandbox follow-up. Not in the floor yet:
   `gh api` with a field or a method (`-f`, `--input`, `-X`), and a sandbox. The hook runs through `cli.main` (not `bin/ap2`'s
   fast path), so it loads more than the Bash guard does; the role writes one file a round.
@@ -2021,7 +2025,7 @@ Calls the author made without asking (check them):
     (the permission floor: v1's outward-tool and Bash denials, plus `Edit` denials on the data folder's own files
     (including the user's `templates/**` and `sources/**`, the rules the worker floor in `roles.py` promises; every
     card's run directory stays writable except its settings files; also the gate's heartbeat `gate.json`, SQLite's
-    `index.sqlite-*` files next to the index (`-wal`, `-shm`, `-journal`), `routines/**` and `chat/**`) and the package, and one allow rule, `Bash(<package>/bin/ap2 worker park:*)`, as v1 allows its park command, and two PreToolUse hooks: first the park hook, `{"matcher": "*", "hooks": [{"type": "command", "command": "\"<package>/bin/ap2\" hook-park", "timeout": 5}]}` (v1's `perms.park_hook()` shape), so the worker and its subagents run it before each tool call, then the Bash guard, `{"matcher": "Bash", "hooks": [{"type": "command", "command": "\"<package>/bin/ap2\" hook-guard", "timeout": 5}]}`, v1's `ap hook-guard` copied into `lib/assistant/guard.py` (see the note below); the floor refuses a data folder or package path that a gitignore pattern cannot
+    `index.sqlite-*` files next to the index (`-wal`, `-shm`, `-journal`), `routines/**` and `chat/**`) and the package, and one allow rule, `Bash(<package>/bin/ap2 worker park <card> <role>:*)` (the worker's own card and role, from its env; none without a card), as v1 allows its park command, and two PreToolUse hooks: first the park hook, `{"matcher": "*", "hooks": [{"type": "command", "command": "\"<package>/bin/ap2\" hook-park", "timeout": 5}]}` (v1's `perms.park_hook()` shape), so the worker and its subagents run it before each tool call, then the Bash guard, `{"matcher": "Bash", "hooks": [{"type": "command", "command": "\"<package>/bin/ap2\" hook-guard", "timeout": 5}]}`, v1's `ap hook-guard` copied into `lib/assistant/guard.py` (see the note below); the floor refuses a data folder or package path that a gitignore pattern cannot
     name literally (one holding `[ ] * ? \ ! #` or ending in a space), before any session starts) and env `AP2_ROLE`, `AP2_DATA`, `AP2_CARD`, `AP2_PROJECT`, `AP2_RUN_DIR`, `AP2_PORTS`,
     `AP2_BRANCH`, `AP2_EXTRA_HOSTS`, `AP2_MCP_SERVERS`, `AP2_HEALTH_CHECKS` (JSON), in both the process env and the
     settings' `env`. v1's `AUTOPILOT_*` variables are dropped, so v1's park hook never takes a v2 worker for its

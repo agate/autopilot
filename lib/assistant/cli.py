@@ -152,6 +152,16 @@ def _roles():
     return ROLES
 
 
+def _own_card_only(card: str, role, what: str) -> None:
+    """In a worker's own session (`AP2_ROLE` set), refuse (WorkerError) a card, or with `role` a card and role,
+    that is not the worker's own (`AP2_CARD`, `AP2_ROLE`): a worker never steers another card's worker."""
+    mine_card, mine_role = os.environ.get("AP2_CARD"), os.environ.get("AP2_ROLE")
+    if card != mine_card or (role is not None and role != mine_role):
+        own = f"{mine_card or 'no card'} · {mine_role}" if role is not None else (mine_card or "no card")
+        asked = f"{card} · {role}" if role is not None else card
+        raise WorkerError(f"a worker {what} ({own}), not {asked}")
+
+
 def cmd_worker(args) -> int:
     from assistant.workers import Workers
 
@@ -174,7 +184,11 @@ def cmd_worker(args) -> int:
     elif sub == "check":
         out = w.check(by=args.by, usage_file=args.usage)
     elif sub == "park":
-        out = w.park(args.card, args.role, args.note, usage_file=args.usage)
+        usage = args.usage
+        if os.environ.get("AP2_ROLE"):  # a worker's own session: it parks only itself, on the real usage file
+            _own_card_only(args.card, args.role, "parks only itself")
+            usage = None  # a usage file the worker wrote itself could park it until any date it likes
+        out = w.park(args.card, args.role, args.note, usage_file=usage)
     elif sub == "answer":
         out = w.answer(args.card, " ".join(args.text), by=args.by)
     else:
@@ -958,6 +972,8 @@ def cmd_review(args) -> int:
         out = prreview.verdict_of(_read_review_file(args.file), cards.languages(config.load(data)))
         _print_json(out)
         return 1 if out["errors"] else 0
+    if args.review_command in ("plan", "check") and os.environ.get("AP2_ROLE"):
+        _own_card_only(args.card, None, f"runs review {args.review_command} only on its own card")
     if args.review_command == "check":
         out = prreview.check(datadir.resolve(args.data), args.card)
         _print_json(out)

@@ -809,7 +809,9 @@ class Ap2Case(Case):
             self.skipTest("the temp folder is inside the account's ~/.claude, so ap2 refuses every temp data folder")
         self.home = self.tmp / "home"
         self.home.mkdir()
-        self.env = {k: v for k, v in os.environ.items() if k not in ("AP2_DATA", "FAKE_GH_REPLIES", "FAKE_GH_LOG")}
+        # A user at a terminal: no AP2_* (a worker's own session carries AP2_ROLE and AP2_CARD).
+        self.env = {k: v for k, v in os.environ.items()
+                    if not k.startswith("AP2_") and k not in ("FAKE_GH_REPLIES", "FAKE_GH_LOG")}
         self.env.update(HOME=str(self.home), AP2_DATA=str(self.data), PYTHON_COLORS="0", PYTHONIOENCODING="utf-8")
 
     def ap2(self, *args, stdin=None):
@@ -1511,6 +1513,31 @@ class FlowTest(Ap2Case):
         plan = self.ok("review", "plan", cid, "--checkout", str(repo))
         self.assertEqual(plan["repo_layer"], f"{repo} at {head[:7]}")
         self.assertIn(("Payments safety", "repo"), [(a["name"], a["origin"]) for a in plan["angles"]])
+
+    def test_a_worker_plans_and_checks_only_its_own_card(self):
+        # A worker on one card must not rewrite another card's plan: that card's finished review would fail to
+        # apply, or its angles would be the injected worker's.
+        raw = self.tmp / "gh-search-prs.json"
+        shutil.copy(SCAN / "gh-search-prs.json", raw)
+        read = self.ok("source", "read", "github-review-requests", "--raw", str(raw))
+        cid = next(i["card"] for i in read["items"] if i["key"] == KEY)
+        self.replies.write_text(json.dumps(table(fixture("graphql-head-a.json"))))
+        self.assertEqual(self.ok("review", "plan", cid)["card"], cid)  # a terminal (no AP2_ROLE): any card
+        plan = prreview.run_dir(self.data, cid) / prreview.PLAN_FILE
+        before = plan.read_bytes()
+        terminal = dict(self.env)
+        self.env.update(AP2_ROLE="pr-review", AP2_CARD="c-20260101-000000-abcdef")
+        for args in (("plan", cid), ("plan", cid, "--stage", "delta"), ("check", cid)):
+            with self.subTest(args=args):
+                r = self.ap2("review", *args)
+                self.assertEqual((r.returncode, r.stdout), (1, ""), r.stderr)
+                self.assertEqual(r.stderr, f"ap2: a worker runs review {args[0]} only on its own card "
+                                           f"(c-20260101-000000-abcdef), not {cid}\n")
+        self.assertEqual(plan.read_bytes(), before)
+        self.env["AP2_CARD"] = cid
+        self.assertEqual(self.ok("review", "plan", cid)["card"], cid)
+        self.env = terminal
+        self.assertEqual(self.ok("review", "plan", cid)["card"], cid)
 
     def flow(self):
         raw = self.tmp / "gh-search-prs.json"

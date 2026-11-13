@@ -40,14 +40,15 @@ class WorkerCommandTest(unittest.TestCase):
         self.log = self.tmp / "claude.log"
         self.wt = self.tmp / "worktree"
         self.wt.mkdir()
+        # A user at a terminal: no AP2_* (a worker's own session carries AP2_ROLE and AP2_CARD).
         self.env = {k: v for k, v in os.environ.items()
-                    if k not in ("AP2_DATA", "LC_ALL") and not k.startswith(("AUTOPILOT_", "FAKE_"))}
+                    if k != "LC_ALL" and not k.startswith(("AUTOPILOT_", "FAKE_", "AP2_"))}
         self.env.update(HOME=str(self.home), AP2_DATA=str(self.data), PYTHON_COLORS="0", PYTHONIOENCODING="utf-8",
                         PATH=f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}",
                         FAKE_CLAUDE_HOME=str(self.fake_home), FAKE_CLAUDE_LOG=str(self.log))
 
-    def run_ap2(self, *args, data=None):
-        env = dict(self.env)
+    def run_ap2(self, *args, data=None, env_extra=None):
+        env = dict(self.env, **(env_extra or {}))
         if data is not None:
             env["AP2_DATA"] = str(data)
         return subprocess.run([sys.executable, str(AP2), *args], capture_output=True, text=True, env=env,
@@ -149,6 +150,55 @@ class WorkerCommandTest(unittest.TestCase):
         other = self.usage(self.tmp / "usage.json", 95)
         self.assertEqual(self.ok("worker", "park", cid, "implement", "--note", "x", "--usage", str(other))["percent"],
                          95)
+
+    def parked(self, cid: str):
+        return next(w for w in json.loads((self.data / "workers.json").read_text())["workers"]
+                    if w["card"] == cid).get("parked")
+
+    def test_a_worker_parks_only_its_own_card_and_role(self):
+        # A worker's own session (AP2_ROLE, AP2_CARD) parking another card would hold that card's slot with no ask.
+        self.live()
+        mine, other = self.add_card(), self.add_card()
+        self.ok("worker", "start", mine, "pr-review", "--cwd", str(self.wt))
+        self.ok("worker", "start", other, "pr-review", "--cwd", str(self.wt))
+        self.usage(self.home / ".claude.json", 95)
+        fake = self.usage(self.tmp / "fake.json", 99)
+        worker = {"AP2_ROLE": "pr-review", "AP2_CARD": mine}
+        for card_id, role in ((other, "pr-review"), (mine, "implement"), (other, "implement")):
+            with self.subTest(card=card_id, role=role):
+                line = self.fails("worker", "park", card_id, role, "--note", "x", "--usage", str(fake),
+                                  env_extra=worker)
+                self.assertIn(f"a worker parks only itself ({mine} · pr-review)", line)
+        self.assertIsNone(self.parked(other))
+        self.assertIsNone(self.parked(mine))
+        self.assertEqual(self.ok("worker", "park", mine, "pr-review", "--note", "x", env_extra=worker)["percent"], 95)
+
+    def test_a_worker_parking_itself_reads_the_real_usage_not_its_usage_flag(self):
+        self.live()
+        cid = self.add_card()
+        self.ok("worker", "start", cid, "pr-review", "--cwd", str(self.wt))
+        worker = {"AP2_ROLE": "pr-review", "AP2_CARD": cid}
+        fake = usage_file(self.tmp / "fake.json", 99, resets_at="2999-01-01T00:00:00+00:00",
+                          fetched=datetime.now(timezone.utc))
+        self.usage(self.home / ".claude.json", 3)
+        self.assertIn("under the park line", self.fails("worker", "park", cid, "pr-review", "--usage", str(fake),
+                                                        env_extra=worker))
+        self.assertIsNone(self.parked(cid))
+        self.usage(self.home / ".claude.json", 95)
+        rec = self.ok("worker", "park", cid, "pr-review", "--usage", str(fake), env_extra=worker)
+        self.assertEqual(rec["percent"], 95)
+        self.assertFalse(rec["resume_at"].startswith("2999"), rec)
+
+    def test_a_terminal_parks_any_card_with_its_usage_flag(self):
+        self.live()
+        a, b = self.add_card(), self.add_card()
+        self.ok("worker", "start", a, "pr-review", "--cwd", str(self.wt))
+        self.ok("worker", "start", b, "implement", "--cwd", str(self.wt))
+        given = self.usage(self.tmp / "given.json", 97)
+        for cid, role in ((a, "pr-review"), (b, "implement")):
+            with self.subTest(card=cid):
+                self.assertEqual(self.ok("worker", "park", cid, role, "--usage", str(given))["percent"], 97)
+                self.assertEqual(self.parked(cid)["percent"], 97)
 
     def test_answer_resume_and_a_parked_resume_by_check(self):
         self.live()
