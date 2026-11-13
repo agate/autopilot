@@ -417,7 +417,7 @@ class HelpAndUsageInProcessTest(unittest.TestCase):
         for want in ("Read-only, but for saving a question on a card, answering today's cap card and switching the "
                      "access profile;",
                      "in live mode a pause answer stops the running workers,",
-                     "a switch to a gateway profile may run its models command."):
+                     "and in both modes a switch to a gateway profile may run its models command."):
             with self.subTest(want):
                 self.assertIn(want, words)
 

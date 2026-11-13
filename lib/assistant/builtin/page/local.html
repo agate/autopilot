@@ -972,8 +972,10 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     const key = st === 502 ? 'access.models_unavailable' : st >= 400 && st < 500 ? 'access.switch_refused' : 'access.switch_failed';
     return {key, text: e && e.message ? e.message : String(e)};
   }
-  function errBox(err) {
-    return h('div', {class: 'warn', role: 'status'}, h('p', {text: L(err.key)}), h('p', {class: 'mono', text: err.text}));
+  function errBox(err, id) {
+    // `id`: what the control that gets focus names in aria-describedby, so a screen reader reads the error with it.
+    return h('div', {class: 'warn', role: 'status', id: id || null},
+      h('p', {text: L(err.key)}), h('p', {class: 'mono', text: err.text}));
   }
   function pick(list, want) {
     return Array.isArray(list) && list.includes(want) ? want : (Array.isArray(list) && list.length ? list[0] : null);
@@ -990,7 +992,15 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     else if (!lost) S.focusKey = null;
     if (want && (inside || lost)) S.focusKey = want;
     old.replaceWith(box);
-    if (!S.focusKey) return;
+    refocus(box);
+  }
+  function refocus(box) {
+    // After the Access box `box` is drawn anew: focus lost with the old box goes to the control S.focusKey names,
+    // when it is in `box` and enabled (the key is then spent). Focus the user put elsewhere is left alone, and the
+    // key dropped.
+    const now = document.activeElement;
+    if (now && now !== document.body) { S.focusKey = null; return; }
+    if (!S.focusKey || !box) return;
     const el = Array.from(box.querySelectorAll('[data-focus]')).find(x => x.dataset.focus === S.focusKey);
     if (el && !el.disabled) { el.focus(); S.focusKey = null; }
   }
@@ -999,7 +1009,11 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     // `c`: the choice box whose post went through; another box opened since is not closed by it.
     if (c === undefined || S.choice === c) S.choice = null;
     S.switchError = null;
-    S.focusKey = null;
+    // The pressed button is now the active one, disabled: focus left in the Access box (or lost to the page when
+    // the busy redraw disabled it) goes to the box's heading once Settings is drawn again.
+    const set = $('access-set'), was = document.activeElement;
+    const ours = !was || was === document.body || (!!set && set.contains(was));
+    S.focusKey = ours && onSettings() ? 'access:title' : null;
     await poll();
     if (onSettings()) await drawSettings();
   }
@@ -1008,6 +1022,7 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     // its choices, and the choice box opens for it.
     // One post at a time: a second click while a switch or a choice is still posting sends nothing.
     if (S.switching || (S.choice && S.choice.busy)) return;
+    if (S.choice && S.choice.name !== name) S.choice = null;  // another profile's box: its error would show under it
     S.switching = true;
     redrawAccess();
     let reply;
@@ -1050,7 +1065,8 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
         await post('/api/profile/choose', {name: c.name, model: c.model, effort: c.effort});
       } catch (e) {
         c.busy = false;
-        if (!onSettings()) return;  // Settings was left while the post ran: the box is gone
+        // Settings was left while the post ran: drop the box, so it does not come back on the next visit.
+        if (!onSettings()) { if (S.choice === c) { S.choice = null; S.focusKey = null; } return; }
         c.error = switchError(e);
         redrawAccess('choice:submit');
         return;
@@ -1065,10 +1081,10 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
       h('label', {text: L('access.choice_effort')}, select('effort', list(ch.efforts))),
       h('div', {class: 'btnrow'},
         h('button', {class: 'btn primary', type: 'button', disabled: off, 'data-focus': 'choice:submit',
-          text: L('access.choice_submit'), onclick: submit}),
+          'aria-describedby': c.error ? 'choice-error' : null, text: L('access.choice_submit'), onclick: submit}),
         h('button', {class: 'btn quiet', type: 'button', disabled: off, 'data-focus': 'choice:cancel',
           text: L('access.choice_cancel'), onclick: cancel})),
-      c.error ? errBox(c.error) : null);
+      c.error ? errBox(c.error, 'choice-error') : null);
   }
   function accessSet() {
     // The Settings screen's first box: the profile, the switch and its choice box, the profiles that do not load,
@@ -1085,11 +1101,13 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     if (S.choice && !sw.some(q => q.name === S.choice.name)) S.choice = null;  // removed or broken since it opened
     const busy = !!S.switching || !!(S.choice && S.choice.busy);  // one post at a time
     const buttons = sw.map(q => h('button', {class: 'btn pbtn', type: 'button', 'aria-pressed': String(q.pressed),
-      disabled: q.pressed || busy, 'data-focus': 'switch:' + q.name, onclick: () => switchProfile(q.name)},
+      disabled: q.pressed || busy, 'data-focus': 'switch:' + q.name,
+      'aria-describedby': S.switchError ? 'access-error' : null, onclick: () => switchProfile(q.name)},
       q.label ? h('span', {text: q.label}) : null, h('span', {class: q.label ? 'mono muted' : 'mono', text: q.name}),
       q.pressed ? h('span', {class: 'muted', text: L('access.current')})
         : q.needs_choice ? h('span', {class: 'muted', text: L('access.needs_choice')}) : null));
-    return h('div', {class: 'set', id: 'access-set'}, h('h3', {text: L('access.title')}), errs,
+    return h('div', {class: 'set', id: 'access-set'},
+      h('h3', {text: L('access.title'), tabindex: '-1', 'data-focus': 'access:title'}), errs,
       b ? h('dl', {class: 'kv'},
         h('dt', {text: L('access.profile')}), h('dd', {}, h('span', {class: b.cls, text: b.text})),
         b.detail ? [h('dt', {text: L('access.model')}), h('dd', {class: 'mono', text: b.detail})] : null,
@@ -1097,7 +1115,7 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
       buttons.length ? [h('h3', {text: L('access.switch')}), h('div', {class: 'btnrow'}, buttons),
         h('p', {class: 'muted', text: L('access.switch_note')})] : null,
       S.choice ? choiceBox(S.choice) : null,
-      S.switchError ? errBox(S.switchError) : null,
+      S.switchError ? errBox(S.switchError, 'access-error') : null,
       broken,
       h('h3', {text: L('usage.title')}),
       h('dl', {class: 'kv'}, usageRows(st.usage).map(r => [h('dt', {text: r.label}),
@@ -1431,7 +1449,8 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     const disk = s.disk || {};
     const total = Object.values(disk).reduce((a, b) => a + (typeof b === 'number' ? b : 0), 0);
     const unset = v => (v === null || v === undefined || v === '' ? L('settings.unset') : String(v));
-    body.replaceChildren(h('div', {class: 'sets'}, accessSet(),
+    const acc = accessSet();
+    body.replaceChildren(h('div', {class: 'sets'}, acc,
       h('div', {class: 'set'}, h('h3', {text: L('settings.config')}),
         h('dl', {class: 'kv'},
           h('dt', {text: L('settings.mode')}), h('dd', {class: 'mono', text: unset(cfg.mode)}),
@@ -1444,6 +1463,7 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
         grid([L('col.name'), L('col.size')],
           Object.keys(disk).map(k => h('tr', {}, h('td', {class: 'mono', text: k}), h('td', {class: 'num', text: size(disk[k])})))
             .concat([h('tr', {}, h('td', {}, h('strong', {text: L('settings.total')})), h('td', {class: 'num', text: size(total)}))])))));
+    refocus(acc);  // after a switch: focus goes to the Access box's heading (afterSwitch)
   }
 
   // --- routing: #/lane/<lane>, #/search/<q>, #/project/<id>, #/card/<id>, #/sources[/<name>],
@@ -1465,8 +1485,13 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     // A cap note is for the card it was answered on, right after the answer: leaving that card drops it, so a
     // later visit draws no stale note (a lane or Settings, Sources, Templates never reach drawCard's check).
     if (S.capNote && !(r.name === 'card' && r.arg === S.capNote.id)) S.capNote = null;
-    // The choice box and a switch's error are for Settings while it stays open: leaving it drops them.
-    if (r.name !== 'settings') { S.choice = null; S.switchError = null; S.focusKey = null; }
+    // The choice box and a switch's error are for Settings while it stays open: leaving it drops them. A box whose
+    // choice is still posting is kept, so a return to Settings shows it (and the switch held off) until its reply
+    // lands: a refusal off Settings drops it then, and one on Settings shows its error in it.
+    if (r.name !== 'settings') {
+      if (!(S.choice && S.choice.busy)) S.choice = null;
+      S.switchError = null; S.focusKey = null;
+    }
     drawRail();
     if (r.name === 'lane' || r.name === 'search' || r.name === 'project' || r.name === 'card') {
       panes('list', 'card');

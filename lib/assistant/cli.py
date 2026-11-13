@@ -1017,9 +1017,9 @@ def _serve_parser(sub) -> None:
                        description="Serve the local page and its JSON on 127.0.0.1 (this Mac only), until Ctrl-C or "
                                    "SIGTERM. Prints one JSON line first: url, data_dir and mode. Read-only, but for "
                                    "saving a question on a card, answering today's cap card and switching the "
-                                   "access profile; in live mode a pause answer stops the running workers, and a "
-                                   "switch to a gateway profile may run its models command. Sets up the data "
-                                   "folder's layout on first use.")
+                                   "access profile; in live mode a pause answer stops the running workers, and in "
+                                   "both modes a switch to a gateway profile may run its models command. Sets up "
+                                   "the data folder's layout on first use.")
     s.add_argument("--port", type=_serve_port, default=server.PORT, metavar="N",
                    help=f"the port (default: {server.PORT}; 0 takes a free one)")
     s.add_argument("--data", metavar="PATH", help=DATA_HELP)

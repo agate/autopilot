@@ -3290,9 +3290,9 @@ Calls the author made without asking (check them):
      switch (for a profile never chosen) and the choice run `gateway.models_command` once each, in both modes, as
      `ap2 profile use` runs it in a terminal. The server's docstring, the read-only bullet and `ap2 serve --help`
      ("Read-only, but for saving a question on a card, answering today's cap card and switching the access
-     profile; in live mode a pause answer stops the running workers, and a switch to a gateway profile may run its
-     models command.") say so; no other route starts one. The simplest reverse: always pass `workers=None` and tell
-     the user to run `ap2 cap answer pause`.
+     profile; in live mode a pause answer stops the running workers, and in both modes a switch to a gateway
+     profile may run its models command.") say so; no other route starts one. The simplest reverse: always pass
+     `workers=None` and tell the user to run `ap2 cap answer pause`.
   5. **[decided by the builder]** The profile switch and its choice box, on the Settings screen. `POST
      /api/profile/use` `{"name"}` and `POST /api/profile/choose` `{"name", "model", "effort"}`, both with the other
      POSTs' origin and body rules (403, 411, 413, 415, 400) and under the write lock of choice 8.
@@ -3304,12 +3304,17 @@ Calls the author made without asking (check them):
        (`profiles.fetch_models`) and replies 200 `{"needs_choice": true, "choices": profiles.choices(...)}`. A models
        command that fails (`ModelsUnavailable`) is 502 with its text; one that lists no model to choose is 502
        "gateway.models_command: listed no models, so there is nothing to choose" (the CLI's refusal), so no empty
-       box opens; a broken price override is 500.
+       box opens; a broken price override is 500. A hand-edited file nested too deeply for `json.loads` (a
+       `RecursionError`, or an `ArithmeticError`, as `profileview.ODD`) still gets a JSON reply: the profile's own
+       file is 409 `<name>: <error>`, and an `active-profile.json` that deep reads as no current profile for the
+       needs-choice check, while the switch itself (which `profiles.use` makes only after reading the old name) is
+       409 with that text, nothing written.
      - The choice loads the profile (400, 404, 409 as above), fetches the list fresh (never a list the page sent),
        then `profiles.choose(data, name, model, effort, models, known)` and `profiles.use`: 200 `{"chosen": {"name",
        "model", "effort"}, "active", "was"}`. A `model` or `effort` that is not text is 400; one not in the fresh
        list is 409 with `check_model` / `check_effort`'s text, nothing saved or switched; `ModelsUnavailable` and an
-       empty list are 502.
+       empty list are 502. A save that cannot be written for a `ValueError` (a label holding a lone surrogate
+       loads, but cannot be written back as UTF-8) is 500 with its text, nothing written or switched.
        It works for any profile that loads, chosen before or not, as `ap2 profile choose` does.
      - The page: a "Switch profile" row, one button per entry of `access.profiles` (label, then the name when it
        differs; "in use" or "model not chosen yet" after it), the active one pressed (`aria-pressed="true"`) and
@@ -3322,13 +3327,20 @@ Calls the author made without asking (check them):
        refused it." for a 4xx, "Not switched: the model list could not be fetched." for a 502, "Not switched:
        something went wrong." otherwise) with the server's reason under it, and a refused choice keeps the box
        open. The box and that error live in page state (`S.choice`, `S.switchError`), so a redraw keeps them;
-       leaving Settings drops them. The 10-second tick does not redraw the Access box while the box is open (a
-       redraw would close a drop-down list under the pointer) or while keyboard focus is inside the Access box. One
+       leaving Settings drops them, except a box whose choice is still posting: it is kept, so a return to Settings
+       shows it with every switch button still disabled; its refusal shows in it on Settings, and drops it when
+       another screen is open. A switch to another profile closes an open box first, so its error never shows
+       under another profile's box. The error box has an id (`access-error`, or `choice-error` in the choice box)
+       that the switch buttons, or "Choose and switch", name in `aria-describedby` while it is shown. The
+       10-second tick does not redraw the Access box while the box is open (a redraw would close a drop-down list
+       under the pointer) or while keyboard focus is inside the Access box. One
        post at a time: while a switch posts, the box's buttons are disabled, and while a choice posts, every switch
        button is. Focus: each control in the Access box has a `data-focus` key, and a redraw puts focus back on the
        control with the same key (once it is enabled again); an opened box focuses its model select, Cancel focuses
-       that profile's switch button, and a refused choice focuses "Choose and switch". The top bar's badge links
-       there.
+       that profile's switch button, and a refused choice focuses "Choose and switch". After a switch or a choice
+       that went through (the pressed button is then the active one, disabled), focus that was in the Access box,
+       or lost to the page, goes to the box's heading (`tabindex="-1"`); focus the user moved elsewhere stays. The
+       top bar's badge links there.
      - **[decided by the builder]** The choice box is part of the Settings screen, not a card in the store: the
        page has no card kind for it, and a store card would need a template and a sync. The simplest reverse: make
        it a card kind later.

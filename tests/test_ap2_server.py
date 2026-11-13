@@ -1363,6 +1363,36 @@ class ProfileUseRouteTest(ProfileRouteCase):
         self.assertEqual(self.active_bytes(), active)
         self.assertEqual(self.runs(), 0)
 
+    def test_a_profile_file_nested_too_deeply_is_409_and_writes_nothing(self):
+        # json.loads raises RecursionError, not ValueError: it still gets a JSON reply, never a dropped connection.
+        self.listed("g")
+        profiles.use(self.data, "g")
+        profiles.path(self.data, "deep").write_text("[" * 200000, encoding="utf-8")
+        before, active = tree(self.data), self.active_bytes()
+        status, _, body = self.use("deep")
+        self.assertEqual(status, 409, body)
+        self.assertTrue(body["error"].startswith("deep: RecursionError: "), body)
+        self.assertEqual(tree(self.data), before)
+        self.assertEqual(self.active_bytes(), active)
+
+    def test_an_active_profile_file_nested_too_deeply_gets_a_json_reply(self):
+        # `profiles.use` reads the old name before it writes and lets that RecursionError through, so the switch is
+        # refused with the error (409) instead of dropping the connection; nothing is written.
+        self.listed("g")
+        h = self.listed("h", chosen=False)
+        profiles.active_file(self.data).write_text("[" * 200000, encoding="utf-8")
+        before = tree(self.data)
+        status, _, body = self.use("g")
+        self.assertEqual(status, 409, body)
+        self.assertTrue(body["error"].startswith("g: RecursionError: "), body)
+        self.assertEqual(tree(self.data), before)
+        # The unreadable active file counts as no current profile: an unchosen one still opens its choice box.
+        status, _, body = self.use("h")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body, {"needs_choice": True,
+                                "choices": profiles.choices(self.data, h, profiles.fetch_models(self.data, h)[0])})
+        self.assertEqual(tree(self.data), before)
+
     def test_an_unchosen_profile_replies_with_its_choices_fetched_once(self):
         self.listed("g")
         profiles.use(self.data, "g")
@@ -1504,6 +1534,30 @@ class ProfileChooseRouteTest(ProfileRouteCase):
                 self.assertEqual(status, want, body)
                 self.assertEqual(self.unchanged(), before)
         self.assertEqual(self.runs(), 0)
+
+    def test_a_profile_file_nested_too_deeply_is_409_before_any_fetch(self):
+        profiles.path(self.data, "deep").write_text("[" * 200000, encoding="utf-8")
+        before = self.unchanged()
+        status, _, body = self.choose("deep", "big", "high")
+        self.assertEqual(status, 409, body)
+        self.assertTrue(body["error"].startswith("deep: RecursionError: "), body)
+        self.assertEqual(self.unchanged(), before)
+        self.assertEqual(self.runs(), 0)
+
+    def test_a_save_that_cannot_be_written_is_500_and_writes_nothing(self):
+        # A label holding the JSON escape of a lone surrogate loads, but cannot be written back as UTF-8: the save
+        # raises UnicodeEncodeError (a ValueError), which is a JSON 500, never a dropped connection.
+        f = profiles.path(self.data, "h")
+        raw = json.loads(f.read_text(encoding="utf-8"))
+        raw["label"] = "\ud800x"
+        f.write_text(json.dumps(raw, ensure_ascii=True), encoding="utf-8")
+        self.assertEqual(profiles.load(self.data, "h")["label"], "\ud800x")
+        before = self.unchanged()
+        status, _, body = self.choose("h", "big", "high")
+        self.assertEqual(status, 500, body)
+        self.assertIn("surrogate", body["error"])
+        self.assertEqual(self.unchanged(), before)
+        self.assertEqual(profiles.active_name(self.data), "g")
 
     def test_choose_works_in_shadow_mode_and_refuses_another_origin(self):
         with mock.patch("assistant.config.require_live", side_effect=AssertionError("require_live")) as live:
@@ -1757,7 +1811,8 @@ console.log(JSON.stringify([
         self.assertIn("parts.push(h('a', {class: b.cls, href: '#/settings', text: b.text}));", text)
         # The top bar draws the badge on each state, and the settings screen opens with the access set.
         self.assertIn("    drawAccess();\n    const sw = $('lang-switch');", text)
-        self.assertIn("body.replaceChildren(h('div', {class: 'sets'}, accessSet(),", text)
+        self.assertIn("const acc = accessSet();\n    body.replaceChildren(h('div', {class: 'sets'}, acc,", text)
+        self.assertIn("    refocus(acc);", text)  # after a switch, focus goes to the Access heading
 
     @unittest.skipUnless(shutil.which("node"), "needs node")
     def test_key_and_profile_errors_show_a_label_and_the_server_text(self):
@@ -2043,7 +2098,7 @@ console.log(JSON.stringify(runs));
         # Settings left open: each tick redraws its Access box from the new state, so it never disagrees with the
         # top bar; other screens, and a tick whose route changed while it ran, leave the box alone.
         # An open choice box is not redrawn under the user (its state stays in S.choice, see the choice box tests).
-        out = self.run_access(page_functions("capKey", "redrawAccess", "tick") + """
+        out = self.run_access(page_functions("capKey", "redrawAccess", "refocus", "tick") + """
 let states = [], onPoll = null;
 const poll = async () => { S.state = states.shift(); if (onPoll) onPoll(); };
 const loadList = async () => {}, loadCard = async () => {};
@@ -2086,7 +2141,9 @@ const onScreen = old => ({replaceWith: n => {
 }, contains: n => old.contains(n)});
 const $ = id => (id === 'access-set' ? (shown ? onScreen(shown) : holder) : null);
 const poll = async () => { calls.push(['poll']); };
-const drawSettings = async () => { calls.push(['drawSettings']); };
+// `settingsDrawn`: what a test has drawSettings do after it is called (e.g. draw the Access box anew).
+let settingsDrawn = null;
+const drawSettings = async () => { calls.push(['drawSettings']); if (settingsDrawn) settingsDrawn(); };
 const fail = status => async () => { throw Object.assign(new Error('REASON'), {status}); };
 const buttonsOf = n => find(n, 'button').map(b => ({text: flat(b), pressed: b.attrs['aria-pressed'] || null,
                                                      disabled: !!b.attrs.disabled}));
@@ -2100,7 +2157,8 @@ S.state = {access: {profile: {name: 'g', mode: 'gateway', label: 'Team'}, cap: {
   {name: 'subscription', label: 'subscription', mode: 'subscription', needs_choice: false}],
   broken_profiles: [{name: 'x', error: 'BROKEN-E'}]}, usage: {mode: 'gateway', windows: [], gateway: {}}};
 """
-    SWITCH_FUNCS = ("errBox", "redrawAccess", "onSettings", "afterSwitch", "switchProfile", "choiceBox", "accessSet")
+    SWITCH_FUNCS = ("errBox", "redrawAccess", "refocus", "onSettings", "afterSwitch", "switchProfile", "choiceBox",
+                    "accessSet")
 
     @unittest.skipUnless(shutil.which("node"), "needs node")
     def test_settings_has_one_switch_button_per_loading_profile_and_the_active_one_is_pressed(self):
@@ -2317,6 +2375,134 @@ const boxButtons = n => find(find(n, 'div').filter(d => d.attrs.id === 'choice-b
         self.assertEqual(out["cancel"], ["switch:h", True, None])
         self.assertEqual(out["movedOut"], [True, None])
 
+    # Settings drawn anew as drawSettings does: focus in the old box falls to the page, then refocus.
+    REDRAW_STUBS = """
+settingsDrawn = () => {
+  if (shown && shown.contains(document.activeElement)) document.activeElement = document.body;
+  shown = accessSet();
+  refocus(shown);
+};
+const choiceBox_ = n => find(n, 'div').filter(d => d.attrs.id === 'choice-box');
+const byId = (n, id) => find(n, 'div').filter(d => d.attrs.id === id).map(flat);
+"""
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_focus_goes_to_the_access_heading_after_a_switch_or_a_choice(self):
+        out = self.run_access(page_functions(*self.SWITCH_FUNCS) + self.DOM_STUBS + self.SWITCH_STUBS
+                              + self.FOCUS_STUBS + self.REDRAW_STUBS + """
+(async () => {
+  const runs = {};
+  S.choice = null; S.switchError = null; S.switching = false; S.focusKey = null;
+  redrawAccess();
+  runs.heading = [control('access:title').tag, control('access:title').attrs.tabindex];
+  // A switch that goes through: the pressed button is the active one now, disabled; focus goes to the heading.
+  control('switch:subscription').focus();
+  post = async () => ({active: 'subscription', was: 'g'});
+  await switchProfile('subscription');
+  runs.switched = [focused(), inBox(), S.focusKey];
+  // A choice that goes through: the box is gone; focus goes to the heading.
+  control('switch:h').focus();
+  post = async () => ({needs_choice: true, choices: CHOICES});
+  await switchProfile('h');
+  control('choice:submit').focus();
+  post = async (path, body) => ({chosen: body, active: 'h', was: 'g'});
+  await control('choice:submit').attrs.onclick();
+  runs.chose = [focused(), inBox(), S.choice, S.focusKey];
+  // Focus the user moved out of the box while the post ran stays there.
+  const search = {tag: 'input'};
+  control('switch:subscription').focus();
+  post = async () => { document.activeElement = search; return {active: 'subscription', was: 'g'}; };
+  await switchProfile('subscription');
+  runs.movedOut = [document.activeElement === search, S.focusKey];
+  console.log(JSON.stringify(runs));
+})();
+""")
+        self.assertEqual(out["heading"], ["h3", "-1"])
+        self.assertEqual(out["switched"], ["access:title", True, None])
+        self.assertEqual(out["chose"], ["access:title", True, None, None])
+        self.assertEqual(out["movedOut"], [True, None])
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_the_error_is_tied_to_the_focused_control_and_a_switch_closes_another_box(self):
+        out = self.run_access(page_functions(*self.SWITCH_FUNCS) + self.DOM_STUBS + self.SWITCH_STUBS
+                              + self.FOCUS_STUBS + self.REDRAW_STUBS + """
+const described = bs => bs.map(b => b.attrs['aria-describedby'] || null);
+(async () => {
+  const runs = {};
+  S.choice = null; S.switchError = null; S.switching = false; S.focusKey = null;
+  redrawAccess();
+  runs.none = described(switchButtons_(shown));
+  // A refused switch: every switch button names the error box.
+  post = fail(409);
+  await switchProfile('subscription');
+  runs.switchErr = [described(switchButtons_(shown)), byId(shown, 'access-error')];
+  // h's box open, then a switch to another profile is refused: h's box is closed, the error shown alone.
+  post = async () => ({needs_choice: true, choices: CHOICES});
+  await switchProfile('h');
+  post = fail(409);
+  await switchProfile('subscription');
+  runs.other = [S.choice, choiceBox_(shown).length, byId(shown, 'access-error')];
+  // A refused choice: "Choose and switch" names the box's error.
+  post = async () => ({needs_choice: true, choices: CHOICES});
+  await switchProfile('h');
+  post = fail(409);
+  await boxButtons(shown)[0].attrs.onclick();
+  runs.choiceErr = [described(boxButtons(shown)), byId(shown, 'choice-error'), described(switchButtons_(shown))];
+  console.log(JSON.stringify(runs));
+})();
+""")
+        self.assertEqual(out["none"], [None, None, None])
+        self.assertEqual(out["switchErr"], [["access-error"] * 3, [["[access.switch_refused]", "REASON"]]])
+        self.assertEqual(out["other"], [None, 0, [["[access.switch_refused]", "REASON"]]])
+        self.assertEqual(out["choiceErr"], [["choice-error", None], [["[access.switch_refused]", "REASON"]],
+                                            [None, None, None]])
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_a_choice_still_posting_survives_leaving_settings_and_coming_back(self):
+        out = self.run_access(page_functions(*self.SWITCH_FUNCS, "parseRoute", "show") + self.DOM_STUBS
+                              + self.SWITCH_STUBS + self.FOCUS_STUBS + self.REDRAW_STUBS + """
+const LANES = ['needs', 'running', 'planned', 'done'];
+const location = {hash: ''};
+const noop = () => {}, later = async () => {};
+const drawRail = noop, panes = noop, drawCard = noop;
+const loadList = later, loadCard = later, drawSources = later, drawTemplates = later;
+const go = async hash => { location.hash = hash; await show(); };
+const err = Object.assign(new Error('REASON'), {status: 409});
+let answer = null;
+const held = () => new Promise((ok, no) => { answer = {ok, no}; });
+(async () => {
+  const runs = {};
+  S.choice = null; S.switchError = null; S.switching = false; S.focusKey = null; S.capNote = null;
+  await go('#/settings');
+  post = async () => ({needs_choice: true, choices: CHOICES});
+  await switchProfile('h');
+  // Choose and switch, and while it posts (a models command may take 20 s): a lane, then Settings again.
+  post = held;
+  let pending = boxButtons(shown)[0].attrs.onclick();
+  await go('#/lane/needs');
+  await go('#/settings');
+  runs.back = [choiceBox_(shown).length, switchButtons_(shown).map(b => !!b.attrs.disabled),
+               boxButtons(shown).map(b => !!b.attrs.disabled)];
+  // The refusal lands on Settings: the box shows it.
+  answer.no(err);
+  await pending;
+  runs.refused = [choiceBox_(shown).length, byId(shown, 'choice-error'), S.choice && S.choice.busy];
+  // Again, but the refusal lands while a lane is open: the box is dropped, and Settings draws none later.
+  pending = boxButtons(shown)[0].attrs.onclick();
+  await go('#/lane/needs');
+  answer.no(err);
+  await pending;
+  runs.left = [S.choice, S.focusKey];
+  await go('#/settings');
+  runs.later = [choiceBox_(shown).length, switchButtons_(shown).map(b => !!b.attrs.disabled)];
+  console.log(JSON.stringify(runs));
+})();
+""")
+        self.assertEqual(out["back"], [1, [True, True, True], [True, True]])
+        self.assertEqual(out["refused"], [1, [["[access.switch_refused]", "REASON"]], False])
+        self.assertEqual(out["left"], [None, None])
+        self.assertEqual(out["later"], [0, [True, False, False]])
+
     @unittest.skipUnless(shutil.which("node"), "needs node")
     def test_one_post_at_a_time_between_the_switch_and_the_choice_box(self):
         out = self.run_access(page_functions(*self.SWITCH_FUNCS) + self.DOM_STUBS + self.SWITCH_STUBS
@@ -2340,15 +2526,16 @@ const boxButtons = n => find(find(n, 'div').filter(d => d.attrs.id === 'choice-b
   await boxButtons(shown)[0].attrs.onclick();
   runs.chooseCalls = calls.filter(x => x[0] === 'post').map(x => x[1]);
   runs.otherBox = !!S.choice && S.choice !== c && S.choice.other === true;
-  // A switch still posting: the box's "Choose and switch" and "Cancel" are off, and a click sends nothing.
+  // A switch still posting: the box's "Choose and switch" and "Cancel" are off, and a click sends nothing. (A
+  // switch to the box's own profile: one to another profile closes the box first.)
   calls.length = 0;
   post = async (path, body) => {
     calls.push(['post', path, body]);
     runs.switchBusy = boxButtons(shown).map(b => !!b.attrs.disabled);
     await boxButtons(shown)[0].attrs.onclick();
-    return {active: 'subscription', was: 'g'};
+    return {active: 'h', was: 'g'};
   };
-  await switchProfile('subscription');
+  await switchProfile('h');
   runs.switchCalls = calls.filter(x => x[0] === 'post').map(x => x[1]);
   console.log(JSON.stringify(runs));
 })();
@@ -2376,14 +2563,21 @@ const $ = () => ({value: ''});
     S.choice = {name: 'h'}; S.switchError = {key: 'access.switch_refused', text: 'REASON'};
     await show();
     runs[hash] = [S.choice, S.switchError];
+    // A box whose choice is still posting is kept for its reply (the switch error is still dropped).
+    S.choice = {name: 'h', busy: true}; S.switchError = {key: 'access.switch_refused', text: 'REASON'};
+    await show();
+    runs['busy ' + hash] = [S.choice, S.switchError];
   }
   console.log(JSON.stringify(runs));
 })();
 """)
         self.assertEqual(out.pop("#/settings"), [{"name": "h"}, {"key": "access.switch_refused", "text": "REASON"}])
+        self.assertEqual(out.pop("busy #/settings"), [{"name": "h", "busy": True},
+                                                      {"key": "access.switch_refused", "text": "REASON"}])
         for hash, kept in out.items():
             with self.subTest(hash):
-                self.assertEqual(kept, [None, None])
+                want = [{"name": "h", "busy": True}, None] if hash.startswith("busy ") else [None, None]
+                self.assertEqual(kept, want)
 
     def test_every_new_access_label_has_an_en_and_a_zh_text(self):
         labels = self.labels()

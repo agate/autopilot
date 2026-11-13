@@ -749,10 +749,13 @@ class Handler(BaseHTTPRequestHandler):
         return body
 
     def _profile_load(self, name: str) -> dict:
-        """The profile `name`: 404 when there is none, 409 with its error when it does not load."""
+        """The profile `name`: 404 when there is none, 409 with its error when it does not load (a hand-edited
+        file nested too deeply, too)."""
         data = self.server.data
         try:
             return profiles.load(data, name)
+        except profileview.ODD as e:
+            raise HTTPError(409, profileview._odd(name, e)) from e
         except profiles.ProfileError as e:
             try:
                 known = name in profiles.names(data)
@@ -781,6 +784,8 @@ class Handler(BaseHTTPRequestHandler):
             return profiles.use(self.server.data, name)
         except profiles.ProfileError as e:
             raise HTTPError(500 if isinstance(e.__cause__, OSError) else 409, str(e)) from e
+        except profileview.ODD as e:  # active-profile.json nested too deeply: `profiles.use` cannot read what it held
+            raise HTTPError(409, profileview._odd(name, e)) from e
 
     def profile_use(self):
         """Switch the active profile through `profiles.use`, in `ap2 profile use`'s order: load, the current name,
@@ -793,7 +798,7 @@ class Handler(BaseHTTPRequestHandler):
             p = self._profile_load(name)
             try:
                 current = profiles.active_name(data)
-            except profiles.ProfileError:
+            except (profiles.ProfileError, *profileview.ODD):
                 current = None  # broken: switching is its fix
             if name != current and profiles.needs_choice(data, p):
                 models, _ = self._fetch_models(p)
@@ -817,6 +822,8 @@ class Handler(BaseHTTPRequestHandler):
                 saved = profiles.choose(data, name, model, effort, models, known)
             except profiles.ProfileError as e:  # not offered, or a save that failed
                 raise HTTPError(500 if isinstance(e.__cause__, OSError) else 409, str(e)) from e
+            except ValueError as e:  # a save that failed: e.g. a label holding a lone surrogate cannot be written
+                raise HTTPError(500, str(e)) from e
             out = self._profile_switch(name)
             return 200, {"chosen": {"name": name, "model": model, "effort": saved["effort"]}, **out}
 
