@@ -2257,22 +2257,32 @@ Calls the author made without asking (check them):
       `bash -c 'ap2 src <data>/c'` after `export PATH=...` is still denied outright). `cp bash <data>/x` (`bash` is no command word there) and `bash -c 'cp a <data>/c'`
       stay denied.
     - `xargs` runs its command on the words it reads, so a pipeline is also judged across its segments: a segment
-      that runs `xargs` (any of its words, quotes removed, after any runner, known or not: `timeout 5 xargs`,
-      `caffeinate xargs`, `exec xargs`, `sudo xargs`, `${SUDO} xargs`, `xa''rgs`) with a write verb in its words (its
+      that runs `xargs` (any of its words, quotes removed, by name or by its full path, `/usr/bin/xargs`, after any
+      runner, known or not: `timeout 5 xargs`, `caffeinate xargs`, `exec xargs`, `sudo xargs`, `${SUDO} xargs`,
+      `xa''rgs`) with a write verb in its words (its
       redirects aside, also once its `$NAME`s are taken out: `| xargs -n1 basename > <run>/rm-list.txt` and `| xargs
       wc -l > "$AP2_RUN_DIR"/install.log` write only the run directory, which the segment's own reading judges) is a
       write when what it reads names a guarded path outside the own run directory (the package's `bin/ap2` run as a
       command aside). What it reads: an earlier segment of its pipeline (back to its start; a `|` at the end of a
       line goes on to the next one), the input of a piped compound it starts a pipeline in (`| if true; then xargs
       rm; fi`, `| { true; xargs rm; }`; only `xargs` itself reads it there: a `find` inside `| while read f; do
-      ...; done` reads no input), and a heredoc body of the `<<` it holds. What a segment sends on also holds its
+      ...; done` reads no input), a heredoc body of the `<<` it holds, and the input an earlier `exec` segment with
+      a `<` in it gives every later command of the shell, when that segment's words or its process substitution name
+      a guarded path (`exec < <(printf '%s\n' <data>/x); xargs rm`, `exec 3< <(...); xargs rm <&3` and `exec <
+      <data>/list; xargs rm` are denied; `exec < $AP2_RUN_DIR/list; xargs rm` is allowed). What a segment sends on
+      also holds its
       command substitutions' output and every segment of a compound that ends in it: a `{ ...; }` group, a `for`,
       `while`, `until` or `select` loop to its `done`, an `if` to its `fi`, a `case` to its `esac`, and a `(...)`
       (so `{ ls <data>/items; } | xargs touch`, `for f in <data>/items/*; do echo $f; done | xargs touch`, `(ls
       <data>; true) | xargs touch` and `echo $(ls <data>/items) | xargs touch` are denied). A heredoc body goes to
       the segment that holds its `<<` (its pipe successors read it through the pipe), and to every segment of its
-      line only when that segment starts with a closer (`}`, `)`, `done`, `fi`, `esac`: `{ ls; xargs rm; } <<EOF`
-      feeds the group): `cat > $AP2_RUN_DIR/notes.md <<'EOF' && find $AP2_RUN_DIR -name '*.tmp' | xargs rm -f` with
+      line only when that segment ends a compound: it starts with a closer (`}`, `)`, `done`, `fi`, `esac`: `{ ls;
+      xargs rm; } <<EOF` feeds the group), a `)` or closing word inside it ends one (`(xargs rm; true) <<'X'`,
+      `(xargs rm; true)<<'X'`, `(true; xargs rm; ) <<'X'`), or one of its words ends in an unquoted `}` that closes
+      no `${` (zsh's `{ xargs rm; true } <<'X'`; fail-closed, a brace list's `}` too). The set of segments a line's
+      bodies go to is found once per line (every segment of it when any holder ends a compound, else the holders),
+      so a line of many `}<<A;` holders stays linear (it was quadratic: about 24 s at 64 KiB). `cat >
+      $AP2_RUN_DIR/notes.md <<'EOF' && find $AP2_RUN_DIR -name '*.tmp' | xargs rm -f` with
       data-folder paths in the notes is allowed, `cd /tmp && xargs touch <<'X'` with `<data>/config.yaml` in its body
       is denied. So `ls <data>/items/*.yaml | xargs sed -i '' 's/a/b/'`, `rg -l foo <data> | xargs sed -i '' ...`,
       `find <data> -name '*.tmp' -print0 | xargs -0 rm` and `echo <data>/config.yaml | xargs rm` are denied, while
@@ -2280,24 +2290,46 @@ Calls the author made without asking (check them):
       -n1 basename`, `rg -l foo <data> | xargs grep -c bar` and `find <data> -name '*.yaml' | xargs cat` are allowed.
       A `dd` or `sed` there may take its `of=` or its in-place flag from the words it reads, so an `of=` or a sed
       in-place flag (`-i`, `-ni`, macOS's `-I`, `--in-place`; not `-print0`) among them makes it a write too (`echo
-      "x of=<run>'" | xargs dd`, `echo "-i s/a/b/ <data>/c" | xargs sed`).
+      "x of=<run>'" | xargs dd`, `echo "-i s/a/b/ <data>/c" | xargs sed`). An `xargs` that runs a shell (a word
+      after it is a shell's name, `csh` and `tcsh` too, whatever its `-c`: `xargs -I{} sh -c {}`, `xargs -I{} bash
+      -c '{}'`, `xargs -0 sh -c`) runs what it reads as a script, so it is judged as a shell that reads its input is
+      (below), with all it reads counted: `printf '%s\n' <data>/x | sed 's/^/rm /' | xargs -I{} sh -c {}` and the
+      `awk '{print "rm " $0}'` and `find <data> ...` forms are denied, `ls <data>/items | xargs -I{} sh -c 'wc -l
+      <data>/items/{}'` is allowed.
     - A command substitution feeds the command around it as a pipe feeds `xargs`: its output becomes that command's
-      words. So a segment with a write verb outside its redirects (or a `dd` or `sed` as above) whose own
+      words. So a segment that runs a write verb (or a `dd` or `sed` as above) whose own
       substitutions (`$(...)` or backticks, inside `"..."` too, nested ones and the segments of their compounds and
       pipelines included) name a guarded path outside the own run directory is a write: `rm $(find <data>/items
       -name x)`, `` rm `find <data>/items -name x` ``, `chmod 600 $(find <data>/items -name x)`, `rm "$(find <data>
       ...)"` and `rm $(ls -d <data>/items/*)` are denied (the guarded path is written in the command; only the list
       of names comes at run time), while `rm $(find $AP2_RUN_DIR -name '*.tmp')`, `wc -l $(ls <data>) >
       $AP2_RUN_DIR/n`, `cat $(ls <data>/items/*.yaml) | head` and `echo "$(ls <data>/items | wc -l) items" >>
-      $AP2_RUN_DIR/journal.md` are allowed.
-    - A shell that reads its script from its input (no `-c`, `_stdin_shell`) runs what the pipeline before it prints,
+      $AP2_RUN_DIR/journal.md` are allowed. The verb counts only among the words the segment runs outside its
+      substitutions (`_run_text`): its command words, and each other word with no blank in it, so a runner the
+      guard does not know still counts (`sudo rm $(...)`, `timeout 5 rm $(...)`), also once its `$NAME`s are taken
+      out (`r$x'm' $(...)`). Quoted prose is no verb, and a plain printer (`echo`, `printf` as the only command
+      outside the substitutions) runs none: `echo "- read $(ls <data>/items | wc -l) cards; next: rm stale branch" >>
+      $AP2_RUN_DIR/journal.md`, `echo "rm: $(ls <data>/items | wc -l)" > /tmp/n.txt` and `git commit -m "fix: rm
+      dead code" -m "$(git -C <pkg> log -1 --format=%s)"` are allowed.
+    - A shell that reads its script from its input (no `-c`, `_stdin_shell`; also a `-c` whose script word is
+      missing or comes from a substitution, `sh -c "$(cat)"`, `bash -c "$(</dev/stdin)"`, fail-closed for a script
+      word ending in a plain `$` too; and `csh` and `tcsh`, found only here, so a `-c` script is still read as POSIX
+      shell code only for `sh`, `bash`, `zsh`, `ksh` and `dash`) runs what the pipeline before it prints,
       so the pipeline is judged as one script: it is a write when, among what is piped into the shell (as for `xargs`
       above), one segment names a guarded path that is no run-directory path at all and one holds a write verb in its
       words, redirects aside (`find <data>/items -name x | sed 's/^/rm /' | sh`, `... | awk '{print "rm", $0}' |
       bash`, `ls -d <data>/items/* | sed 's/^/touch /' | zsh`). A run-directory path with a `$` after it does not
       count there: it is a word of the script, which the shell's own reading judges (`echo 'make >
       "$AP2_RUN_DIR/m.log"; echo "exit $?"' | sh` stays allowed), and so do `ls <data>/items | sed 's/^/wc -l /' | sh`
-      and `find $AP2_RUN_DIR -name '*.tmp' | sed 's/^/rm /' | sh`.
+      and `find $AP2_RUN_DIR -name '*.tmp' | sed 's/^/rm /' | sh`. Text the shell's own reading already judged as its
+      exact script does not count there either: the words of a plain printer (`echo '...' | sh`, also the printers of
+      a group, `{ echo 'set -e'; echo 'ls <data>/items | wc -l'; echo 'date >> <run>/j.md'; } | bash`; a printer with
+      a substitution keeps its words, `echo "rm $(ls -d <data>/items/*)" | sh` is denied) and a heredoc body that a
+      plain `cat` (no other words) passes on to a shell that reads it as its script (`cat <<'EOF' | bash` with `cat
+      <data>/config.yaml` on one line and `rm -rf build/` on another is allowed, as `bash <<'EOF'` is); only text a
+      command makes at run time counts (a `sed`, `awk` or `find` and all it reads, a substitution's output), so
+      `sed 's/^/rm /' <<'X' | sh` and `cat <<'X' | sed 's/^/rm /' | sh` with `<data>/config.yaml` in the body stay
+      denied. The `xargs` checks count all of it.
     - These are judged in one pass in order (`_fed_writes`): a segment comes after the segments it reads from, and
       each compound keeps what its segments send on, passing it to the compounds around it until one already holds
       it, so the pass stays linear. A heredoc body is one shared tuple (`_Piped.bodies` holds one per heredoc line),

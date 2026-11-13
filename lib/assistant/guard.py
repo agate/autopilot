@@ -47,19 +47,23 @@ too, or as any word after an unquoted `)`, `]]` or `}` of its segment, `PATH=...
 `functions[...]`, ...) loses every `ap2` exemption, and a segment of it that names the data folder or the package
 outside the own run directory at all is denied (one whose run-directory paths only have a `$` after them is judged
 by its verb). The script a shell or `eval` runs (`bash -c '...'`), and the words piped into a shell with no `-c`
-among its options (`echo '...' | sh`; `bash -s -- -c` has none), are read as a command of their own; when that
+among its options (`echo '...' | sh`; `bash -s -- -c` has none) or with a `-c` script that is missing or a
+substitution (`sh -c "$(cat)"`), `csh` and `tcsh` too, are read as a command of their own; when that
 writes nothing, the outer segment no longer reads the `-c` script word (the words after it, the script's `$1`...,
 stay, judged with the script's verb too) nor the words of a piped plain `echo` or `printf` (one command word, no
 `always` or closer; its redirects still count). A shell's name, or its script, before a word-final `}` counts as
 well (zsh's `{ ... | sh}`). What one command reads from another can be a write too (`_fed_writes`): a segment that
-runs `xargs` (any of its words, after any runner) with a write verb outside its redirects (or a `dd` or `sed` that
-may take its `of=` or `-i` from the words it reads) is a write when what it reads (its pipeline back to the start,
-the compound it starts a pipeline in, a heredoc body it holds, and on the way each `{ ...; }`, loop, `if`, `case`
-or `(...)` that ends before a `|` and each command substitution's output) names a guarded path outside the own run
-directory (`ls <data>/items | xargs touch`, `{ ls <data>; } | xargs rm`; `| xargs wc -l` and `find $AP2_RUN_DIR
-... | xargs rm` stay allowed); so is such a writer whose own command substitutions read one (`rm $(find <data>
-...)`; not `wc -l $(ls <data>) > <run>/n`), and a pipeline into a shell that reads its script from its input
-where a segment names a guarded path and one holds a write verb (`find <data> | sed 's/^/rm /' | sh`). A zsh script
+runs `xargs` (any of its words, by name or full path, after any runner) with a write verb outside its redirects (or
+a `dd` or `sed` that may take its `of=` or `-i` from the words it reads) is a write when what it reads (its
+pipeline back to the start, the compound it starts a pipeline in, a heredoc body it holds, the input an earlier
+`exec <...` gives the shell, and on the way each `{ ...; }`, loop, `if`, `case` or `(...)` that ends before a `|`
+and each command substitution's output) names a guarded path outside the own run directory (`ls <data>/items |
+xargs touch`, `{ ls <data>; } | xargs rm`; `| xargs wc -l` and `find $AP2_RUN_DIR ... | xargs rm` stay allowed);
+so is a segment that runs such a writer outside its own command substitutions when they read one (`rm $(find
+<data> ...)`; not `wc -l $(ls <data>) > <run>/n`, nor a verb in a printer's quoted prose), and a pipeline into a
+shell that reads its script from its input (or into an `xargs` that runs a shell) where a segment names a guarded
+path and one holds a write verb, counting for the shell only text made at run time, not the words of a printer or
+a heredoc body `cat` passes on, which the shell's own reading judged (`find <data> | sed 's/^/rm /' | sh`). A zsh script
 with a `(` that names a guarded path is a write (a fresh zsh has bare glob
 qualifiers on). Heredoc body lines that end in a backslash are joined, as bash joins them (an
 even run of backslashes too, fail-closed); a `$'...'` delimiter is decoded as bash 3.2 and zsh both decode it, and
@@ -422,7 +426,7 @@ _CLOSE_WORD = r"(?:\}|done|fi|esac)(?=[\s<>;|&)]|$)"
 _LEAD = re.compile(r"\s*((?:" + _CLOSE_WORD + r"\s*)*)((?:(?:\{|if|while|until|do|then|else|elif|!|time)(?=\s|$)\s*)*)"
                    r"((?:for|select|case|foreach)(?=\s|$))?")
 _OPENS = re.compile(r"\{|if|while|until")
-# A segment that starts with a closer (`_heredocs`: `{ ...; xargs rm; } <<EOF` gives its body to the whole line).
+# A segment that starts with a closer (`_ends_compound`: `{ ...; xargs rm; } <<EOF` gives its body to the whole line).
 _CLOSER = re.compile(r"\s*(?:\)|" + _CLOSE_WORD + ")")
 
 
@@ -958,10 +962,12 @@ def _heredocs(cmd: str, i: int, segs: list, line: int, pending: list, sub: bool,
     such shell on the line), the whole body (leading tabs stripped for `<<-`) is also a `_Script`. An unquoted body
     with a `$(` or a backtick is also read as a `"..."` word is (`_segments` with `body`: its substitutions, which
     can run across lines, are segments of their own; a `'` or `"` outside them is a plain character), its length
-    spent from `budget`. The body lines, one shared tuple, are also added to the `bodies` (`_Piped`) of each segment
-    that holds a `<<` (`holders`, indexes in `segs`: `xargs touch <<'EOF'`; its pipe successors read them through
-    `prev`, `cat <<'EOF' | xargs touch`), or of every segment of the line when that segment starts with a closer
-    (`_CLOSER`: `{ ...; xargs rm; } <<'EOF'` feeds the group); each one set goes to `undo` with the value before."""
+    spent from `budget`. The body lines, one shared `_Chunk` (`scripted` when a shell on the line reads them), are
+    also added to the `bodies` (`_Piped`) of each segment that holds a `<<` (`holders`, indexes in `segs`: `xargs
+    touch <<'EOF'`; its pipe successors read them through `prev`, `cat <<'EOF' | xargs touch`), or of every segment
+    of the line when any holder ends a compound (`_ends_compound`: `{ ...; xargs rm; } <<'EOF'`, `(xargs rm; true)
+    <<'EOF'` feed the group), that target set found once per line; each one set goes to `undo` with the value
+    before."""
     n, closed, first = len(cmd), False, len(segs)
     shells = [w for s in segs[line:] if not isinstance(s, _Body)
               and (w := _stdin_shell(_words(s, None, None, pid, None, sq)))]
@@ -990,19 +996,43 @@ def _heredocs(cmd: str, i: int, segs: list, line: int, pending: list, sub: bool,
         if not quoted and ("$(" in script or "`" in script):
             budget.spend(len(script))
             segs.extend(_segments(script, pid, budget, seen, sq, True))
-    bodies = tuple(s for s in segs[first:] if isinstance(s, _Body))
+    bodies = _Chunk(s for s in segs[first:] if isinstance(s, _Body))
     if bodies:
-        for h in holders:
-            for k in range(line, first) if _CLOSER.match(segs[h]) else (h,):
-                seg = segs[k]
-                if isinstance(seg, (_Body, _Script)) or (isinstance(seg, _Piped) and any(b is bodies for b in seg.bodies)):
-                    continue
-                if not isinstance(seg, _Piped):
-                    seg = segs[k] = _Piped(seg)
-                if undo is not None:
-                    undo.append((seg, seg.bodies))
-                seg.bodies = seg.bodies + (bodies,)
+        bodies.scripted = fed
+        # One target set for the line: every segment of it when a holder ends a compound, else the holders.
+        for k in range(line, first) if any(_ends_compound(segs[h], pid, sq) for h in holders) else holders:
+            seg = segs[k]
+            if isinstance(seg, (_Body, _Script)) or (isinstance(seg, _Piped) and any(b is bodies for b in seg.bodies)):
+                continue
+            if not isinstance(seg, _Piped):
+                seg = segs[k] = _Piped(seg)
+            if undo is not None:
+                undo.append((seg, seg.bodies))
+            seg.bodies = seg.bodies + (bodies,)
     return min(i, n)
+
+
+class _Chunk(tuple):
+    """The body lines of the heredocs of one line (`_heredocs`), shared by every segment that may read them.
+    `scripted`: a shell on the line reads them as its script too (a `_Script`), so a plain `cat` that passes them on
+    to that shell carries no text the shell's own reading has not judged (`_fed_writes`)."""
+    scripted = False
+
+
+def _ends_compound(seg: str, pid: bool, sq: bool) -> bool:
+    """Whether the heredoc holder `seg` ends a compound: it starts with a closer (`_CLOSER`), a `)` or a closing
+    word ends one inside it (`_Piped.closed`: `(xargs rm; true) <<'EOF'`), or one of its words ends in an unquoted
+    `}` that closes no `${` (zsh closes a group there: `{ xargs rm; true } <<'EOF'`)."""
+    if _CLOSER.match(seg) or getattr(seg, "closed", ()):
+        return True
+    if "}" not in seg:
+        return False
+    for w in _words(seg, None, None, pid, None, sq):
+        if _unbrace(w) != w:
+            o = w.rfind("{")
+            if o < 1 or w[o - 1] != "$":
+                return True
+    return False
 
 
 def _opener(cmd: str, i: int, esc: int, kind) -> bool:
@@ -1775,27 +1805,44 @@ def _fed_writes(segs: list, parsed: list, marks: _Marks, pid: bool, sq: bool, bu
     (`_FED_IN_PLACE`); a write verb), its heredoc bodies (`_Piped.bodies`), its command substitutions' output
     (`_Piped.subs`), the compounds it ends (`_Piped.closed`: all of their segments, `{ ls <data>; } | xargs rm`, `for
     ... done | xargs rm`) and what is piped into it (`_Piped.prev`, back to the start of the pipeline). It is a write:
-    - when a segment that runs `xargs` (any of its words, quotes removed, after any runner: `timeout 5 xargs`,
-      `${SUDO} xargs`) reads a guarded path (piped into it, or into a compound it starts a pipeline in,
-      `_Piped.inherit`: `| if true; then xargs rm; fi`; or a heredoc body it holds) and holds a write verb
-      (`_fed_verb`), or a `dd` or a `sed` that may take an `of=` or an in-place flag from what it reads (`echo
-      "of=<data>/x" | xargs dd`);
-    - when a segment's command substitutions read a guarded path and it holds such a writer (`rm $(find <data>
-      ...)`, `` chmod 600 `ls <data>/x` ``; not `wc -l $(ls <data>) > <run>/n`);
+    - when a segment that runs `xargs` (any of its words, quotes removed, by name or by its full path, after any
+      runner: `timeout 5 xargs`, `${SUDO} xargs`) reads a guarded path (piped into it, or into a compound it starts
+      a pipeline in, `_Piped.inherit`: `| if true; then xargs rm; fi`; a heredoc body it holds; or the input an
+      earlier `exec` segment with a `<` redirect gives the shell, when that segment's words or process
+      substitution name one: `exec < <(ls <data>); xargs rm`) and holds a write verb (`_fed_verb`), or a `dd` or a
+      `sed` that may take an `of=` or an in-place flag from what it reads (`echo "of=<data>/x" | xargs dd`); or
+      when such an `xargs` runs a shell (a word after it is one of `_STDIN_SHELL`'s, whatever its `-c`: `xargs
+      -I{} sh -c {}`) and what it reads carries both a guarded path and a write verb, as for a shell below;
+    - when a segment's command substitutions read a guarded path and a word the segment runs is such a writer
+      (`_runs_writer`: `rm $(find <data> ...)`, `` chmod 600 `ls <data>/x` ``, `sudo rm $(...)`; not `wc -l $(ls
+      <data>) > <run>/n`, a plain printer, nor a verb in quoted prose: `echo "next: rm $(ls <data> | head -1)"`);
     - when what is piped into a shell that reads its script from its input (`shells`, `_stdin_shell`) carries both a
       guarded path and a write verb (`find <data> | sed 's/^/rm /' | sh`); here only a path that is no run-directory
       path at all counts (`_Marks.level` 2): a run-directory path with a `$` after it is a script word the shell's
-      own reading judges (`echo 'make > "$AP2_RUN_DIR/m.log"; echo "exit $?"' | sh`).
+      own reading judges (`echo 'make > "$AP2_RUN_DIR/m.log"; echo "exit $?"' | sh`). Nor does text that reading
+      already judged as the shell's exact script count (`gen`, kept beside what a segment carries): the words of a
+      plain printer (`_printer`: `echo '...' | sh`, also inside a group, `{ echo a; echo b; } | sh`) and a heredoc
+      body that a plain `cat` passes on to a shell that reads it as its script (`_Chunk.scripted`: `cat <<'EOF' |
+      bash`); only text a command makes at run time does (a `sed`, `awk` or `find` and all it reads, a
+      substitution's output).
     One pass in order: a segment comes after what it reads (its substitutions', its pipe's and its compounds'
     segments), and each compound keeps what its segments carry, passed on to the compounds around it until one
     already holds it, so the pass stays linear."""
-    need = bool(shells)  # the write-verb bit counts only for a shell's input
     shells = set(shells)
-    xargs = {j for j, (seg, p) in enumerate(zip(segs, parsed)) if not p.body and isinstance(seg, _Piped)
-             and (seg.prev is not None or seg.inherit is not None or seg.bodies)
-             and any(w.rsplit("/", 1)[-1] == "xargs" for w in p.words)}
+    xargs, xshells = set(), set()
+    for j, p in enumerate(parsed):
+        if p.body:
+            continue
+        k = next((k for k, w in enumerate(p.words) if w.rsplit("/", 1)[-1] == "xargs"), None)
+        if k is not None:
+            xargs.add(j)
+            if any(_STDIN_SHELL.search(_unbrace(w)) for w in p.words[k + 1:]):
+                xshells.add(j)
+    need = bool(shells or xshells)  # the write-verb bit counts only for a shell's input
     index = {id(seg): j for j, seg in enumerate(segs)}
-    groups, out, chunks, verbs = {}, {}, {}, {}  # id of a `_Group`, a segment, a body chunk -> what it carries
+    # id of a `_Group`, a segment, a body chunk -> what it carries; `ggroups` and `gout`: what a shell's own
+    # reading has not judged of it (`gen`)
+    groups, out, chunks, verbs, ggroups, gout = {}, {}, {}, {}, {}, {}
 
     def verb_of(j):
         if j not in verbs:
@@ -1807,8 +1854,9 @@ def _fed_writes(segs: list, parsed: list, marks: _Marks, pid: bool, sq: bool, bu
         return (verb_of(j) or (state[1] and bool(_DD.search(text)))
                 or (state[2] and bool(_SED.search(text))))
 
-    if not (xargs or shells or any(getattr(seg, "subs", None) is not None and not p.body and writer(j)
-                                   for j, (seg, p) in enumerate(zip(segs, parsed)))):
+    if not (xargs or shells or any(getattr(seg, "subs", None) is not None and not p.body
+                                   and _runs_writer(seg, p, (0, True, True, True), pid, sq)
+                                   for seg, p in zip(segs, parsed))):
         return False
 
     def carried(words, p=None, seg=None):
@@ -1838,44 +1886,116 @@ def _fed_writes(segs: list, parsed: list, marks: _Marks, pid: bool, sq: bool, bu
             chunks[key] = state
         return chunks[key]
 
-    def source(seg):  # what the segment `seg` sends on (a pipe or a compound's input)
-        state = out.get(id(seg))
+    def source(seg, table):  # what the segment `seg` sends on (a pipe or a compound's input)
+        state = table.get(id(seg))
         return state if state is not None else (2 * marks.names(seg), True, True, True)
 
-    def keep(group, state):  # `group` and the compounds around it carry `state` too
+    def keep(group, state, table):  # `group` and the compounds around it carry `state` too
         while group is not None:
-            old = groups.get(id(group), _NOTHING)
+            old = table.get(id(group), _NOTHING)
             new = _either(old, state)
             if new == old:
                 return  # one around it already holds it as well
-            groups[id(group)] = new
+            table[id(group)] = new
             group = group.up
 
+    stdin = _NOTHING  # what an `exec` input redirect gives every later command of the shell
     for j, (seg, p) in enumerate(zip(segs, parsed)):
-        if p.body or not isinstance(seg, _Piped) or not (p.words or seg.closed or seg.bodies or seg.prev):
+        if p.body:
+            continue
+        lone = not isinstance(seg, _Piped)
+        if lone or not (p.words or seg.closed or seg.bodies or seg.prev):
+            if p.words and _exec_input(seg, p):
+                stdin = _either(stdin, carried(p.words, p, seg))
+            if j in xargs and stdin[0] and (writer(j, stdin) or (j in xshells and stdin[0] == 2 and stdin[3])):
+                return True
             continue  # a blank segment (a newline inside `$(`) carries nothing
         state = carried(p.words, p, seg)
-        bodies = _NOTHING
+        bodies = gbodies = _NOTHING
+        plain_cat = [w for k, w in enumerate(p.words) if k not in p.ops] in (["cat"], ["cat", "-"])
         for chunk in seg.bodies:
-            bodies = _either(bodies, read(chunk))
+            got = read(chunk)
+            bodies = _either(bodies, got)
+            if not (plain_cat and getattr(chunk, "scripted", False)):
+                gbodies = _either(gbodies, got)
         subs = groups.get(id(seg.subs), _NOTHING) if seg.subs is not None else _NOTHING
-        piped = (source(seg.prev) if seg.prev is not None else
-                 source(seg.inherit) if seg.inherit is not None else _NOTHING)
-        if subs[0] and writer(j, subs):
+        feed = seg.prev if seg.prev is not None else seg.inherit
+        piped = source(feed, out) if feed is not None else _NOTHING
+        gpiped = source(feed, gout) if feed is not None else _NOTHING
+        if _exec_input(seg, p):
+            stdin = _either(stdin, _either(state, subs))
+        if subs[0] and _runs_writer(seg, p, subs, pid, sq):
             return True
-        if j in xargs and (piped[0] or bodies[0]) and writer(j, _either(piped, bodies)):
+        fed = _either(_either(piped, bodies), stdin)
+        if j in xargs and fed[0] and writer(j, fed):
             return True
-        if j in shells and piped[0] == 2 and piped[3]:
+        if j in xshells and fed[0] == 2 and fed[3]:
             return True
+        if j in shells and gpiped[0] == 2 and gpiped[3]:
+            return True
+        gen = _either(_either(_NOTHING if _printer(p) else state, gbodies), subs)
         state = _either(_either(state, bodies), subs)
         if seg.prev is not None:
             state = _either(state, piped)
+            gen = _either(gen, piped)  # a command's output from what it reads is made at run time
         for group in seg.closed:
-            keep(group, state)
+            keep(group, state, groups)
             state = _either(state, groups.get(id(group), _NOTHING))
-        out[id(seg)] = state
-        keep(seg.group, state)
+            keep(group, gen, ggroups)
+            gen = _either(gen, ggroups.get(id(group), _NOTHING))
+        out[id(seg)], gout[id(seg)] = state, gen
+        keep(seg.group, state, groups)
+        keep(seg.group, gen, ggroups)
     return False
+
+
+def _exec_input(seg: str, p) -> bool:
+    """Whether the segment `seg` (`p` its `_Parsed`) runs `exec` with a `<` in its text: an input redirect (or a
+    process substitution) that every later command of the shell reads (`exec < <(ls <data>); xargs rm`)."""
+    return "<" in seg and p.lead is not None and p.words[p.lead] == "exec"
+
+
+def _depths(p) -> list:
+    """For each word of the `_Parsed` segment `p`, how many substitutions it sits inside (its `events`)."""
+    out, depth, e, events = [], 0, 0, p.events
+    for k in range(len(p.words)):
+        while e < len(events) and events[e][0] <= k:
+            depth = depth + 1 if events[e][1] else max(depth - 1, 0)
+            e += 1
+        out.append(depth)
+    return out
+
+
+def _runs_writer(seg: str, p, state, pid: bool, sq: bool) -> bool:
+    """Whether the segment `seg` (`p` its `_Parsed`), given its command substitutions' output (`state`, as
+    `_fed_writes` reads it), runs a writer of what they print: a write verb among the words it runs outside them
+    (`_run_text`), also in those words once each `$NAME` of the segment is taken out, as `_verb` does (`r$x'm'
+    $(...)` runs `rm`), or a `dd` or `sed` there that may take an `of=` or an in-place flag from the output. A
+    plain printer outside them (`echo`, `printf`) runs none."""
+    text = _run_text(p)
+    if text is None:
+        return False
+    if _writes(_harmless(text)) or (state[1] and bool(_DD.search(text))) or (state[2] and bool(_SED.search(text))):
+        return True
+    bare = _VAR_REF.sub("", seg) if "$" in seg else seg
+    if bare == seg:
+        return False
+    text = _run_text(_Parsed(bare, pid, sq))
+    return text is not None and _writes(_harmless(text))
+
+
+def _run_text(p):
+    """The words the `_Parsed` segment `p` runs outside its command substitutions, joined by blanks: its command
+    words there (`_commands`) and each other word there with no blank in it (so a runner `_commands` does not know
+    still counts: `sudo rm $(...)`; quoted prose such as `"next: rm $(...)"` does not), redirects aside; None for
+    a plain printer there (`_printer` once the substitutions' own words are aside: `echo "rm: $(...)"`)."""
+    depths = _depths(p)
+    outer = [k for k in p.commands if not depths[k]]
+    if (len(outer) == 1 and outer[0] == p.lead and p.words[p.lead] in _PRINTERS and not p.flags & _LOOSE
+            and "always" not in p.words):
+        return None
+    return " ".join(w for k, w in enumerate(p.words) if k not in p.ops and not depths[k]
+                    and (k in p.commands_set or not any(c.isspace() for c in w))) + " "
 
 
 def _alike(seg: str) -> bool:
@@ -1940,13 +2060,14 @@ class _Parsed:
 
 
 def _stdin_shell(words: list):
-    """The shell word (`_unbrace`d), when a segment of the shell words `words` runs a shell (`_SHELL`, not `eval`,
-    also before a word-final `}`) with no `-c` among its options, so the shell may read its script from its input;
-    else None. Only the option words right after the shell count (as in `_script_word`: up to the first `--`, `-` or
-    other word, an `-o` or `-O` value skipped): a `-c` after them is a positional argument (`bash -s -- -c`), and a
-    cluster with an `s` reads the input whatever else it holds (fail-closed)."""
-    k = next((k for k, w in enumerate(words) if _SHELL.search(_unbrace(w)) and not _unbrace(w).endswith("eval")),
-             None)
+    """The shell word (`_unbrace`d), when a segment of the shell words `words` runs a shell (`_STDIN_SHELL`: `_SHELL`'s
+    shells, not `eval`, and `csh` or `tcsh`, also before a word-final `}`) that may read its script from its input:
+    with no `-c` among its options, or with a `-c` whose script word is missing or comes from a substitution (it
+    holds a backtick or a `$(`, which `_words` leaves as a word ending in `$`: `sh -c "$(cat)"`; fail-closed, a word
+    ending in a plain `$` too); else None. Only the option words right after the shell count (as in `_script_word`:
+    up to the first `--`, `-` or other word, an `-o` or `-O` value skipped): a `-c` after them is a positional
+    argument (`bash -s -- -c`), and a cluster with an `s` reads the input whatever else it holds (fail-closed)."""
+    k = next((k for k, w in enumerate(words) if _STDIN_SHELL.search(_unbrace(w))), None)
     if k is None:
         return None
     values, c = 0, False
@@ -1961,7 +2082,16 @@ def _stdin_shell(words: list):
             values = 0 if w[1:2] == "-" else w.count("o") + w.count("O")
         else:
             break
-    return None if c else _unbrace(words[k])
+    if c:
+        script = _script_word(words, k)
+        if script is not None and not (words[script].endswith("$") or "`" in words[script] or "$(" in words[script]):
+            return None
+    return _unbrace(words[k])
+
+
+# The shells `_stdin_shell` finds: `_SHELL`'s, `eval` aside, and `csh` and `tcsh`, which read a script from their
+# input too (a `-c` script is still read as POSIX shell code only for `_SHELL`'s shells).
+_STDIN_SHELL = re.compile(r"(?<![A-Za-z0-9_.])(?:sh|bash|zsh|ksh|dash|csh|tcsh)\Z")
 
 
 def _script_word(words: list, shell: int):
