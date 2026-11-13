@@ -3248,7 +3248,7 @@ Calls the author made without asking (check them):
      `unknown_today` null and the page says "not counted yet today"; week and month still come from it while they
      are this period's, as `spend.totals` counts them (the week from Monday, the month from the 1st): a count from an
      earlier week leaves `week` null and one from an earlier month leaves `month` and `unknown` null (the page shows
-     "—"), so a Monday or a 1st never shows the last period's money as this one's. `spend/**` is
+     "—"); a count dated after today (the clock moved back) or with no readable day leaves all of them null, so a Monday or a 1st never shows the last period's money as this one's. `spend/**` is
      in `PROTECTED`, so workers cannot edit it.
   3. **[decided by the builder]** The cap card's buttons: `POST /api/cap/answer` `{"card_id", "option"}`, with the
      question's body rules (JSON, at most 64 KiB, this page's `Origin` only; the checks are two helpers,
