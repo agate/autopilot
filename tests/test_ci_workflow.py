@@ -266,6 +266,10 @@ class SwitchCheckTest(unittest.TestCase):
         copy = insert_after(self.text, "  unittest:", '    "continue-on-error": true')
         self.assertEqual(job_switch_problems(copy), ["the `unittest` job sets `continue-on-error: true`"])
 
+    def test_a_space_before_the_colon_is_still_read(self):
+        copy = insert_after(self.text, SETUP_PYTHON, "        if : false")
+        self.assertEqual(step_switch_problems(copy, SETUP_PYTHON), [f"the `{SETUP_PYTHON}` step sets `if: false`"])
+
     def test_a_flow_mapping_setup_python_step_is_a_problem(self):
         # Keys the check cannot read must fail the check, not pass it.
         copy = re.sub(r"(?m)^      - uses: actions/setup-python@v5\n        with:\n          python-version: .*$",
@@ -287,6 +291,10 @@ class SwitchCheckTest(unittest.TestCase):
                 copy = insert_after(self.text, "runs-on: ubuntu-latest", comment)
                 copy = insert_after(copy, comment, "    continue-on-error: true")
                 self.assertEqual(job_switch_problems(copy), ["the `unittest` job sets `continue-on-error: true`"])
+
+    def test_a_blank_line_does_not_end_the_job(self):
+        copy = self.text.rstrip("\n") + "\n\n    continue-on-error: true\n"
+        self.assertEqual(job_switch_problems(copy), ["the `unittest` job sets `continue-on-error: true`"])
 
     def test_text_inside_a_run_block_is_not_a_problem(self):
         copy = self.text.replace(f"        run: {RUN_COMMAND}",
