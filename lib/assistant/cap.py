@@ -8,7 +8,8 @@ no worker starts or resumes; running workers keep going. One card per local day 
 by 50% or 100%, to accept today's cost that cannot be priced, or to pause. The pause (`paused.json`) refuses every
 start and resume in any mode, also past midnight, until `ap2 cap resume` lifts it; the `pause` answer also stops and
 parks every running worker (`Workers.cap_stop`). A subscription profile has no cap: its usage windows stay the park
-hook's job.
+hook's job. Before any spend is read, a gateway profile whose key command fails (`keys.check`) refuses every start
+and resume too (`reason: key`), with no card and no fallback to the subscription.
 
 "Today" is the calendar day of `now`: an aware `now` at its own offset, a naive one by this computer's local rules,
 as in `spend.totals`. Every function takes the data folder and the time; there is no module clock. Everything is
@@ -24,7 +25,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from assistant import cards, config, spend
+from assistant import cards, config, keys, spend
 from assistant.cards import CardError
 from assistant.config import ConfigError
 from assistant.store import Store, write_json
@@ -36,7 +37,7 @@ ACCEPT_UNKNOWN = "accept_unknown"  # today's cost that cannot be priced counts a
 PAUSE = "pause"
 ANSWERS = (*OPTIONS, ACCEPT_UNKNOWN, PAUSE)
 PAUSE_NOTE = "paused at the daily cap"
-REASONS = ("ok", "cap", "paused")  # the allowance's reasons; a later slice may add one (key health)
+REASONS = ("ok", "cap", "paused", "key")  # the allowance's reasons: `key` is a gateway key that fails (keys.py)
 CAUSES = ("spent", "unknown")
 CARD_STATES = ("open", "answered", None)
 FEED = "cap"
@@ -329,8 +330,10 @@ def close_card(data, now, store: Optional[Store] = None) -> None:
 
 def allowance(data, projects, now, p: dict, listing=None, store: Optional[Store] = None) -> dict:
     """May a worker start or resume now on profile `p`? `{"allow": 0 | None, "reason": REASONS, "cause"?, "limit"?,
-    "spent"?}`. Paused (any mode): `allow 0`, `reason paused`. A subscription profile: `allow None`, `reason ok`,
-    with no spend parsed, and an unanswered card is taken back. A gateway profile: today's gateway spend (every
+    "spent"?, "error"?}`. Paused (any mode): `allow 0`, `reason paused`. A subscription profile: `allow None`, `reason
+    ok`, with no spend parsed, and an unanswered card is taken back. A gateway profile whose key command fails
+    (`keys.check`, cached): `allow 0`, `reason key`, with its `error`, before any spend is read and with no card
+    opened; nothing falls back to the subscription. Otherwise for a gateway profile: today's gateway spend (every
     gateway profile together) at or over today's limit, or today's cost that cannot be priced (unless accepted),
     opens the card and is `allow 0`, `reason cap`; otherwise an unanswered card is taken back and it is `allow
     None`, `reason ok`. A card that cannot be written never lets work start: the refusal stands, with
@@ -345,6 +348,9 @@ def allowance(data, projects, now, p: dict, listing=None, store: Optional[Store]
         except (CardError, OSError) as e:
             out["card_error"] = str(e) or type(e).__name__
         return out
+    err = keys.check(data, p, now)
+    if err:
+        return {"allow": 0, "reason": "key", "error": err}
     limit = today_limit(data, p, now)
     try:
         t = spend.totals(data, projects, now, "gateway", listing)
@@ -370,6 +376,8 @@ def allowance(data, projects, now, p: dict, listing=None, store: Optional[Store]
 
 def refusal(a: dict) -> str:
     """The one line a refused start or resume says: the reason, today's spend, the limit and the fix."""
+    if a.get("reason") == "key":
+        return f"the gateway key does not work: {a.get('error') or 'the key command failed'}. {keys.KEY_FIX}"
     if a.get("reason") == "paused":
         pz = a.get("paused") or {}
         why = f"work is paused at the daily cap since {pz['at']}" if pz.get("reason") == "cap" and pz.get("at") \
