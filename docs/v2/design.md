@@ -3302,11 +3302,14 @@ Calls the author made without asking (check them):
        subscription: `profiles.use`, 200 `{"active", "was"}`, no models command run. A profile that
        `profiles.needs_choice` and is not the active one switches nothing: the route fetches its list once
        (`profiles.fetch_models`) and replies 200 `{"needs_choice": true, "choices": profiles.choices(...)}`. A models
-       command that fails (`ModelsUnavailable`) is 502 with its text; a broken price override is 500.
+       command that fails (`ModelsUnavailable`) is 502 with its text; one that lists no model to choose is 502
+       "gateway.models_command: listed no models, so there is nothing to choose" (the CLI's refusal), so no empty
+       box opens; a broken price override is 500.
      - The choice loads the profile (400, 404, 409 as above), fetches the list fresh (never a list the page sent),
        then `profiles.choose(data, name, model, effort, models, known)` and `profiles.use`: 200 `{"chosen": {"name",
        "model", "effort"}, "active", "was"}`. A `model` or `effort` that is not text is 400; one not in the fresh
-       list is 409 with `check_model` / `check_effort`'s text, nothing saved or switched; `ModelsUnavailable` is 502.
+       list is 409 with `check_model` / `check_effort`'s text, nothing saved or switched; `ModelsUnavailable` and an
+       empty list are 502.
        It works for any profile that loads, chosen before or not, as `ap2 profile choose` does.
      - The page: a "Switch profile" row, one button per entry of `access.profiles` (label, then the name when it
        differs; "in use" or "model not chosen yet" after it), the active one pressed (`aria-pressed="true"`) and
@@ -3320,7 +3323,12 @@ Calls the author made without asking (check them):
        something went wrong." otherwise) with the server's reason under it, and a refused choice keeps the box
        open. The box and that error live in page state (`S.choice`, `S.switchError`), so a redraw keeps them;
        leaving Settings drops them. The 10-second tick does not redraw the Access box while the box is open (a
-       redraw would close a drop-down list under the pointer). The top bar's badge links there.
+       redraw would close a drop-down list under the pointer) or while keyboard focus is inside the Access box. One
+       post at a time: while a switch posts, the box's buttons are disabled, and while a choice posts, every switch
+       button is. Focus: each control in the Access box has a `data-focus` key, and a redraw puts focus back on the
+       control with the same key (once it is enabled again); an opened box focuses its model select, Cancel focuses
+       that profile's switch button, and a refused choice focuses "Choose and switch". The top bar's badge links
+       there.
      - **[decided by the builder]** The choice box is part of the Settings screen, not a card in the store: the
        page has no card kind for it, and a store card would need a template and a sync. The simplest reverse: make
        it a card kind later.

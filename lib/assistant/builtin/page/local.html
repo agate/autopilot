@@ -621,7 +621,7 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
   const SEARCH_MAX_WORDS = 50;
   const PANES = ['list', 'card', 'sources', 'source', 'templates', 'template', 'settings'];
   const S = {state: null, fetchedAt: 0, lang: null, route: {name: 'lane', arg: 'needs'}, list: {name: 'lane', arg: 'needs'},
-             listData: null, cardId: null, choice: null, switchError: null, switching: false};
+             listData: null, cardId: null, choice: null, switchError: null, switching: false, focusKey: null};
 
   const $ = id => document.getElementById(id);
 
@@ -978,21 +978,36 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
   function pick(list, want) {
     return Array.isArray(list) && list.includes(want) ? want : (Array.isArray(list) && list.length ? list[0] : null);
   }
-  function redrawAccess() {
+  function redrawAccess(want) {
+    // Draw the Access box again in place, and keep keyboard focus in it: each control has a data-focus key. A
+    // control focused in the old box is focused again in the new one; one the redraw disabled (a busy post) stays
+    // remembered in S.focusKey until a later redraw enables it. `want` names the control to focus instead. Focus
+    // the user moved out of the box is left alone.
     const old = $('access-set'), box = accessSet();
-    if (old && box) old.replaceWith(box);
+    if (!old || !box) return;
+    const was = document.activeElement, inside = !!was && old.contains(was), lost = !was || was === document.body;
+    if (inside) S.focusKey = (was.dataset && was.dataset.focus) || null;
+    else if (!lost) S.focusKey = null;
+    if (want && (inside || lost)) S.focusKey = want;
+    old.replaceWith(box);
+    if (!S.focusKey) return;
+    const el = Array.from(box.querySelectorAll('[data-focus]')).find(x => x.dataset.focus === S.focusKey);
+    if (el && !el.disabled) { el.focus(); S.focusKey = null; }
   }
   function onSettings() { return !!(S.route && S.route.name === 'settings'); }
-  async function afterSwitch() {
-    S.choice = null;
+  async function afterSwitch(c) {
+    // `c`: the choice box whose post went through; another box opened since is not closed by it.
+    if (c === undefined || S.choice === c) S.choice = null;
     S.switchError = null;
+    S.focusKey = null;
     await poll();
     if (onSettings()) await drawSettings();
   }
   async function switchProfile(name) {
     // The server's `profiles.use`, as `ap2 profile use`. A profile never chosen switches nothing: the reply lists
     // its choices, and the choice box opens for it.
-    if (S.switching) return;  // a second click while the first switch is still posting
+    // One post at a time: a second click while a switch or a choice is still posting sends nothing.
+    if (S.switching || (S.choice && S.choice.busy)) return;
     S.switching = true;
     redrawAccess();
     let reply;
@@ -1012,7 +1027,7 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
       S.switchError = null;
       S.choice = {name, choices: c, model: pick(c.models, c.recommended_model), effort: pick(c.efforts, c.recommended_effort),
                   error: null, busy: false};
-      redrawAccess();
+      redrawAccess('choice:model');
       return;
     }
     await afterSwitch();
@@ -1024,9 +1039,10 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     const ch = c.choices || {};
     const list = v => (Array.isArray(v) ? v.filter(x => typeof x === 'string') : []);
     const select = (field, items) => h('select', {class: 'mono', name: field, disabled: c.busy,
-      onchange: e => { c[field] = e.target.value; }}, items.map(v => h('option', {value: v, selected: v === c[field], text: v})));
+      'data-focus': 'choice:' + field, onchange: e => { c[field] = e.target.value; }},
+      items.map(v => h('option', {value: v, selected: v === c[field], text: v})));
     const submit = async () => {
-      if (c.busy) return;
+      if (c.busy || S.switching) return;
       c.busy = true;
       c.error = null;
       redrawAccess();
@@ -1036,19 +1052,22 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
         c.busy = false;
         if (!onSettings()) return;  // Settings was left while the post ran: the box is gone
         c.error = switchError(e);
-        redrawAccess();
+        redrawAccess('choice:submit');
         return;
       }
-      await afterSwitch();
+      await afterSwitch(c);
     };
-    const cancel = () => { if (S.choice === c) S.choice = null; redrawAccess(); };
+    const cancel = () => { if (S.choice === c) S.choice = null; redrawAccess('switch:' + c.name); };
+    const off = c.busy || !!S.switching;  // one post at a time: a switch still posting holds the box too
     const title = L('access.choice_title', {name: c.name});
     return h('div', {class: 'choice', id: 'choice-box', role: 'group', 'aria-label': title}, h('p', {text: title}),
       h('label', {text: L('access.choice_model')}, select('model', list(ch.models))),
       h('label', {text: L('access.choice_effort')}, select('effort', list(ch.efforts))),
       h('div', {class: 'btnrow'},
-        h('button', {class: 'btn primary', type: 'button', disabled: c.busy, text: L('access.choice_submit'), onclick: submit}),
-        h('button', {class: 'btn quiet', type: 'button', disabled: c.busy, text: L('access.choice_cancel'), onclick: cancel})),
+        h('button', {class: 'btn primary', type: 'button', disabled: off, 'data-focus': 'choice:submit',
+          text: L('access.choice_submit'), onclick: submit}),
+        h('button', {class: 'btn quiet', type: 'button', disabled: off, 'data-focus': 'choice:cancel',
+          text: L('access.choice_cancel'), onclick: cancel})),
       c.error ? errBox(c.error) : null);
   }
   function accessSet() {
@@ -1064,8 +1083,9 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
       h('p', {text: L('access.broken', {name: x.name})}), h('p', {class: 'mono', text: x.error})));
     const sw = switchButtons(a);
     if (S.choice && !sw.some(q => q.name === S.choice.name)) S.choice = null;  // removed or broken since it opened
+    const busy = !!S.switching || !!(S.choice && S.choice.busy);  // one post at a time
     const buttons = sw.map(q => h('button', {class: 'btn pbtn', type: 'button', 'aria-pressed': String(q.pressed),
-      disabled: q.pressed || S.switching, onclick: () => switchProfile(q.name)},
+      disabled: q.pressed || busy, 'data-focus': 'switch:' + q.name, onclick: () => switchProfile(q.name)},
       q.label ? h('span', {text: q.label}) : null, h('span', {class: q.label ? 'mono muted' : 'mono', text: q.name}),
       q.pressed ? h('span', {class: 'muted', text: L('access.current')})
         : q.needs_choice ? h('span', {class: 'muted', text: L('access.needs_choice')}) : null));
@@ -1446,7 +1466,7 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     // later visit draws no stale note (a lane or Settings, Sources, Templates never reach drawCard's check).
     if (S.capNote && !(r.name === 'card' && r.arg === S.capNote.id)) S.capNote = null;
     // The choice box and a switch's error are for Settings while it stays open: leaving it drops them.
-    if (r.name !== 'settings') { S.choice = null; S.switchError = null; }
+    if (r.name !== 'settings') { S.choice = null; S.switchError = null; S.focusKey = null; }
     drawRail();
     if (r.name === 'lane' || r.name === 'search' || r.name === 'project' || r.name === 'card') {
       panes('list', 'card');
@@ -1494,8 +1514,12 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     }
     // Settings: its Access box is drawn from the state, so redraw it with the new one (the top bar's links to
     // Settings land on the screen already open and draw nothing). Not while a choice box is open: a redraw would
-    // close a drop-down list under the user's pointer; the box's own buttons redraw it when it closes.
-    if (r.name === 'settings' && !S.choice) redrawAccess();
+    // close a drop-down list under the user's pointer; the box's own buttons redraw it when it closes. Nor while
+    // keyboard focus is inside the Access box: the redraw would drop it.
+    if (r.name === 'settings' && !S.choice) {
+      const set = $('access-set');
+      if (!(set && set.contains(document.activeElement))) redrawAccess();
+    }
   }
 
   $('search').addEventListener('keydown', e => {

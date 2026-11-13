@@ -1391,6 +1391,23 @@ class ProfileUseRouteTest(ProfileRouteCase):
         self.assertEqual(tree(self.data), before)
         self.assertEqual(self.active_bytes(), active)
 
+    def test_a_models_command_that_lists_no_model_is_502_and_opens_no_box(self):
+        # An empty choice box could only be refused ("model missing"): the route refuses it as `ap2 profile use`.
+        self.listed("g")
+        profiles.use(self.data, "g")
+        self.listed("h", chosen=False)
+        for listing in ("[]", '["not a model!"]'):  # nothing, or nothing shaped like a model name
+            with self.subTest(listing=listing):
+                self.listing.write_text(listing, encoding="utf-8")
+                before, active = tree(self.data), self.active_bytes()
+                status, _, body = self.use("h")
+                self.assertEqual(status, 502, body)
+                self.assertEqual(body["error"],
+                                 "gateway.models_command: listed no models, so there is nothing to choose")
+                self.assertEqual(tree(self.data), before)
+                self.assertEqual(self.active_bytes(), active)
+                self.assertEqual(profiles.active_name(self.data), "g")
+
     def test_the_switch_works_in_shadow_mode_and_refuses_another_origin(self):
         self.listed("g")
         with mock.patch("assistant.config.require_live", side_effect=AssertionError("require_live")) as live:
@@ -1464,6 +1481,16 @@ class ProfileChooseRouteTest(ProfileRouteCase):
         self.assertEqual(status, 502, body)
         self.assertEqual(body["error"], "gateway.models_command: failed (exit 1)")
         self.assertEqual(self.unchanged(), before)
+
+    def test_a_models_command_that_lists_no_model_is_502_and_saves_nothing(self):
+        self.listing.write_text("[]", encoding="utf-8")
+        before = self.unchanged()
+        status, _, body = self.choose("h", "big", "high")
+        self.assertEqual(status, 502, body)
+        self.assertEqual(body["error"], "gateway.models_command: listed no models, so there is nothing to choose")
+        self.assertEqual(self.runs(), 1)
+        self.assertEqual(self.unchanged(), before)
+        self.assertEqual(profiles.active_name(self.data), "g")
 
     def test_a_bad_body_unknown_or_broken_profile_is_refused_before_any_fetch(self):
         profiles.path(self.data, "bad").write_text("{nope", encoding="utf-8")
@@ -1786,10 +1813,22 @@ console.log(JSON.stringify([
         self.assertEqual(set(cap.ANSWERS), {"raise50", "raise100", "accept_unknown", "pause"})
 
     # A plain-object `h` (tag, attrs, kids) and `flat`, every text of a tree in order, for running the page's
-    # drawing functions under node.
+    # drawing functions under node. Each node also has the few DOM calls the focus code uses (`dataset`, `disabled`,
+    # `contains`, `querySelectorAll('[data-focus]')`, `focus`), with `document.activeElement` as the focused node.
     DOM_STUBS = """
-const h = (tag, attrs, ...kids) => ({tag, attrs: attrs || {}, kids,
-  replaceChildren(...k) { this.kids = k; }});
+const document = {body: {tag: 'body'}};
+document.activeElement = document.body;
+const NODE = {
+  replaceChildren(...k) { this.kids = k; },
+  get dataset() { return this.attrs['data-focus'] == null ? {} : {focus: String(this.attrs['data-focus'])}; },
+  get disabled() { return !!this.attrs.disabled; },
+  contains(n) { return n === this || find(this.kids, n && n.tag).includes(n); },
+  querySelectorAll(sel) { return all(this).filter(n => sel === '[data-focus]' && n.attrs['data-focus'] != null); },
+  focus() { document.activeElement = this; },
+};
+const h = (tag, attrs, ...kids) => Object.assign(Object.create(NODE), {tag, attrs: attrs || {}, kids});
+const all = n => (n === null || n === undefined || typeof n !== 'object') ? []
+  : Array.isArray(n) ? n.flatMap(all) : [n, ...all(n.kids)];
 const flat = n => (n === null || n === undefined || n === false) ? []
   : Array.isArray(n) ? n.flatMap(flat)
   : typeof n === 'object' ? [...(n.attrs && n.attrs.text != null ? [String(n.attrs.text)] : []), ...flat(n.kids)]
@@ -2009,32 +2048,43 @@ let states = [], onPoll = null;
 const poll = async () => { S.state = states.shift(); if (onPoll) onPoll(); };
 const loadList = async () => {}, loadCard = async () => {};
 const replaced = [];
-const box = {replaceWith: n => replaced.push(n)};
+const button = {tag: 'button'}, elsewhere = {tag: 'input'};
+const document = {body: {tag: 'body'}, activeElement: null};
+const box = {replaceWith: n => replaced.push(n), contains: n => n === button};
 const $ = id => (id === 'access-set' ? box : null);
 const accessSet = () => 'today ' + S.state.usage.gateway.today;
 const st = today => ({access: {cap: {}}, usage: {gateway: {today}}});
 (async () => {
   const runs = {};
-  for (const [name, route, act, choice] of [['settings', {name: 'settings', arg: null}],
+  for (const [name, route, act, choice, focused] of [['settings', {name: 'settings', arg: null}],
                                     ['lane', {name: 'lane', arg: 'needs'}],
                                     ['left', {name: 'settings', arg: null}, () => { S.route = {name: 'lane', arg: 'needs'}; }],
-                                    ['choosing', {name: 'settings', arg: null}, null, {name: 'h', model: 'big'}]]) {
+                                    ['choosing', {name: 'settings', arg: null}, null, {name: 'h', model: 'big'}],
+                                    // Keyboard focus on a switch button: a redraw would drop it to the page.
+                                    ['focused', {name: 'settings', arg: null}, null, null, button],
+                                    ['focus elsewhere', {name: 'settings', arg: null}, null, null, elsewhere]]) {
     S.route = route; S.state = st(8); states = [st(42)]; replaced.length = 0; onPoll = act || null;
-    S.choice = choice || null;
+    S.choice = choice || null; document.activeElement = focused || document.body;
     await tick();
     runs[name] = replaced.slice();
   }
   console.log(JSON.stringify(runs));
 })();
 """)
-        self.assertEqual(out, {"settings": ["today 42"], "lane": [], "left": [], "choosing": []})
+        self.assertEqual(out, {"settings": ["today 42"], "lane": [], "left": [], "choosing": [], "focused": [],
+                               "focus elsewhere": ["today 42"]})
 
     # The Settings screen's profile switch and its choice box, drawn by accessSet from S.state and S.choice. `$`
     # hands out one 'access-set' holder whose replaceWith keeps the redrawn box in `shown`.
     SWITCH_STUBS = """
 let shown = null, calls = [], post = null;
-const holder = {replaceWith: n => { shown = n; }};
-const $ = id => (id === 'access-set' ? holder : null);
+const holder = {replaceWith: n => { shown = n; }, contains: () => false};
+// The box on screen: replacing it drops the focus inside it to the page, as a browser does.
+const onScreen = old => ({replaceWith: n => {
+  if (old.contains(document.activeElement)) document.activeElement = document.body;
+  shown = n;
+}, contains: n => old.contains(n)});
+const $ = id => (id === 'access-set' ? (shown ? onScreen(shown) : holder) : null);
 const poll = async () => { calls.push(['poll']); };
 const drawSettings = async () => { calls.push(['drawSettings']); };
 const fail = status => async () => { throw Object.assign(new Error('REASON'), {status}); };
@@ -2210,6 +2260,104 @@ const err = Object.assign(new Error('REASON'), {status: 409});
         self.assertEqual(out["refused"], [None, None, False])
         self.assertEqual(out["switched"], [["post", "/api/profile/use", {"name": "subscription"}], ["poll"]])
         self.assertEqual(out["box"], [None, False])
+
+    # Focus helpers for the switch tests: the data-focus key of the focused node ('body' for the page), whether it
+    # is in the box on screen, and a key's control in that box.
+    FOCUS_STUBS = """
+const focused = () => (document.activeElement === document.body ? 'body'
+  : (document.activeElement.attrs || {})['data-focus'] || '?');
+const inBox = () => !!shown && shown.contains(document.activeElement);
+const control = key => shown.querySelectorAll('[data-focus]').find(n => n.dataset.focus === key);
+const switchButtons_ = n => find(n, 'button').filter(b => String(b.attrs['data-focus']).startsWith('switch:'));
+const boxButtons = n => find(find(n, 'div').filter(d => d.attrs.id === 'choice-box'), 'button');
+"""
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_keyboard_focus_stays_in_the_access_box_across_its_redraws(self):
+        out = self.run_access(page_functions(*self.SWITCH_FUNCS) + self.DOM_STUBS + self.SWITCH_STUBS
+                              + self.FOCUS_STUBS + """
+(async () => {
+  const runs = {};
+  S.choice = null; S.switchError = null; S.switching = false; S.focusKey = null;
+  redrawAccess();
+  // Enter on a switch button: the busy redraw disables it (focus falls to the page, the key is kept); the refusal
+  // enables it again and focus comes back onto it.
+  control('switch:subscription').focus();
+  post = async () => { runs.during = [focused(), S.focusKey]; throw Object.assign(new Error('REASON'), {status: 409}); };
+  await switchProfile('subscription');
+  runs.refused = [focused(), inBox(), S.focusKey];
+  // A needs-choice reply: the opened box's model select gets focus.
+  S.switchError = null;
+  control('switch:h').focus();
+  post = async () => ({needs_choice: true, choices: CHOICES});
+  await switchProfile('h');
+  runs.opened = [focused(), inBox(), control('choice:model').tag];
+  // A refused choice: focus on "Choose and switch", its error next to it.
+  control('choice:submit').focus();
+  post = fail(409);
+  await control('choice:submit').attrs.onclick();
+  runs.choiceRefused = [focused(), inBox(), find(shown, 'div').filter(d => d.attrs.role === 'status').map(flat)];
+  // Cancel: focus back on that profile's switch button.
+  control('choice:cancel').focus();
+  control('choice:cancel').attrs.onclick();
+  runs.cancel = [focused(), inBox(), S.choice];
+  // Focus the user moved out of the box while the post ran is left where they put it.
+  const search = {tag: 'input'};
+  control('switch:subscription').focus();
+  post = async () => { document.activeElement = search; throw Object.assign(new Error('REASON'), {status: 409}); };
+  await switchProfile('subscription');
+  runs.movedOut = [document.activeElement === search, S.focusKey];
+  console.log(JSON.stringify(runs));
+})();
+""")
+        self.assertEqual(out["during"], ["body", "switch:subscription"])
+        self.assertEqual(out["refused"], ["switch:subscription", True, None])
+        self.assertEqual(out["opened"], ["choice:model", True, "select"])
+        self.assertEqual(out["choiceRefused"], ["choice:submit", True, [["[access.switch_refused]", "REASON"]]])
+        self.assertEqual(out["cancel"], ["switch:h", True, None])
+        self.assertEqual(out["movedOut"], [True, None])
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_one_post_at_a_time_between_the_switch_and_the_choice_box(self):
+        out = self.run_access(page_functions(*self.SWITCH_FUNCS) + self.DOM_STUBS + self.SWITCH_STUBS
+                              + self.FOCUS_STUBS + """
+(async () => {
+  const runs = {};
+  S.choice = null; S.switchError = null; S.switching = false; S.focusKey = null;
+  post = async () => ({needs_choice: true, choices: CHOICES});
+  await switchProfile('h');
+  // A choice still posting: every switch button is off, and a switch click sends nothing.
+  calls.length = 0;
+  post = async (path, body) => {
+    calls.push(['post', path, body]);
+    runs.chooseBusy = switchButtons_(shown).map(b => !!b.attrs.disabled);
+    await switchProfile('subscription');
+    // Settings was left and come back to while it ran, and another box opened: the late success leaves it open.
+    S.choice = {name: 'h', other: true, choices: CHOICES, model: 'big', effort: 'high', error: null, busy: false};
+    return {chosen: body, active: 'h', was: 'g'};
+  };
+  const c = S.choice;
+  await boxButtons(shown)[0].attrs.onclick();
+  runs.chooseCalls = calls.filter(x => x[0] === 'post').map(x => x[1]);
+  runs.otherBox = !!S.choice && S.choice !== c && S.choice.other === true;
+  // A switch still posting: the box's "Choose and switch" and "Cancel" are off, and a click sends nothing.
+  calls.length = 0;
+  post = async (path, body) => {
+    calls.push(['post', path, body]);
+    runs.switchBusy = boxButtons(shown).map(b => !!b.attrs.disabled);
+    await boxButtons(shown)[0].attrs.onclick();
+    return {active: 'subscription', was: 'g'};
+  };
+  await switchProfile('subscription');
+  runs.switchCalls = calls.filter(x => x[0] === 'post').map(x => x[1]);
+  console.log(JSON.stringify(runs));
+})();
+""")
+        self.assertEqual(out["chooseBusy"], [True, True, True])
+        self.assertEqual(out["chooseCalls"], ["/api/profile/choose"])
+        self.assertTrue(out["otherBox"])
+        self.assertEqual(out["switchBusy"], [True, True])
+        self.assertEqual(out["switchCalls"], ["/api/profile/use"])
 
     @unittest.skipUnless(shutil.which("node"), "needs node")
     def test_leaving_settings_drops_the_choice_box_and_the_switch_error(self):

@@ -769,6 +769,13 @@ class Handler(BaseHTTPRequestHandler):
         except ConfigError as e:  # SpendError: the price override cannot be read
             raise HTTPError(500, str(e)) from e
 
+    @staticmethod
+    def _some_models(models: list) -> None:
+        """502 when the models command listed no model to choose (as `ap2 profile use` refuses it): a choice box
+        with nothing in it could only be refused."""
+        if not models:
+            raise HTTPError(502, "gateway.models_command: listed no models, so there is nothing to choose")
+
     def _profile_switch(self, name: str) -> dict:
         try:
             return profiles.use(self.server.data, name)
@@ -790,6 +797,7 @@ class Handler(BaseHTTPRequestHandler):
                 current = None  # broken: switching is its fix
             if name != current and profiles.needs_choice(data, p):
                 models, _ = self._fetch_models(p)
+                self._some_models(models)
                 return 200, {"needs_choice": True, "choices": profiles.choices(data, p, models)}
             return 200, self._profile_switch(name)
 
@@ -804,6 +812,7 @@ class Handler(BaseHTTPRequestHandler):
         with self.server.write_lock:
             p = self._profile_load(name)
             models, known = self._fetch_models(p)
+            self._some_models(models)
             try:
                 saved = profiles.choose(data, name, model, effort, models, known)
             except profiles.ProfileError as e:  # not offered, or a save that failed
