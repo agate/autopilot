@@ -3946,22 +3946,59 @@ class PrReviewRoleTest(PrReviewCase):
     def test_the_read_only_floor_denies_every_mcp_tool_and_server(self):
         # A read-only role lists no MCP tool, so every MCP tool its session loads is denied, the write ones (that
         # v1's outward-verb list does not name) and the read ones alike, and each server is denied whole, so a tool
-        # that shows up later on a known server is covered too. The built-in tools are left as they are.
+        # that shows up later on a known server is covered too. The role's own built-in tools are kept. A tool
+        # name with `__` in its own part belongs to the server before the first `__` after `mcp__`.
         env = {"AP2_RUN_DIR": str(transcripts.run_dir(self.data, "c-20260105-090000-abcdef"))}
         mcp = ["mcp__docs__delete", "mcp__docs__update", "mcp__builds__submit", "mcp__builds__run",
-               "mcp__drive__delete_file", "mcp__docs__read_page", "mcp__chat__send_message"]
-        builtin = ["Bash", "Read", "Glob", "Grep", "Write", "Agent", "Skill", "WebFetch"]
+               "mcp__drive__delete_file", "mcp__docs__read_page", "mcp__chat__send_message",
+               "mcp__wiki__page__delete"]
+        builtin = ["Bash", "Read", "Glob", "Grep", "Write", "Agent"]
         project = {"tools": builtin + mcp, "deny_servers": ["mcp__tracker"]}
         ro = workers_mod.floor("pr-review", project, self.data, env)["permissions"]["deny"]
-        for rule in mcp + ["mcp__docs", "mcp__builds", "mcp__drive", "mcp__chat", "mcp__tracker"]:
+        for rule in mcp + ["mcp__docs", "mcp__builds", "mcp__drive", "mcp__chat", "mcp__tracker", "mcp__wiki"]:
             with self.subTest(rule=rule):
                 self.assertIn(rule, ro)
+        self.assertNotIn("mcp__wiki__page", ro)
         for tool in builtin:
             self.assertNotIn(tool, ro)
         self.assertEqual(len(ro), len(set(ro)))  # each rule once
         # The worker roles keep today's floor: only the outward-verb tools and the not-connected servers.
         base = workers_mod.floor("implement", project, self.data, env)["permissions"]["deny"]
         self.assertEqual([r for r in base if r.startswith("mcp__")], ["mcp__chat__send_message", "mcp__tracker"])
+
+    def test_the_read_only_floor_denies_every_built_in_tool_its_role_does_not_list(self):
+        # A read-only role gets only its own tools: every other built-in the session finds is denied (a scheduled
+        # cloud agent, the user's claude.ai pages, a push, a skill, the web), but the tool search and `Task` (the
+        # Agent tool's older name) stay open. A worker role keeps today's floor: none of these built-ins.
+        env = {"AP2_RUN_DIR": str(transcripts.run_dir(self.data, "c-20260105-090000-abcdef"))}
+        denied = ["RemoteTrigger", "ArtifactData", "Artifact", "Skill", "WebFetch", "CronCreate", "PushNotification"]
+        kept = ["ToolSearch", "Agent", "Bash", "Read", "Write", "Glob", "Grep", "Task"]
+        project = {"tools": denied + kept}
+        ro = workers_mod.floor("pr-review", project, self.data, env)["permissions"]["deny"]
+        for tool in denied:
+            with self.subTest(tool=tool):
+                self.assertIn(tool, ro)
+        for tool in kept:
+            with self.subTest(tool=tool):
+                self.assertNotIn(tool, ro)
+        self.assertEqual(len(ro), len(set(ro)))  # each rule once
+        base = workers_mod.floor("implement", project, self.data, env)["permissions"]["deny"]
+        for tool in denied + kept:
+            with self.subTest(implement=tool):
+                self.assertNotIn(tool, base)
+
+    def test_the_read_only_floor_denies_the_fixed_built_ins_when_discovery_lists_none(self):
+        # The fixed list (roles.READ_ONLY_BUILTIN_DENIED) is denied even when the discovered tool list is empty, as
+        # a tool the session loads later is not in it; the role's own tools and `Task` are not.
+        env = {"AP2_RUN_DIR": str(transcripts.run_dir(self.data, "c-20260105-090000-abcdef"))}
+        ro = workers_mod.floor("pr-review", {"tools": []}, self.data, env)["permissions"]["deny"]
+        for tool in ("RemoteTrigger", "ArtifactData", "Artifact", "PushNotification", "Skill", "WebFetch"):
+            with self.subTest(tool=tool):
+                self.assertIn(tool, ro)
+        for tool in roles.ROLES["pr-review"].tools + ("Task", "ToolSearch"):
+            with self.subTest(kept=tool):
+                self.assertNotIn(tool, ro)
+        self.assertEqual(len(ro), len(set(ro)))
 
     def test_a_started_read_only_worker_denies_every_listed_server_whole(self):
         # Every server the discovery lists is denied whole for a read-only role, a connected one with no tool in the

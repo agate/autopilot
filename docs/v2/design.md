@@ -792,8 +792,13 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   does not run (`roles.READ_ONLY_AP2_DENIED`) as Bash deny rules in the same shape, every MCP tool the session
   loads that `Role.tools` does not list (no read-only role lists one) and every MCP server whole (each server those
   tools are on and each one the tool discovery lists, connected or not, so a tool it adds later is covered too),
-  because v1's outward-verb list leaves a server's `delete`, `update`, `submit` or `merge` tool open (the built-in
-  tools are left as they are), and a third PreToolUse hook,
+  because v1's outward-verb list leaves a server's `delete`, `update`, `submit` or `merge` tool open, every
+  built-in tool `Role.tools` does not list (each one the discovery finds, and `roles.READ_ONLY_BUILTIN_DENIED`, v1's
+  `replies.DISALLOWED` without `Task` plus `Artifact`, `ArtifactData`, `TaskCreate`, `TaskUpdate` and `TodoWrite`,
+  even when it finds none), because the session starts with every built-in and some act outside the floor
+  (`RemoteTrigger` schedules a cloud agent, `Artifact` and `ArtifactData` overwrite the user's claude.ai pages), but
+  `ToolSearch` and `Task` (the Agent tool's older name) stay open (`roles.READ_ONLY_KEPT`), and a third PreToolUse
+  hook,
   `{"matcher": "Write", ...: "\"<package>/bin/ap2\" hook-write"}` (`workers.write_guard`). The hook is an
   allow-list: a Write passes only when its path (links followed) sits directly in the card's run directory
   (`AP2_RUN_DIR`) and its name, in any case, is the role's result file (`prreview.json` for `pr-review`) or

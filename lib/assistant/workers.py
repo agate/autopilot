@@ -273,8 +273,9 @@ def floor(role: str, project: dict, data: Path, env: dict, profile: Optional[dic
     """The worker's permission floor (`--settings`): v1's outward-tool denials (`perms.denied_tools`, from the
     project's `tools`; `Workers._tools` fills them in when it lists none, with `deny_servers`, the whole-server
     rules) and Bash denials, the data folder's own files and the package, the park and Bash guard hooks, and the
-    worker's env. A read-only role also denies every MCP tool in `tools` that its `Role.tools` does not list, and
-    every MCP server whole: each one those tools are on and each one `_tools` found listed (`listed_servers`).
+    worker's env. A read-only role also denies every tool in `tools` (built-in or MCP) that its `Role.tools` does
+    not list but `roles.READ_ONLY_KEPT`, the same for `roles.READ_ONLY_BUILTIN_DENIED`, and every MCP server whole:
+    each one those tools are on and each one `_tools` found listed (`listed_servers`).
     With `profile`, its overlay is merged under it (`profiles.merge`): the deny and allow lists, the hooks and the
     AP2_* env stay exactly as they are. Refused for a path a gitignore pattern cannot name literally
     (`require_literal`)."""
@@ -305,16 +306,20 @@ def floor(role: str, project: dict, data: Path, env: dict, profile: Optional[dic
         # allow), so a Write hook (`ap2 hook-write`, `write_guard`) refuses every other Write.
         deny += list(roles.READ_ONLY_DENIED) + list(roles.READ_ONLY_BASH_DENIED)
         deny += [f"Bash({cmd} {verb}:*)" for verb in roles.READ_ONLY_AP2_DENIED for cmd in ("ap2", ap2)]
-        # No MCP tool its role does not list (no read-only role lists one): v1's outward-verb list leaves an MCP
-        # server's delete, update, submit or merge tool open, and the session loads every server the user's
-        # sessions do. Each server is denied whole as well, so a tool it adds later is covered; a server the role
-        # takes a tool from is not.
+        # No tool its role does not list, MCP or built-in, but the tool search and `Task` (READ_ONLY_KEPT): v1's
+        # outward-verb list leaves an MCP server's delete, update, submit or merge tool open, the session loads
+        # every server the user's sessions do, and it starts with every built-in tool (a scheduled cloud agent, the
+        # user's claude.ai pages). The fixed built-in list is denied even when discovery did not list it. Each
+        # server is denied whole as well, so a tool it adds later is covered; a server the role takes a tool from
+        # is not.
         own = set(roles.ROLES[role].tools)
+        keep = own | set(roles.READ_ONLY_KEPT)
         tools = [t for t in project.get("tools") or [] if isinstance(t, str)]
         kept = {_mcp_server(t) for t in own} - {""}
         servers = [_mcp_server(t) for t in tools] + list(project.get("listed_servers") or [])
         servers += list(project.get("deny_servers") or [])
-        extra = [t for t in tools if _mcp_server(t) and t not in own]
+        extra = [t for t in tools if t not in keep]
+        extra += [t for t in roles.READ_ONLY_BUILTIN_DENIED if t not in keep]
         extra += [s for s in servers if s and s not in kept]
         deny += [r for r in dict.fromkeys(extra) if r not in deny]
         hooks["PreToolUse"].append(
