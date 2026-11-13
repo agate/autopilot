@@ -49,20 +49,24 @@ refresh holds new work instead, and an error older than the last refresh does no
 
 PR review cards review themselves (design 6.2 point 2). After acting on the workers on record, a live `check` starts
 one `pr-review` worker for each card of kind `pr-review` that is not in lane `done`, has no worker on record and no
-line in this pass, has no open ask, whose `sessions["pr-review"].state` is absent or `ended`, and is not reviewed at
-its head (`pr.reviewed_sha` missing or not `pr.head_sha`): in a fresh, empty folder of its own outside the data
-folder (`tempfile.mkdtemp`, one per start; AP2_RUN_DIR still names the card's run directory, where its report goes),
-with the template's brief, behind `/autopilot:pr-review <card> <stage>` (`delta` once the card's `reviews` list holds
-one, else `review`). A refused start (the cap, the key, a pause, `max_workers`, the profile) is a note on that card's
-line; shadow mode starts none and says so. Such a worker is done when `prreview.json` is newer than the round's first
-start (`round_started_at`, kept through in-place resumes) and its turn has ended (idle, done, failed or gone; while it
-works or waits at a prompt it is still checking a draft). Then `check` runs `prreview.apply` and then `prreview.sync`
-on its card, with the worker list's lock free; an apply that fails sets the card's `ask` (`fix`), which holds the
-next auto-start back, and a sync that fails is a note. A turn that ends with no report is closed idle after IDLE_MIN
+line in this pass, has no open ask, whose `sessions["pr-review"].state` is absent, or `ended` by a done close
+(`closed: done`; an `ap2 worker end`, saved as `closed: end`, or an `ended` with no `closed` waits for a start by
+hand), and is not reviewed at its head (`pr.reviewed_sha` missing or not `pr.head_sha`): in a fresh, empty folder of
+its own outside the data folder (`tempfile.mkdtemp`, one per start; AP2_RUN_DIR still names the card's run
+directory, where its report goes), with the template's brief, behind `/autopilot:pr-review <card> <stage>` (`delta`
+once the card's `reviews` list holds one, else `review`). A refused start (the cap, the key, a pause, `max_workers`,
+the profile) is a note on that card's line; shadow mode starts none and says so. Such a worker is done when
+`prreview.json` is newer than the round's first start (`round_started_at`, kept through every resume of the round)
+and its turn has ended (idle, done, failed or gone; while it works or waits at a prompt it is still checking a draft).
+Then, still under the worker list's lock (so an overlapping check cannot see the card closed and not yet reviewed),
+`check` removes the round's folder when it is empty and runs `prreview.apply` on its card, but only when the run
+directory's plan and report are regular files (a FIFO there would hang the pass); with the lock free it then runs
+`prreview.sync`. An apply that fails or is not run sets the card's `ask` (`fix`), which holds the next auto-start
+back, and a sync that fails is a note. `question.json` too is read only when it is a regular file. A turn that ends with no report is closed idle after IDLE_MIN
 minutes with the card's `ask` (`fix`, `review_idle`), which holds the auto-start back as well. Its floor is
 read-only: no Edit or NotebookEdit, no GitHub or git write commands (`roles.READ_ONLY_BASH_DENIED`), and a Write
 hook (`ap2 hook-write`, `write_guard`) allows a Write only to its report or `question.json` in the card's run
-directory.
+directory; a path it cannot resolve, and any error in the hook, is denied.
 
 Starting (or resuming) a session can make branches and PRs, so it needs live mode; listing, classifying, ending
 and archiving work in shadow mode. v1 is reused by import (`lib/autopilot/workers.py`, `sessions.py`,
@@ -75,6 +79,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -293,17 +298,24 @@ def write_guard(payload, env) -> Optional[dict]:
         names.add(RESULT_FILES[env["AP2_ROLE"]].casefold())
     ok = False
     if isinstance(path, str) and os.path.isabs(path) and os.path.isabs(run):
-        real, home = os.path.realpath(path), os.path.realpath(run)
-        ok = os.path.dirname(real) == home and os.path.basename(real).casefold() in names
+        try:
+            real, home = os.path.realpath(path), os.path.realpath(run)
+        except (ValueError, OSError):  # a NUL or a lone surrogate: no file has that name, so it stays denied
+            real = home = None
+        ok = real is not None and os.path.dirname(real) == home and os.path.basename(real).casefold() in names
     if ok:
         return None
+    return _write_deny()
+
+
+def _write_deny() -> dict:
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                    "permissionDecisionReason": WRITE_DENIED}}
 
 
 def write_hook(argv: list, stdin=None) -> int:
     """`ap2 hook-write`: the payload on stdin, the deny JSON (or nothing) on stdout, exit 0 always. Any argument is
-    no opinion. A payload that cannot be read is denied for a v2 worker: the hook fails closed."""
+    no opinion. A payload that cannot be read, or any error, is denied for a v2 worker: the hook fails closed."""
     try:
         if argv or not os.environ.get("AP2_ROLE") or stdin is None:
             return 0
@@ -316,7 +328,11 @@ def write_hook(argv: list, stdin=None) -> int:
         if out:
             os.write(1, (json.dumps(out) + "\n").encode())
     except Exception:  # noqa: BLE001 - a hook must never break the session
-        pass
+        try:
+            if os.environ.get("AP2_ROLE"):
+                os.write(1, (json.dumps(_write_deny()) + "\n").encode())
+        except Exception:  # noqa: BLE001 - nothing more a hook can do
+            pass
     return 0
 
 
@@ -940,11 +956,14 @@ class Workers:
         self._kill(rec.get("short_id"), sid)  # outside the try: a stop that raised keeps the record on every path
         self._note_key(sid, rec.get("profile"))
         saved = False
+        # A pr-review session says how it was closed (`closed`: the mark's path, or `end` for an end by hand): only
+        # a done close lets the next round start on its own (`_review_is_due`).
+        how = {"closed": mark.get("closed") or mark["path"]} if rec["role"] == REVIEW_ROLE else {}
         try:
             self._close_worker_asks(rec["card"], rec["role"], by, kinds=("attach",))
             self._save_session(rec["card"], rec["role"], by, id=sid, cwd=rec.get("cwd"),
                                needs=rec.get("needs") or [], state=mark["state"], why=mark["why"],
-                               **(mark.get("extra") or {}))
+                               **(mark.get("extra") or {}), **how)
             saved = True
         finally:
             if saved or mark["drop_on_error"]:
@@ -1016,7 +1035,8 @@ class Workers:
         return {"type": "fix", "role": role, "reason": REFUSED, "text": text}
 
     def end(self, card_id: str, role: str, by: str = BY) -> dict:
-        """Stop a worker and keep its session on the card, so a later round can resume it. Works in shadow mode."""
+        """Stop a worker and keep its session on the card, so a later round can resume it. Works in shadow mode.
+        A pr-review session ended here is saved as `closed: end`, so its card waits for a start by hand."""
         failed = None
         with self.registry.locked() as records:
             rec = self._find(records, card_id, role)
@@ -1027,7 +1047,7 @@ class Workers:
                 # Either way end's own drop rule applies: once the stop returned, the record leaves the list, so a
                 # save that keeps failing cannot hold the worker's slot and ports forever.
                 mark = rec.get("closing") or self._mark("end")
-                out = self._finish_close(rec, records, dict(mark, drop_on_error=True), by)
+                out = self._finish_close(rec, records, dict(mark, drop_on_error=True, closed="end"), by)
             except Exception as e:  # noqa: BLE001 - raised below, once the list without the record is written back
                 failed = e
         if failed is not None:
@@ -1205,8 +1225,15 @@ class Workers:
             return 0.0
 
     def _read_question(self, card_id: str):
+        """The question's text. Only a regular file is read: opened without following a link and without waiting
+        (a FIFO the worker put there would hold the worker list's lock forever), so anything else reads as none."""
+        q = None
         try:
-            q = json.loads((self.run_dir(card_id) / QUESTION).read_text(encoding="utf-8"))
+            fd = os.open(self.run_dir(card_id) / QUESTION,
+                         os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
+            with os.fdopen(fd, "rb") as f:
+                if stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+                    q = json.loads(f.read().decode("utf-8"))
         except (OSError, ValueError):
             q = None
         text = q.get("text") if isinstance(q, dict) else q
@@ -1401,8 +1428,8 @@ class Workers:
                 out.append(entry)
         if stopped is not None:
             raise stopped
-        for entry in reviews:  # with the lock free: sync reads GitHub
-            self._review_done(entry, by)
+        for entry in reviews:  # applied under the lock (`_review_due`); with the lock free: sync reads GitHub
+            self._review_sync(entry, by)
         if not planned:
             return self._start_reviews(out, by)
         # Step 2, with the lock free: a failure is kept for step 3, where the record is checked first. A Ctrl-C
@@ -1474,8 +1501,8 @@ class Workers:
              allow: Optional[Callable] = None, reviews: Optional[list] = None) -> Optional[dict]:
         """Act on one worker's state under the lock (`check`'s step 1). An in-place resume is only planned: its
         plan (`_plan_resume`) is returned, and `check` runs it once its tools are listed; otherwise None. A
-        pr-review worker closed as done puts its line on `reviews`, for `check` to apply and sync once the lock is
-        free (`_review_done`)."""
+        pr-review worker closed as done has its report applied here, under the lock (`_review_due`), and an applied
+        one puts its line on `reviews`, for `check` to sync once the lock is free (`_review_sync`)."""
         card_id, role = rec["card"], rec["role"]
         allow = allow or self._pass_allowance(now)
         if rec.get("closing"):
@@ -1483,7 +1510,7 @@ class Workers:
             # out, so the session's state now (dead, most likely) says nothing about what to do.
             mark = rec["closing"]
             entry.update(self._finish_close(rec, records, mark, by))
-            self._review_due(rec, records, mark, entry, reviews)
+            self._review_due(rec, records, mark, entry, reviews, by)
             return
         # Each clock runs only while its state is seen without a break; "unknown" (the listing failed) says nothing,
         # so it keeps them. A prompt that is gone takes its attach ask with it.
@@ -1495,7 +1522,7 @@ class Workers:
         if state == "done":
             mark = self._mark("done")
             entry.update(self._finish_close(rec, records, mark, by))
-            self._review_due(rec, records, mark, entry, reviews)
+            self._review_due(rec, records, mark, entry, reviews, by)
         elif state == "question":
             # Kept on the card too, so `answer` works even when the ask cannot be raised (the user's own ask is
             # open).
@@ -1542,40 +1569,82 @@ class Workers:
 
     # -- PR review cards review themselves (design 6.2 point 2) ---------------------------------------------------
 
-    @staticmethod
-    def _review_due(rec: dict, records: list, mark: dict, entry: dict, reviews: Optional[list]) -> None:
-        """A pr-review worker's done close went through (its record left the list): its card's review is applied."""
-        if (reviews is not None and rec["role"] == REVIEW_ROLE and mark.get("path") == "done"
-                and not any(r is rec for r in records)):
+    def _review_due(self, rec: dict, records: list, mark: dict, entry: dict, reviews: Optional[list],
+                    by: str) -> None:
+        """A pr-review worker's done close went through (its record left the list). Still under the worker list's
+        lock, so no other check sees the card closed with its review not yet on it (and starts a second one): the
+        empty folder it ran in is removed (`_drop_round_dir`) and its report applied (`_review_apply`). An applied
+        one goes on `reviews`, for `check` to sync once the lock is free."""
+        if (reviews is None or rec["role"] != REVIEW_ROLE or mark.get("path") != "done"
+                or any(r is rec for r in records)):
+            return
+        self._drop_round_dir(rec.get("cwd"))
+        if self._review_apply(entry, by):
             reviews.append(entry)
+
+    @staticmethod
+    def _drop_round_dir(cwd) -> None:
+        """Remove the folder a done pr-review round ran in when `_start_reviews` made it (directly in the temp
+        folder, its name starting with REVIEW_DIR) and it is empty (`os.rmdir` removes only an empty one)."""
+        try:
+            home = Path(cwd).resolve()
+            if home.parent == Path(tempfile.gettempdir()).resolve() and home.name.startswith(REVIEW_DIR):
+                os.rmdir(home)
+        except (OSError, TypeError, ValueError):
+            pass
 
     @staticmethod
     def _add_note(entry: dict, text: str) -> None:
         entry["note"] = f"{entry['note']}; {text}" if entry.get("note") else text
 
-    def _review_done(self, entry: dict, by: str) -> None:
-        """The done path of a pr-review worker: `prreview.apply` puts its report on the card, then `prreview.sync`
-        asks GitHub where the PR stands. Their results go on the worker's line (`verdict`, `sync`). Neither fails
-        the pass: a failed apply is a note and the card's `fix` ask (so the card is not started again), and sync
-        runs only after an apply that worked; a failed sync is a note."""
+    def _not_regular(self, card_id: str) -> Optional[str]:
+        """The first of the run directory's plan and report files that is there but is not a regular file (a FIFO,
+        a device or a link), or None. `prreview.apply` opens them with a plain blocking read: a FIFO the worker put
+        there would hang the whole check. A missing one is left to `apply`, which says so."""
+        for name in (prreview.PLAN_FILE, prreview.REPORT_FILE):
+            try:
+                mode = os.lstat(prreview.run_dir(self.data, card_id) / name).st_mode
+            except OSError:
+                continue
+            if not stat.S_ISREG(mode):
+                return name
+        return None
+
+    def _review_apply(self, entry: dict, by: str) -> bool:
+        """`prreview.apply` puts the worker's report on the card; its verdict goes on the worker's line (`verdict`).
+        It never fails the pass: a plan or report file that is not a regular file is not read, and that or a failed
+        apply is a note and the card's `fix` ask (so the card is not started again). True when it was applied."""
         cid = entry["card"]
+        bad = self._not_regular(cid)
+        if bad is not None:
+            self._apply_failed(entry, cid, f"{bad} in its run directory is not a regular file", by)
+            return False
         try:
             card = prreview.apply(self.data, cid, by=by, cfg=self.cfg)
         except Exception as e:  # noqa: BLE001 - a broken report never fails the pass
-            why = str(e) or type(e).__name__
-            self._add_note(entry, f"the review was not applied: {why}")
-            if not isinstance(e, (config.ConfigError, CardError)):
-                entry["error"] = type(e).__name__
-            text = (f"The PR review finished, but its report could not be put on the card: {why}. To go on, run "
-                    f"`ap2 review check {cid}`, then `ap2 review apply {cid}`.")
-            try:
-                if not self._set_ask(cid, {"type": "fix", "role": REVIEW_ROLE, "reason": APPLY_FAILED,
-                                           "text": text}, by):
-                    self._add_note(entry, "the card already has an open ask, so this one is not on it")
-            except Exception as e2:  # noqa: BLE001 - the note above already says what failed
-                self._add_note(entry, f"the ask could not be set: {str(e2) or type(e2).__name__}")
-            return
+            self._apply_failed(entry, cid, str(e) or type(e).__name__, by,
+                               None if isinstance(e, (config.ConfigError, CardError)) else type(e).__name__)
+            return False
         entry["verdict"] = (card.get("verdict") or {}).get("verdict")
+        return True
+
+    def _apply_failed(self, entry: dict, cid: str, why: str, by: str, error: Optional[str] = None) -> None:
+        self._add_note(entry, f"the review was not applied: {why}")
+        if error:
+            entry["error"] = error
+        text = (f"The PR review finished, but its report could not be put on the card: {why}. To go on, run "
+                f"`ap2 review check {cid}`, then `ap2 review apply {cid}`.")
+        try:
+            if not self._set_ask(cid, {"type": "fix", "role": REVIEW_ROLE, "reason": APPLY_FAILED,
+                                       "text": text}, by):
+                self._add_note(entry, "the card already has an open ask, so this one is not on it")
+        except Exception as e2:  # noqa: BLE001 - the note above already says what failed
+            self._add_note(entry, f"the ask could not be set: {str(e2) or type(e2).__name__}")
+
+    def _review_sync(self, entry: dict, by: str) -> None:
+        """After an apply that worked, with the worker list's lock free: `prreview.sync` asks GitHub where the PR
+        stands; its state goes on the worker's line (`sync`). A failed sync is a note: the review stays applied."""
+        cid = entry["card"]
         try:
             entry["sync"] = prreview.sync(self.data, cid, by=by, cfg=self.cfg, run=self.gh)["state"]
         except Exception as e:  # noqa: BLE001 - the review stays applied
@@ -1643,12 +1712,13 @@ class Workers:
 
     @staticmethod
     def _review_is_due(card: dict) -> bool:
-        """Not in lane done, no open ask, the role's session absent or ended, and not reviewed at its head."""
+        """Not in lane done, no open ask, the role's session absent or ended by a done close (`closed: done`; one
+        ended by hand, or saved before `closed` was kept, waits for a start by hand), and not reviewed at its head."""
         if card.get("lane") == "done" or card.get("ask") is not None:
             return False
         sessions = card.get("sessions") if isinstance(card.get("sessions"), dict) else {}
-        saved = sessions.get(REVIEW_ROLE)
-        if (saved.get("state") if isinstance(saved, dict) else None) not in (None, "ended"):
+        saved = sessions.get(REVIEW_ROLE) if isinstance(sessions.get(REVIEW_ROLE), dict) else {}
+        if saved.get("state") is not None and not (saved.get("state") == "ended" and saved.get("closed") == "done"):
             return False
         pr = card.get("pr") if isinstance(card.get("pr"), dict) else {}
         return not pr.get("reviewed_sha") or pr.get("reviewed_sha") != pr.get("head_sha")

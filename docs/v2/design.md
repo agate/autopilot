@@ -711,8 +711,13 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   card's `reviews` list holds one (`apply` adds one per review), else `review`. Every live `ap2 worker check`, after
   it has acted on the workers on record, starts one `pr-review` worker for each card of kind `pr-review` that is not
   in lane `done`, has no worker on record and no line in this pass (so a card closed in a pass starts again only on
-  the next one), has no open `ask`, whose `sessions["pr-review"].state` is absent or `ended`, and is not reviewed at
-  its head (`pr.reviewed_sha` missing, or not `pr.head_sha`). It runs in a fresh, empty folder of its own outside
+  the next one), has no open `ask`, whose `sessions["pr-review"].state` is absent, or `ended` by a done close, and is
+  not reviewed at its head (`pr.reviewed_sha` missing, or not `pr.head_sha`). Every close of a `pr-review` worker
+  saves how it was closed as `sessions["pr-review"].closed`: the close's path (`done`, `idle`, `question` and so on),
+  or `end` for `ap2 worker end`. Only `closed: done` lets the next round start on its own. A worker ended by hand
+  holds the card, like `paused`, until the user starts the role by hand; its report is not applied. A card saved
+  before `closed` was kept, with `state: ended` and no `closed`, is read as ended by hand: held, so an old hand end
+  never starts a paid review on its own. It runs in a fresh, empty folder of its own outside
   the data folder (`tempfile.mkdtemp`, prefix `ap2-pr-review-`, mode 0700, one per start; the role reviews from
   GitHub, so `plan` says "no checkout given"), with the brief from the card's template. Not the run directory:
   the Bash guard judges the data-folder paths a command spells out, so from inside the data folder a relative
@@ -720,7 +725,9 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   `.mcp.json` and `CLAUDE.md` a later session there would load. The run directory is still made when missing and
   `AP2_RUN_DIR` still names it: the report goes there by its absolute path (`plan` prints it). A resume (`--resume`
   or in place) keeps the folder on record; when it is gone, the resume says the worker's folder is gone. A refused
-  start removes its folder again. Each start is a line `{card, role: "pr-review", state: "due", did: "started"}`; a start the cap, the key,
+  start removes its folder again, unless a record points at it (the start failed after the record was written). A
+  done close removes the folder too, when it is still empty and is one of these (directly in the temp folder, its
+  name starting `ap2-pr-review-`); a folder with files in it is kept. Each start is a line `{card, role: "pr-review", state: "due", did: "started"}`; a start the cap, the key,
   a pause, `max_workers` or the profile refuses is the same line with `did: "nothing"` and a `note`, and the later
   cards still get their try. Shadow mode starts none: each due card's line says so. The start lives in `check`, not
   the gate, because the gate starts no process (`gate.py`).
@@ -728,8 +735,13 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   round's first start and its turn has ended (idle, done, failed or gone; 8.2 rule 1): while it still works or waits at a prompt
   the report is a draft the role is still checking, so `check` leaves it. A turn that ended on a park or an API
   stop leaves a draft too: the worker is parked (or paused), not done. When `check` closes it as done, it
-  runs `apply` and then `sync` on the card, by `check`'s `by`, once the worker list's lock is free (sync reads
-  GitHub); the line gets `verdict` and `sync` (sync's `state`). Neither fails the pass. A failed `apply` is a note,
+  runs `apply` on the card right after the close, still under the worker list's lock: an overlapping `check` waits
+  for the lock, so it never sees the card closed with no `reviewed_sha` yet and starts a second, paid review. Then,
+  once the lock is free, it runs `sync` (sync reads GitHub). Both run by `check`'s `by`; the line gets `verdict` and
+  `sync` (sync's `state`). Neither fails the pass. Before `apply`, `check` looks at `prreview-plan.json` and
+  `prreview.json` in the run directory without following a link (`lstat`): when either is there but is not a regular
+  file (a FIFO, a device or a link), `apply` is not run, since its plain read of a FIFO would wait forever and hang
+  the whole pass; that is a failed `apply` whose error says the file is not a regular file. A failed `apply` is a note,
   and the card's `ask` (`type: fix`, `reason: review_apply_failed`) with the error and "run `ap2 review check
   CARD`, then `ap2 review apply CARD`", so the card is not started again in a loop; `sync` runs only after an
   `apply` that worked, and a failed one is a note (the review stays applied). That ask is the role's own worker ask
@@ -742,8 +754,11 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   --resume`. Without it the card would sit `paused`, never started again and never shown to the user. Like the
   failed-apply ask it holds the next auto-start back, and any start of the role and `finish` close it. A pass
   stopped between the close and the apply (Ctrl-C, a killed process) leaves the report unapplied
-  and the session `ended` with no `reviewed_sha`, so the next `check` starts a whole new review: a worker run is
-  lost, nothing on the card is.
+  and the session `ended` (`closed: done`) with no `reviewed_sha`, so the next `check` starts a whole new review: a
+  worker run is lost, nothing on the card is. The same holds for `question.json`: `check` reads it only when it is a
+  regular file, opened without following a link and without waiting (else the question reads as "could not be
+  read"), since that read runs under the worker list's lock. The Write hook denies a path it cannot resolve (a NUL
+  or a lone surrogate in it), and any error in the hook is a deny for a v2 worker, not silence.
 - **[decided by the builder]** The read-only floor (`roles.FLOORS["read-only"]`). The `pr-review` settings add
   `Edit` and `NotebookEdit` as deny rules (`roles.READ_ONLY_DENIED`) to the worker floor, the GitHub and git write
   commands as Bash deny rules in v1's rule shape (`roles.READ_ONLY_BASH_DENIED`: `gh pr merge`, `gh pr close`,
@@ -950,14 +965,17 @@ Rules:
 1. **[decided, from v1]** A worker ends a round by writing its result file (`handback.json`, `review.json`,
    `prloop.json`; the `pr-review` role's is `prreview.json`, and its done path applies and syncs the review, 6.2).
    A `prreview.json` counts from the round's first start (`round_started_at` on the worker's record, kept through
-   the in-place resumes of a parked or dead worker; `started_at` moves with each resume), so a report that passed
+   the in-place resumes of a parked or dead worker and through a `--resume` start of a parked one; `started_at`
+   moves with each resume), so a report that passed
    its check before a park is still the round's when the resumed turn ends without writing it again. It counts
    only once the worker's turn has ended (the listing shows it idle, done or failed, or the session is gone): the role checks its report after writing it and fixes it until the check passes, so while
    the session still works or waits at a prompt the file is a draft and the worker stays running (or blocked). A
    turn that ended because the worker parked itself, or on a usage limit or a gateway's refusal, did not
    end on a checked report either: the worker is parked (or paused) as any other role, and the draft
    is not applied. The gate sees the file (newer than the worker's start) and runs `worker end`: stop the process,
-   save the session id on the card. Session state can be lost; the card cannot.
+   save the session id on the card. Session state can be lost; the card cannot. For a `pr-review` worker the done
+   close is saved as `closed: done` and a hand `ap2 worker end` as `closed: end`: only the done close lets the next
+   round start on its own, and a hand end holds the card until a start by hand (6.2).
 2. **[decided, from v1]** Dead (no session, or its process is gone, with no result file): resume once with
    "you were interrupted; check your worktree and run files first". Dead twice: stop and ask the user. A resume
    that cannot start (its worktree is gone) counts as that one resume. A parked worker whose resume cannot start

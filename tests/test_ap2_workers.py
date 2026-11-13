@@ -14,6 +14,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import types
 import unittest
@@ -3636,6 +3637,16 @@ class PrReviewRoleTest(PrReviewCase):
         self.assertIsNone(workers_mod.write_guard({"tool_name": "Write", "tool_input": {"file_path": "/x"}}, {}))
         self.assertIsNone(workers_mod.write_guard({"tool_name": "Read", "tool_input": {"file_path": "/x"}}, env))
 
+    def test_a_path_that_cannot_be_resolved_is_denied(self):
+        run = transcripts.run_dir(self.data, "c-20260105-090000-abcdef")
+        run.mkdir(parents=True)
+        env = {"AP2_ROLE": "pr-review", "AP2_RUN_DIR": str(run)}
+        # A lone surrogate or a NUL makes the path's resolve raise: no file has such a name, so it is denied.
+        for bad in (f"{run}/\ud800/../prreview.json", f"{run}/x\x00/../prreview.json"):
+            with self.subTest(bad=ascii(bad)):
+                out = workers_mod.write_guard({"tool_name": "Write", "tool_input": {"file_path": bad}}, env)
+                self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+
     def test_the_hook_command_answers_on_stdout(self):
         run = transcripts.run_dir(self.data, "c-20260105-090000-abcdef")
         run.mkdir(parents=True)
@@ -3656,6 +3667,9 @@ class PrReviewRoleTest(PrReviewCase):
                            capture_output=True, text=True, env=env, timeout=60)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(json.loads(r.stdout)["hookSpecificOutput"]["permissionDecision"], "deny")
+        # A path with a lone surrogate (escaped in the JSON) is denied too: any error in the hook fails closed.
+        self.assertEqual(json.loads(hook(f"{run}/\ud800/../prreview.json"))["hookSpecificOutput"]
+                         ["permissionDecision"], "deny")
 
     def test_a_started_worker_gets_the_read_only_floor(self):
         cid = self.pr_card()
@@ -3705,12 +3719,18 @@ class PrReviewAutoStartTest(PrReviewCase):
         asked = self.pr_card(ask={"type": "confirm", "text": "Review this one?"})
         paused = self.pr_card(key="example/widgets#43", sessions={"pr-review": {"state": "paused", "id": "x"}})
         asked_w = self.pr_card(key="example/widgets#44", sessions={"pr-review": {"state": "asked", "id": "y"}})
-        ended = self.pr_card(key="example/widgets#45", sessions={"pr-review": {"state": "ended", "id": "z"}},
+        ended = self.pr_card(key="example/widgets#45", sessions={"pr-review": {"state": "ended", "id": "z",
+                                                                               "closed": "done"}},
                              pr={"repo": "example/widgets", "number": 45, "head_sha": prr.B, "reviewed_sha": prr.A})
+        # Ended by hand (`ap2 worker end`), or ended before the close was saved (no `closed`): held until a start by
+        # hand.
+        by_hand = self.pr_card(key="example/widgets#46", sessions={"pr-review": {"state": "ended", "id": "v",
+                                                                                 "closed": "end"}})
+        older = self.pr_card(key="example/widgets#47", sessions={"pr-review": {"state": "ended", "id": "u"}})
         out = self.workers().check()
         self.assertEqual([(e["card"], e["did"]) for e in out], [(ended, "started")])
         self.assertTrue(self.review_starts()[0]["argv"][-1].startswith(f"/autopilot:pr-review {ended} review\n"))
-        for cid in (asked, paused, asked_w):
+        for cid in (asked, paused, asked_w, by_hand, older):
             self.assertNotIn(cid, [r["card"] for r in resources.Registry(self.data).read()])
 
     def test_a_worker_put_on_record_after_the_locked_steps_is_seen(self):
@@ -3722,6 +3742,17 @@ class PrReviewAutoStartTest(PrReviewCase):
                             "session_id": "", "ports": [7200, 7209], "needs": [], "cwd": str(self.wt)})
         self.assertEqual(self.workers()._start_reviews([], "test"), [])
         self.assertEqual(self.review_starts(), [])
+
+    def test_a_start_that_is_on_record_keeps_its_folder(self):
+        # The start fails after its record was written (the listing does not answer in time): the record points at the
+        # running session and its folder, so the folder is kept.
+        cid = self.pr_card()
+        with mock.patch.object(Workers, "_session_id", side_effect=subprocess.TimeoutExpired("claude", 5)):
+            out = self.workers().check()
+        self.assertEqual([(e["card"], e["did"]) for e in out], [(cid, "nothing")])
+        rec = resources.Registry(self.data).read()[0]
+        self.assertEqual(rec["card"], cid)
+        self.assertTrue(Path(rec["cwd"]).is_dir())
 
     def test_a_card_with_another_worker_is_not_started(self):
         cid = self.pr_card()
@@ -3833,6 +3864,7 @@ class PrReviewDonePathTest(PrReviewCase):
         self.assertIn("does not pass ap2 review check", ask["text"])
         self.assertIn(f"run `ap2 review check {cid}`, then `ap2 review apply {cid}`", ask["text"])
         self.assertNotIn("verdict", self.get(cid))
+        self.assertEqual(self.get(cid)["sessions"]["pr-review"]["closed"], "done")
         # The ask holds the next auto-start back: no loop.
         self.assertEqual(self.workers().check(), [])
         self.assertEqual(len(self.review_starts()), 1)
@@ -3887,6 +3919,7 @@ class PrReviewDonePathTest(PrReviewCase):
         self.assertEqual((out[0]["card"], out[0]["did"], out[0]["verdict"], out[0]["sync"]),
                          (cid, "ended", "changes", "current"))
         self.assertEqual(self.get(cid)["pr"]["reviewed_sha"], prr.A)
+        self.assertEqual(self.get(cid)["sessions"]["pr-review"]["closed"], "done")
         self.assertEqual(resources.Registry(self.data).read(), [])
 
     def test_a_question_close_whose_stop_lands_late_is_not_applied(self):
@@ -3925,6 +3958,165 @@ class PrReviewDonePathTest(PrReviewCase):
         self.assertEqual((out[0]["card"], out[0]["state"], out[0]["did"], out[0]["verdict"]),
                          (cid, "done", "ended", "changes"))
         self.assertEqual(self.get(cid)["pr"]["reviewed_sha"], prr.A)
+
+    def test_a_report_written_before_a_park_is_applied_after_a_resume_by_hand(self):
+        cid = self.started()
+        w = self.workers()
+        self.the_worker_reviews(cid, end_turn=False)
+        at = self.clock().timestamp()
+        os.utime(transcripts.run_dir(self.data, cid) / prreview.REPORT_FILE, (at, at))
+        w.park(cid, "pr-review", "at the park line", usage_file=usage_file(self.tmp / "u.json", 95))
+        rec = resources.Registry(self.data).read()[0]
+        self.set_agent(rec["short_id"], state="done", status="idle")
+        self.clock.advance(4 * 60)
+        # Resumed by hand, not by check: the new record keeps the round's first start.
+        w.start(cid, "pr-review", prompt="Go on.", resume=True)
+        resumed = resources.Registry(self.data).read()[0]
+        self.assertEqual(resumed["started_at"], cards.stamp(self.clock()))
+        self.assertEqual(resumed["round_started_at"], rec["round_started_at"])
+        # The resumed turn ends without touching the report: the round's report is done.
+        self.set_agent(resumed["short_id"], state="done", status="idle")
+        self.view("open_head_a")
+        out = w.check()
+        self.assertEqual([(e["card"], e["state"], e["did"]) for e in out], [(cid, "done", "ended")])
+        self.assertEqual(self.get(cid)["pr"]["reviewed_sha"], prr.A)
+
+    def check_in_a_thread(self, fifo):
+        """One check, in a thread given 10 seconds: a check that hangs on `fifo` fails the test instead of hanging
+        it (the FIFO is then opened for writing and closed, so the thread's read ends)."""
+        out, err = [], []
+
+        def run():
+            try:
+                out.append(self.workers().check())
+            except BaseException as e:  # noqa: BLE001 - raised in the test's thread
+                err.append(e)
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        t.join(10)
+        if t.is_alive():
+            with contextlib.suppress(OSError):
+                os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+            t.join(10)
+            self.fail(f"check hung on {fifo}")
+        if err:
+            raise err[0]
+        return out[0]
+
+    def test_a_plan_file_that_is_not_a_regular_file_is_not_read(self):
+        cid = self.started()
+        self.the_worker_reviews(cid)
+        plan = transcripts.run_dir(self.data, cid) / prreview.PLAN_FILE
+        plan.unlink()
+        os.mkfifo(plan)  # the worker's Bash may write its run directory: opening a FIFO waits for a writer
+        with mock.patch.object(prreview, "apply", wraps=prreview.apply) as apply:
+            out = self.check_in_a_thread(plan)
+        apply.assert_not_called()
+        self.assertEqual([(e["card"], e["did"]) for e in out], [(cid, "ended")])
+        self.assertIn(f"{prreview.PLAN_FILE} in its run directory is not a regular file", out[0]["note"])
+        self.assertNotIn("error", out[0])
+        ask = self.get(cid)["ask"]
+        self.assertEqual((ask["type"], ask["role"], ask["reason"]), ("fix", "pr-review", workers_mod.APPLY_FAILED))
+        self.assertIn("is not a regular file", ask["text"])
+        self.assertEqual(self.gh.log, [])
+
+    def test_a_report_that_is_a_link_is_not_read(self):
+        cid = self.started()
+        self.the_worker_reviews(cid)
+        report = transcripts.run_dir(self.data, cid) / prreview.REPORT_FILE
+        moved = self.tmp / "elsewhere.json"
+        report.rename(moved)
+        report.symlink_to(moved)
+        with mock.patch.object(prreview, "apply") as apply:
+            out = self.workers().check()
+        apply.assert_not_called()
+        self.assertIn(f"{prreview.REPORT_FILE} in its run directory is not a regular file", out[0]["note"])
+        self.assertEqual(self.get(cid)["ask"]["reason"], workers_mod.APPLY_FAILED)
+
+    def test_a_question_file_that_is_not_a_regular_file_is_not_read(self):
+        cid = self.started()
+        q = self.write_result(cid, "question.json", {"text": "Which base branch?"})
+        real = Workers.classify
+
+        def classify(self_, rec, listing):
+            state = real(self_, rec, listing)
+            if q.is_file():  # swapped for a FIFO once it was seen
+                q.unlink()
+                os.mkfifo(q)
+            return state
+
+        with mock.patch.object(Workers, "classify", classify):
+            out = self.check_in_a_thread(q)
+        self.assertEqual([(e["card"], e["did"]) for e in out], [(cid, "asked")])
+        self.assertEqual(self.get(cid)["ask"]["text"],
+                         "The worker asked a question but its question.json could not be read.")
+
+    def test_an_end_by_hand_holds_the_card_until_a_start_by_hand(self):
+        cid = self.started()
+        self.the_worker_reviews(cid)
+        with mock.patch.object(prreview, "apply") as apply:
+            self.assertEqual(self.workers().end(cid, "pr-review")["did"], "ended")
+            self.assertEqual(self.workers().check(), [])
+        apply.assert_not_called()
+        self.assertEqual(len(self.review_starts()), 1)
+        self.assertEqual(self.get(cid)["sessions"]["pr-review"]["closed"], "end")
+        self.assertNotIn("verdict", self.get(cid))
+
+    @unittest.skipIf(fcntl is None, "the worker list's lock is POSIX only")
+    def test_an_overlapping_check_starts_no_second_review(self):
+        cid = self.started()
+        self.the_worker_reviews(cid)
+        self.view("open_head_a")
+        real, threads, others = prreview.apply, [], []
+
+        def overlapping():
+            others.append(self.workers().check())
+
+        def apply(*a, **kw):
+            # A second check runs while this one applies the review. With the worker list's lock free it runs now,
+            # and finds the card closed with no review on it; with the lock held it waits for it.
+            fd = os.open(str(self.data / ".workers.lock"), os.O_RDWR)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                free = True
+            except BlockingIOError:
+                free = False
+            finally:
+                os.close(fd)
+            if free:
+                overlapping()
+            else:
+                threads.append(threading.Thread(target=overlapping, daemon=True))
+                threads[-1].start()
+            return real(*a, **kw)
+
+        with mock.patch.object(prreview, "apply", apply):
+            out = self.workers().check()
+            for t in threads:
+                t.join(30)
+                self.assertFalse(t.is_alive())
+        self.assertEqual([(e["card"], e["did"], e["verdict"]) for e in out], [(cid, "ended", "changes")])
+        self.assertEqual(others, [[]])
+        self.assertEqual(len(self.review_starts()), 1)
+
+    def test_a_done_round_removes_its_empty_folder(self):
+        cid = self.started()
+        home = Path(resources.Registry(self.data).read()[0]["cwd"])
+        self.the_worker_reviews(cid)
+        self.view("open_head_a")
+        self.assertEqual(self.workers().check()[0]["did"], "ended")
+        self.assertFalse(home.exists())
+        self.assertEqual(list(self.scratch.iterdir()), [])
+
+    def test_a_done_round_keeps_a_folder_that_is_not_empty(self):
+        cid = self.started()
+        home = Path(resources.Registry(self.data).read()[0]["cwd"])
+        (home / "notes.md").write_text("kept")
+        self.the_worker_reviews(cid)
+        self.view("open_head_a")
+        self.assertEqual(self.workers().check()[0]["did"], "ended")
+        self.assertEqual((home / "notes.md").read_text(), "kept")
 
     def test_a_turn_that_ends_with_no_report_asks_the_user_and_is_not_started_again(self):
         cid = self.started()
@@ -3997,6 +4189,7 @@ class PrReviewDonePathTest(PrReviewCase):
         self.assertEqual(out[0]["sync"], "new_commits")
         self.assertEqual(len(self.review_starts()), 1)  # not in the same pass
         self.assertEqual(self.get(cid)["pr"]["head_sha"], prr.B)
+        self.assertEqual(self.get(cid)["sessions"]["pr-review"]["closed"], "done")
         again = self.workers().check()
         self.assertEqual(again, [{"card": cid, "role": "pr-review", "state": "due", "did": "started"}])
         self.assertTrue(self.review_starts()[-1]["argv"][-1].startswith(f"/autopilot:pr-review {cid} delta\n"))
