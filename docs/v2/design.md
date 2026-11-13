@@ -3092,10 +3092,11 @@ Calls the author made without asking (check them):
   are separate. A key value never appears anywhere: the key, refresh and rotate commands run with stdin, stdout and
   stderr all `DEVNULL`, and only "exit N" or the exception's class name is kept or printed.
   1. Own module. `keys.py` has `STATE = "profile-key.json"`, `REFRESH = "profile-refresh.json"`, `KEY_TTL` (10
-     minutes), `KEY_FAIL_TTL` (60 s), `KEY_FIX`, `check(data, p, now)`, `cached_error(data, p)`, `rotate(data, name,
-     now)`, `auth_failed(errors, after)` and `note_session_end(data, projects, session_id, profile_name, now)`. Every
-     function takes the data folder and the time; there is no module clock. It imports `profiles`, `store` and
-     `apistop` (which imports only `transcripts`), never `spend`, `workers` or `cap` (`cap` imports it).
+     minutes), `KEY_FAIL_TTL` (60 s), `KEY_FIX`, `KEY_HOLD_FIX`, `check(data, p, now)`, `cached_error(data, p)`,
+     `rotate(data, name, now)`, `auth_failed(errors, after)` and `note_session_end(data, projects, session_id,
+     profile_name, now)`. Every function takes the data folder and the time; there is no module clock. It imports
+     `profiles`, `store` and `apistop` (which imports only `transcripts`), never `spend`, `workers` or `cap` (`cap`
+     imports it).
   2. The check is cached. `check` runs `gateway.key_command` (60 s) for a gateway profile and returns its error
      text, or None when it works; the subscription runs nothing and is None. The answer is kept as the profile's
      record `{"at", "ok", "error", "profile", "auth"?}` in `<data>/profile-key.json`: a working key is checked again
@@ -3121,10 +3122,15 @@ Calls the author made without asking (check them):
      malformed record reads as never checked (the command runs again: fail towards checking, never towards a stale
      "ok").
   3. The allowance refuses on a key error. In `cap.allowance`, after the pause and for a gateway profile only:
-     `keys.check(...)`; an error returns `{"allow": 0, "reason": "key", "error": ...}` before any spend is read, and
-     opens no cap card. Nothing switches to the subscription. `cap.refusal` says "the gateway key does not work:
-     <error>. <KEY_FIX>", with `KEY_FIX` = "Run the profile's key command in a terminal (sign in again if it asks);
-     the next start or check tries it again." Every start, `--resume`, `answer` and in-place resume already goes
+     `keys.check(...)`; an error returns `{"allow": 0, "reason": "key", "error": ..., "profile": <its name>}` before
+     any spend is read, and opens no cap card. Nothing switches to the subscription. `cap.refusal` says "the gateway
+     key does not work: <error>. <KEY_FIX>", with `KEY_FIX` = "Run the profile's key command in a terminal (sign in
+     again if it asks); the next start or check tries it again." During the hold after a second rejection (the error
+     is `AUTH_AGAIN`, the only error written with `auth: true`) running the key command changes nothing, so the line
+     ends with `KEY_HOLD_FIX` instead = "Wait up to 10 minutes: the hold ends and the next start or check runs the key
+     command again. Or run `ap2 profile rotate NAME` to get a new key now (it needs the profile's rotate_command).",
+     NAME replaced by the profile's name from the allowance (kept as NAME when the dict has none; `refusal` reads no
+     file). Every start, `--resume`, `answer` and in-place resume already goes
      through `cap.allowance`, so they are all refused with a CapError and nothing is planned, discovered or
      launched; a dead worker keeps its one resume and a parked one stays parked, as at the cap. Running workers are
      not stopped. `Workers.check` runs the active profile's `keys.check` once before it locks the worker list (only
