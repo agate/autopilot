@@ -698,10 +698,12 @@ class ImportV1Test(unittest.TestCase):
         return self.actions(report)["v1:shop:D1"], self.by_key()["v1:shop:D1"]
 
     def test_a_question_card_with_an_invisible_old_where_is_closed_with_the_fresh_phrase(self):
-        # cards.blank: a configured-language plain.where slot of only U+FEFF (and white space) has no words, so the
-        # fresh question_where phrase is written, as for a missing one; the store would refuse it as is empty.
+        # cards.blank: a configured-language plain.where slot of only U+FEFF (and white space), of only white space,
+        # or of a non-text value has no words, so the fresh question_where phrase is written, as for a missing one;
+        # the store would refuse it as is empty.
         fresh = {lang: importv1.PHRASES[lang]["question_where"].format(project="shop", about="") for lang in ("en", "zh")}
         for lang, text, want in (("en", "\ufeff", fresh["en"]), ("zh", "\ufeff \x1c", fresh["zh"]),
+                                 ("en", "   ", fresh["en"]), ("zh", 5, fresh["zh"]),
                                  ("zh", "这里有字", "这里有字")):
             with self.subTest(lang=lang, text=text):
                 self.setUp()  # a fresh temp v1 and data folder: D1 must still be in state.json
