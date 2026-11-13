@@ -157,6 +157,8 @@ class GuardTest(unittest.TestCase):
     def test_guard_does_not_join_a_line_after_an_escaped_backslash(self):
         cmd = 'ap task show X \\\\\nc""p x ~/.claude/"autopilot-data"/y'
         self.assertIsNotNone(guard.decide(bash(cmd), self.W))
+        cmd = "echo x > /tmp/a" + "\\\\" + "\n" + "cat ~/.claude/autopilot-data/x"
+        self.assertIsNone(guard.decide(bash(cmd), self.W))
 
     def test_guard_joins_backslash_runs_of_64_kib_in_linear_time(self):
         mark = " ~/.claude/autopilot-data/x "
@@ -175,6 +177,18 @@ class GuardTest(unittest.TestCase):
                     'ap task list v2 # \\\nc""p a ~/.claude/autopilot-data/x'):
             self.assertIsNotNone(guard.decide(bash(cmd), self.W), cmd)
         self.assertIsNone(guard.decide(bash("ap decision add v2 \\\n~/.claude/autopilot-data/x.json"), self.W))
+
+    def test_guard_reads_a_joined_ap_line_with_a_comment_like_any_other(self):
+        # the joined reading glues the lines after the comment onto the `ap` line, so it is not exempt
+        for cmd in ("ap note v2 x # see below \\\ncp /tmp/evil.yaml \\\n~/.claude/autopilot-data/config.yaml",
+                    "ap note v2 x # \\\nrm -rf \\\n~/.claude/autopilot-data/projects"):
+            self.assertIsNotNone(guard.decide(bash(cmd), self.W), cmd)
+        self.assertIsNone(guard.decide(bash('ap task set v2 PROJ-1 note="see #3" \\\nstatus=done'), self.W))
+
+    def test_guard_checks_an_open_mode_with_escaped_quotes(self):
+        cmd = 'python3 -c "import json; json.dump({}, open(\\"$AUTOPILOT_DATA/x.json\\", \\"w\\"))"'
+        self.assertIsNotNone(guard.decide(bash(cmd), self.W))
+        self.assertIsNone(guard.decide(bash('python3 -c "open(\\"$AUTOPILOT_DATA/x.json\\").read()"'), self.W))
 
 
 if __name__ == "__main__":
