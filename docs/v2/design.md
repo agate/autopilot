@@ -1702,18 +1702,22 @@ Calls the author made without asking (check them):
     questions, runs the read-only session in the card's folder and writes `answer`, `answered_at` and the files
     or messages it used.** Until then the page shows "Saved. Your Mac answers it when question answering is
     turned on." Nothing in this slice answers it: no session, no process.
-  - Read-only and shadow mode: two POSTs change anything: the question and the cap card's answer (`POST
-    /api/cap/answer`; see "Access on the pages" below). Every other `POST`, `PUT`, `PATCH` and `DELETE`, and every
-    other method on those two, is 405 and writes nothing, in shadow and live mode alike. **Saving a question and
-    answering the cap card are allowed in shadow mode, because they write only inside the data folder, which
+  - Read-only and shadow mode: four POSTs change anything: the question, the cap card's answer (`POST
+    /api/cap/answer`), the profile switch (`POST /api/profile/use`) and the profile's model and effort choice
+    (`POST /api/profile/choose`; see "Access on the pages" below). Every other `POST`, `PUT`, `PATCH` and `DELETE`,
+    and every other method on those four, is 405 and writes nothing, in shadow and live mode alike. **Saving a
+    question, answering the cap card, switching the profile and choosing its model and effort are allowed in shadow
+    mode, because they write only inside the data folder (`active-profile.json`, the profile's own file), which
     shadow mode allows (10).** No route calls
     `config.require_live`, because none writes outside the data folder; a later route that does must call it
     first. The GETs write nothing: they read the store without creating its lock file, except a search (`q`),
     which may build `index.sqlite`, the store's own cache, as `ap2 search` does. The question route may create
     `.store.lock`, the store's own empty lock file, when it is missing, even for a refused question; nothing else
-    is written on a refusal. The server calls no Jira, Slack, GitHub or model API and runs no key command. **One
-    route may start a process: in live mode only, the cap answer `pause` stops every running worker with `claude
-    stop` (`Workers.cap_stop`), exactly as `ap2 cap answer pause` does.** No other route starts one.
+    is written on a refusal. The server calls no Jira, Slack, GitHub or model API and runs no key command. **Two
+    things a POST may start: in live mode only, the cap answer `pause` stops every running worker with `claude
+    stop` (`Workers.cap_stop`), exactly as `ap2 cap answer pause` does; and in both modes the profile switch (for a
+    profile never chosen) and the choice run the profile's `gateway.models_command` once to fetch its list, as `ap2
+    profile use` and `ap2 profile choose` do.** No other route starts one, and no GET runs the models command.
   - The page is one file with inline CSS and JS and no fonts or scripts from another host. It writes card text
     only as text (`textContent`), never as HTML. Screens by hash route: `#/lane/<lane>`, `#/search/<words>`,
     `#/project/<id>` (its children), `#/card/<id>`, `#/sources[/<name>]`, `#/templates[/<kind>]`, `#/settings`.
@@ -1725,7 +1729,7 @@ Calls the author made without asking (check them):
     a text that is missing in the chosen language says so instead of showing another language.
   - Later work: template buttons (lane change, restore, child), the chat box (9.3), the Restore points screen,
     real worker counts, answering questions (the workers slice), "started at login" (launchd), a pause lift (`ap2
-    cap resume`) and the profile switch (see "Access on the pages" choice 5) on the page, and labels for languages other than `en` and `zh`.
+    cap resume`) on the page, and labels for languages other than `en` and `zh`.
 - **[decided by the builder]** The phone page data (design 9.2, 9.4, 10). `phone.build(data, cfg=None, now=None,
   plugin_dir=None, usage_file=None)` in `lib/assistant/phone.py` turns the card store into one JSON document;
   `ap2 phone build [--data PATH] [--out PATH]` prints it (UTF-8, sorted keys, one line) or writes it to `--out` through a temp file
@@ -2766,8 +2770,8 @@ Calls the author made without asking (check them):
       to the subscription asks nothing.
     - Workers never ask: a worker start or resume runs the active profile as stored, chosen or not; only
       `ap2 profile` reads `needs_choice`.
-    - The page's choice card (the `profile_choice` reply, two selects) is not here: it needs the page's profile
-      switch, and is its own task after it.
+    - The local page asks too: its Settings screen's profile switch opens a choice box (two selects, from a list
+      fetched fresh) for a profile never chosen; see "Access on the pages" choice 5.
     - **[decided by the builder]** The time of a choice is `profiles.now()`: local time with its UTC offset, to the
       second (v1's `_now`), so a test can patch one function.
     - **[decided by the builder]** The numbered list, the `Number [N]:` prompt and "Type a number from 1 to N" go to
@@ -3215,8 +3219,8 @@ Calls the author made without asking (check them):
      worker floor Edit-denies them (a worker must not mark a failing key as working).
 - **[decided by the builder]** Access on the pages (slice 5 of the port of v1's access profiles: v1 showed it through
   `meta.access` in the published page and page replies; v2's local page is a server on this Mac, so the cap card's
-  answer is a POST route that calls the same function the command line calls (the profile switch is its own later
-  task, choice 5), and the phone data gets the same facts read only). Each numbered choice is reversible.
+  answer, the profile switch and its choice are POST routes that call the same functions the command line calls
+  (choice 5), and the phone data gets the same facts read only). Each numbered choice is reversible.
   1. **[decided by the builder]** One read for both pages: `profileview.summary(data, now, usage_file)` in
      `lib/assistant/profileview.py` returns `{"access", "usage"}`, used as they are by `/api/state`, and
      by `phone.build` with its path texts scrubbed (choice 7). `access`: `{profile: {name, label, mode, model, effort, daily_cap_usd} | null, profile_error,
@@ -3281,23 +3285,75 @@ Calls the author made without asking (check them):
      keeps that note for the card (`S.capNote`) and the redrawn card shows it in its cap section until the page
      leaves that card (another route or another card drops it) or the card opens again (the 10-second tick
      redraws the cap card, when it is the card on screen, if today's cap state changes); a clean 200 shows nothing, as before.
-  4. **[decided by the builder]** The one route that may start a process: because of choice 3, `pause` in live mode
-     runs `claude stop` for each running worker (`Workers.cap_stop`). The server's docstring, the read-only
-     bullet and `ap2 serve --help` ("Read-only, but for saving a question on a card and answering today's cap
-     card; in live mode a pause answer stops the running workers.") say so; no other route starts one. The simplest reverse: always pass `workers=None` and tell the user
-     to run `ap2 cap answer pause`.
-  5. **[decided by the builder]** The profile switch is split off to its own task (this slice passed its size
-     limit). Planned there: `POST /api/profile/use` `{"name"}`, under the same write lock and body rules. A name
-     that does not match `profiles.PROFILE_NAME` is 400; `profiles.load` failing is 404 for an unknown name and 409
-     for a broken one (nothing written); a profile that `profiles.needs_choice` and is not the active one is 409
-     with the command line's words ("NAME has no model and effort chosen yet, so nothing switched: run `ap2
-     profile choose NAME --model M --effort E`, then switch again") and no models command runs (the page's choice
-     card replaces this 409 later); otherwise `profiles.use` and 200 `{"active", "was"}`. The switch takes effect
-     at once: the next start or resume uses it and running workers keep their own profile; v1's "takes up to 5
-     minutes" note is not ported, since v2 applies it at once. One button per profile that loads, on the Settings
-     screen, the active one pressed and disabled. Until then `ap2 profile use NAME` switches, and this slice's
-     Settings screen shows the active profile and lists the profiles that do not load in the warning style;
-     `access.profiles` (with `needs_choice`) is already in the data. The top bar's badge links there.
+  4. **[decided by the builder]** What a POST may start: because of choice 3, `pause` in live mode runs `claude
+     stop` for each running worker (`Workers.cap_stop`). The second is the models command of choice 5: the profile
+     switch (for a profile never chosen) and the choice run `gateway.models_command` once each, in both modes, as
+     `ap2 profile use` runs it in a terminal. The server's docstring, the read-only bullet and `ap2 serve --help`
+     ("Read-only, but for saving a question on a card, answering today's cap card and switching the access
+     profile; in live mode a pause answer stops the running workers, and in both modes a switch to a gateway
+     profile may run its models command.") say so; no other route starts one. The simplest reverse: always pass
+     `workers=None` and tell the user to run `ap2 cap answer pause`.
+  5. **[decided by the builder]** The profile switch and its choice box, on the Settings screen. `POST
+     /api/profile/use` `{"name"}` and `POST /api/profile/choose` `{"name", "model", "effort"}`, both with the other
+     POSTs' origin and body rules (403, 411, 413, 415, 400) and under the write lock of choice 8.
+     - The switch follows `ap2 profile use`'s order. A `name` that is not text or does not match
+       `profiles.PROFILE_NAME` is 400; `profiles.load` failing is 404 for an unknown name and 409 with its error
+       for one that does not load; nothing is written on a refusal. The active profile, a chosen one or the
+       subscription: `profiles.use`, 200 `{"active", "was"}`, no models command run. A profile that
+       `profiles.needs_choice` and is not the active one switches nothing: the route fetches its list once
+       (`profiles.fetch_models`) and replies 200 `{"needs_choice": true, "choices": profiles.choices(...)}`. A models
+       command that fails (`ModelsUnavailable`) is 502 with its text; one that lists no model to choose is 502
+       "gateway.models_command: listed no models, so there is nothing to choose" (the CLI's refusal), so no empty
+       box opens; a broken price override is 500 (one nested too deeply for `json.loads` too, as `the price override
+       <path>: <error>`). A hand-edited file nested too deeply for `json.loads` (a
+       `RecursionError`, or an `ArithmeticError`, as `profileview.ODD`) still gets a JSON reply: the profile's own
+       file is 409 `<name>: <error>`, and an `active-profile.json` that deep reads as no current profile for the
+       needs-choice check, while the switch itself (which `profiles.use` makes only after reading the old name) is
+       409 `cannot switch to <name>: active-profile.json: <error>`, nothing written. Both routes end with one last guard: a `profileview.ODD` that no
+       handler inside turned into its own status is 500 `<type>: <error>`, never a dropped connection.
+     - The choice loads the profile (400, 404, 409 as above), fetches the list fresh (never a list the page sent),
+       then `profiles.choose(data, name, model, effort, models, known)` and `profiles.use`: 200 `{"chosen": {"name",
+       "model", "effort"}, "active", "was"}`. A `model` or `effort` that is not text is 400; one not in the fresh
+       list is 409 with `check_model` / `check_effort`'s text, nothing saved or switched; `ModelsUnavailable` and an
+       empty list are 502. A save that cannot be written for a `ValueError` (a label holding a lone surrogate
+       loads, but cannot be written back as UTF-8) or a `profileview.ODD` (a `settings` nested deep enough that
+       `json.loads` reads it but `json.dump` recurses too deeply) is 500 with its text, nothing written or switched.
+       It works for any profile that loads, chosen before or not, as `ap2 profile choose` does.
+     - The page: a "Switch profile" row, one button per entry of `access.profiles` (label, then the name when it
+       differs; "in use" or "model not chosen yet" after it), the active one pressed (`aria-pressed="true"`) and
+       disabled; the profiles in `broken_profiles` get no button and stay in the warning list. The note under it:
+       "A switch takes effect at once: the next worker start or resume uses it. Running workers keep their own
+       profile."; v1's "takes up to 5 minutes" note is not ported, since v2 applies it at once. A needs-choice reply
+       opens a box under the buttons for that profile: two selects (models, efforts) from `choices`, the recommended
+       model and effort preselected, "Choose and switch" and "Cancel". After a switch or a choice the page reloads
+       `/api/state` and redraws Settings; a refusal shows a label in the page's language ("Not switched: the server
+       refused it." for a 4xx, "Not switched: the model list could not be fetched." for a 502, "Not switched:
+       something went wrong." otherwise) with the server's reason under it, and a refused choice keeps the box
+       open. The box and that error live in page state (`S.choice`, `S.switchError`), so a redraw keeps them;
+       leaving Settings drops them, except a box whose choice is still posting: it is kept, so a return to Settings
+       shows it with every switch button still disabled; its refusal shows in it on Settings, and drops it when
+       another screen is open. A switch to another profile closes an open box first, so its error never shows
+       under another profile's box. The error box has an id (`access-error`, or `choice-error` in the choice box)
+       that the switch buttons, or "Choose and switch", name in `aria-describedby` while it is shown. The
+       10-second tick redraws the Access box only when what it shows from the state changed (the page's language,
+       `access`, and the usage rows as drawn), whatever has keyboard focus: the redraw puts focus back on the same
+       control (below), and a state that shows the same draws nothing. It does not redraw it while the choice box
+       is open (a redraw would close a drop-down list under the pointer). One
+       post at a time: while a switch posts, the box's buttons are disabled, and while a choice posts, every switch
+       button is. Focus: each control in the Access box has a `data-focus` key, and a redraw puts focus back on the
+       control with the same key (once it is enabled again); an opened box focuses its model select, Cancel focuses
+       that profile's switch button, and a refused choice focuses "Choose and switch". After a switch or a choice
+       that went through (the pressed button is then the active one, disabled), focus that was in the Access box,
+       or lost to the page, goes to the box's heading (`tabindex="-1"`); focus the user moved elsewhere stays. The
+       top bar's badge links there.
+     - **[decided by the builder]** The choice box is part of the Settings screen, not a card in the store: the
+       page has no card kind for it, and a store card would need a template and a sync. The simplest reverse: make
+       it a card kind later.
+     - **[decided by the builder]** The needs-choice reply is a 200 with `needs_choice: true`, not a 409: nothing
+       went wrong, and the page reads `choices` from it.
+     - **[decided by the builder]** The models command runs from a POST, in both modes, as `ap2 profile use` runs
+       it in a terminal; with `profiles.CHOICE_TIMEOUT` (20 s) it may hold the write lock that long, so a cap answer
+       sent meanwhile waits. The server's docstring says so.
   6. **[decided by the builder]** The top bar, after the running count: the badge (`Subscription`, or `Workers:
      Gateway · <label or name>` with `model · effort` and `Page sessions: Subscription`); the compact usage (the
      subscription's highest window percent and its kind, or a gateway's `$today / $limit today`); a red line for
@@ -3318,9 +3374,10 @@ Calls the author made without asking (check them):
      key record names its path) and every `error` field (`access.error`, `access.cap.error`,
      `access.cap.pause.error`). Building stays read only: no key command, no `totals`, no write. The phone page
      itself, its buttons and its answers wait for the phone page's HTML.
-  8. **[decided by the builder]** Concurrency: the cap answer holds one `threading.Lock` on the server (the profile
-     switch will share it), so two clicks at once answer the card once (the second sees `answered` and gets 409). An `ap2 cap answer` at the
-     same moment is not locked against, as between two command-line runs today.
+  8. **[decided by the builder]** Concurrency: the cap answer, the profile switch and the choice share one
+     `threading.Lock` on the server, so two clicks at once answer the card once (the second sees `answered` and
+     gets 409), and a switch and a choice never write at the same time. An `ap2 cap answer` or `ap2 profile use` at
+     the same moment is not locked against, as between two command-line runs today.
   9. **[decided by the builder]** Labels: about 40 new keys per table (`access.*`, `cap.*`, `usage.*`), ported
      from v1's English words, each with its `zh` text. The window kinds `five_hour` and `seven_day` get labels; any
      other kind shows as it is. The cap answer's notes (`cap.not_stopped`, `cap.stop_busy`, `cap.stop_error`) and
@@ -3328,7 +3385,7 @@ Calls the author made without asking (check them):
   - Lessons 3: 3.1 (values never cut) is choice 6 and its tests (`$512.00 / $500.00` and `$2,300.00`, and the
     values' CSS); the 1280 px and 390 px layouts were checked by screenshot, not by a test. 3.2 (republish the phone page when the HTML it would build
     differs from the published one, keeping a hash of the published page) needs a phone publish step v2 does not
-    have yet: later work, with the phone page's buttons, the profile switch (choice 5) and a "lift the pause"
+    have yet: later work, with the phone page's buttons and a "lift the pause"
     button on the local page.
 - **[decided by the builder]** v1 import (10, 11 question 5), read-only, in `importv1.py`.
   - Command: `ap2 import-v1 [--data PATH] [--from DIR] [--project NAME ...] [--dry-run]`. `--from` defaults to
