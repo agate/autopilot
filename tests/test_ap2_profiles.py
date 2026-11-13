@@ -69,6 +69,15 @@ class ProfileStoreTest(WorkerCase):
             self.assertTrue(any("daily_cap_usd" in e for e in profiles.validate(gateway(daily_cap_usd=cap))), cap)
         self.assertEqual(profiles.validate(gateway()), [])
         self.assertTrue(profiles.validate(gateway(name="Bad_Name")))
+        # An int too big for a float (math.isfinite raises OverflowError on it) is the same plain error.
+        cap_error = "daily_cap_usd: required for a gateway profile, a finite number above 0"
+        self.assertEqual(profiles.validate(gateway(daily_cap_usd=10 ** 400)), [cap_error])
+        (self.data / "profiles").mkdir()
+        (self.data / "profiles" / "big.json").write_text(json.dumps(gateway("big", daily_cap_usd=10 ** 400)))
+        with self.assertRaises(ProfileError) as caught:
+            profiles.load(self.data, "big")
+        self.assertIn(cap_error, str(caught.exception))
+        shutil.rmtree(self.data / "profiles")
         bad_url = gateway()
         bad_url["gateway"]["base_url"] = "ftp://x.example.com"
         self.assertTrue(any("base_url" in e for e in profiles.validate(bad_url)))

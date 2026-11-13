@@ -153,7 +153,9 @@ class SummaryTest(ViewCase):
         self.assertEqual(a["broken_profiles"][0]["name"], "zz")
         self.assertIn("zz.json", a["broken_profiles"][0]["error"])
 
-    def test_a_cap_too_big_for_a_float_or_a_too_deep_file_is_an_error_field(self):
+    def test_a_cap_too_big_for_a_float_is_a_broken_profile_and_a_too_deep_file_an_error_field(self):
+        # A cap too big for a float fails validation as any bad cap does (its ProfileError names the file, as the
+        # local page shows full paths); a RecursionError from a profile read is profileview's own odd-error field.
         (self.data / profiles.FOLDER).mkdir(exist_ok=True)
         big = json.dumps(gateway("big", daily_cap_usd=-1)).replace('"daily_cap_usd": -1', '"daily_cap_usd": 1'
                                                                     + "0" * 400)
@@ -174,19 +176,22 @@ class SummaryTest(ViewCase):
         self.assertIsNone(a["profile_error"])
         broken = {b["name"]: b["error"] for b in a["broken_profiles"]}
         self.assertEqual(set(broken), {"big", "deep"})
-        self.assertTrue(broken["big"].startswith("big: OverflowError: "), broken["big"])
+        cap_error = "daily_cap_usd: required for a gateway profile, a finite number above 0"
+        self.assertEqual(broken["big"], f"{self.data / profiles.FOLDER / 'big.json'}: {cap_error}")
         self.assertTrue(broken["deep"].startswith("deep: RecursionError: "), broken["deep"])
-        self.assertNotIn(str(self.tmp), json.dumps(a))
+        self.assertNotIn(str(self.tmp), broken["deep"])
         status, raw = self.state_over_http()
         self.assertEqual(status, 200, raw)
         self.assertIn("big", [b["name"] for b in json.loads(raw)["access"]["broken_profiles"]])
         built = phone.build(self.data, cfg=Config(), now=NOW.astimezone(timezone.utc), usage_file=self.usage)
         self.assertIn("big", [b["name"] for b in built["access"]["broken_profiles"]])
+        self.assertNotIn(str(self.tmp), json.dumps(built["access"]))  # the phone scrubs the path
         # The active one: the same text is the profile error, with the fix.
         (self.data / profiles.ACTIVE).write_text(json.dumps({"name": "big"}))
         a = self.summary()["access"]
         self.assertIsNone(a["profile"])
-        self.assertTrue(a["profile_error"].startswith("big: OverflowError: "), a["profile_error"])
+        self.assertIn(f"big.json: {cap_error}", a["profile_error"])
+        self.assertNotIn("OverflowError", a["profile_error"])
         self.assertIn(profiles.FIX, a["profile_error"])
         with mock.patch.object(profiles, "active", side_effect=deep), \
                 mock.patch.object(profiles, "active_name", side_effect=deep):

@@ -150,6 +150,14 @@ def _owned_env(env) -> list:
     return out
 
 
+def _finite(x) -> bool:
+    """`math.isfinite`, but False for an int too big for a float (where `isfinite` raises OverflowError)."""
+    try:
+        return math.isfinite(x)
+    except OverflowError:
+        return False
+
+
 def validate(p) -> list:
     """Every reason `p` is not a usable profile; [] when it is. Runs no command (see `save`)."""
     if not isinstance(p, dict):
@@ -180,7 +188,7 @@ def validate(p) -> list:
         if not p.get("small_model"):
             errs.append("small_model: required for a gateway profile")
         cap = p.get("daily_cap_usd")
-        if isinstance(cap, bool) or not isinstance(cap, (int, float)) or not math.isfinite(cap) or cap <= 0:
+        if isinstance(cap, bool) or not isinstance(cap, (int, float)) or not _finite(cap) or cap <= 0:
             errs.append("daily_cap_usd: required for a gateway profile, a finite number above 0")
     elif mode == "subscription" and gw:
         errs.append("gateway: a subscription profile has none")
