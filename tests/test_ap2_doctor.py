@@ -44,7 +44,7 @@ class DoctorTest(unittest.TestCase):
         self.agents.mkdir(parents=True, exist_ok=True)
         pl = plistlib.loads(install.render_plist(["/x/assistant-gate"], data or self.data, []))
         pl["Label"] = label
-        pl["EnvironmentVariables"]["PATH"] = path if path is not None else f"{self.tools}:/usr/bin:/bin"
+        pl["EnvironmentVariables"]["PATH"] = path if path is not None else str(self.tools)
         (self.agents / f"{install.LABEL}.plist").write_bytes(plistlib.dumps(pl))
 
     def write_gate(self, minutes_ago):
