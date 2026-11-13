@@ -63,6 +63,9 @@ def write_json(path: Path, obj) -> None:
 
 # The deepest dict / list nesting a card or its changes may hold; far under where the copy or the writer stop.
 MAX_DEPTH = 200
+# The most items (list or tuple items, dict keys and values, of any kind) `check_writable(shared=True)` looks at
+# after it first meets a cycle (see there); a value needing more is refused as too deep. Well under a second.
+CYCLE_WALK_BUDGET = 100_000
 
 
 def check_writable(value, what: str = "card is", *, shared: bool = True) -> None:
@@ -71,11 +74,21 @@ def check_writable(value, what: str = "card is", *, shared: bool = True) -> None
     `copy.deepcopy` and the indented writer, which stop at the recursion limit. Where they stop depends on how deep
     the caller's stack already is, so trying the copy gives one answer on write and another on read (a card the
     store wrote and then could not read). A fixed bound well under that limit gives the same answer everywhere, and
-    walking the value (with a list, not recursion; nothing copied, no text built; a shared value walked again only
-    when met deeper) is cheap on every read. Raises TooDeepError `<what> nested too deeply to copy or write` at the
-    first level past the bound. Anything else (a value JSON cannot write, a container already on the path, i.e. a
-    cycle) is left to the card checks. `shared=False` is for a value fresh from `json.loads`, a tree with no shared
-    containers: the memo of what was walked would then skip nothing and only hold one entry per container."""
+    walking the value (with a list, not recursion; nothing copied, no text built) is cheap on every read. Raises
+    TooDeepError `<what> nested too deeply to copy or write` at the first level past the bound. Anything else (a
+    value JSON cannot write, a container already on the path, i.e. a cycle) is left to the card checks.
+
+    A depth is counted along non-repeating paths: a container already on the path is not walked into again. A
+    shared value is walked again only when met deeper, which is exact while no cycle has been seen (what lies
+    below a container then does not depend on the path to it). Once the walk meets the first cycle, a container
+    walked before may have been cut short by a back edge to a container that a later route does not hold, so from
+    then on every non-repeating path is walked. That work is capped: past CYCLE_WALK_BUDGET items looked at after
+    the first cycle (every list or tuple item and dict key and value, a number or a container on the path
+    included), the value is refused with the same TooDeepError (a value with a cycle can never be written as
+    JSON, so nothing writable is lost). A small shallow cycle still passes here and is refused by the card checks.
+
+    `shared=False` is for a value fresh from `json.loads`, a tree with no shared containers or cycles: the memo of
+    what was walked would then skip nothing and only hold one entry per container."""
     kinds = (dict, list, tuple)
     if not isinstance(value, kinds):
         return
@@ -83,24 +96,37 @@ def check_writable(value, what: str = "card is", *, shared: bool = True) -> None
     def inside(node):
         return itertools.chain.from_iterable(node.items()) if isinstance(node, dict) else iter(node)
 
+    def too_deep():
+        return cards.TooDeepError(f"{what} nested too deeply to copy or write")
+
     path = [(value, inside(value))]
     on_path = {id(value)}
     walked = {id(value): 1} if shared else None  # id -> the deepest depth a container was already walked from
+    left = None  # once a cycle is seen (shared only): how many more items may be looked at
     while path:
         node, rest = path[-1]
         for child in rest:
-            if isinstance(child, kinds) and id(child) not in on_path:
-                if len(path) >= MAX_DEPTH:
-                    raise cards.TooDeepError(f"{what} nested too deeply to copy or write")
-                depth = len(path) + 1
-                # an empty one holds nothing deeper: counted above, never walked into; one already walked from as
-                # deep or deeper holds nothing new (so each is walked at most MAX_DEPTH times, not once per path)
-                if child and (walked is None or walked.get(id(child), 0) < depth):
-                    if walked is not None:
-                        walked[id(child)] = depth
-                    path.append((child, inside(child)))
-                    on_path.add(id(child))
-                    break
+            if left is not None:
+                if left <= 0:
+                    raise too_deep()
+                left -= 1
+            if not isinstance(child, kinds):
+                continue
+            if id(child) in on_path:  # a cycle: from here on the memo no longer tells the depth below a container
+                if walked is not None:
+                    walked, left = None, CYCLE_WALK_BUDGET
+                continue
+            if len(path) >= MAX_DEPTH:
+                raise too_deep()
+            depth = len(path) + 1
+            # an empty one holds nothing deeper: counted above, never walked into; one already walked from as
+            # deep or deeper holds nothing new (so each is walked at most MAX_DEPTH times, not once per path)
+            if child and (walked is None or walked.get(id(child), 0) < depth):
+                if walked is not None:
+                    walked[id(child)] = depth
+                path.append((child, inside(child)))
+                on_path.add(id(child))
+                break
         else:
             path.pop()
             on_path.discard(id(node))
@@ -225,8 +251,8 @@ class Store:
         if given:
             raise CardError(f"{', '.join(given)} {'is' if len(given) == 1 else 'are'} set by the store; leave "
                             f"{'it' if len(given) == 1 else 'them'} out")
+        check_writable(card)  # first, as in update: a value with a cycle past the bound gets the depth words
         cards.validate(card, self.languages)
-        check_writable(card)
         with self._guard():
             at = self.clock()
             new = copy.deepcopy(card)
