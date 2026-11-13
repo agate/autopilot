@@ -157,7 +157,9 @@ with one line naming the link, so a link into v1's folder cannot carry a store w
   `sessions/`, `sources/`, `routines/`, `templates/`, `attachments/`) get the same guard in a later task, from the
   code that writes them.
 
-v1's data is in `~/.claude/autopilot-data`. Moving it is part of the migration (section 10).
+v1's data is in `~/.claude/autopilot-data`. Moving it is part of the migration (section 10). One project moves at a
+time with `ap2 import-v1 --take-over NAME` (section 12, "Take over a v1 project"): its folder is copied to
+`<data>/v1/<name>/`, and v1's folder is only read.
 
 ### 3.5 Conversations (transcripts)
 
@@ -1183,7 +1185,10 @@ archived with the card.
 - **[open]** Moving v1's data from `~/.claude/autopilot-data` and secretary's state into the new data folder.
   **[decided by the builder]** The read-only part is built: `ap2 import-v1` copies each v1 project (its
   `config.json` and `state.json`) into v2 cards without changing v1's folder, so v2 shows v1's work in shadow mode
-  (section 12, "v1 import"). Moving or deleting v1's data, and secretary's state, stay open.
+  (section 12, "v1 import"). **[decided by the builder]** Moving one project is `ap2 import-v1 --take-over NAME`
+  (section 12, "Take over a v1 project"): after the user pauses it in v1, its cards turn live and its folder is
+  copied into the data folder; v1's folder is still only read. Every other project (read-only and searchable,
+  phase 2 slice 5), deleting v1's data, and secretary's state stay for later slices.
 
 ## 11. Open questions, most important first
 
@@ -1198,8 +1203,9 @@ archived with the card.
 3. **Replies on the local page** resume the session immediately (8.3)?
 4. **Drafts and quotes in two languages** (3.1, proposed part).
 5. **Data migration** from v1 and secretary (10). **Answered for the read-only part:** `ap2 import-v1` copies v1
-   projects into cards and never writes to v1's folder (section 12, "v1 import"). Moving v1's or secretary's data
-   is still open.
+   projects into cards and never writes to v1's folder (section 12, "v1 import"). **Answered for moving one
+   project:** `ap2 import-v1 --take-over NAME` (section 12, "Take over a v1 project"). Every other v1 project and
+   secretary's data stay for later slices (phase 2 slices 5 and 7).
 
 Calls the author made without asking (check them):
 
@@ -3790,7 +3796,64 @@ Calls the author made without asking (check them):
     writes) is listed under `refused` and the others still import; the command then prints one `ap2: ...` line and
     exits 1 after the report.
   - Writes only inside the data folder, so it runs in shadow mode (no `require_live`). Not imported:
-    `events.jsonl`, reports, run folders, and `<data>/projects/<name>.yaml` (not written from `config.json`).
+    `events.jsonl`, reports, run folders, and `<data>/projects/<name>.yaml` (not written from `config.json`). A
+    take-over (below) brings all of them for its one project.
+  - **[decided by the builder]** Take over a v1 project: `ap2 import-v1 --take-over NAME [--dry-run]` moves that
+    one project to v2 (`--project` with it is an argument error, exit 2). The other checks of the import still run
+    (overlaps, an unknown name). The user pauses it in v1 first; v2 never pauses or resumes v1.
+    - Refusals, one `ap2:` line, exit 1, nothing written (not even the data folder's layout): the project is not
+      paused (no `paused` file in its folder and no `stopped: true` in its config.json; the line says to run
+      `ap pause NAME` in v1); its state.json lists a worker (the line names each `task role` and says to run
+      `ap worker end NAME TASK ROLE` in v1, which saves the session on the task); the project does not read (as
+      for the import), a task's `sessions` names a role v2 has no worker for or holds a text that is not a session
+      id; a config.json value the project file would refuse; a link where a copy goes. `--dry-run` reports
+      `take_over: {paused, workers}` and what would be added, changed and copied instead of refusing the first two.
+    - Live cards: every card gets `taken_over` (the time) and a live `do` (v2 works on it, v1 is paused for it).
+      A task card also gets `branch` (v1's; an open task without one gets `projects.branch(project, <v1 id>,
+      <slug of its title>)`, never the card key, whose colons git refuses; v1 has no id rule, so a computed branch
+      holding white space, a control character, `:`, `~`, `^`, `?`, `*`, `[`, `\` or `..` stops the take-over with
+      one line naming the task), `worktree` (v1's, when set), `needs`,
+      `spec`, and `sessions` from v1's `{role: session id}` as `{role: {id, ids, cwd: <worktree or "">, needs,
+      state: ended, why: "taken over from v1", at}}`, the shape `Workers._save_session` writes, so
+      `start(..., resume=True)` continues it in its worktree. `lane` and `status` are mapped as by the import.
+      Every decision gets a card: an open `ask` or `gate` an open question card; every other one (answered,
+      resolved, undone, open `self` and `system`) a done question card (`ask: null`) whose `source.record` keeps
+      `kind`, `task`, `status`, `answer`, `answered_at` and `created_at`; `not_imported.decisions` is 0. A card the
+      import made keeps its id, parent and audit (`action: take_over`); one not made yet is added live. Nothing goes
+      to `workers.json` and no worker starts: the dispatcher pass starts what comes next.
+    - Files: the whole project folder is copied to `<data>/v1/<name>/` with the same relative paths, by `shutil.copy2`
+      (same bytes and mtimes, so an old `handback.json` never looks newer than a v2 start), leaving out only v1's
+      `state.lock`. Each open task's `runs/<task>/` is also copied into its card's run folder
+      (`<data>/sessions/<card>/`), where v2's workers read and write; none is when v1's `runs/` is itself a link (it
+      is listed under `skipped`), and a task id that is not one plain path part (`.`, `..`, one holding a separator)
+      gets no run-folder copy, so a copy never reads outside `runs/`. A `spec` inside the project folder points at its
+      copy under `<data>/v1/<name>/`; another `spec` is kept. A link (or anything not a file or folder) on the v1 side
+      is never followed or copied and is listed under `skipped`; a link on the v2 side (`<data>/v1`, anything under
+      it, `<data>/projects`, `<data>/sessions`, a run folder or a file in it) stops the take-over; every link check
+      runs before anything is written (a card added now gets its run folder after the cards are written, under the
+      `<data>/sessions` already checked). The report's `files: {copied, same, kept, skipped}` lists destinations
+      relative to the data folder (`skipped`: sources relative to the project folder). A dry run lists a run folder's
+      copies only for a card that exists already.
+    - Project file: `<data>/projects/<name>.yaml` is written from config.json's `repo`, `branch_pattern`,
+      `branch_prefix`, `resources`, `health_checks`, `extra_hosts` and `mcp_servers` (one `key: <JSON>` line each,
+      JSON being inside the YAML subset; a `null` or empty value is left out), only when it does not exist
+      (`project_file: written`, `kept`, or `write` on a dry run). A value `projects.load` would refuse, or one that
+      does not read back the same, stops the take-over before any write.
+    - Second run: a card with `taken_over` is never rebuilt from v1 (`unchanged`), so what v2 changed since stays;
+      a copy whose destination exists is never written (`same`, or `kept` when its bytes differ); a file removed
+      on the v2 side since is copied again (with v1's mtime), nothing else is; nothing is removed. A task or decision new in v1 since is added live. The plain import skips a project whose project
+      card has `taken_over` and lists it under the report's `taken_over: [names]` (exit 0; the others import).
+    - Choices taken (simplest reversible, v2 RULES.md line 3): refuse, not warn, when v1 is not paused (a warning
+      would let v1 and v2 both work on it; the dry run lets the user look first); refuse while v1 lists a worker (a
+      live v1 session could hand back into v1's run folder after the copy; parked ones may be allowed later); copy,
+      not link (a link would let a v2 write reach v1, and the store refuses links); the whole folder lands in
+      `<data>/v1/<name>/` as a frozen record and open tasks' run folders a second time where v2's workers look
+      (undo: delete `<data>/v1/<name>/`); never overwrite, never remove, never rebuild a taken-over card; each
+      saved session is `state: ended` with no `workers.json` row; settled decisions of every kind are done
+      `question` cards (no new kind); an open task without a branch gets one from the project's pattern and the v1
+      id; the project file is written only when absent (the user's own file wins); a v1 `null` or empty value is
+      left out of it (both `branch` functions read an empty prefix as none); it runs in shadow mode, and live mode
+      for the project is the user's next step (`docs/v2/build-brief.md`, switch-over step 3).
 - **[decided by the builder]** Install (phase 2 slice 3), in `install.py` and `doctor.py`. Only the user runs these
   commands; a worker never does, and no test runs the real `launchctl` (every call goes through a runner the
   caller passes in, and every path is worked out at call time from the home folder, so a temp home moves them all).

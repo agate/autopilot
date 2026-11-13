@@ -14,7 +14,9 @@ from unittest import mock
 from tests.helpers import ROOT
 from tests.test_ap2_cli import temp_inside_the_accounts_claude
 from tests.test_ap2_store import card as store_card
-from assistant import cards, cli, datadir, importv1
+from assistant import cards, cli, datadir, importv1, projects
+from assistant.config import load as config_load
+from assistant.transcripts import run_dir as transcripts_run_dir
 from assistant.store import Store
 
 FIXTURE = ROOT / "tests" / "fixtures" / "v1-data"
@@ -1421,6 +1423,397 @@ class ImportV1Test(unittest.TestCase):
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             self.assertEqual(cli.main([]), 2)
         self.assertIn("import-v1", err.getvalue())
+
+
+SID = "0f3c2a1b-1111-4222-8333-444455556666"
+
+
+def take_over_fixture(v1: Path, worktree: Path) -> Path:
+    """In a temp copy of the fixture only: shop is paused, PROJ-2 has a worktree, a saved implement session and a
+    spec, and the project folder holds every kind of file v1 keeps. Returns the outside folder a link points at."""
+    shop = v1 / "projects" / "shop"
+    (shop / "paused").write_text("")
+    state = json.loads((shop / "state.json").read_text(encoding="utf-8"))
+    proj2 = next(t for t in state["tasks"] if t["id"] == "PROJ-2")
+    proj2.update(worktree=str(worktree), sessions={"implement": SID}, spec=str(shop / "specs" / "PROJ-2.md"))
+    (shop / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    files = {"runs/PROJ-2/brief-implement.md": "# brief\n", "runs/PROJ-2/handback.json": '{"key": "PROJ-2"}',
+             "runs/PROJ-2/journal.md": "- started\n", "runs/PROJ-5/handback.json": '{"key": "PROJ-5"}',
+             "specs/PROJ-2.md": "# PROJ-2\n", "reports/2026-11-01-09.json": "{}", "events.jsonl": "{}\n",
+             "archive.jsonl": "{}\n", "RULES.md": "1. Be careful.\n", "state.lock": ""}
+    for rel, text in files.items():
+        (shop / rel).parent.mkdir(parents=True, exist_ok=True)
+        (shop / rel).write_text(text, encoding="utf-8")
+    (shop / "runs" / "PROJ-2" / "media").mkdir()
+    (shop / "runs" / "PROJ-2" / "media" / "shot.png").write_bytes(b"\x89PNG\r\n\x1a\n" + bytes(range(256)))
+    # Old mtimes, as v1's files would have: a copy must keep them.
+    for p in shop.rglob("*"):
+        os.utime(p, ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
+    outside = v1.parent / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("not v1's")
+    (shop / "runs" / "PROJ-2" / "out").symlink_to(outside)
+    return outside
+
+
+class TakeOverTest(unittest.TestCase):
+    """`ap2 import-v1 --take-over shop` (design 12, "Take over a v1 project"). It borrows ImportV1Test's setUp and
+    helpers, not its tests."""
+
+    run_cli, ok, fails, by_key, actions, edit_state = (ImportV1Test.run_cli, ImportV1Test.ok, ImportV1Test.fails,
+                                                      ImportV1Test.by_key, ImportV1Test.actions,
+                                                      ImportV1Test.edit_state)
+
+    def setUp(self):
+        ImportV1Test.setUp(self)
+        self.wt = self.tmp / "worktree"
+        self.wt.mkdir()
+        self.shop = self.v1 / "projects" / "shop"
+        take_over_fixture(self.v1, self.wt)
+
+    def take_over(self, *args):
+        return self.ok("--take-over", "shop", *args)
+
+    def refused(self, *args):
+        before_v1 = snapshot(self.v1)
+        before = snapshot(self.data) if self.data.exists() else None
+        line = self.fails("--take-over", "shop", *args)
+        self.assertEqual(snapshot(self.v1), before_v1)
+        if before is None:
+            self.assertFalse(self.data.exists())
+        else:
+            self.assertEqual(snapshot(self.data), before)
+        return line
+
+    def project_entry(self, report):
+        self.assertEqual([p["name"] for p in report["projects"]], ["shop"])
+        return report["projects"][0]
+
+    # -- 1. the flag and its refusals ---------------------------------------------------------------------------
+
+    def test_not_paused_is_refused_with_the_pause_command(self):
+        (self.shop / "paused").unlink()
+        line = self.refused()
+        self.assertIn("ap pause shop", line)
+        self.ok("--project", "shop")  # a plain import first: the data folder exists, and still nothing changes
+        line = self.refused()
+        self.assertIn("ap pause shop", line)
+
+    def test_stopped_in_config_counts_as_paused(self):
+        (self.shop / "paused").unlink()
+        cfg = json.loads((self.shop / "config.json").read_text())
+        (self.shop / "config.json").write_text(json.dumps(dict(cfg, stopped=True)))
+        self.take_over()
+
+    def test_a_listed_v1_worker_is_refused_with_its_end_command(self):
+        self.edit_state("projects/shop", lambda s: s.update(workers=[
+            {"task": "PROJ-2", "role": "implement"}, {"task": "PROJ-3", "role": "pr"}]))
+        line = self.refused()
+        self.assertIn("PROJ-2 implement", line)
+        self.assertIn("PROJ-3 pr", line)
+        self.assertIn("ap worker end shop TASK ROLE", line)
+
+    def test_a_project_read_project_refuses_is_one_line(self):
+        self.edit_state("projects/shop", lambda s: s.pop("decisions"))
+        self.assertIn("decisions missing", self.refused())
+
+    def test_a_bad_saved_session_is_refused(self):
+        for sessions in ({"deploy": SID}, {"implement": "--allowedTools=Bash"}, {"implement": 7}, ["implement"]):
+            with self.subTest(sessions=sessions):
+                def change(s):
+                    s["tasks"][1]["sessions"] = sessions
+                self.edit_state("projects/shop", change)
+                self.assertIn("PROJ-2", self.refused())
+
+    def test_the_flag_with_project_is_an_argument_error(self):
+        with self.assertRaises(SystemExit) as stopped:
+            self.run_cli("--take-over", "shop", "--project", "notes")
+        self.assertEqual(stopped.exception.code, 2)
+        self.assertFalse(self.data.exists())
+
+    def test_an_unknown_name_is_one_line(self):
+        self.assertIn("no v1 project named nope", self.fails("--take-over", "nope"))
+
+    def test_a_dry_run_of_an_unpaused_project_reports_and_writes_nothing(self):
+        (self.shop / "paused").unlink()
+        self.edit_state("projects/shop", lambda s: s.update(workers=[{"task": "PROJ-2", "role": "implement"}]))
+        before = snapshot(self.v1)
+        report = self.take_over("--dry-run")
+        self.assertFalse(self.data.exists())
+        self.assertEqual(snapshot(self.v1), before)
+        entry = self.project_entry(report)
+        self.assertEqual(entry["take_over"], {"paused": False, "workers": ["PROJ-2 implement"]})
+        self.assertEqual(set(self.actions(report).values()), {"add"})
+        self.assertIn("v1/shop/state.json", entry["files"]["copied"])
+        self.assertEqual(entry["project_file"], "write")
+
+    # -- 2. open tasks become live cards that keep their work -------------------------------------------------
+
+    def test_open_tasks_become_live_cards_that_keep_their_work(self):
+        self.ok("--project", "shop")
+        ids = {k: c["id"] for k, c in self.by_key().items()}
+        report = self.take_over()
+        got = self.by_key()
+        self.assertEqual({k: c["id"] for k, c in got.items() if k in ids}, ids)  # the same cards
+        actions = self.actions(report)
+        self.assertEqual({actions[k] for k in ids}, {"take_over"})
+        self.assertEqual({actions[k] for k in actions if k not in ids}, {"add"})  # D3, D4, D5
+        for c in got.values():
+            self.assertTrue(cards.parse_stamp(c["taken_over"]))
+            self.assertNotIn("read-only", c["plain"]["do"]["en"])
+            self.assertGreater(len(c["audit"]), 1 if c["key"] in ids else 0)
+        self.assertIn("v2 works on", got["v1:shop"]["plain"]["do"]["en"])
+        one, two, three = (got[f"v1:shop:PROJ-{n}"] for n in (1, 2, 3))
+        self.assertEqual((one["lane"], one["status"], one["branch"]), ("planned", "todo", "dev.PROJ-1.add-the-cart"))
+        self.assertNotIn("worktree", one)
+        self.assertEqual((one["needs"], one.get("sessions")), ([], None))
+        self.assertEqual((two["lane"], two["status"], two["branch"]),
+                         ("running", "in_progress", "dev.PROJ-2.fix-total"))
+        self.assertEqual(two["worktree"], str(self.wt))
+        self.assertEqual(two["sessions"], {"implement": {
+            "id": SID, "ids": [SID], "cwd": str(self.wt), "needs": [], "state": "ended", "why": "taken over from v1",
+            "at": two["taken_over"]}})
+        self.assertEqual(two["parent"], got["v1:shop"]["id"])
+        self.assertEqual(three["source"]["record"]["pr"], "https://github.com/org/repo/pull/7")
+        self.assertEqual(three["branch"], "dev.PROJ-3.receipt")
+
+    def test_a_take_over_with_no_earlier_import_adds_live_cards(self):
+        report = self.take_over()
+        self.assertEqual(set(self.actions(report).values()), {"add"})
+        got = self.by_key()
+        self.assertEqual(got["v1:shop:PROJ-2"]["parent"], got["v1:shop"]["id"])
+        self.assertEqual(got["v1:shop:D5"]["parent"], got["v1:shop:PROJ-1"]["id"])
+        self.assertTrue(all(c.get("taken_over") for c in got.values()))
+
+    # -- 4. settled cards come along --------------------------------------------------------------------------
+
+    def test_settled_decisions_and_tasks_come_along(self):
+        report = self.take_over()
+        got = self.by_key()
+        self.assertEqual(self.project_entry(report)["not_imported"], {"decisions": 0})
+        for key in ("v1:shop:D3", "v1:shop:D4", "v1:shop:D5"):
+            c = got[key]
+            with self.subTest(key=key):
+                self.assertEqual((c["kind"], c["lane"], c["ask"]), ("question", "done", None))
+                self.assertTrue(c["taken_over"])
+                self.assertEqual(sorted(c["source"]["record"]),
+                                 ["answer", "answered_at", "created_at", "kind", "status", "task"])
+        self.assertEqual(got["v1:shop:D5"]["source"]["record"]["answer"], "no")
+        self.assertEqual(got["v1:shop:D5"]["source"]["record"]["answered_at"], "2026-11-05T11:00:00Z")
+        self.assertEqual(got["v1:shop:D3"]["source"]["record"]["kind"], "self")
+        self.assertEqual(got["v1:shop:D3"]["parent"], got["v1:shop:PROJ-2"]["id"])
+        self.assertEqual(got["v1:shop:D4"]["parent"], got["v1:shop"]["id"])
+        for key, kind in (("v1:shop:D1", "answer"), ("v1:shop:D2", "approve")):
+            self.assertEqual((got[key]["lane"], got[key]["ask"]), ("needs", {"type": kind, "from": "v1"}))
+            self.assertIn("v2 works on", got[key]["plain"]["do"]["en"])
+        for task in ("PROJ-5", "PROJ-6"):
+            self.assertEqual(got[f"v1:shop:{task}"]["lane"], "done")
+            self.assertTrue(got[f"v1:shop:{task}"]["taken_over"])
+            self.assertNotIn("branch", got[f"v1:shop:{task}"])
+
+    # -- 5. every file the project holds is copied -------------------------------------------------------------
+
+    def test_every_file_is_copied_with_its_bytes_and_mtime(self):
+        report = self.take_over()
+        files = self.project_entry(report)["files"]
+        record = self.data / "v1" / "shop"
+        sources = [p for p in self.shop.rglob("*") if p.is_file() and not p.is_symlink()
+                   and "out" not in p.relative_to(self.shop).parts]
+        self.assertTrue(sources)
+        for src in sources:
+            rel = src.relative_to(self.shop)
+            with self.subTest(rel=str(rel)):
+                if str(rel) == "state.lock":
+                    self.assertFalse((record / rel).exists())
+                    continue
+                dst = record / rel
+                self.assertEqual(dst.read_bytes(), src.read_bytes())
+                self.assertEqual(dst.stat().st_mtime_ns, src.stat().st_mtime_ns)
+                self.assertIn(f"v1/shop/{rel}", files["copied"])
+        self.assertFalse(os.path.lexists(record / "runs" / "PROJ-2" / "out"))
+        self.assertEqual(files["skipped"], ["runs/PROJ-2/out"])
+        self.assertEqual((files["same"], files["kept"]), ([], []))
+        got = self.by_key()
+        run2 = transcripts_run_dir(self.data, got["v1:shop:PROJ-2"]["id"])
+        for rel in ("brief-implement.md", "handback.json", "journal.md", "media/shot.png"):
+            src = self.shop / "runs" / "PROJ-2" / rel
+            self.assertEqual((run2 / rel).read_bytes(), src.read_bytes())
+            self.assertEqual((run2 / rel).stat().st_mtime_ns, src.stat().st_mtime_ns)
+        self.assertFalse(os.path.lexists(run2 / "out"))
+        run5 = transcripts_run_dir(self.data, got["v1:shop:PROJ-5"]["id"])
+        self.assertFalse(run5.exists())
+        self.assertTrue((record / "runs" / "PROJ-5" / "handback.json").is_file())
+        self.assertEqual(got["v1:shop:PROJ-2"]["spec"], str(record / "specs" / "PROJ-2.md"))
+
+    def test_a_spec_outside_the_project_folder_is_kept(self):
+        self.edit_state("projects/shop", lambda s: s["tasks"][1].update(spec="/elsewhere/PROJ-2.md"))
+        self.take_over()
+        self.assertEqual(self.by_key()["v1:shop:PROJ-2"]["spec"], "/elsewhere/PROJ-2.md")
+
+    def test_a_link_on_the_v2_side_stops_the_take_over(self):
+        for where in ("v1", "v1/shop", "v1/shop/runs"):
+            with self.subTest(where=where):
+                shutil.rmtree(self.data, ignore_errors=True)
+                self.ok("--project", "notes")
+                target = self.tmp / f"elsewhere-{where.replace('/', '-')}"
+                target.mkdir()
+                (self.data / where).parent.mkdir(parents=True, exist_ok=True)
+                (self.data / where).symlink_to(target)
+                self.assertIn("link", self.refused())
+                self.assertEqual(list(target.iterdir()), [])
+        shutil.rmtree(self.data, ignore_errors=True)
+        self.ok("--project", "shop")
+        run2 = transcripts_run_dir(self.data, self.by_key()["v1:shop:PROJ-2"]["id"])
+        run2.mkdir(parents=True)
+        outside = self.tmp / "outside-journal.md"
+        outside.write_text("mine\n")
+        (run2 / "journal.md").symlink_to(outside)
+        self.assertIn("link", self.refused())
+        self.assertEqual(outside.read_text(), "mine\n")
+
+    def test_a_runs_folder_that_is_a_link_is_never_followed(self):
+        outside = self.tmp / "outside-runs"
+        (outside / "PROJ-2").mkdir(parents=True)
+        (outside / "PROJ-2" / "secret.txt").write_text("not v1's")
+        shutil.rmtree(self.shop / "runs")
+        (self.shop / "runs").symlink_to(outside)
+        files = self.project_entry(self.take_over())["files"]
+        self.assertIn("runs", files["skipped"])
+        self.assertEqual([f for f in files["copied"] if f.startswith("sessions/")], [])
+        run2 = transcripts_run_dir(self.data, self.by_key()["v1:shop:PROJ-2"]["id"])
+        self.assertFalse((run2 / "secret.txt").exists())
+        self.assertFalse(os.path.lexists(self.data / "v1" / "shop" / "runs"))
+
+    def test_a_sessions_link_stops_the_take_over_before_any_write(self):
+        self.ok("--project", "notes")
+        target = self.tmp / "elsewhere-sessions"
+        target.mkdir()
+        shutil.rmtree(self.data / "sessions")
+        (self.data / "sessions").symlink_to(target)
+        self.assertIn("link", self.refused())
+        self.assertFalse((self.data / "v1").exists())
+        self.assertFalse(projects.path(self.data, "shop").exists())
+        self.assertNotIn("v1:shop", self.by_key())
+        self.assertEqual(list(target.iterdir()), [])
+
+    def test_a_computed_branch_git_refuses_stops_the_take_over(self):
+        for task_id in ("A:1", "fix total", "a~1", "a^1", "a?", "a*", "a[1", "a\\1", "a..b"):
+            with self.subTest(task_id=task_id):
+                self.edit_state("projects/shop", lambda s: s["tasks"][0].update(id=task_id))
+                line = self.refused()
+                self.assertIn(task_id, line)
+                self.assertIn("branch", line)
+
+    def test_a_project_file_made_meanwhile_is_one_line(self):
+        real_open = open
+
+        def racing(file, mode="r", *a, **k):
+            if mode == "x":
+                raise FileExistsError(17, "File exists", str(file))
+            return real_open(file, mode, *a, **k)
+
+        with mock.patch("builtins.open", racing):
+            line = self.fails("--take-over", "shop")
+        self.assertIn("cannot write", line)
+        self.assertIn("shop.yaml", line)
+
+    # -- 6. the project's setup file ---------------------------------------------------------------------------
+
+    def test_the_project_file_is_written_from_v1s_config_and_reads_back(self):
+        report = self.take_over()
+        self.assertEqual(self.project_entry(report)["project_file"], "written")
+        got = projects.load(self.data, "shop")
+        self.assertEqual((got["repo"], got["branch_pattern"], got["branch_prefix"]),
+                         ("/srv/repos/shop", "{prefix}.{task}.{short}", "dev"))
+        self.assertEqual((got["resources"], got["extra_hosts"]), ([], []))
+
+    def test_an_existing_project_file_is_kept(self):
+        path = projects.path(self.data, "shop")
+        path.parent.mkdir(parents=True)
+        path.write_text("repo: /my/own/checkout\n", encoding="utf-8")
+        before = path.read_bytes()
+        report = self.take_over()
+        self.assertEqual(self.project_entry(report)["project_file"], "kept")
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_a_v1_value_projects_load_refuses_stops_the_take_over(self):
+        for bad in ({"resources": "device"}, {"resources": ["ok", 3]}, {"repo": 7},
+                    {"health_checks": [{"name": "x"}]}):
+            with self.subTest(bad=bad):
+                cfg = json.loads((FIXTURE / "projects" / "shop" / "config.json").read_text())
+                (self.shop / "config.json").write_text(json.dumps(dict(cfg, **bad)))
+                self.assertIn("config.json", self.refused())
+
+    # -- 7. v1 is only read, and nothing is started --------------------------------------------------------------
+
+    def test_v1_is_only_read_and_nothing_is_started(self):
+        before = snapshot(self.v1)
+
+        def boom(*a, **k):
+            raise AssertionError(f"ran {a!r}")
+
+        with mock.patch("subprocess.run", boom), mock.patch("subprocess.Popen", boom), \
+                mock.patch("os.system", boom):
+            self.take_over("--dry-run")
+            self.assertEqual(snapshot(self.v1), before)
+            self.take_over()
+            self.assertEqual(snapshot(self.v1), before)
+            self.take_over()
+            self.assertEqual(snapshot(self.v1), before)
+        self.assertEqual(config_load(self.data).mode, "shadow")
+        self.assertFalse((Path(os.environ["HOME"]) / ".claude").exists())
+        self.assertFalse((self.data / "workers.json").exists())
+
+    # -- 8. a second run changes nothing; the plain import leaves the project alone ----------------------------
+
+    def test_a_second_take_over_changes_nothing(self):
+        self.take_over()
+        folders = ("items", "v1", "sessions", "projects")
+        before = {f: snapshot(self.data / f) for f in folders}
+        report = self.take_over()
+        self.assertEqual(set(self.actions(report).values()), {"unchanged"})
+        files = self.project_entry(report)["files"]
+        self.assertEqual((files["copied"], files["kept"]), ([], []))
+        self.assertIn("v1/shop/state.json", files["same"])
+        self.assertEqual(self.project_entry(report)["project_file"], "kept")
+        self.assertEqual({f: snapshot(self.data / f) for f in folders}, before)
+
+    def test_what_v2_changed_stays_and_new_v1_work_is_added_live(self):
+        self.take_over()
+        got = self.by_key()
+        two = got["v1:shop:PROJ-2"]
+        Store(self.data).update(two["id"], {"lane": "needs", "ask": {"type": "fix"}}, by="test")
+        journal = transcripts_run_dir(self.data, two["id"]) / "journal.md"
+        journal.write_text("- v2 went on\n", encoding="utf-8")
+        self.edit_state("projects/shop", lambda s: s["tasks"].append(
+            {"id": "PROJ-7", "title": {"en": "New work"}, "depends_on": [], "status": "todo", "link": None,
+             "needs": [], "critical": False, "phase": 1, "origin": "source"}))
+        report = self.take_over()
+        files = self.project_entry(report)["files"]
+        self.assertIn(f"sessions/{two['id']}/journal.md", files["kept"])
+        self.assertIn("v1/shop/state.json", files["kept"])
+        self.assertEqual(self.actions(report)["v1:shop:PROJ-7"], "add")
+        report = self.ok()  # the plain import
+        self.assertEqual(report["taken_over"], ["shop"])
+        self.assertEqual([p["name"] for p in report["projects"]], ["notes"])
+        self.assertEqual(self.ok("--project", "shop")["taken_over"], ["shop"])
+        after = self.by_key()
+        self.assertEqual((after["v1:shop:PROJ-2"]["lane"], after["v1:shop:PROJ-2"]["ask"]), ("needs", {"type": "fix"}))
+        self.assertEqual(journal.read_text(encoding="utf-8"), "- v2 went on\n")
+        self.assertTrue(after["v1:shop:PROJ-7"]["taken_over"])
+        self.assertEqual(after["v1:shop:PROJ-7"]["branch"], "dev.PROJ-7.new-work")
+        self.assertIn("v1:notes", after)
+
+    # -- 9. help ------------------------------------------------------------------------------------------------
+
+    def test_the_help_names_the_take_over(self):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+            cli.main(["import-v1", "--help"])
+        text = " ".join(out.getvalue().split())
+        self.assertIn("--take-over NAME", text)
+        self.assertIn("paused in v1 first", text)
+        self.assertIn("v1's folder is only read", text)
 
 
 if __name__ == "__main__":

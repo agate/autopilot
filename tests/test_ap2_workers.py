@@ -5481,5 +5481,41 @@ class PrReviewDonePathTest(PrReviewCase):
         self.assertNotEqual(self.ends_without_a_delta("open_head_a", "current")["lane"], "done")
 
 
+# -- a card taken over from v1 (design 12, "Take over a v1 project") ------------------------------------------------
+
+class TakenOverCardTest(WorkerCase):
+    """The take-over changes nothing in workers.py: its cards must fit `start` as they are."""
+
+    def setUp(self):
+        super().setUp()
+        from tests.test_ap2_import_v1 import FIXTURE, SID, take_over_fixture
+        self.sid = SID
+        v1 = self.tmp / "v1"
+        shutil.copytree(FIXTURE, v1)
+        take_over_fixture(v1, self.wt)
+        from assistant import importv1
+        importv1.run(self.data, str(v1), take_over="shop")
+        self.assertFalse((self.data / resources.FILE).exists())  # the take-over starts no worker, picks no port
+        self.cards = {c["key"]: c for c in Store(self.data, self.cfg, self.clock).list()}
+
+    def test_a_taken_over_card_resumes_its_v1_session_in_its_v1_worktree(self):
+        two = self.cards["v1:shop:PROJ-2"]
+        rec = self.workers().start(two["id"], "implement", prompt="Continue.", resume=True)
+        [call] = self.bg_calls()
+        self.assertEqual(call["argv"][1:3], ["--resume", self.sid])
+        self.assertEqual(Path(call["cwd"]).resolve(), self.wt)
+        self.assertEqual(call["env"]["AP2_BRANCH"], "dev.PROJ-2.fix-total")
+        self.assertEqual(call["env"]["AP2_RUN_DIR"], str(transcripts.run_dir(self.data, two["id"])))
+        self.assertEqual(call["env"]["AP2_PROJECT"], "shop")
+        self.assertEqual(rec["ports"], [7200, 7209])
+
+    def test_a_fresh_start_of_a_taken_over_card_gets_the_computed_branch(self):
+        one = self.cards["v1:shop:PROJ-1"]
+        self.workers().start(one["id"], "implement", cwd=self.wt, prompt="Do the work.")
+        [call] = self.bg_calls()
+        self.assertEqual(call["env"]["AP2_BRANCH"], "dev.PROJ-1.add-the-cart")
+        self.assertNotIn(":", call["env"]["AP2_BRANCH"])
+
+
 if __name__ == "__main__":
     unittest.main()
