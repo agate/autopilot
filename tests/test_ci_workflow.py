@@ -24,19 +24,24 @@ def job_block(text, name):
         return None
     block = []
     for line in lines[start + 1:]:
-        if line.strip() and indent(line) <= 2:
+        # A comment line, at any indent, does not end the job.
+        if line.strip() and not line.strip().startswith("#") and indent(line) <= 2:
             break
         block.append(line)
     return block
+
+
+# One mapping key and the rest of its line: the key may be quoted (`'if':`) and may have spaces before its colon.
+KEY = r"""(?P<q>["']?)(?P<key>[A-Za-z][\w-]*)(?P=q)\s*:(?P<rest>.*)"""
 
 
 def job_keys(block):
     """Keys set directly on the job (4 spaces in), comments skipped."""
     keys = []
     for line in block:
-        m = re.match(r"^    ([A-Za-z][\w-]*):(.*)$", line)
+        m = re.match(rf"^    {KEY}$", line)
         if m:
-            keys.append((m.group(1), m.group(2).split("#", 1)[0].strip()))
+            keys.append((m["key"], m["rest"].split("#", 1)[0].strip()))
     return keys
 
 
@@ -54,16 +59,17 @@ def steps(block):
 def step_keys(step):
     """Keys set directly on one step: the one on its `- ` line and those at that key's indent, comments skipped.
 
-    Keys nested deeper (under `with:` or `env:`) are not the step's own and are left out."""
-    m = re.match(r"^( *- *)([A-Za-z][\w-]*):(.*)$", step[0])
+    Keys nested deeper (under `with:` or `env:`) are not the step's own and are left out.
+    None when the `- ` line does not open with a key (a flow mapping, a comment, an anchor), so the keys cannot be read."""
+    m = re.match(rf"^(?P<dash> *- *){KEY}$", step[0])
     if not m:
-        return []
-    keys = [(m.group(2), m.group(3).split("#", 1)[0].strip())]
-    pad = " " * len(m.group(1))
+        return None
+    keys = [(m["key"], m["rest"].split("#", 1)[0].strip())]
+    pad = " " * len(m["dash"])
     for line in step[1:]:
-        m = re.match(rf"^{pad}([A-Za-z][\w-]*):(.*)$", line)
+        m = re.match(rf"^{pad}{KEY}$", line)
         if m:
-            keys.append((m.group(1), m.group(2).split("#", 1)[0].strip()))
+            keys.append((m["key"], m["rest"].split("#", 1)[0].strip()))
     return keys
 
 
@@ -90,7 +96,11 @@ def step_switch_problems(text, marker):
     found = [s for s in steps(block) if any(marker in l for l in s)]
     if len(found) != 1:
         return [f"want one step containing `{marker}`, got {len(found)}"]
-    return [f"the `{marker}` step sets `{k}: {v}`" for k, v in step_keys(found[0]) if k in SWITCHES]
+    keys = step_keys(found[0])
+    if keys is None:
+        # Keys the check cannot read must fail it, not pass it.
+        return [f"cannot read the keys of the `{marker}` step"]
+    return [f"the `{marker}` step sets `{k}: {v}`" for k, v in keys if k in SWITCHES]
 
 
 class CiWorkflowTest(unittest.TestCase):
@@ -247,6 +257,49 @@ class SwitchCheckTest(unittest.TestCase):
         copy = insert_after(copy, 'USER: ""', "          if: false")
         self.assertEqual(step_switch_problems(copy, SETUP_PYTHON), [])
         self.assertEqual(step_switch_problems(copy, RUN_COMMAND), [])
+
+    def test_a_quoted_if_on_the_setup_python_step_is_a_problem(self):
+        copy = insert_after(self.text, SETUP_PYTHON, "        'if': false")
+        self.assertEqual(step_switch_problems(copy, SETUP_PYTHON), [f"the `{SETUP_PYTHON}` step sets `if: false`"])
+
+    def test_a_quoted_job_level_continue_on_error_is_a_problem(self):
+        copy = insert_after(self.text, "  unittest:", '    "continue-on-error": true')
+        self.assertEqual(job_switch_problems(copy), ["the `unittest` job sets `continue-on-error: true`"])
+
+    def test_a_flow_mapping_setup_python_step_is_a_problem(self):
+        # Keys the check cannot read must fail the check, not pass it.
+        copy = re.sub(r"(?m)^      - uses: actions/setup-python@v5\n        with:\n          python-version: .*$",
+                      "      - {uses: actions/setup-python@v5, if: false}", self.text)
+        self.assertNotEqual(copy, self.text)
+        self.assertEqual(step_switch_problems(copy, SETUP_PYTHON),
+                         [f"cannot read the keys of the `{SETUP_PYTHON}` step"])
+
+    def test_a_setup_python_step_that_opens_with_a_comment_is_a_problem(self):
+        copy = re.sub(r"(?m)^      - (uses: actions/setup-python@)", r"      - # note\n        \1", self.text)
+        copy = insert_after(copy, SETUP_PYTHON, "        if: false")
+        self.assertNotEqual(copy, self.text)
+        self.assertEqual(step_switch_problems(copy, SETUP_PYTHON),
+                         [f"cannot read the keys of the `{SETUP_PYTHON}` step"])
+
+    def test_a_comment_does_not_end_the_job(self):
+        for comment in ("#    timeout-minutes: 30", "  # x"):
+            with self.subTest(comment=comment):
+                copy = insert_after(self.text, "runs-on: ubuntu-latest", comment)
+                copy = insert_after(copy, comment, "    continue-on-error: true")
+                self.assertEqual(job_switch_problems(copy), ["the `unittest` job sets `continue-on-error: true`"])
+
+    def test_text_inside_a_run_block_is_not_a_problem(self):
+        copy = self.text.replace(f"        run: {RUN_COMMAND}",
+                                 "        run: |\n"
+                                 "          if: false\n"
+                                 "          continue-on-error: true\n"
+                                 f"          {RUN_COMMAND}")
+        self.assertNotEqual(copy, self.text)
+        self.assertEqual(step_switch_problems(copy, RUN_COMMAND), [])
+
+    def test_job_level_switch_after_the_steps_is_a_problem(self):
+        copy = insert_after(self.text, RUN_COMMAND, "    continue-on-error: true")
+        self.assertEqual(job_switch_problems(copy), ["the `unittest` job sets `continue-on-error: true`"])
 
     def test_a_missing_job_or_step_is_a_problem(self):
         # A renamed job or step must not make the check pass with nothing to look at.
