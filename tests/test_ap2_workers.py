@@ -2824,6 +2824,28 @@ class ShortIdOnRecordTest(WorkerCase):
             w.check()  # nothing raised: the next check does not keep it either
         self.assertEqual(resources.Registry(self.data).read()[0]["session_id"], "")
 
+    def test_a_session_id_a_check_fills_in_is_kept_only_when_it_is_a_session_id(self):
+        # The listing did not show the session at the start, so a check fills its id in (`_fill_session_id`). A
+        # listed id that is not a session id (a lone surrogate) kept raw would fail every later write-back.
+        w = self.workers()
+        cid = self.add_card()
+        with mock.patch("autopilot.sessions.list_all", return_value=[]):
+            w.start(cid, "implement", cwd=self.wt, prompt="Do the work.")
+        self.assertEqual(resources.Registry(self.data).read()[0]["session_id"], "")
+        real = v1_sessions.list_all
+
+        def forged(claude):
+            rows = real(claude)
+            return None if rows is None else [dict(r, sessionId="\ud800") for r in rows]
+
+        with mock.patch.object(workers_mod.v1_sessions, "list_all", side_effect=forged):
+            out = w.check()
+        self.assertNotIn("note", out[0])
+        self.assertEqual(resources.Registry(self.data).read()[0]["session_id"], "")
+        self.write_result(cid)
+        with mock.patch.object(workers_mod.v1_sessions, "list_all", side_effect=forged):
+            self.assertEqual(w.check()[0]["did"], "ended")
+
 
 class FinishRetryTest(WorkerCase):
     """`finish` remembers per role which originals `claude rm` already removed (`sessions.<role>.removed_ids`),
@@ -3223,6 +3245,31 @@ class LimitParkFromTranscriptTest(ApiStopCase):
         a = self.start(w)
         self.stopped_on(a, limit_line(iso(self.clock() - timedelta(minutes=2))))
         self.assertEqual(w.check()[0]["did"], "parked")
+
+    def test_the_reset_is_read_from_the_whole_text_not_the_cut_note(self):
+        # The note is cut at WORKER_TEXT_MAX characters; the reset named past that point is still read.
+        w = self.workers()
+        a = self.start(w)
+        self.clock.advance(1)
+        text = "x" * 2100 + " · your 5-hour limit resets 8:40pm (America/Los_Angeles)"
+        self.stopped_on(a, error_line(text, iso(self.clock()), apiErrorStatus=429))
+        self.assertEqual(w.check()[0]["did"], "parked")
+        parked = self.rec()["parked"]
+        self.assertEqual(parked["resets_at"], "2026-01-05T20:40:00-08:00")
+        self.assertTrue(parked["note"].endswith(" [cut]"), parked["note"][-40:])
+
+    def test_a_reset_at_the_last_date_parks_for_the_back_off(self):
+        # The reset plus the resume delay would be past the last date a datetime holds: the back-off is used.
+        w = self.workers()
+        a = self.start(w)
+        self.clock.advance(1)
+        self.stopped_on(a, limit_line(iso(self.clock())))
+        last = datetime.max.replace(tzinfo=timezone.utc)
+        with mock.patch.object(workers_mod.apistop, "reset_time", return_value=last):
+            self.assertEqual(w.check()[0]["did"], "parked")
+        parked = self.rec()["parked"]
+        self.assertEqual(parked["resets_at"], last.isoformat())
+        self.assertEqual(datetime.fromisoformat(parked["resume_at"]), self.clock() + timedelta(minutes=30))
 
 
 class ApiStopIgnoredTest(ApiStopCase):
@@ -4634,6 +4681,52 @@ class PrReviewDonePathTest(PrReviewCase):
         parked = resources.Registry(self.data).read()[0]["parked"]
         self.assertEqual((parked["reason"], parked["note"]), ("limit", "\\ud800 usage limit reached"))
         self.assertEqual([(e["card"], e["state"]) for e in w.check()], [(cid, "parked")])
+
+    def assert_applied_despite(self, cid, w):
+        """The line the process left behind is ignored: the list reads, the check closes the worker as done and
+        applies its report, and the next check raises nothing."""
+        self.assertEqual([(r["card"], r["state"], r.get("api_stop")) for r in w.list()], [(cid, "done", None)])
+        self.view("open_head_a")
+        out = w.check()
+        self.assertEqual([(e["card"], e["state"], e["did"], e.get("verdict")) for e in out],
+                         [(cid, "done", "ended", "changes")])
+        self.assertNotIn("error", out[0])
+        self.assertEqual(self.get(cid)["verdict"]["verdict"], "changes")
+        self.assertEqual(resources.Registry(self.data).read(), [])
+        self.assertEqual(w.list(), [])
+        self.assertEqual(w.check(), [])
+
+    def test_a_raise_while_reading_the_transcript_does_not_stop_the_apply(self):
+        cid = self.started()
+        w = self.reviewed_then_said(cid, lambda at: limit_line(at))
+        with mock.patch.object(workers_mod.apistop, "tail", side_effect=RuntimeError("unreadable")):
+            self.assert_applied_despite(cid, w)
+
+    def test_a_reply_dated_in_year_one_does_not_stop_the_apply(self):
+        cid = self.started()
+        w = self.reviewed_then_said(cid, lambda at: reply(at="0001-01-01T00:00:00"))
+        self.assert_applied_despite(cid, w)
+
+    def applied_despite_a_limit_at_the_last_date(self, reset):
+        # Dated in the future, it is ignored (no park at all), so no reset or resume time is worked out from it.
+        cid = self.started()
+        w = self.reviewed_then_said(cid, lambda at: error_line(f"usage limit reached · resets {reset}",
+                                                               "9999-12-31T23:59:59.000Z", apiErrorStatus=429))
+        self.assert_applied_despite(cid, w)
+
+    def test_a_limit_line_dated_at_the_last_date_does_not_stop_the_apply(self):
+        self.applied_despite_a_limit_at_the_last_date("1am (UTC)")
+
+    def test_a_limit_line_dated_at_the_last_date_with_a_late_reset_does_not_stop_the_apply(self):
+        self.applied_despite_a_limit_at_the_last_date("11:59pm (UTC)")
+
+    def test_a_limit_line_dated_at_the_last_date_in_a_plus_14_zone_does_not_stop_the_apply(self):
+        self.applied_despite_a_limit_at_the_last_date("1am (Pacific/Kiritimati)")
+
+    def test_a_limit_line_dated_in_the_future_does_not_park_the_worker(self):
+        cid = self.started()
+        w = self.reviewed_then_said(cid, lambda at: limit_line("2100-01-01T00:00:00.000Z"))
+        self.assert_applied_despite(cid, w)
 
     def test_a_refusal_with_a_lone_surrogate_whose_stop_fails_keeps_an_escaped_mark(self):
         cid = self.started()

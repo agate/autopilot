@@ -1169,7 +1169,7 @@ class Workers:
         for r in self.registry.read():
             row = dict(r, state=self.classify(r, listing))
             seen = self._api_tail(r, row["state"], listing)
-            stop = apistop.stop(*seen) if seen is not None else None
+            stop = apistop.stop(*seen, until=self._until(self.clock())) if seen is not None else None
             if stop is not None:
                 row["api_stop"] = stop["kind"]
             out.append(row)
@@ -1187,6 +1187,13 @@ class Workers:
         except (TypeError, ValueError):
             return datetime.max.replace(tzinfo=timezone.utc)
 
+    @staticmethod
+    def _until(now: datetime) -> datetime:
+        """The latest time an API error in a worker's transcript can be its own: now, plus RUN_SKEW_MIN minutes. One
+        dated later is ignored: a process the worker left can write any time, and a park until then would hold the
+        worker's slot with no ask."""
+        return now + timedelta(minutes=RUN_SKEW_MIN)
+
     def _listed_session(self, session_id: str) -> Optional[dict]:
         """The listing's session with this id (`sessionId`), unless it is marked `state: stopped`; None when it is not
         listed or the listing failed."""
@@ -1199,14 +1206,18 @@ class Workers:
         """(the transcript's tail, `_since`) for a worker whose turn stopped (idle, blocked or dead, or a pr-review
         worker's done: its report may be a draft its turn never got to check), or None: a parked or closing worker,
         a session the listing shows working or busy, and a transcript that is missing or cannot be read are not
-        read."""
+        read. A raise while reading it is None too: the transcript is outside the data folder, and a raise would hold
+        back the worker's close (and its report's apply) on every check and fail the whole worker list."""
         stopped = ("idle", "blocked", "dead", "done") if rec["role"] == REVIEW_ROLE else ("idle", "blocked", "dead")
         if state not in stopped or rec.get("parked") or rec.get("closing"):
             return None
         s = v1_sessions.find_by_id(rec.get("short_id"), listing) or v1_sessions.find(rec["session_name"], listing)
         if s is not None and (s.get("state") == "working" or s.get("status") == "busy"):
             return None
-        t = apistop.tail(self.transcripts_dir, rec.get("session_id") or (s or {}).get("sessionId"))
+        try:
+            t = apistop.tail(self.transcripts_dir, rec.get("session_id") or (s or {}).get("sessionId"))
+        except Exception:  # noqa: BLE001 - no API error seen, as for a transcript that cannot be read
+            return None
         return (t, self._since(rec)) if t is not None else None
 
     def _api_act(self, rec: dict, state: str, listing, records: list, entry: dict, by: str, now: datetime) -> bool:
@@ -1221,7 +1232,7 @@ class Workers:
         if replied and not t["errors"]:
             rec.pop("limit_parks", None)
             return False
-        stop = apistop.stop(t, since)
+        stop = apistop.stop(t, since, until=self._until(now))
         if stop is None:
             return False
         # The transcript is outside the data folder: a process the worker left behind can write its last line.
@@ -1236,9 +1247,11 @@ class Workers:
             before = 0
         n = before + 1
         reset = apistop.reset_time(stop["text"], stop["at"])
-        if reset is not None:
-            resume_at = reset + timedelta(minutes=PARK_RULES["resume_after_min"])
-        else:
+        try:
+            resume_at = reset + timedelta(minutes=PARK_RULES["resume_after_min"]) if reset is not None else None
+        except OverflowError:  # a reset at the last date a datetime holds
+            resume_at = None
+        if resume_at is None:
             resume_at = now + apistop.backoff(n)
         if rec.get("blocked_since"):
             self._close_worker_asks(rec["card"], rec["role"], by, kinds=("attach",))  # parked: no prompt to answer

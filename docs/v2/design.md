@@ -3198,8 +3198,9 @@ Calls the author made without asking (check them):
      `system` line with `isApiErrorMessage: true`, or the model `<synthetic>`, or a non-empty string `error`; a
      line that does not parse is skipped. `apistop.stop(tail, since)` reads the last error only, and only when it
      is dated at or after `since` (the run's `started_at` less 2 minutes: a resumed copy repeats the old
-     conversation with the old times). It is `limit` for a 429, `error: rate_limit` or a text that names a limit,
-     and `gateway_refused` for a 400 (status or text) whose text says `safety guard`; anything else is none.
+     conversation with the old times). An error line dated in the future (later than now plus 2 minutes), or a
+     time that cannot be read, is ignored. It is `limit` for a 429, `error: rate_limit` or a text that names a
+     limit, and `gateway_refused` for a 400 (status or text) whose text says `safety guard`; anything else is none.
      `gateway_refused` is never a key failure: key health can test for it with this same function.
   2. When it is read. In `check`'s step 1, after the session id is filled in, for a record that is not parked and
      not closing, whose state is idle, blocked or dead, and whose session the listing does not show working or busy.

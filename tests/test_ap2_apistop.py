@@ -188,6 +188,13 @@ class TailTest(Case):
         self.transcript([limit_line(at="2026-11-12T02:32:42")])
         self.assertIsNotNone(self.tail()["errors"][0]["at"].tzinfo)
 
+    def test_a_naive_time_out_of_the_local_range_is_none(self):
+        # A process the worker left can write any time: one that cannot be put in the local zone is no time.
+        self.assertIsNone(apistop._when("0001-01-01T00:00:00"))
+        apistop._when("9999-12-31T23:59:59")  # None or a time, never a raise
+        self.transcript([limit_line(), reply(at="0001-01-01T00:00:00")])
+        self.assertEqual(self.tail(), {"errors": [], "reply_at": None})
+
 
 class StopTest(Case):
     def stop(self, lines, since=SINCE):
@@ -229,6 +236,12 @@ class StopTest(Case):
         self.assertIsNone(self.stop([limit_line(at=None)], SINCE))  # no time: cannot be told apart from history
         at = datetime(2026, 11, 12, 2, 32, 42, 322000, tzinfo=timezone.utc)
         self.assertEqual(self.stop([limit_line()], at)["kind"], "limit")  # at `since` counts
+
+    def test_an_error_dated_after_until_is_ignored(self):
+        at = datetime(2026, 11, 12, 2, 32, 42, 322000, tzinfo=timezone.utc)
+        self.assertEqual(self.stop([limit_line()]), apistop.stop(self.tail(), SINCE, until=None))  # the default
+        self.assertEqual(apistop.stop(self.tail(), SINCE, until=at)["kind"], "limit")  # at `until` counts
+        self.assertIsNone(apistop.stop(self.tail(), SINCE, until=at - timedelta(seconds=1)))
 
     def test_no_tail_or_no_errors(self):
         self.assertIsNone(apistop.stop(None, SINCE))
@@ -278,6 +291,13 @@ class ResetTimeTest(unittest.TestCase):
                     "resets 13pm (UTC)", "resets 0am (UTC)", "resets 9:61 (UTC)", "resets Foo 3, 9am (UTC)",
                     "resets Feb 30, 9am (UTC)", "resets 9am (../../etc/passwd)", "", None):
             self.assertIsNone(apistop.reset_time(txt, base), txt)
+
+
+    def test_a_reset_past_the_last_date_is_none(self):
+        last = datetime(9999, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
+        self.assertIsNone(apistop.reset_time("resets 1am (UTC)", last))  # the next day is past the last date
+        self.assertIsNone(apistop.reset_time("resets 1am (Pacific/Kiritimati)", last))  # +14: no such local time
+        self.assertIsNone(apistop.reset_time("resets Jan 2, 9am (UTC)", last))  # next year's is past it too
 
 
 class BackoffTest(unittest.TestCase):
