@@ -1154,7 +1154,22 @@ Calls the author made without asking (check them):
     and also a RecursionError, so the raw prune keeps its `nested too deeply` words. A card file, point, or add or
     update input nested deeper than 200 levels is refused the same way, a `TooDeepError` naming its file, before
     anything is written (no restore point): a fixed bound well under what `copy.deepcopy` and the indented writer
-    handle, so write and read agree whatever the caller's stack.
+    handle, so write and read agree whatever the caller's stack. Depth is counted along paths that do not repeat a
+    container. A value from a Python caller may share containers; one met again is walked again only when met deeper,
+    which is exact until the walk meets a cycle (a container already on its path). From the first cycle on, every such
+    path is walked, and a value that needs more than 100,000 items looked at after that point (list items, dict keys
+    and values, of any kind) is refused with the same `nested too deeply` words. A small shallow cycle still passes
+    the bound and is refused by the card checks with their own words.
+  - **[decided by the builder]** Shared values with a cycle. A container's first walk can be cut short by a back edge
+    to a container on the path then; a later route that does not hold that container can go deeper, so once a cycle is
+    seen the "already walked from as deep" shortcut is off and every non-repeating path is walked, under a budget of
+    100,000 items looked at (`CYCLE_WALK_BUDGET`, well under a second). Every item counts, a number included, so a
+    wide container walked many times cannot multiply the work past the budget. Refusing past the budget loses nothing:
+    a value with a cycle can never be written as JSON. Not chosen: refusing every cycle with the depth words (moves
+    cycle handling out of the card checks), dropping the shortcut everywhere (a value shared on every level has 2**40
+    paths), or forgetting only the entries a cycle touched (harder to prove right, still needs a budget). The longest
+    non-repeating path has no fast exact algorithm, so some budget is needed. `add` checks the depth before the card
+    checks, as `update` does, so such a card gets the depth words there too.
   - Proposed opposite action: `Store.propose_opposite(id, action, run, by)` sets the card's `ask` to
     `{"type": "approve", "action": <move_ticket_back|close_pr|force_push_saved_ref|revert_pr>, "run": [argv...],
     "proposed": true, "text"?: <optional note>}` and runs nothing. It is refused when the card already has an open ask (that ask is never

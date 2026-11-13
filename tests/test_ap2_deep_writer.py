@@ -55,6 +55,17 @@ def deeper(frames: int, call):
     return call() if frames <= 0 else deeper(frames - 1, call)
 
 
+def cut_short(n: int) -> list:
+    """`[A, B]` with A = [S, L], B = [S], S = [X], X = [A] (a cycle) and L `n` nested lists. The walk meets S first
+    from A, where X's back edge to A stops it; from B, A is off the path, so S's deepest simple path runs on through
+    A into L: top, B, S, X, A, L, 5 + n lists deep (the top is depth 1). Through A alone it is only 2 + n."""
+    s, x = [], []
+    a, b = [s, json.loads(lists(n))], [s]
+    s.append(x)
+    x.append(a)
+    return [a, b]
+
+
 # The card and the `changes` holding `x` are depth 1, so `x` holds one level fewer than the bound.
 AT_BOUND = lists(MAX_DEPTH - 1)
 PAST_BOUND = lists(MAX_DEPTH)
@@ -194,6 +205,21 @@ class BoundTest(WriterCase):
         self.assertEqual(back["x"], json.loads(AT_BOUND))
         self.assertEqual(self.store.get(card_id), back)
 
+    def test_a_scalar_or_a_back_edge_in_the_deepest_list_at_the_bound_passes(self):
+        # A scalar in the deepest list is not one more level.
+        self.assertIsNone(check_writable(json.loads("[" * MAX_DEPTH + "1" + "]" * MAX_DEPTH)))
+        # A back edge from the deepest list is a cycle, left to the card checks, not a level past the bound.
+        top = cur = []
+        for _ in range(MAX_DEPTH - 1):
+            n = []
+            cur.append(n)
+            cur = n
+        cur.append(top)
+        self.assertIsNone(check_writable(top))
+        x = json.loads("[" * (MAX_DEPTH - 1) + '"a"' + "]" * (MAX_DEPTH - 1))  # the card is depth 1
+        new = self.store.add(card(x=x), by="w")
+        self.assertEqual(self.store.get(new["id"])["x"], x)
+
     def test_one_level_past_the_bound_is_refused_and_writes_nothing(self):
         card_id, point, path = self.card_with_point()
         with self.subTest("add"):
@@ -295,6 +321,81 @@ class CycleTest(WriterCase):
         self.assertNotIsInstance(cm.exception, RecursionError)
         self.assertEqual(str(cm.exception), "text is not valid JSON: NaN or Infinity")  # the check's words, as before
         self.assertEqual(self.files(), before)
+
+    def test_a_shared_value_cut_short_by_a_cycle_is_counted_along_its_other_route(self):
+        # Via A, S's walk stops at X's back edge to A; via B, A is off the path, so S goes on through A into L.
+        for name, value in {"top": cut_short(MAX_DEPTH - 4), "inside a list": [cut_short(MAX_DEPTH - 5)]}.items():
+            with self.subTest(name):
+                with self.assertRaisesRegex(cards.TooDeepError, r"\Avalue is nested too deeply to copy or write\Z"):
+                    check_writable(value, "value is")
+        self.assert_refused(lambda: self.store.add(card(x=cut_short(MAX_DEPTH - 5)), by="w"),
+                            "card is nested too deeply to copy or write")
+        self.assertEqual(self.files(), {})
+
+    def test_the_same_shape_at_the_bound_passes(self):
+        self.assertIsNone(check_writable(cut_short(MAX_DEPTH - 5)))  # deepest simple path: 200
+        self.assertIsNone(check_writable([cut_short(MAX_DEPTH - 6)]))
+
+    def test_a_cycle_with_more_paths_than_the_budget_is_refused_fast(self):
+        top = bottom = [1]
+        for _ in range(40):  # each level holds the one below twice: 2**40 paths, 41 lists
+            top = [top, top]
+        bottom.append(top)  # one back edge from the bottom to the top
+        start = time.monotonic()
+        with self.assertRaisesRegex(cards.TooDeepError, r"\Acard is nested too deeply to copy or write\Z"):
+            check_writable(top)
+        self.assertLess(time.monotonic() - start, 2)
+
+    def test_an_update_with_a_cycle_past_the_budget_gets_the_depth_words(self):
+        # The budget refusal names the caller's subject and comes before the card checks, as for add.
+        new = self.store.add(card(), by="w")
+        top = bottom = [1]
+        for _ in range(40):
+            top = [top, top]
+        bottom.append(top)
+        self.assert_refused(lambda: self.store.update(new["id"], {"x": top}, by="w"),
+                            "changes are nested too deeply to copy or write")
+
+    def test_a_cycle_through_wide_containers_is_refused_fast(self):
+        filler = [0] * 1000
+        top = bottom = list(filler)
+        for _ in range(20):  # each level holds the one below twice and 1000 numbers: the budget caps items, not pushes
+            top = [top, top] + filler
+        bottom.append(top)  # one back edge from the bottom to the top
+        start = time.monotonic()
+        with self.assertRaisesRegex(cards.TooDeepError, r"\Acard is nested too deeply to copy or write\Z"):
+            check_writable(top)
+        self.assertLess(time.monotonic() - start, 2)
+
+    def test_the_budget_counts_only_items_looked_at_after_the_first_cycle(self):
+        d = {}
+        d["x"] = d
+        loop = []
+        loop.append(loop)
+        before = [1]
+        for _ in range(40):
+            before = [before, before]  # walked with the memo: the cycle comes after it
+        with mock.patch.object(store, "CYCLE_WALK_BUDGET", 0):
+            self.assertIsNone(check_writable({"x": d}))
+            self.assertIsNone(check_writable(loop))
+            self.assertIsNone(check_writable([before, loop]))
+            with self.assertRaises(cards.TooDeepError):
+                check_writable(cut_short(2))  # after the cycle at X, L and the route via B are walked
+        # items looked at after the cycle at X: in A, L and L's []; then B, and via B: S, X, A, S (on the path), L, []
+        with mock.patch.object(store, "CYCLE_WALK_BUDGET", 9):
+            self.assertIsNone(check_writable(cut_short(2)))
+        with mock.patch.object(store, "CYCLE_WALK_BUDGET", 8):
+            with self.assertRaisesRegex(cards.TooDeepError, r"\Acard is nested too deeply to copy or write\Z"):
+                check_writable(cut_short(2))
+        # after the cycle at d, both the key "b" and the value 1 count: two items
+        with mock.patch.object(store, "CYCLE_WALK_BUDGET", 2):
+            self.assertIsNone(check_writable({"a": d, "b": 1}))
+        with mock.patch.object(store, "CYCLE_WALK_BUDGET", 1):
+            with self.assertRaises(cards.TooDeepError):
+                check_writable({"a": d, "b": 1})
+
+    def test_the_budget_is_a_fixed_constant(self):
+        self.assertEqual(store.CYCLE_WALK_BUDGET, 100_000)
 
 
 class SharedTest(WriterCase):
