@@ -16,6 +16,7 @@ from unittest import mock
 from tests.helpers import ROOT
 from tests.test_ap2_cli import temp_inside_the_accounts_claude, use_temp_home
 from tests.test_ap2_phone import FIELDS, tree
+from tests.test_ap2_profileview import usage_json
 
 from assistant import cards, cli, datadir
 from assistant.config import Config
@@ -58,6 +59,25 @@ class Ap2PhoneCommandTest(unittest.TestCase):
         self.assertEqual(out["mode"], "shadow")
         self.assertIn("Café order".encode("utf-8"), r.stdout)  # UTF-8, not \\u escapes
         self.assertEqual(r.stdout.decode("utf-8"), json.dumps(out, sort_keys=True, ensure_ascii=False) + "\n")
+
+    def test_the_usage_windows_come_from_homes_claude_json_by_default(self):
+        # No usage file is passed: `phone.build` reads `~/.claude.json`, here the temp HOME's (never the real one).
+        from datetime import datetime, timezone
+        usage_json(self.home / ".claude.json", now=datetime.now(timezone.utc), percent=63, kind="five_hour",
+                   used=1234, limit=5000)
+        r = self.run_ap2("phone", "build")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        usage = json.loads(r.stdout)["usage"]
+        self.assertEqual(usage["mode"], "subscription")
+        self.assertEqual([(w["kind"], w["percent"], w["resets_at"]) for w in usage["windows"]],
+                         [("five_hour", 63, "2026-11-11T18:00:00+00:00"),
+                          ("seven_day", 7, "2026-11-15T00:00:00+00:00")])
+        self.assertEqual((usage["credits_used_usd"], usage["credits_limit_usd"]), (12.34, 50.0))
+        # With no such file the windows are null: the values above came from that file.
+        (self.home / ".claude.json").unlink()
+        r = self.run_ap2("phone", "build")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNone(json.loads(r.stdout)["usage"]["windows"])
 
     def test_sets_up_the_data_folder_like_serve(self):
         r = self.run_ap2("phone", "build")
