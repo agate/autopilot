@@ -48,7 +48,8 @@ def job_keys(block):
 
 
 def steps(block):
-    """Each step of the job as its own list of lines, split on the `- ` that opens it.
+    """Each step of the job as its own list of lines, split on the `-` that opens it (`- ` or a bare `-` with the
+    step's keys on the lines below).
 
     A readable job-level key at 4 spaces after the steps ends the last step. Any other line at 6 spaces or less
     (a comment, the rest of a quoted string) keeps it open."""
@@ -56,7 +57,7 @@ def steps(block):
     in_step = False
     for line in block:
         text = line.strip()
-        if re.match(r"^      - ", line):
+        if re.match(r"^      -(?:[ \t]|$)", line):
             out.append([line])
             in_step = True
         elif not text or indent(line) > 6:
@@ -88,7 +89,8 @@ def unreadable_lines(lines, pad):
     """The lines at exactly `pad` spaces that `KEY` cannot read, blank and comment lines skipped.
 
     At a mapping's key indent such a line is still a key to GitHub: an anchor (`&a if: false`), a tag
-    (`!!str if: false`), an explicit key (`? if` with `: false` below it), a merge key (`<<: *a`) or a `- ` item.
+    (`!!str if: false`), an explicit key (`? if` with `: false` below it) or a merge key (`<<: *a`).
+    A `- ` item there (a sequence, or a YAML error) cannot be read either, so it fails too.
     Lines nested deeper (under `with:`, `env:`, inside a `run: |` block) are not the mapping's own keys."""
     out = []
     for line in lines:
@@ -518,11 +520,22 @@ class SwitchCheckTest(unittest.TestCase):
                 (["        name: 'Set up", "    x: y'", "        continue-on-error: true"], []),
                 (["        env: {A: 1,", "      B: 2}", "        continue-on-error: true"],
                  [f"the `{SETUP_PYTHON}` step sets `continue-on-error: true`"]),
-                (["        env: [1,", "    x: 2]", "        continue-on-error: true"], [])):
+                (["        env: [1,", "    x: 2]", "        continue-on-error: true"], []),
+                (["        env: {A: {B: 1},", "    x: 2}", "        continue-on-error: true"], [])):
             with self.subTest(lines=lines):
                 copy = insert_after(self.text, "python-version: ${{ matrix.python-version }}", "\n".join(lines))
                 self.assertEqual(step_switch_problems(copy, SETUP_PYTHON),
                                  step_problems + [open_step_value(lines[0].strip(), SETUP_PYTHON)])
+                self.assertEqual(job_switch_problems(copy), [open_job_value(lines[0].strip())])
+
+    def test_a_string_with_an_escaped_quote_running_on_is_a_problem(self):
+        # `\"` inside double quotes and `''` inside single quotes do not close the string.
+        for lines in (['        name: "say \\"hi', '    x: y"', "        continue-on-error: true"],
+                      ["        name: 'Don''t", "    x: y'", "        continue-on-error: true"]):
+            with self.subTest(lines=lines):
+                copy = insert_after(self.text, "python-version: ${{ matrix.python-version }}", "\n".join(lines))
+                self.assertEqual(step_switch_problems(copy, SETUP_PYTHON),
+                                 [open_step_value(lines[0].strip(), SETUP_PYTHON)])
                 self.assertEqual(job_switch_problems(copy), [open_job_value(lines[0].strip())])
 
     def test_an_anchored_or_tagged_string_running_on_is_a_problem(self):
@@ -537,7 +550,7 @@ class SwitchCheckTest(unittest.TestCase):
     def test_a_value_that_closes_on_its_line_is_not_a_problem(self):
         for line in ("        name: 'it''s'", '        name: "a \\" b"', '        name: "a # b"',
                      '        with: {a: "]", b: 1}', "        name: [a, '[', {b: c}] # [", '          "a b": "c"',
-                     "        run: echo \"it's", '        name: "a" # "'):
+                     "        run: echo \"it's", '        name: "a" # "', "        working-directory: 'C:\\'"):
             with self.subTest(line=line):
                 copy = insert_after(self.text, "python-version: ${{ matrix.python-version }}", line)
                 self.assertEqual(job_switch_problems(copy), [])
@@ -563,17 +576,31 @@ class SwitchCheckTest(unittest.TestCase):
     def test_a_string_opened_right_after_a_run_block_is_a_problem(self):
         for header in ("|", ">-", "|2 # keep", "&r |+"):
             with self.subTest(header=header):
+                # The body (a blank line too) is skipped: its open quote and brackets are not read as a value.
+                block = (f"        run: {header}\n"
+                         "          echo a\n"
+                         "\n"
+                         "          \"it's [ {\n"
+                         f"          {RUN_COMMAND}")
+                copy = self.text.replace(f"        run: {RUN_COMMAND}", block)
+                self.assertNotEqual(copy, self.text)
+                self.assertEqual(step_switch_problems(copy, RUN_COMMAND), [])
+                self.assertEqual(job_switch_problems(copy), [])
                 copy = self.text.replace(f"        run: {RUN_COMMAND}",
-                                         f"        run: {header}\n"
-                                         "          echo \"it's\n"
-                                         f"          {RUN_COMMAND}\n"
+                                         block + "\n"
                                          '        working-directory: "./\n'
                                          '    tests: here"\n'
                                          "        continue-on-error: true")
-                self.assertNotEqual(copy, self.text)
                 self.assertEqual(step_switch_problems(copy, RUN_COMMAND),
                                  [open_step_value('working-directory: "./', RUN_COMMAND)])
                 self.assertEqual(job_switch_problems(copy), [open_job_value('working-directory: "./')])
+
+    def test_a_string_opened_right_after_a_dash_run_block_is_a_problem(self):
+        # On a `- run: |` line the body must be deeper than the key's column, not the dash's.
+        copy = (self.text.rstrip("\n")
+                + '\n      - run: |\n          make\n        working-directory: "./\n    tests: here"\n'
+                  "        continue-on-error: true\n")
+        self.assertEqual(job_switch_problems(copy), [open_job_value('working-directory: "./')])
 
     def test_a_job_whose_id_starts_with_an_underscore_ends_the_unittest_job(self):
         copy = (self.text.rstrip("\n")
@@ -604,6 +631,20 @@ class SwitchCheckTest(unittest.TestCase):
         copy = insert_after(copy, "python-version: ${{ matrix.python-version }}", "        &a if: false")
         self.assertEqual(step_switch_problems(copy, SETUP_PYTHON),
                          [f"cannot read the step-level line '&a if: false' of the `{SETUP_PYTHON}` step"])
+
+    def test_a_step_opened_by_a_bare_dash_is_a_problem(self):
+        # A bare `-` opens a step whose keys sit on the lines below; the check cannot read them, so it must fail.
+        for marker, old, new in (
+                (RUN_COMMAND, rf"(?ms)^      - name: Run tests\n.*?^        run: {re.escape(RUN_COMMAND)}$",
+                 "      -\n         name: Run tests\n         if: matrix.python-version == '3.12'\n"
+                 f'         env:\n           USER: ""\n         run: {RUN_COMMAND}'),
+                (SETUP_PYTHON, r"(?m)^      - uses: actions/setup-python@v5\n        with:\n          python-version",
+                 "      -\n         uses: actions/setup-python@v5\n         if: false\n         with:\n"
+                 "           python-version")):
+            with self.subTest(marker=marker):
+                copy = re.sub(old, lambda _: new, self.text)
+                self.assertNotEqual(copy, self.text)
+                self.assertEqual(step_switch_problems(copy, marker), [f"cannot read the keys of the `{marker}` step"])
 
     def test_the_step_pad_follows_the_dash_line(self):
         copy = self.text.replace("      - uses: actions/setup-python@v5\n        with:\n          python-version",
