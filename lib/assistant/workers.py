@@ -1408,7 +1408,7 @@ class Workers:
     def answer(self, card_id: str, text: str, by: str = BY) -> dict:
         """Resume the worker that asked the card's question, with the answer in the prompt, and close the ask.
         Live mode only."""
-        if not (isinstance(text, str) and text.strip()):
+        if cards.blank(text):
             raise WorkerError("the answer must be a non-empty text")
         config.require_live(self.cfg, f"resume the worker on card {card_id} with the answer")
         card = self._card(card_id)

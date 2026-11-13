@@ -463,7 +463,7 @@ def check_findings(buckets, langs) -> list:
                     seen.add(fid)
             if "severity" in f and f["severity"] not in SEVERITIES:
                 out.append(f"{at}.severity: must be one of {'|'.join(SEVERITIES)}, not {str(f['severity'])[:40]!r}")
-            if "where" in f and not (isinstance(f["where"], str) and f["where"].strip()):
+            if "where" in f and cards.blank(f["where"]):
                 out.append(f"{at}.where: must be a non-empty string (path:line at the head)")
             for k in TEXT_FIELDS + BUCKET_FIELDS[b]:
                 if k in f:
@@ -731,9 +731,9 @@ def plain_for(record, card, langs) -> dict:
     n = sum(len(found.get(b) or []) for b in ("confirmed", "questions") if isinstance(found.get(b), list))
     m = KEY.match(card.get("key")) if isinstance(card.get("key"), str) else None
     number = m.group(2) if m else record.get("id")  # a Slack ask's id is its message ts, not the PR number
-    if not (isinstance(number, (str, int)) and str(number).strip()):
+    if not isinstance(number, (str, int)) or cards.blank(str(number)):
         number = "?"
-    author = record.get("author") if isinstance(record.get("author"), str) and record["author"].strip() else None
+    author = record.get("author") if not cards.blank(record.get("author")) else None
     own = card.get("feed") == OWN_FEED
     out = {line: {} for line in cards.PLAIN_LINES}
     for lang in langs:

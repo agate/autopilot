@@ -1199,5 +1199,44 @@ process.stdin.on('end', () => { console.log(JSON.stringify(JSON.parse(input).map
         self.assertIn(f"const SEARCH_MAX_WORDS = {server.SEARCH_MAX_WORDS};", text)
 
 
+# -- invisible text: a search q and a question text follow cards.blank ---------------------------------------------
+
+class InvisibleTextTest(ServerCase):
+    def setUp(self):
+        super().setUp()
+        for i, lane in enumerate(("needs", "running", "done")):
+            self.add(title=f"card {i}", lane=lane, plain=plain("pelican"))
+    def test_an_invisible_q_lists_what_no_q_lists(self):
+        everything = self.ok("/api/cards")
+        for q in ("%EF%BB%BF", "%EF%BB%BF%20%1C"):
+            with self.subTest(q=q), mock.patch("assistant.store.Store.search",
+                                               side_effect=AssertionError("the search ran")):
+                self.assertEqual(self.ok(f"/api/cards?q={q}"), everything)
+
+    def test_a_q_with_words_next_to_an_invisible_character_is_searched_as_it_is(self):
+        for q, text in (("%EF%BB%BFT1", "\ufeffT1"), ("a%EF%BB%BF", "a\ufeff")):
+            with self.subTest(q=q), mock.patch("assistant.store.Store.search", autospec=True,
+                                               return_value=[]) as search:
+                self.assertEqual(self.ok(f"/api/cards?q={q}")["total"], 0)
+                self.assertEqual(search.call_args.args[1:], (text,))
+
+    def test_a_question_of_only_invisible_characters_is_400_text_is_blank(self):
+        card = self.add()
+        for text in ("\ufeff", "\ufeff \x1c"):
+            with self.subTest(text=text):
+                before = tree(self.data)
+                status, _, reply = self.ask(card["id"], text)
+                self.assertEqual((status, reply), (400, {"error": "text is blank"}))
+                self.assertEqual(tree(self.data), before)
+
+    def test_a_question_with_words_next_to_an_invisible_character_is_saved_as_it_is(self):
+        card = self.add()
+        for text in ("\ufeffT1", "a\ufeff"):
+            with self.subTest(text=text):
+                status, _, reply = self.ask(card["id"], text)
+                self.assertEqual(status, 201, reply)
+                self.assertEqual(reply["question"]["text"], text)
+
+
 if __name__ == "__main__":
     unittest.main()

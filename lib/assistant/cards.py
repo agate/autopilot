@@ -105,7 +105,7 @@ def _enum(card: dict, key: str, allowed: tuple) -> None:
 
 
 def _text(card: dict, key: str) -> None:
-    if not (isinstance(card[key], str) and card[key].strip()):
+    if blank(card[key]):
         raise CardError(_not(key, "a non-empty text", card[key]))
 
 

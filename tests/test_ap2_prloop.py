@@ -1034,5 +1034,40 @@ class PurityTest(unittest.TestCase):
         self.assertNotIn("socket", text)
 
 
+# -- invisible text: a one-line field follows cards.blank -----------------------------------------------------------
+
+class InvisibleTextTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp(prefix="ap2-prloop-"))
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def write(self, rec) -> Path:
+        path = self.dir / "prloop.json"
+        path.write_bytes(json.dumps(rec).encode())
+        return path
+
+    def test_a_one_line_field_of_only_invisible_characters_is_refused(self):
+        for value in ("\ufeff", "\ufeff \x1c"):
+            for name, edit, field in (
+                    ("where", lambda r, v: r["rounds"][0]["findings"][0].update(where=v),
+                     r": rounds\[0\]\.findings\[0\]\.where: must be one line of text"),
+                    ("stop", lambda r, v: r["rounds"][-1].update(stop=v),
+                     r": rounds\[2\]\.stop: must be one line of text")):
+                with self.subTest(field=name, value=value):
+                    rec = at_limit()
+                    edit(rec, value)
+                    with self.assertRaises(PrLoopError) as cm:
+                        prloop.read(self.write(rec))
+                    self.assertRegex(str(cm.exception), field)
+
+    def test_a_one_line_field_with_words_next_to_an_invisible_character_is_kept(self):
+        for value in ("\ufeffT1", "a\ufeff"):
+            with self.subTest(value=value):
+                rec = at_limit()
+                rec["rounds"][0]["findings"][0]["where"] = value
+                rec["rounds"][-1]["stop"] = value
+                self.assertEqual(prloop.read(self.write(rec)), rec)
+
+
 if __name__ == "__main__":
     unittest.main()

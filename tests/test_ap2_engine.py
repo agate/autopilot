@@ -1988,5 +1988,82 @@ class ShadowTest(EngineCase):
             self.engine().apply_writes("w", "on_close")
 
 
+# -- invisible text: author, place, pr and a link's setting follow cards.blank -------------------------------------
+
+INVISIBLE = ("\ufeff", "\ufeff \x1c")
+WORDS_NEXT_TO_INVISIBLE = ("\ufeffT1", "a\ufeff")
+
+
+class InvisibleTextTest(EngineCase):
+    RAW = "Message_ts: 1730000000.123456 Channel: C0123ABCD Text: PTAL\n"
+    BASE = {"id": "1730000000.123456", "at": "1730000000.123456", "text": "PTAL", "place_id": "C0123ABCD"}
+
+    def setUp(self):
+        super().setUp()
+        self.user_source("slack-mentions", "extends: slack-mentions\nsettings: { me: U0EXAMPLE1 }\n")
+
+    def check(self, *records):
+        src = Engine(self.data, cfg=self.cfg, plugin_dir=sources.PLUGIN_DIR, clock=self.clock).source("slack-mentions")
+        return Engine.check_records(src, list(records), self.RAW)
+
+    def test_an_author_or_place_of_only_invisible_characters_gives_the_phrase_without_it(self):
+        for value in INVISIBLE:
+            with self.subTest(value=value):
+                self.assertEqual(engine.hidden_text("en", {"author": value, "place": "#team"}, "messages"),
+                                 "Someone wrote a message in #team")
+                self.assertEqual(engine.hidden_text("en", {"author": "Ana", "place": value}, "messages"),
+                                 "Ana wrote a message")
+                self.assertEqual(engine.hidden_text("en", {"author": value, "place": value}, "work"),
+                                 "Someone wrote an item")
+
+    def test_an_author_or_place_with_words_next_to_an_invisible_character_is_kept(self):
+        for value in WORDS_NEXT_TO_INVISIBLE:
+            with self.subTest(value=value):
+                self.assertEqual(engine.hidden_text("en", {"author": value, "place": value}, "messages"),
+                                 f"{value} wrote a message in {value}")
+
+    def test_a_pr_of_only_invisible_characters_is_left_out(self):
+        for value in INVISIBLE:
+            with self.subTest(value=value):
+                entries, dropped = self.check(dict(self.BASE, category="question", pr=value))
+                self.assertEqual(dropped, [])
+                self.assertNotIn("pr", entries[0]["record"])
+                entries, dropped = self.check(dict(self.BASE, category="review_request", pr=value))
+                self.assertEqual((entries, dropped), ([], [{"item": 0, "reason": "key: {pr} missing"}]))
+
+    def test_a_pr_with_words_next_to_an_invisible_character_is_still_checked(self):
+        for value in ("\ufeffexample/widgets#42", "example/widgets#42\ufeff"):
+            with self.subTest(value=value):
+                entries, dropped = self.check(dict(self.BASE, category="question", pr=value))
+                self.assertEqual(dropped, [{"item": 0, "reason": f"form.pr {value!r} is not <owner>/<repo>#<number>"}])
+
+    def link_source(self, site: str):
+        self.user_source("jl", f"""\
+            source: jl
+            brings: messages
+            read: {{ via: command, run: "echo []" }}
+            fill: paths
+            form: {{ id: .id, at: .at, text: .text }}
+            link: "https://{{site}}/i/{{id}}"
+            key: "{{id}}"
+            sort: {{ all: alert }}
+            settings: {{ site: "{site}" }}
+            """)
+        return self.engine().source("jl")
+
+    def test_a_link_setting_of_only_invisible_characters_is_empty(self):
+        for value in ("\\ufeff", "\\ufeff \\x1c"):
+            with self.subTest(value=value):
+                src = self.link_source(value)
+                with self.assertRaises(ValueError) as cm:
+                    self.engine().link_and_key(src, {"id": "7", "at": "t", "text": "x"})
+                self.assertEqual(str(cm.exception), "link: {site} is empty")
+
+    def test_a_link_setting_with_words_next_to_an_invisible_character_is_written_as_it_is(self):
+        src = self.link_source("example.com\\ufeff")
+        self.assertEqual(self.engine().link_and_key(src, {"id": "7", "at": "t", "text": "x"}),
+                         ("https://example.com\ufeff/i/7", "7"))
+
+
 if __name__ == "__main__":
     unittest.main()

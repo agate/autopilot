@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from assistant import form, yamlish
+from assistant import cards, form, yamlish
 from assistant.config import ConfigError
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent.parent / "sources"
@@ -246,7 +246,7 @@ def merge(base: dict, over: dict) -> dict:
 
 
 def _text(v) -> bool:
-    return isinstance(v, str) and bool(v.strip())
+    return not cards.blank(v)
 
 
 def validate(src: Source, lines: Optional[dict] = None) -> Source:
@@ -474,7 +474,7 @@ def unset_settings(src: Source) -> None:
         named += [n for kind, n in src.link[1] if kind == "field"]
     named += _pattern_names(read_args(src))
     for name in dict.fromkeys(named):
-        if name in st and not st[name].strip():
+        if name in st and cards.blank(st[name]):
             where = (f"<data>/sources/{src.name}.yaml (extends: {src.name})" if src.origin == "built-in"
                      else str(src.file))
             raise SourceError(f"{src.name}: settings.{name} is not set; add it in {where}")

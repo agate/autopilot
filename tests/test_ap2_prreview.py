@@ -1921,5 +1921,37 @@ class NothingPostedTest(unittest.TestCase):
         self.assertTrue(issubclass(prreview.ReviewError, prreview.ConfigError))
 
 
+# -- invisible text: a finding's where, the PR number and the author follow cards.blank ----------------------------
+
+class InvisibleTextTest(unittest.TestCase):
+    def findings(self, where):
+        found = copy.deepcopy(fixture("report-review.json")["findings"])
+        found["confirmed"][0]["where"] = where
+        return found
+
+    def test_a_where_of_only_invisible_characters_is_refused(self):
+        for value in ("\ufeff", "\ufeff \x1c"):
+            with self.subTest(value=value):
+                self.assertIn("findings.confirmed[0].where: must be a non-empty string (path:line at the head)",
+                              prreview.check_findings(self.findings(value), LANGS))
+
+    def test_a_where_with_words_next_to_an_invisible_character_passes(self):
+        for value in ("\ufeffT1", "a\ufeff"):
+            with self.subTest(value=value):
+                self.assertEqual(prreview.check_findings(self.findings(value), LANGS), [])
+
+    def test_a_pr_number_or_author_of_only_invisible_characters_is_left_out(self):
+        for value in ("\ufeff", "\ufeff \x1c"):
+            with self.subTest(value=value):
+                what = prreview.plain_for({"id": value, "author": value, "text": TITLE}, {}, ("en",))["what"]["en"]
+                self.assertEqual(what, f"Someone asked you to review PR #?: {TITLE}")
+
+    def test_a_pr_number_or_author_with_words_next_to_an_invisible_character_is_kept(self):
+        for value in ("\ufeffT1", "a\ufeff"):
+            with self.subTest(value=value):
+                what = prreview.plain_for({"id": value, "author": value, "text": TITLE}, {}, ("en",))["what"]["en"]
+                self.assertEqual(what, f"{value} asked you to review PR #{value}: {TITLE}")
+
+
 if __name__ == "__main__":
     unittest.main()

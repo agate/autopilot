@@ -156,9 +156,8 @@ def fill_brief(brief: str, card: dict, *, primary: str = Config.primary_language
     """Fill each `{field}` (or `{a.b}`, a field inside a field) from `card`; `{{` and `}}` are literal braces.
     `{title}` is the title as `cards.title_for` picks it for the `primary` language (a text title as it is; an object
     title's primary slot when it is non-blank text, else its first non-blank text slot in sorted key order). A field
-    the card lacks, or holds as null or blank text, is an error naming it: never an empty fill. `{title}` is blank by
-    `cards.blank` (so a title of only U+FEFF is missing too); every other field by `str.strip()`. A value must be text
-    or a number."""
+    the card lacks, or holds as null or blank text, is an error naming it: never an empty fill. Every field is blank by
+    `cards.blank`, `{title}` too (so a value of only U+FEFF is missing). A value must be text or a number."""
     try:
         names = placeholders(brief)
     except ValueError as e:
@@ -170,7 +169,7 @@ def fill_brief(brief: str, card: dict, *, primary: str = Config.primary_language
             empty = v is None or (isinstance(v, str) and blank(v))
         else:
             v = _lookup(card, name)
-            empty = v is None or (isinstance(v, str) and not v.strip())
+            empty = v is None or (isinstance(v, str) and blank(v))
         if empty:
             missing.append(name)
         elif isinstance(v, bool) or not isinstance(v, (str, int, float)):
@@ -220,7 +219,7 @@ class _Checker:
                 self.widen(v, path + (i,))
 
     def text(self, value, path: tuple, what: str) -> None:
-        if not isinstance(value, str) or not value.strip():
+        if blank(value):
             self.fail(path, f"{what} must be non-empty text, not {value!r}")
 
 

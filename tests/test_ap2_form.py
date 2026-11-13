@@ -238,5 +238,52 @@ class LinkAndKeyTest(FillCase):
         self.assertEqual(result["items"], [])
 
 
+# -- invisible text: required fields, thread_id and key parts follow cards.blank -----------------------------------
+
+INVISIBLE = ("\ufeff", "\ufeff \x1c")
+WORDS_NEXT_TO_INVISIBLE = ("\ufeffT1", "a\ufeff")
+PATHS = {"id": parse_path(".id"), "at": parse_path(".at"), "text": parse_path(".text")}
+
+
+class InvisibleTextTest(unittest.TestCase):
+    def test_a_required_field_of_only_invisible_characters_drops_the_item(self):
+        for value in INVISIBLE:
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError) as cm:
+                    form.fill_item(PATHS, (), {"id": 1, "at": "t", "text": value})
+                self.assertEqual(str(cm.exception), "form.text is empty")
+
+    def test_a_checked_record_with_a_required_field_of_only_invisible_characters_is_refused(self):
+        for value in INVISIBLE:
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError) as cm:
+                    form.check_record({"id": "1", "at": "t", "text": value})
+                self.assertEqual(str(cm.exception), "form.text is empty")
+
+    def test_a_thread_id_of_only_invisible_characters_falls_back_to_the_id(self):
+        for value in INVISIBLE:
+            with self.subTest(value=value):
+                values = form.derived({"id": "1.2", "thread_id": value}, "s")
+                self.assertEqual(values["thread_or_id"], "1.2")
+
+    def test_a_key_part_of_only_invisible_characters_is_refused(self):
+        for value in INVISIBLE:
+            for url in (False, True):
+                with self.subTest(value=value, url=url):
+                    with self.assertRaises(ValueError) as cm:
+                        form.fill_pattern(form.parse_pattern("{place_id}:{thread_id}"),
+                                          {"place_id": "C1", "thread_id": value}, url=url)
+                    self.assertEqual(str(cm.exception), "{thread_id} is empty")
+
+    def test_words_next_to_an_invisible_character_are_kept_as_they_are(self):
+        for value in WORDS_NEXT_TO_INVISIBLE:
+            with self.subTest(value=value):
+                self.assertEqual(form.fill_item(PATHS, (), {"id": 1, "at": "t", "text": value})["text"], value)
+                self.assertEqual(form.check_record({"id": "1", "at": "t", "text": value})["text"], value)
+                self.assertEqual(form.derived({"id": "1.2", "thread_id": value}, "s")["thread_or_id"], value)
+                self.assertEqual(form.fill_pattern(form.parse_pattern("{a}:{b}"), {"a": "C1", "b": value}),
+                                 f"C1:{value}")
+
+
 if __name__ == "__main__":
     unittest.main()

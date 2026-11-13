@@ -1163,5 +1163,50 @@ class FatalLineTest(GateCase):
         self.assertFalse((self.data / "gate.log").exists())
 
 
+# -- invisible text: a routine title, a tz and a watch name follow cards.blank -------------------------------------
+
+INVISIBLE = ("\ufeff", "\ufeff \x1c")
+
+
+class InvisibleTextTest(GateCase):
+    T = utc(2026, 11, 10, 14, 0)
+
+    def test_a_title_of_only_invisible_characters_is_refused(self):
+        for title in INVISIBLE:
+            with self.subTest(title=title):
+                p = self.put(title=title)
+                with self.assertRaises(routines.RoutineError) as cm:
+                    routines.load(p)
+                self.assertIn(f"{p}: title: title must be a non-empty text", str(cm.exception))
+
+    def test_a_tz_of_only_invisible_characters_gets_the_tz_words(self):
+        for tz in INVISIBLE:
+            with self.subTest(tz=tz):
+                p = self.put(tz=tz)
+                with self.assertRaises(routines.RoutineError) as cm:
+                    routines.load(p)
+                self.assertIn(f"{p}: tz: tz must be an IANA time zone name", str(cm.exception))
+
+    def test_a_title_with_words_next_to_an_invisible_character_is_kept(self):
+        for title in ("\ufeffT1", "a\ufeff"):
+            with self.subTest(title=title):
+                self.assertEqual(routines.load(self.put(title=title)).title, title)
+
+    def test_a_watch_named_only_invisible_characters_is_refused(self):
+        for name in INVISIBLE:
+            with self.subTest(name=name):
+                (self.data / "watches.json").unlink(missing_ok=True)
+                out = self.gate(self.T, watches=[{"name": name, "every": "5m"}, {"name": "ok", "every": "5m"}])
+                self.assertEqual(out["watches_due"], ["ok"])
+                self.assertEqual(len(out["errors"]), 1)
+                self.assertIn("a watch needs a name", out["errors"][0]["error"])
+
+    def test_a_watch_name_with_words_next_to_an_invisible_character_is_kept(self):
+        for name in ("\ufeffT1", "a\ufeff"):
+            with self.subTest(name=name):
+                (self.data / "watches.json").unlink(missing_ok=True)
+                self.assertEqual(self.gate(self.T, watches=[{"name": name, "every": "5m"}])["watches_due"], [name])
+
+
 if __name__ == "__main__":
     unittest.main()

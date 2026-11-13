@@ -71,7 +71,7 @@ Rules:
 
 
 def _text(v) -> bool:
-    return isinstance(v, str) and bool(v.strip())
+    return not cards.blank(v)
 
 
 # A server or tool name as it appears in Claude Code's tool names (mcp__<server>__<tool>).

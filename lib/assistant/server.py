@@ -552,7 +552,7 @@ class Handler(BaseHTTPRequestHandler):
         if q is not None and (len(q) > SEARCH_MAX_CHARS or len(q.split()) > SEARCH_MAX_WORDS):
             raise HTTPError(400, f"q must be at most {SEARCH_MAX_CHARS} characters and {SEARCH_MAX_WORDS} words")
         cfg = self.cfg()
-        if q is not None and q.strip():
+        if q is not None and not cards.blank(q):
             found = [c for c in self._store_call(Store(self.server.data, cfg=cfg, clock=self.server.clock).search, q)
                      if (lane is None or c.get("lane") == lane) and (kind is None or c.get("kind") == kind)
                      and (parent is None or c.get("parent") == parent)]
@@ -609,7 +609,7 @@ class Handler(BaseHTTPRequestHandler):
         text = body.get("text")
         if not isinstance(text, str):
             raise HTTPError(400, "text missing" if text is None else f"text must be text, not {type(text).__name__}")
-        if not text.strip():
+        if cards.blank(text):
             raise HTTPError(400, "text is blank")
         if len(text) > QUESTION_MAX:
             raise HTTPError(400, f"text is longer than {QUESTION_MAX} characters ({len(text)})")

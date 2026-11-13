@@ -3411,5 +3411,35 @@ class ListApiStopTest(ApiStopCase):
         self.assertNotIn("api_stop", rows[b["card"]])
 
 
+# -- invisible text: an answer follows cards.blank ------------------------------------------------------------------
+
+class InvisibleAnswerTest(WorkerCase):
+    def asked(self, w):
+        cid = self.add_card()
+        self.start(w, card_id=cid)
+        self.write_result(cid, "question.json", {"text": "Which one?"})
+        w.check()
+        return cid
+
+    def test_an_answer_of_only_invisible_characters_is_refused(self):
+        w = self.workers()
+        cid = self.asked(w)
+        for text in ("\ufeff", "\ufeff \x1c"):
+            with self.subTest(text=text):
+                before = len(self.bg_calls())
+                with self.assertRaisesRegex(WorkerError, "the answer must be a non-empty text"):
+                    w.answer(cid, text)
+                self.assertEqual(len(self.bg_calls()), before)
+                self.assertEqual(self.get(cid)["sessions"]["implement"]["question"], "Which one?")
+
+    def test_an_answer_with_words_next_to_an_invisible_character_is_passed_on_as_it_is(self):
+        for text in ("\ufeffT1", "a\ufeff"):
+            with self.subTest(text=text):
+                w = self.workers()
+                cid = self.asked(w)
+                w.answer(cid, text)
+                self.assertIn(f"The answer: {text}", self.bg_calls()[-1]["argv"][-1])
+
+
 if __name__ == "__main__":
     unittest.main()

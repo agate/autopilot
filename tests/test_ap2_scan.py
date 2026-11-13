@@ -1055,5 +1055,28 @@ class ScanCommandTest(ScanCase):
         self.assertFalse((Path(p["folder"]) / "calls.jsonl").exists())
 
 
+# -- invisible text: a read value of a scan source follows cards.blank ---------------------------------------------
+
+class InvisibleTextTest(ScanCase):
+    def test_a_skill_of_only_invisible_characters_is_missing(self):
+        for value in ("\\ufeff", "\\ufeff \\x1c"):
+            with self.subTest(value=value):
+                self.user("standup", f'source: standup\nbrings: messages\nread: {{ via: skill, skill: "{value}" }}\n'
+                                     "fill: ai\nform: { id: x, at: x, text: x }\nlink: none\nsort: { all: question }\n")
+                out = self.plan("standup")
+                self.assertEqual(out["calls"], [])
+                self.assertEqual([e["error"] for e in out["errors"]],
+                                 ["standup: via: skill needs read.skill, the skill to run"])
+
+    def test_a_skill_with_words_next_to_an_invisible_character_is_planned(self):
+        for value in ("\\ufeffT1", "a\\ufeff"):
+            with self.subTest(value=value):
+                self.user("standup", f'source: standup\nbrings: messages\nread: {{ via: skill, skill: "{value}" }}\n'
+                                     "fill: ai\nform: { id: x, at: x, text: x }\nlink: none\nsort: { all: question }\n")
+                out = self.plan("standup")
+                self.assertEqual(out["errors"], [])
+                self.assertEqual([c["source"] for c in out["calls"]], ["standup"])
+
+
 if __name__ == "__main__":
     unittest.main()

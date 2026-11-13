@@ -112,7 +112,7 @@ def hidden_text(lang: str, record: dict, brings: Optional[str]) -> str:
     """The phrase that stands for `record` in `lang`: "Ana wrote a message in #team", or the shorter form without
     an author or a place. Never holds the record's text."""
     p = hidden_phrases(lang)
-    author, place = (record.get(k) if isinstance(record.get(k), str) and record[k].strip() else None
+    author, place = (record.get(k) if not cards.blank(record.get(k)) else None
                      for k in ("author", "place"))
     form = "both" if author and place else "author" if author else "place" if place else "none"
     return p[form].format(author=author, place=place, thing=p[brings if brings in ("messages", "work") else "other"])
@@ -398,7 +398,7 @@ class Engine:
                 category = rec.get("category")
                 if not isinstance(category, str) or category not in src.sort:
                     raise ValueError(f"category {category!r} is not one of sort's ({', '.join(src.sort)})")
-                if "pr" in record and not record["pr"].strip():
+                if "pr" in record and cards.blank(record["pr"]):
                     del record["pr"]  # "no PR" said as empty text: the field is left out
                 if "pr" in record:
                     if not PR_KEY.match(record["pr"]):
@@ -435,7 +435,7 @@ class Engine:
         if src.link[0] == "none":
             return None, key
         if src.link[0] == "pattern":
-            parts = tuple(("text", settings[s]) if kind == "field" and settings.get(s, "").strip() else (kind, s)
+            parts = tuple(("text", settings[s]) if kind == "field" and not cards.blank(settings.get(s)) else (kind, s)
                           for kind, s in src.link[1])
             try:
                 link = form.fill_pattern(parts, values, url=True)
