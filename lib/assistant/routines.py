@@ -18,6 +18,8 @@ from datetime import MAXYEAR, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
+from assistant import cards
+
 try:
     from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 except ImportError:  # Python before 3.9
@@ -117,7 +119,7 @@ def _at(path: Path, value) -> tuple:
 
 
 def _tz(path: Path, value):
-    if not (isinstance(value, str) and value.strip()):
+    if cards.blank(value):
         _fail(path, "tz", f"tz must be an IANA time zone name such as America/Los_Angeles, not {value!r}")
     if ZoneInfo is None:
         _fail(path, "tz", "this Python has no zoneinfo module (Python 3.9 or later is needed)")
@@ -153,7 +155,7 @@ def parse(path: Path, obj) -> Routine:
         if key not in obj:
             _fail(path, key, "missing")
     title = obj["title"]
-    if not (isinstance(title, str) and title.strip()):
+    if cards.blank(title):
         _fail(path, "title", f"title must be a non-empty text, not {title!r}")
     try:
         title.encode("utf-8")

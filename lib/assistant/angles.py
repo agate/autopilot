@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from assistant import sources, templates, yamlish
+from assistant import cards, sources, templates, yamlish
 from assistant.config import ConfigError
 
 PLUGIN_FILE = Path(__file__).resolve().parent.parent.parent / "review" / "angles.yaml"
@@ -253,7 +253,7 @@ class _Checker:
 
     def text(self, entry: dict, key: str, path: tuple) -> None:
         v = entry[key]
-        if not isinstance(v, str) or not v.strip():
+        if cards.blank(v):
             self.fail(path + (key,), f"{key} must be non-empty text, not {_show(v)}")
         # A name is printed on one line (pick's name and why, unknown_off).
         if key in ("name", "extends") and not _one_line(v):
@@ -283,7 +283,7 @@ class _Checker:
                     self.fail(at + (k,), f"the file holds more than {MAX_GLOBS} globs in all")
             seen = set()
             for x in items:
-                if not isinstance(x, str) or not x.strip():
+                if cards.blank(x):
                     self.fail(at + (k,), f"when.{k} entries must be non-empty text, not {_show(x)}")
                 if x in seen:
                     self.fail(at + (k,), f"when.{k} holds {_show(x)} more than once")

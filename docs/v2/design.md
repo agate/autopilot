@@ -83,6 +83,10 @@ Anti-goals (failure even if it "works"):
   holds it for `title_problems`, `cards.title_for` and the server's titles; the page's `blankText` holds it for
   `titleIn`, and a test checks the two give the same answer for every character up to U+FFFF. A zero-width
   space is words.
+- **[decided by the builder]** Every check whether a text has words uses `cards.blank`, not only titles: a `by`,
+  a question, an answer, a routine title, a source value or setting, a form field, a key part, a watch name, an
+  angle, a brief field and a search `q` of only invisible characters count as empty. Shell parsing (the Bash
+  guard), parsers, HTTP headers and line picking keep `str.strip()`, because there U+FEFF is a character, not space.
 - **[proposed]** A reply drafted for someone else stays in the language that person wrote in. On the
   other-language page its meaning is shown separately, and Copy leaves the meaning out. A quote shows the
   translation first and the original behind a collapsed "Original" toggle.

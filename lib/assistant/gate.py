@@ -188,7 +188,7 @@ def due_watches(data: Path, watches, now: datetime):
     for w in watches:
         name = w.get("name") if isinstance(w, dict) else None
         try:
-            if not (isinstance(name, str) and name.strip()):
+            if cards.blank(name):
                 raise ValueError(f"a watch needs a name, not {name!r}")
             cards.check_unicode(name, "the watch name")  # a CardError is a ValueError
             every = parse_every(w.get("every"))

@@ -554,5 +554,47 @@ class KeyForTest(SourceCase):
         self.assertEqual(str(cm.exception), f"slack-mentions: settings.org is not set; add it in {p}")
 
 
+# -- invisible text: a source value and a named setting follow cards.blank -----------------------------------------
+
+INVISIBLE = ("\\ufeff", "\\ufeff \\x1c")  # as YAML escapes in a double-quoted text
+WORDS_NEXT_TO_INVISIBLE = ("\\ufeffT1", "a\\ufeff")
+
+
+class InvisibleTextTest(SourceCase):
+    def test_a_source_value_of_only_invisible_characters_is_refused(self):
+        for value in INVISIBLE:
+            with self.subTest(value=value):
+                self.user("s", GOOD.replace("run: echo []", f'run: "{value}"'))
+                with self.assertRaises(SourceError) as cm:
+                    self.loader().load("s")
+                self.assertIn("read.run must be the command to run (via: command)", str(cm.exception))
+
+    def test_a_source_value_with_words_next_to_an_invisible_character_is_kept(self):
+        for value in WORDS_NEXT_TO_INVISIBLE:
+            with self.subTest(value=value):
+                self.user("s", GOOD.replace("run: echo []", f'run: "{value}"'))
+                want = value.replace("\\ufeff", "\ufeff")
+                self.assertEqual(self.loader().load("s").data["read"]["run"], want)
+
+    def test_a_named_setting_of_only_invisible_characters_is_not_set(self):
+        for value in INVISIBLE:
+            with self.subTest(value=value):
+                p = self.user("slack-mentions", f'extends: slack-mentions\nsettings: {{ me: U1, org: "{value}" }}\n'
+                                                'key_for: { review_request: "{org}/{pr}" }\n')
+                src = Loader(self.data, plugin_dir=sources.PLUGIN_DIR).load("slack-mentions")
+                with self.assertRaises(SourceError) as cm:
+                    sources.unset_settings(src)
+                self.assertEqual(str(cm.exception), f"slack-mentions: settings.org is not set; add it in {p}")
+
+    def test_a_named_setting_with_words_next_to_an_invisible_character_is_set(self):
+        for value in WORDS_NEXT_TO_INVISIBLE:
+            with self.subTest(value=value):
+                self.user("slack-mentions", f'extends: slack-mentions\nsettings: {{ me: U1, org: "{value}" }}\n'
+                                            'key_for: { review_request: "{org}/{pr}" }\n')
+                src = Loader(self.data, plugin_dir=sources.PLUGIN_DIR).load("slack-mentions")
+                self.assertIsNone(sources.unset_settings(src))
+                self.assertEqual(sources.settings(src)["org"], value.replace("\\ufeff", "\ufeff"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -23,7 +23,7 @@ import os
 import re
 from typing import Optional
 
-from assistant import angles, sources, store
+from assistant import angles, cards, sources, store
 
 ROUND_LIMIT = 20                                         # the most rounds a loop may run, and the default
 BUCKETS = ("fix", "out_of_scope", "invalid", "owner")   # v1's triage buckets
@@ -112,7 +112,7 @@ class _Checker:
 
     def one_line(self, field: str, value, empty: bool = False) -> str:
         # angles' rule: no control character, line or paragraph separator, or bidi override or isolate
-        if not isinstance(value, str) or (not empty and not value.strip()) or not angles._one_line(value):
+        if not isinstance(value, str) or (not empty and cards.blank(value)) or not angles._one_line(value):
             self.fail(field, f"must be one line of text, not {_show(value)}")
         return self.unicode(field, value)
 

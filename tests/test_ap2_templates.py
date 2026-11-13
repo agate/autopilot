@@ -599,9 +599,19 @@ class TitleBriefTest(TempFolder):
         # title_for skips an object title's invisible slot for one with words.
         self.assertEqual(templates.fill_brief("In {title}.", {"title": {"en": "\ufeff", "zh": "Z"}}), "In Z.")
 
-    def test_a_field_other_than_title_of_only_an_invisible_character_fills_as_it_is(self):
-        # Only {title} is judged by cards.blank; other fields keep str.strip(), which keeps U+FEFF.
-        self.assertEqual(templates.fill_brief("In {id}.", {"id": "\ufeff"}), "In \ufeff.")
+    def test_a_field_other_than_title_of_only_invisible_characters_is_missing(self):
+        # Every field is judged by cards.blank, so an invisible {id} is missing too, never an invisible fill.
+        for value in ("\ufeff", "\ufeff \x1c"):
+            with self.subTest(value=value):
+                with self.assertRaises(BriefError) as e:
+                    templates.fill_brief("In {id}.", {"id": value})
+                self.assertEqual(e.exception.missing, ["id"])
+                self.assertIn("the card has no {id}", str(e.exception))
+
+    def test_a_field_other_than_title_with_words_next_to_an_invisible_character_fills_as_it_is(self):
+        for value in ("\ufeffT1", "a\ufeff"):
+            with self.subTest(value=value):
+                self.assertEqual(templates.fill_brief("In {id}.", {"id": value}), f"In {value}.")
 
     def test_a_dotted_title_slot_still_reads_the_field(self):
         self.assertEqual(templates.fill_brief("{title.zh}", {"title": {"en": "E", "zh": "Z"}}), "Z")
@@ -724,6 +734,26 @@ class CheckTest(TempFolder):
         path = self.write("question.yaml", (FIXTURES / "question.yaml").read_text())
         out = templates.check(path, self.data)
         self.assertEqual((out["replaces"], out["installed"]), ("builtin", False))
+
+
+# -- invisible text: a template's text values follow cards.blank ---------------------------------------------------
+
+class InvisibleTemplateTextTest(unittest.TestCase):
+    def test_a_text_value_of_only_invisible_characters_is_refused(self):
+        for value in ("\\ufeff", "\\ufeff \\x1c"):
+            for key, text in (("label", GOOD.replace("label: It arrived", f'label: "{value}"')),
+                              ("brief", GOOD.replace('brief: "Check {tracking}."', f'brief: "{value}"')),
+                              ("title", GOOD + f'title: "{value}"\n')):
+                with self.subTest(key=key, value=value):
+                    with self.assertRaises(TemplateError) as e:
+                        templates.parse(text, "parcel.yaml")
+                    self.assertIn(f"{key} must be non-empty text", str(e.exception))
+
+    def test_a_text_value_with_words_next_to_an_invisible_character_is_kept(self):
+        for value in ("\\ufeffT1", "a\\ufeff"):
+            with self.subTest(value=value):
+                t = templates.parse(GOOD.replace("label: It arrived", f'label: "{value}"'), "parcel.yaml")
+                self.assertEqual(t["buttons"][0]["label"], value.replace("\\ufeff", "\ufeff"))
 
 
 if __name__ == "__main__":

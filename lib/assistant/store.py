@@ -227,7 +227,7 @@ class Store:
 
     @staticmethod
     def _by(by) -> str:
-        if not (isinstance(by, str) and by.strip()):
+        if cards.blank(by):
             raise CardError(f"by must name who made the change, not {by!r}")
         cards.check_unicode(by, "by")
         return by
@@ -236,7 +236,7 @@ class Store:
     def _did(did) -> Optional[str]:
         if did is None:
             return None
-        if not (isinstance(did, str) and did.strip()):
+        if cards.blank(did):
             raise CardError(f"did must say what the change did, or be left out, not {did!r}")
         cards.check_unicode(did, "did")
         return did
@@ -386,7 +386,7 @@ class Store:
         up pending questions and writes the answer."""
         by = self._by(by)
         cards.check_id(card_id)
-        if not (isinstance(text, str) and text.strip()):
+        if cards.blank(text):
             raise CardError(f"a question must be a non-empty text, not {text!r}")
         cards.check_unicode(text, "question")
         with self._guard():

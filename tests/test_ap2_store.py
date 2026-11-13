@@ -1354,5 +1354,64 @@ class LinkedDataFolderTest(unittest.TestCase):
         self.assertEqual(datadir.resolve(str(link)), real)
 
 
+# -- invisible text: every "has words" check follows cards.blank ---------------------------------------------------
+
+INVISIBLE = ("\ufeff", "\ufeff \x1c")
+WORDS_NEXT_TO_INVISIBLE = ("\ufeffT1", "a\ufeff")
+
+
+class InvisibleTextTest(StoreCase):
+    def test_a_by_of_only_invisible_characters_is_refused(self):
+        for by in INVISIBLE:
+            with self.subTest(by=by):
+                with self.assertRaises(CardError) as cm:
+                    self.store.add(card(), by=by)
+                self.assertIn("by must name who made the change", str(cm.exception))
+        self.assertEqual(self.store.list(), [])
+
+    def test_a_did_of_only_invisible_characters_is_refused(self):
+        added = self.store.add(card(), by="w")
+        for did in INVISIBLE:
+            with self.subTest(did=did):
+                with self.assertRaises(CardError) as cm:
+                    self.store.update(added["id"], {"lane": "running"}, by="w", did=did)
+                self.assertIn("did must say what the change did", str(cm.exception))
+                self.assertEqual(self.store.get(added["id"]), added)
+
+    def test_a_question_of_only_invisible_characters_is_refused(self):
+        added = self.store.add(card(), by="w")
+        for text in INVISIBLE:
+            with self.subTest(text=text):
+                with self.assertRaises(CardError) as cm:
+                    self.store.ask_about(added["id"], text, by="w")
+                self.assertIn("a question must be a non-empty text", str(cm.exception))
+                self.assertEqual(self.store.get(added["id"]), added)
+
+    def test_words_next_to_an_invisible_character_are_kept_as_they_are(self):
+        for words in WORDS_NEXT_TO_INVISIBLE:
+            with self.subTest(words=words):
+                added = self.store.add(card(), by=words)
+                self.assertEqual(added["audit"][-1]["by"], words)
+                new = self.store.update(added["id"], {"lane": "running"}, by=words, did=words)
+                self.assertEqual(new["audit"][-1]["did"], words)
+                asked = self.store.ask_about(added["id"], words, by=words)
+                self.assertEqual(asked["questions"][-1]["text"], words)
+
+    def test_a_kind_or_feed_of_only_invisible_characters_is_refused(self):
+        for key in ("kind", "feed"):
+            for value in INVISIBLE:
+                with self.subTest(key=key, value=value):
+                    with self.assertRaises(CardError) as cm:
+                        self.store.add(card(**{key: value}), by="w")
+                    self.assertIn(f"{key} must be a non-empty text", str(cm.exception))
+        self.assertEqual(self.store.list(), [])
+
+    def test_a_kind_or_feed_with_words_next_to_an_invisible_character_is_kept(self):
+        for key in ("kind", "feed"):
+            for value in WORDS_NEXT_TO_INVISIBLE:
+                with self.subTest(key=key, value=value):
+                    self.assertEqual(self.store.add(card(**{key: value}), by="w")[key], value)
+
+
 if __name__ == "__main__":
     unittest.main()

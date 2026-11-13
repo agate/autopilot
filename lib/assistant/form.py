@@ -25,6 +25,8 @@ from __future__ import annotations
 import re
 from urllib.parse import quote
 
+from assistant import cards
+
 FIELDS = ("id", "thread_id", "author", "at", "text", "place", "place_id", "status", "depends_on", "pr")
 REQUIRED = ("id", "at", "text")
 LIST_FIELDS = ("depends_on",)
@@ -209,7 +211,7 @@ def fill_item(paths: dict, prefix: tuple, item, required: tuple = REQUIRED) -> d
                 raise ValueError(f"form.{field} missing")
             continue
         text = as_text(value, f"form.{field}")
-        if field in required and not text.strip():
+        if field in required and cards.blank(text):
             raise ValueError(f"form.{field} is empty")
         record[field] = text
     return record
@@ -233,7 +235,7 @@ def check_record(record, required: tuple = REQUIRED) -> dict:
         elif value is not None:
             out[field] = as_text(value, f"form.{field}")
     for field in required:
-        if not out.get(field, "").strip():
+        if cards.blank(out.get(field)):
             raise ValueError(f"form.{field} {'is empty' if field in out else 'missing'}")
     return out
 
@@ -249,7 +251,7 @@ def derived(record: dict, source: str) -> dict:
     if "id" in record:
         values["id_digits"] = record["id"].replace(".", "")
         thread = record.get("thread_id")
-        values["thread_or_id"] = thread if isinstance(thread, str) and thread.strip() else record["id"]
+        values["thread_or_id"] = thread if not cards.blank(thread) else record["id"]
     if "place_id" not in values and "place" in record:
         values["place_id"] = record["place"]
     values["source"] = source
@@ -288,7 +290,7 @@ def fill_pattern(parts: tuple, values: dict, url: bool = False) -> str:
             out.append(s)
         elif s not in values:
             raise ValueError(f"{{{s}}} missing")
-        elif not values[s].strip():
+        elif cards.blank(values[s]):
             raise ValueError(f"{{{s}}} is empty")  # an empty part would merge different items into one key
         else:
             out.append(quote(values[s], safe="") if url else values[s])

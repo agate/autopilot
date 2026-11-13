@@ -1369,5 +1369,37 @@ class PickerTest(AngleCase):
         self.assertEqual(angles.SMALL_LINES, 30)
 
 
+# -- invisible text: an angle's text and its when entries follow cards.blank ---------------------------------------
+
+class InvisibleTextTest(AngleCase):
+    def angle(self, question='"q?"', paths='["billing/**"]'):
+        return f'- name: Invisible\n  question: {question}\n  when: {{ paths: {paths} }}\n  brief: "b"\n'
+
+    def test_an_angle_text_of_only_invisible_characters_is_refused(self):
+        for value in ("\\ufeff", "\\ufeff \\x1c"):
+            with self.subTest(value=value):
+                self.user(self.angle(question=f'"{value}"'))
+                with self.assertRaises(AngleError) as e:
+                    self.load()
+                self.assertIn("question must be non-empty text", str(e.exception))
+
+    def test_a_when_entry_of_only_invisible_characters_is_refused(self):
+        for value in ("\\ufeff", "\\ufeff \\x1c"):
+            with self.subTest(value=value):
+                self.user(self.angle(paths=f'["{value}"]'))
+                with self.assertRaises(AngleError) as e:
+                    self.load()
+                self.assertIn("when.paths entries must be non-empty text", str(e.exception))
+
+    def test_words_next_to_an_invisible_character_are_kept_as_they_are(self):
+        for value in ("\\ufeffT1", "a\\ufeff"):
+            with self.subTest(value=value):
+                self.user(self.angle(question=f'"{value}"', paths=f'["{value}"]'))
+                got = self.load().get("Invisible")
+                want = value.replace("\\ufeff", "\ufeff")
+                self.assertEqual(got.question, want)
+                self.assertEqual(got.when["paths"], [want])
+
+
 if __name__ == "__main__":
     unittest.main()
