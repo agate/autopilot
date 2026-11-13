@@ -3228,13 +3228,17 @@ Calls the author made without asking (check them):
      `cap.today_limit` (null on the subscription); `paused` and `pause` are `cap.paused` (any mode). A ProfileError or
      CapError becomes an `error` field in the block it comes from (`access.error` for the profile listing,
      `access.cap.error` for the cap state), never a 500. So does an ArithmeticError or RecursionError from a profiles,
-     key record or cap read (a hand-edited cap or raise too big for a float, a JSON nest too deep), as
+     key record or cap read (a hand-edited raise too big for a float, a JSON nest too deep), as
      `<name>: <error type>: <error>` with no path, in `profile_error` (with `profiles.FIX`), the `broken_profiles`
      entry, `key_error`, `access.error` or `access.cap.error`; a pause file that raises one reads as paused
-     (`reason: unknown`). `usage`: `{mode,
+     (`reason: unknown`). A profile's `daily_cap_usd` too big for a float (`10**400`, where
+     `math.isfinite` raises OverflowError) is no such error: `profiles.validate` gives it the ordinary
+     `daily_cap_usd: required for a gateway profile, a finite number above 0` line, so `profiles.load` raises its
+     ProfileError (naming the file) and the command line never crashes on it. `usage`: `{mode,
      windows: [{kind, model, percent, resets_at}] | null, stale, credits_used_usd, credits_limit_usd, gateway}`.
      The windows and credits come from v1's `budget.read(usage_file)` (Claude Code's `~/.claude.json`, looked up at
-     each request; `ap2 serve` and `ap2 phone build` use that default); on a gateway they are the page sessions'
+     each request; `ap2 serve` and `ap2 phone build` use that default, `Path.home() / ".claude.json"` when no
+     `usage_file` is passed, and tests reach it only through a temp `HOME`); on a gateway they are the page sessions'
      windows, which still use the subscription. A file it cannot read gives null windows. The module is named
      `profileview` because `access.py` is kept for the health checks.
   2. **[decided by the builder]** The pages read a remembered count, never the ledger: `spend.totals` reads
@@ -3258,15 +3262,27 @@ Calls the author made without asking (check them):
      `option` must be one of that card's `ask.options`, else 409 (so `accept_unknown` cannot answer a `spent`
      card); an option that is no answer at all is 400. Then `cap.answer(data, option, now, workers=w)`, `w` being
      `Workers(data, cfg)` in live mode and None in shadow mode, exactly as `ap2 cap answer`: `cap.answer` stays the
-     one entry. The reply is 200 with its dict; a CapError naming a file, a damaged card, or (live `pause` only) a
-     worker list `cap_stop` cannot read is 500; in that last case `paused.json` and the answer are already
-     written, as with `ap2 cap answer pause`. The page draws the buttons only on
+     one entry. The reply is 200 with its dict; a CapError naming a file, a damaged card, or a worker list that
+     `Workers(data, cfg)` cannot open (before anything is written) is 500. A worker list that `cap_stop` cannot
+     read (live `pause` only) comes after `paused.json` and the answer are written, so it is no 500 (the page would
+     say "Not answered:" for a card that is answered): the server hands `cap.answer` a small adapter whose
+     `cap_stop()` calls the real one and turns a WorkerError into `{"stopped": [], "failed": [], "stop_error":
+     <its text>}`, and the reply is 200 with the answer, `paused: true` and `stop_error`. `cap.answer` stays the
+     one entry and `ap2 cap answer` is unchanged. The page draws the buttons only on
      a card of kind `cap` whose ask is `from: cap` and whose id is `access.cap.card_id` while the card is open,
      with labels from its tables, `pause` as the quiet button. After a 200 the page reloads the state and the
-     card; a 409 shows a label in the page's language with the server's reason under it.
+     card; a 409 shows a label in the page's language with the server's reason under it. A 200 from a live
+     `pause` carries `cap_stop`'s dict: when `failed` is a non-empty list, the cap section's status box shows a
+     neutral (not red) line, "Answered, but these workers did not stop yet (the next check tries again):", with
+     those workers under it; when `busy` is true, "Answered; another stop of the running workers is already under
+     way."; when `stop_error` is set, "Answered and paused, but the running workers could not be stopped:" with the
+     server's text under it, never "Not answered:". The answered card is redrawn without its buttons, so the page
+     keeps that note for the card (`S.capNote`) and the redrawn card shows it in its cap section until another
+     card is drawn; a clean 200 shows nothing, as before.
   4. **[decided by the builder]** The one route that may start a process: because of choice 3, `pause` in live mode
-     runs `claude stop` for each running worker (`Workers.cap_stop`). The server's docstring and the read-only
-     bullet say so; no other route starts one. The simplest reverse: always pass `workers=None` and tell the user
+     runs `claude stop` for each running worker (`Workers.cap_stop`). The server's docstring, the read-only
+     bullet and `ap2 serve --help` ("Read-only, but for saving a question on a card and answering today's cap
+     card; in live mode a pause answer stops the running workers.") say so; no other route starts one. The simplest reverse: always pass `workers=None` and tell the user
      to run `ap2 cap answer pause`.
   5. **[decided by the builder]** The profile switch is split off to its own task (this slice passed its size
      limit). Planned there: `POST /api/profile/use` `{"name"}`, under the same write lock and body rules. A name
@@ -3285,7 +3301,10 @@ Calls the author made without asking (check them):
      subscription's highest window percent and its kind, or a gateway's `$today / $limit today`); a red line for
      `profile_error` ("Profile not working; new workers wait") or `key_error` ("Gateway key not working; new
      workers wait"), each followed by the server's own text; "Daily cap reached: answer the card", a link to
-     `#/card/<card_id>`, while the card is open; "Paused at the daily cap; run `ap2 cap resume`" while paused. The
+     `#/card/<card_id>`, while the card is open; "Paused at the daily cap; run `ap2 cap resume`" while paused; a red line "Daily cap state not readable; new
+     gateway workers may wait", a link to the Settings screen, followed by the server's text, while
+     `access.cap.error` is set (a symlinked or odd `cap-state.json`). The Settings screen's first box lists that
+     error too, with the same label, among the profile, key and listing errors. The
      Settings screen's first box has the full usage rows (today against today's limit, this week, this month, when
      it was counted, each window with its reset, the extra-usage credits on the subscription). **No value is cut
      (lessons 3.1: v1's value column showed `$512/$500` as `$512/$5`): money is `$` with two decimals and
@@ -3302,7 +3321,8 @@ Calls the author made without asking (check them):
      same moment is not locked against, as between two command-line runs today.
   9. **[decided by the builder]** Labels: about 40 new keys per table (`access.*`, `cap.*`, `usage.*`), ported
      from v1's English words, each with its `zh` text. The window kinds `five_hour` and `seven_day` get labels; any
-     other kind shows as it is.
+     other kind shows as it is. The cap answer's notes (`cap.not_stopped`, `cap.stop_busy`, `cap.stop_error`) and
+     the cap state error (`access.cap_error`) are in both tables too.
   - Lessons 3: 3.1 (values never cut) is choice 6 and its tests (`$512.00 / $500.00` and `$2,300.00`, checked in
     the page's CSS and at 1280 px and 390 px wide). 3.2 (republish the phone page when the HTML it would build
     differs from the published one, keeping a hash of the published page) needs a phone publish step v2 does not

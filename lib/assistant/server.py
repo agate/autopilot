@@ -262,6 +262,22 @@ def _size(path: Path) -> int:
     return total
 
 
+class _CapStop:
+    """The workers a live `pause` hands `cap.answer`: `cap_stop()` is the real one, but a WorkerError from it (a
+    damaged worker list) comes back as `{"stopped": [], "failed": [], "stop_error": <its text>}`. `cap.answer` calls
+    it after writing `paused.json` and the answer, so the reply says the card is answered and the workers were not
+    stopped, instead of a 500 that reads as "not answered"."""
+
+    def __init__(self, workers):
+        self.workers = workers
+
+    def cap_stop(self) -> dict:
+        try:
+            return self.workers.cap_stop()
+        except WorkerError as e:
+            return {"stopped": [], "failed": [], "stop_error": str(e)}
+
+
 # --- the server ------------------------------------------------------------------------------------------------
 
 class Server(ThreadingHTTPServer):
@@ -667,7 +683,9 @@ class Handler(BaseHTTPRequestHandler):
     def cap_answer(self):
         """Answer today's open cap card with one of its options, through `cap.answer` (the one entry, as `ap2 cap
         answer`). A card that is not today's open one, or an option it does not offer, is 409 and changes nothing.
-        In live mode a `pause` stops every running worker (`Workers.cap_stop`); in shadow mode it stops none."""
+        In live mode a `pause` stops every running worker (`Workers.cap_stop`); in shadow mode it stops none. A
+        worker list that `cap_stop` cannot read comes after `paused.json` and the answer are written, so the reply
+        is still 200, with `stop_error` (see `_CapStop`)."""
         self._check_origin("a cap answer")
         body = self._json_body("a cap answer", '{"card_id": "...", "option": "..."}')
         card_id, option = body.get("card_id"), body.get("option")
@@ -699,7 +717,7 @@ class Handler(BaseHTTPRequestHandler):
                 w = None
                 if cfg.mode == "live":  # the pause stops workers in live mode only, as `ap2 cap answer`
                     from assistant.workers import Workers
-                    w = Workers(data, cfg=cfg)
+                    w = _CapStop(Workers(data, cfg=cfg))  # a WorkerError here: nothing written yet, a 500
                 return 200, cap.answer(data, option, now, workers=w)
             except (ConfigError, CardError, OSError, WorkerError) as e:  # WorkerError: a damaged worker list
                 raise HTTPError(500, str(e)) from e

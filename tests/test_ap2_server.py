@@ -388,6 +388,25 @@ class ListTest(ServerCase):
         self.assertEqual(set(st), {"mode", "primary_language", "secondary_language", "languages", "lanes",
                                    "running", "projects", "heartbeat", "access", "usage", "url"})
 
+    def test_with_no_usage_file_the_state_reads_homes_claude_json(self):
+        # `make_server` with no `usage_file` reads `~/.claude.json` at each request: HOME is a temp folder here.
+        from tests.test_ap2_profileview import usage_json
+        home = self.tmp / "home"
+        home.mkdir()
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            srv = server.make_server(self.data, port=0, cfg=self.cfg, plugin_dir=self.plugin, clock=self.clock)
+            srv.log_stream = io.StringIO()
+            self.addCleanup(srv.server_close)
+            thread = threading.Thread(target=srv.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(thread.join, 10)
+            self.addCleanup(srv.shutdown)
+            self.srv, self.port = srv, srv.server_address[1]
+            self.assertIsNone(self.ok("/api/state")["usage"]["windows"])  # no file yet
+            usage_json(home / ".claude.json", now=self.clock(), percent=63)  # looked up again at the next request
+            windows = self.ok("/api/state")["usage"]["windows"]
+        self.assertEqual([(w["kind"], w["percent"]) for w in windows], [("five_hour", 63), ("seven_day", 7)])
+
     def test_an_open_lane_is_by_priority_then_newest(self):
         body = self.ok("/api/cards?lane=needs")
         self.assertEqual(body["total"], 3)
@@ -1170,13 +1189,32 @@ class CapAnswerRouteTest(ServerCase):
         self.assertNotIn("note", body)
         self.assertTrue((self.data / cap.PAUSED).exists())
 
-    def test_a_damaged_worker_list_in_live_mode_is_a_500(self):
+    def test_a_damaged_worker_list_in_live_mode_answers_and_says_the_stop_failed(self):
+        # cap_stop runs after paused.json and the answer are written: the reply is 200 with `stop_error`, never a 500
+        # that the page would read as "not answered".
         self.start(cfg=Config(mode="live"))
         err = WorkerError("<data>/workers.json: cannot read the worker list")
         with mock.patch("assistant.workers.Workers.cap_stop", side_effect=err):
             status, _, body = self.answer("pause")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["answered"], "pause")
+        self.assertIs(body["paused"], True)
+        self.assertEqual(body["stop_error"], "<data>/workers.json: cannot read the worker list")
+        self.assertEqual((body["stopped"], body["failed"]), ([], []))
+        self.assertTrue((self.data / cap.PAUSED).exists())
+        self.assertEqual(cap.state(self.data, self.clock().astimezone())["card"], "answered")
+
+    def test_a_worker_list_that_cannot_be_opened_in_live_mode_is_a_500_with_nothing_written(self):
+        self.start(cfg=Config(mode="live"))
+        before = tree(self.data)
+        err = WorkerError("<data>/workers.json: cannot open the worker list")
+        with mock.patch("assistant.workers.Workers.__init__", side_effect=err):
+            status, _, body = self.answer("pause")
         self.assertEqual(status, 500, body)
-        self.assertIn("<data>/workers.json: cannot read the worker list", body["error"])
+        self.assertIn("<data>/workers.json: cannot open the worker list", body["error"])
+        self.assertEqual(tree(self.data), before)
+        self.assertFalse((self.data / cap.PAUSED).exists())
+        self.assertEqual(cap.state(self.data, self.clock().astimezone())["card"], "open")
 
     def test_two_answers_at_once_raise_once(self):
         self.start()
@@ -1468,7 +1506,8 @@ console.log(JSON.stringify([
         self.assertIn("if (e.status === 409) status.replaceChildren(h('p', {text: L('cap.stale')}), "
                       "h('p', {class: 'mono', text: e.message}));", text)
         self.assertIn("const capAnswers = capOptions(c, S.state && S.state.access);\n"
-                      "    if (capAnswers.length) det.append(capSection(c, capAnswers));", text)  # the card view
+                      "    if (S.capNote && S.capNote.id !== c.id) S.capNote = null;", text)  # the card view
+        self.assertIn("    if (capAnswers.length) det.append(capSection(c, capAnswers));\n", text)
         self.assertEqual(set(cap.ANSWERS), {"raise50", "raise100", "accept_unknown", "pause"})
 
     # A plain-object `h` (tag, attrs, kids) and `flat`, every text of a tree in order, for running the page's
@@ -1486,7 +1525,7 @@ const find = (n, tag) => (n === null || n === undefined || typeof n !== 'object'
 
     @unittest.skipUnless(shutil.which("node"), "needs node")
     def test_cap_buttons_post_their_own_answer_and_reload_the_list(self):
-        out = self.run_access(page_functions("capSection") + self.DOM_STUBS + """
+        out = self.run_access(page_functions("capStopNote", "capSection") + self.DOM_STUBS + """
 const calls = [];
 const post = async (path, body) => { calls.push(['post', path, body]); return {}; };
 const poll = async () => { calls.push(['poll']); };
@@ -1513,6 +1552,86 @@ const opts = ['raise50', 'raise100', 'pause'];
                 self.assertEqual(calls[0], ["post", "/api/cap/answer", {"card_id": "C1", "option": opt}])
                 self.assertIn(["loadList"], calls)
                 self.assertEqual(len([c for c in calls if c[0] == "post"]), 1)
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_an_answer_whose_workers_did_not_all_stop_says_so_in_a_neutral_line(self):
+        # A 200 with workers that did not stop (`failed`), another stop under way (`busy`) or a worker list it could
+        # not read (`stop_error`): the status box shows a neutral line (the card is answered), never "Not answered:".
+        out = self.run_access(page_functions("capStopNote", "capNoteSection", "capSection") + self.DOM_STUBS + """
+const replies = [{answered: 'pause', stopped: [], failed: ['w-1']},
+                 {answered: 'pause', stopped: [], failed: [{card: 'c-9', role: 'impl', note: 'n'}]},
+                 {answered: 'pause', stopped: [], failed: [], busy: true},
+                 {answered: 'pause', paused: true, stopped: [], failed: [],
+                  stop_error: '<data>/workers.json: cannot read the worker list'},
+                 {answered: 'pause', stopped: ['w-1'], failed: []}, {answered: 'raise50'}];
+let post = null;
+const poll = async () => {}, loadList = async () => {}, loadCard = async () => {};
+S.route = null;
+(async () => {
+  const seen = [];
+  for (const reply of replies) {
+    post = async () => reply;
+    const sec = capSection({id: 'C1', kind: 'cap'}, ['pause']);
+    await find(sec, 'button')[0].attrs.onclick();
+    const status = sec.kids[2];
+    const redrawn = S.capNote ? flat(capNoteSection(S.capNote.reply)) : null;
+    seen.push({hidden: status.hidden !== false, cls: status.className || status.attrs.class,
+               text: flat(status.kids), note: S.capNote && S.capNote.id, redrawn});
+  }
+  console.log(JSON.stringify(seen));
+})();
+""")
+        failed, failed_dict, busy, stop_error, clean, raised = out
+        self.assertEqual((failed["hidden"], failed["cls"]), (False, "capinfo"))
+        self.assertEqual(failed["text"], ["[cap.not_stopped]", "w-1"])
+        self.assertEqual(failed["note"], "C1")
+        self.assertEqual(failed["redrawn"], ["[cap.title]", "[cap.not_stopped]", "w-1"])  # kept after the redraw
+        self.assertEqual(failed_dict["text"], ["[cap.not_stopped]", "c-9 impl"])
+        self.assertEqual((busy["hidden"], busy["cls"], busy["text"]), (False, "capinfo", ["[cap.stop_busy]"]))
+        self.assertEqual((stop_error["hidden"], stop_error["cls"]), (False, "capinfo"))
+        self.assertEqual(stop_error["text"], ["[cap.stop_error]", "<data>/workers.json: cannot read the worker list"])
+        for name, quiet in (("clean", clean), ("raise", raised)):
+            with self.subTest(name):
+                self.assertEqual((quiet["hidden"], quiet["text"], quiet["note"]), (True, [], None))
+        for got in (failed, busy, stop_error):
+            self.assertNotIn("[cap.failed]", " ".join(got["text"]))
+        text = PAGE.read_text(encoding="utf-8")
+        self.assertIn("    if (capAnswers.length) det.append(capSection(c, capAnswers));\n"
+                      "    else if (S.capNote) det.append(capNoteSection(S.capNote.reply));", text)
+        labels = self.labels()
+        for key in ("cap.not_stopped", "cap.stop_busy", "cap.stop_error"):
+            with self.subTest(key):
+                self.assertTrue(labels["en"][key])
+                self.assertRegex(labels["zh"][key], r"[\u4e00-\u9fff]")
+        self.assertEqual(labels["en"]["cap.not_stopped"],
+                         "Answered, but these workers did not stop yet (the next check tries again):")
+        self.assertEqual(labels["en"]["cap.stop_error"],
+                         "Answered and paused, but the running workers could not be stopped:")
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_a_cap_state_that_cannot_be_read_is_a_red_line_and_a_settings_error(self):
+        out = self.run_access(page_functions("drawAccess", "accessSet") + self.DOM_STUBS + """
+const boxes = {};
+const $ = id => (boxes[id] = boxes[id] || h('span', {id}));
+const access = {profile: {name: 's', mode: 'subscription', label: 'Subscription'},
+                cap: {card: null, card_id: null, paused: false, error: 'CAP-STATE-ERR-C'}};
+S.state = {access, usage: {mode: 'subscription', windows: []}};
+const alerts = accessAlerts(access);
+drawAccess();
+console.log(JSON.stringify({alerts, top: flat(boxes.access), set: flat(accessSet()),
+                            none: accessAlerts({profile: null, cap: {error: null}})}));
+""")
+        self.assertEqual(out["alerts"], [{"cls": "keyerr", "label": "[access.cap_error]", "detail": "CAP-STATE-ERR-C",
+                                          "href": "#/settings"}])
+        self.assertIn("[access.cap_error]", out["top"])
+        self.assertIn(" CAP-STATE-ERR-C", out["top"])
+        self.assertIn("[access.cap_error]", out["set"])
+        self.assertIn("CAP-STATE-ERR-C", out["set"])
+        self.assertEqual(out["none"], [])
+        labels = self.labels()
+        self.assertEqual(labels["en"]["access.cap_error"],
+                         "Daily cap state not readable; new gateway workers may wait")
+        self.assertRegex(labels["zh"]["access.cap_error"], r"[\u4e00-\u9fff]")
 
     @unittest.skipUnless(shutil.which("node"), "needs node")
     def test_the_top_bar_and_the_access_set_draw_every_text(self):

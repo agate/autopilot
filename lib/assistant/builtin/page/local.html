@@ -157,6 +157,7 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
 .keyerr{color:var(--bad);font-weight:600;overflow-wrap:anywhere}
 .keyerr a,.capnote a{color:inherit}
 .capnote{color:var(--need);font-weight:600}
+.capinfo{color:var(--muted);font-size:13px}
 .btnrow{display:flex;flex-wrap:wrap;gap:6px}
 .btn.quiet{background:transparent;color:var(--muted);border-style:dashed}
 .btn:disabled{cursor:default;opacity:.75}
@@ -366,6 +367,7 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     "access.broken": "{name} cannot be loaded:",
     "access.profile_error": "Profile not working; new workers wait",
     "access.key_error": "Gateway key not working; new workers wait",
+    "access.cap_error": "Daily cap state not readable; new gateway workers may wait",
     "cap.reached": "Daily cap reached: answer the card",
     "cap.paused": "Paused at the daily cap; run `ap2 cap resume`",
     "cap.title": "Answer the daily cap",
@@ -375,6 +377,9 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     "cap.pause": "Pause all workers",
     "cap.stale": "Not answered: this cap card is no longer open.",
     "cap.failed": "Not answered:",
+    "cap.not_stopped": "Answered, but these workers did not stop yet (the next check tries again):",
+    "cap.stop_busy": "Answered; another stop of the running workers is already under way.",
+    "cap.stop_error": "Answered and paused, but the running workers could not be stopped:",
     "usage.title": "Usage",
     "usage.today": "Today",
     "usage.week": "This week",
@@ -536,6 +541,7 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     "access.broken": "{name} 无法加载：",
     "access.profile_error": "访问配置不可用；新的 worker 会等待",
     "access.key_error": "网关密钥不可用；新的 worker 会等待",
+    "access.cap_error": "无法读取每日上限状态；新的网关 worker 可能会等待",
     "cap.reached": "已到每日上限：请回答卡片",
     "cap.paused": "已在每日上限处暂停；运行 `ap2 cap resume` 解除",
     "cap.title": "回答每日上限",
@@ -545,6 +551,9 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     "cap.pause": "暂停所有 worker",
     "cap.stale": "没有回答：这张上限卡片已经不再开放。",
     "cap.failed": "没有回答：",
+    "cap.not_stopped": "已回答，但这些 worker 还没有停下（下一次检查会再试）：",
+    "cap.stop_busy": "已回答；另一次停止运行中 worker 的操作已经在进行。",
+    "cap.stop_error": "已回答并暂停，但运行中的 worker 没能停下：",
     "usage.title": "用量",
     "usage.today": "今天",
     "usage.week": "本周",
@@ -793,6 +802,7 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     if (a.profile_error) out.push({cls: 'keyerr', label: L('access.profile_error'), detail: a.profile_error, href: '#/settings'});
     if (a.key_error) out.push({cls: 'keyerr', label: L('access.key_error'), detail: a.key_error, href: null});
     const c = a.cap || {};
+    if (c.error) out.push({cls: 'keyerr', label: L('access.cap_error'), detail: c.error, href: '#/settings'});
     if (c.card === 'open' && typeof c.card_id === 'string' && c.card_id) {
       out.push({cls: 'capnote', label: L('cap.reached'), detail: null, href: route('card', c.card_id)});
     }
@@ -859,6 +869,23 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
   async function post(path, body) {
     return api(path, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
   }
+  function capStopNote(reply) {
+    // After a 200: the pause's workers that did not stop (`failed`), another stop under way (`busy`), or a worker
+    // list it could not read (`stop_error`). Each is a neutral line (the card is answered), or null when all is well.
+    const r = reply && typeof reply === 'object' ? reply : {};
+    const who = w => (w && typeof w === 'object' ? [w.card, w.role].filter(Boolean).join(' ') : text(w));
+    if (r.stop_error) return [h('p', {text: L('cap.stop_error')}), h('p', {class: 'mono', text: text(r.stop_error)})];
+    if (Array.isArray(r.failed) && r.failed.length) {
+      return [h('p', {text: L('cap.not_stopped')}), h('p', {class: 'mono', text: r.failed.map(who).join(', ')})];
+    }
+    if (r.busy === true) return [h('p', {text: L('cap.stop_busy')})];
+    return null;
+  }
+  function capNoteSection(reply) {
+    // The answered cap card, redrawn without its buttons: the note of its answer stays (see capStopNote).
+    return h('section', {class: 'sec capans', 'data-block': 'cap_answer'}, h('h3', {text: L('cap.title')}),
+      h('div', {class: 'capinfo', role: 'status'}, capStopNote(reply)));
+  }
   function capSection(card, opts) {
     // One button per answer; a click runs the server's `cap.answer`, the same as `ap2 cap answer`.
     const status = h('div', {class: 'warn', role: 'status', hidden: true});
@@ -868,12 +895,20 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
       if (buttons.some(b => b.disabled)) return;  // a second click while the first answer is still posting
       for (const b of buttons) b.disabled = true;
       try {
-        await post('/api/cap/answer', {card_id: card.id, option});
+        const reply = await post('/api/cap/answer', {card_id: card.id, option});
+        const note = capStopNote(reply);  // answered: a neutral line, never "Not answered:"
+        S.capNote = note ? {id: card.id, reply} : null;  // the card's redraw below keeps it (capNoteSection)
         await poll();
         await loadList();  // the answered card leaves Needs you now, not at the next poll
         if (S.route && S.route.name === 'card' && S.route.arg === card.id) await loadCard(card.id);
+        if (note) {
+          status.className = 'capinfo';
+          status.replaceChildren(...note);
+          status.hidden = false;
+        }
       } catch (e) {
         // The server's reason is English: a label in the page's language, the reason under it.
+        status.className = 'warn';
         if (e.status === 409) status.replaceChildren(h('p', {text: L('cap.stale')}), h('p', {class: 'mono', text: e.message}));
         else status.replaceChildren(h('p', {text: L('cap.failed') + ' ' + e.message}));
         status.hidden = false;
@@ -888,7 +923,8 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     const st = S.state || {}, a = st.access;
     if (!a) return null;
     const b = badge(a);
-    const errs = [[L('access.profile_error'), a.profile_error], [L('access.key_error'), a.key_error], ['', a.error]]
+    const errs = [[L('access.profile_error'), a.profile_error], [L('access.key_error'), a.key_error], ['', a.error],
+                  [L('access.cap_error'), a.cap && a.cap.error]]
       .filter(e => e[1]).map(e => h('div', {class: 'warn'}, e[0] ? h('p', {text: e[0]}) : null, h('p', {class: 'mono', text: e[1]})));
     const broken = (a.broken_profiles || []).map(x => h('div', {class: 'warn'},
       h('p', {text: L('access.broken', {name: x.name})}), h('p', {class: 'mono', text: x.error})));
@@ -1108,7 +1144,9 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
       }))));
     if (d.template_error) det.append(h('div', {class: 'warn'}, h('p', {text: L('card.template_error')}), h('p', {class: 'mono', text: d.template_error})));
     const capAnswers = capOptions(c, S.state && S.state.access);
+    if (S.capNote && S.capNote.id !== c.id) S.capNote = null;  // the note is for the card it was answered on
     if (capAnswers.length) det.append(capSection(c, capAnswers));
+    else if (S.capNote) det.append(capNoteSection(S.capNote.reply));
     for (const block of d.view) {
       if (block === 'source_block') { if (d.source_block) det.append(sourceSection(d.source_block)); }
       else if (block === 'children') det.append(rowsSection('children', d.children));
