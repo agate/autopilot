@@ -77,7 +77,8 @@ class GuardTest(unittest.TestCase):
                     "sed -n -i 's/a/b/' ~/.claude/autopilot-data/x",
                     "sed -e 's/a/b/' -i ~/.claude/autopilot-data/x",
                     "sed -ni p ~/.claude/autopilot-data/x",
-                    "sed --in-place 's/a/b/' ~/.claude/autopilot-data/x"):
+                    "sed --in-place 's/a/b/' ~/.claude/autopilot-data/x",
+                    "sed -I '' 's/a/b/' ~/.claude/autopilot-data/x"):
             self.assertIsNotNone(guard.decide(bash(cmd), self.W), cmd)
 
     def test_guard_allows_near_misses_of_the_dd_open_and_sed_forms(self):
@@ -87,7 +88,14 @@ class GuardTest(unittest.TestCase):
                     "python3 -c \"open('/x/autopilot-data/y')\"",
                     "python3 -c \"print(open('/x/autopilot-data/y').read(), 'w')\"",
                     "sed -n p ~/.claude/autopilot-data/x",
-                    "sed -n p ~/.claude/autopilot-data/x | rg -i y"):
+                    "sed -n p ~/.claude/autopilot-data/x | rg -i y",
+                    "sed -n 1p ~/.claude/autopilot-data/runs/P-1/run-index.md",
+                    "find ~/.claude/autopilot-data/ -iname '*.md' -exec sed -n 1p {} +"):
+            self.assertIsNone(guard.decide(bash(cmd), self.W), cmd)
+
+    def test_guard_allows_reads_with_other_harmless_redirects(self):
+        for cmd in ("cat ~/.claude/autopilot-data/x >&2",
+                    "rg -n x ~/.claude/autopilot-data/x >>/dev/null"):
             self.assertIsNone(guard.decide(bash(cmd), self.W), cmd)
 
     def _assert_fast(self, cmd):
@@ -148,6 +156,7 @@ class GuardTest(unittest.TestCase):
                     '"/path/bin/ap" decision add v2 x.json',
                     "'ap' task set v2 PROJ-1 status=done",
                     '"/path/bin/ap" decision add v2 ~/.claude/"autopilot-data"/x.json',
+                    '"/path/bin/ap" journal add v2 X "rm ~/.claude/"autopilot-data"/x"',
                     "'ap' task set v2 PROJ-1 status=done > ~/.claude/autopilot-data/x"):
             self.assertIsNone(guard.decide(bash(cmd), self.W), cmd)
 
