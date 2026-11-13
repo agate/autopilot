@@ -1420,6 +1420,7 @@ class InvisibleTextTest(StoreCase):
 
     def test_a_search_text_with_words_next_to_an_invisible_character_is_kept(self):
         added = self.store.add(card(title="﻿T1 retry"), by="w")
+        self.store.add(card(title="T1 other"), by="w")
         for text in ("﻿T1", "retry"):
             with self.subTest(text=text):
                 self.assertEqual([c["id"] for c in self.store.search(text)], [added["id"]])
