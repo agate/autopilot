@@ -409,6 +409,18 @@ class HelpAndUsageInProcessTest(unittest.TestCase):
             self.assert_exits(["config", "--bad"], 2)
         self.assertEqual(out.getvalue(), "")
 
+    def test_serve_help_names_every_write_and_what_it_may_run(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assert_exits(["serve", "--help"], 0)
+        words = " ".join(out.getvalue().split())  # argparse wraps the text at the terminal's width
+        for want in ("Read-only, but for saving a question on a card, answering today's cap card and switching the "
+                     "access profile;",
+                     "in live mode a pause answer stops the running workers,",
+                     "a switch to a gateway profile may run its models command."):
+            with self.subTest(want):
+                self.assertIn(want, words)
+
     def test_help_with_both_streams_closed_exits_0(self):
         with mock.patch.object(sys, "stdout", None), mock.patch.object(sys, "stderr", None):
             self.assert_exits(["--help"], 0)

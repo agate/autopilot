@@ -11,14 +11,21 @@ port); `ap2 serve` runs it. Routes:
 - `GET /api/sources[/<name>]`, `GET /api/templates[/<kind>]`, `GET /api/settings`: the Manage screens.
 - `POST /api/cards/<id>/questions`: save a question about a card (design 9.4).
 - `POST /api/cap/answer`: answer today's open cap card through `cap.answer`, as `ap2 cap answer` does.
+- `POST /api/profile/use`: switch the active access profile through `profiles.use`, as `ap2 profile use` does; a
+  profile whose model and effort were never chosen is not switched, the reply lists its choices instead.
+- `POST /api/profile/choose`: save a profile's model and effort, checked against a list fetched just then
+  (`profiles.choose`), then switch to it.
 
-These two POSTs are the only writes. Every request must name this server in its `Host` header (`127.0.0.1:<port>`
+These four POSTs are the only writes. Every request must name this server in its `Host` header (`127.0.0.1:<port>`
 or `localhost:<port>`), so a page on another site whose name points at 127.0.0.1 (DNS rebinding) cannot read cards.
 Each POST also refuses another site's `Origin` and any body that is not `application/json`, so a plain HTML form
 elsewhere cannot post. No route calls Jira, Slack, GitHub or the model API, or writes outside the data folder; the
 GETs write nothing (a search may build `index.sqlite`, the store's own cache, as `ap2 search` does) and run no key
-command. One route may start a process: in live mode only, the cap answer `pause` stops every running worker with
-`claude stop` (`Workers.cap_stop`), exactly as `ap2 cap answer pause` does. No other route starts one.
+command. Two things a POST may start: in live mode only, the cap answer `pause` stops every running worker with
+`claude stop` (`Workers.cap_stop`), exactly as `ap2 cap answer pause` does; and in both modes a switch to a gateway
+profile whose model and effort were never chosen, and every choice, runs that profile's `gateway.models_command`
+once to fetch the list fresh, as `ap2 profile use` and `ap2 profile choose` do (at most `profiles.CHOICE_TIMEOUT`
+seconds, while it holds the write lock). No other route starts a process.
 """
 from __future__ import annotations
 
@@ -39,7 +46,7 @@ from socketserver import TCPServer
 from typing import Callable, Optional
 from urllib.parse import parse_qs, unquote
 
-from assistant import cap, cards, config, datadir, gate, index, profileview, templates
+from assistant import cap, cards, config, datadir, gate, index, profiles, profileview, templates
 from assistant.cards import CardError
 from assistant.config import ConfigError
 from assistant.resources import WorkerError
@@ -337,7 +344,7 @@ def make_server(data, port: int = PORT, cfg: Optional[config.Config] = None, plu
     srv.plugin_dir = Path(plugin_dir) if plugin_dir is not None else None
     srv.clock = clock
     srv.usage_file = Path(usage_file) if usage_file is not None else None
-    srv.write_lock = threading.Lock()  # the cap answers, one at a time
+    srv.write_lock = threading.Lock()  # the cap answers, the profile switches and choices: one at a time
     srv.log_stream = sys.stderr
     srv.url = f"http://{HOST}:{srv.server_address[1]}/"
     return srv
@@ -470,13 +477,16 @@ class Handler(BaseHTTPRequestHandler):
             if method != "POST":
                 raise HTTPError(405, f"{method} is not allowed here; questions are saved with POST", allow="POST")
             return self.ask(parts[2])
-        if parts == ["api", "cap", "answer"]:
-            if method != "POST":
-                raise HTTPError(405, f"{method} is not allowed here; cap answers are sent with POST", allow="POST")
-            return self.cap_answer()
+        for route, what, write in ((["api", "cap", "answer"], "cap answers are", self.cap_answer),
+                                   (["api", "profile", "use"], "profile switches are", self.profile_use),
+                                   (["api", "profile", "choose"], "profile choices are", self.profile_choose)):
+            if parts == route:
+                if method != "POST":
+                    raise HTTPError(405, f"{method} is not allowed here; {what} sent with POST", allow="POST")
+                return write()
         if method != "GET":
-            raise HTTPError(405, f"{method} is not allowed: this page is read-only but for saving a question and "
-                                 "answering the cap card", allow="GET")
+            raise HTTPError(405, f"{method} is not allowed: this page is read-only but for saving a question, "
+                                 "answering the cap card and switching the access profile", allow="GET")
         if raw_path == "/":
             return 200, self.page()
         if raw_path == "/favicon.ico":  # browsers ask for it on every open; no icon, and no error line in the log
@@ -722,6 +732,84 @@ class Handler(BaseHTTPRequestHandler):
             # WorkerError: a safety net for any other one raised before the writes (cap_stop's own becomes a 200)
             except (ConfigError, CardError, OSError, WorkerError) as e:
                 raise HTTPError(500, str(e)) from e
+
+    # -- POST /api/profile/use and /api/profile/choose --------------------------------------------------------------
+
+    def _profile_body(self, what: str, shape: str, fields: tuple) -> dict:
+        """The POST's checked body: `name` a profile name (400), each of `fields` a text (400)."""
+        self._check_origin(what)
+        body = self._json_body(what, shape)
+        name = body.get("name")
+        if not isinstance(name, str) or not profiles.PROFILE_NAME.match(name):
+            raise HTTPError(400, f"name must be a profile name ({profiles.NAME_RULE}), not {name!r}")
+        for f in fields:
+            if not isinstance(body.get(f), str):
+                raise HTTPError(400, f"{f} missing" if body.get(f) is None
+                                else f"{f} must be text, not {type(body[f]).__name__}")
+        return body
+
+    def _profile_load(self, name: str) -> dict:
+        """The profile `name`: 404 when there is none, 409 with its error when it does not load."""
+        data = self.server.data
+        try:
+            return profiles.load(data, name)
+        except profiles.ProfileError as e:
+            try:
+                known = name in profiles.names(data)
+            except profiles.ProfileError:
+                known = True  # the folder cannot be read: not "unknown"
+            raise HTTPError(409 if known else 404, str(e)) from e
+
+    def _fetch_models(self, p: dict) -> tuple:
+        """`profiles.fetch_models`, fetched now: 502 when the models command fails, 500 for a broken price file."""
+        try:
+            return profiles.fetch_models(self.server.data, p)
+        except profiles.ModelsUnavailable as e:
+            raise HTTPError(502, str(e)) from e
+        except ConfigError as e:  # SpendError: the price override cannot be read
+            raise HTTPError(500, str(e)) from e
+
+    def _profile_switch(self, name: str) -> dict:
+        try:
+            return profiles.use(self.server.data, name)
+        except profiles.ProfileError as e:
+            raise HTTPError(500 if isinstance(e.__cause__, OSError) else 409, str(e)) from e
+
+    def profile_use(self):
+        """Switch the active profile through `profiles.use`, in `ap2 profile use`'s order: load, the current name,
+        and only for a profile that is not the active one and was never chosen, one fetch of its model list. That
+        one switches nothing: the reply is 200 `{"needs_choice": true, "choices"}`, for the page's choice box. The
+        switch takes effect at once: the next start or resume uses it, and running workers keep their own."""
+        name = self._profile_body("a profile switch", '{"name": "..."}', ())["name"]
+        data = self.server.data
+        with self.server.write_lock:
+            p = self._profile_load(name)
+            try:
+                current = profiles.active_name(data)
+            except profiles.ProfileError:
+                current = None  # broken: switching is its fix
+            if name != current and profiles.needs_choice(data, p):
+                models, _ = self._fetch_models(p)
+                return 200, {"needs_choice": True, "choices": profiles.choices(data, p, models)}
+            return 200, self._profile_switch(name)
+
+    def profile_choose(self):
+        """Save `name`'s model and effort through `profiles.choose`, checked against a list fetched now (never one
+        the page sent), then switch to it. A model or effort not in that list is 409 and nothing is saved or
+        switched."""
+        body = self._profile_body("a profile choice", '{"name": "...", "model": "...", "effort": "..."}',
+                                  ("model", "effort"))
+        name, model, effort = body["name"], body["model"], body["effort"]
+        data = self.server.data
+        with self.server.write_lock:
+            p = self._profile_load(name)
+            models, known = self._fetch_models(p)
+            try:
+                saved = profiles.choose(data, name, model, effort, models, known)
+            except profiles.ProfileError as e:  # not offered, or a save that failed
+                raise HTTPError(500 if isinstance(e.__cause__, OSError) else 409, str(e)) from e
+            out = self._profile_switch(name)
+            return 200, {"chosen": {"name": name, "model": model, "effort": saved["effort"]}, **out}
 
     # -- GET /api/sources, /api/templates, /api/settings ---------------------------------------------------------
 
