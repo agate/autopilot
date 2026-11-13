@@ -12,8 +12,9 @@ read, kept, logged or printed. Only "exit N" or the exception's class name is ke
   ever falls back to the subscription.
 - `note_session_end` (from every worker close): when the session ended because the gateway rejected the key (HTTP
   401 or 403, among the errors `apistop.tail` reads at the end of its transcript), the refresh command (else the
-  key command) runs once and `<data>/profile-refresh.json` (`REFRESH`) says when; a second rejection within KEY_TTL of that refresh sets the key error instead. A refusal that is not
-  about the key (a 400 from the gateway's safety guard, a 429 limit) never refreshes anything.
+  key command) runs once and `<data>/profile-refresh.json` (`REFRESH`) says when; a second rejection within
+  KEY_TTL of that refresh sets the key error instead. A refusal that is not about the key (a 400 from the
+  gateway's safety guard, a 429 limit) never refreshes anything.
 - `rotate` (`ap2 profile rotate NAME`) runs the rotate command; nothing else ever does.
 
 Every function takes the data folder and the time; there is no module clock. Everything is kept inside the data

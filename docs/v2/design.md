@@ -2501,7 +2501,7 @@ Calls the author made without asking (check them):
      hangs does not hold the lock. The refresh (choice 4) still runs inside `_close`, which `check` calls under the
      lock, for up to 60 s.
   4. One refresh on a rejected key. When `Workers._close` has stopped a worker (every close path: done, question,
-     died, idle, blocked, end, parked_failed), `keys.note_session_end` reads that session's API errors
+     died, idle, blocked, refused, end, parked_failed), `keys.note_session_end` reads that session's API errors
      (`apistop.tail`, choice 5) for the worker's own `profile` (its record's; none is the subscription: nothing to
      do). On a gateway profile whose session ended on an authentication failure newer than the last refresh, it runs
      `gateway.refresh_command` (else `key_command`) once (60 s), writes `<data>/profile-refresh.json` `{"at",
