@@ -50,6 +50,8 @@ class GuardTest(unittest.TestCase):
                     "echo x > ~/.claude/'autopilot'-data/RULES.md",
                     "echo x > ~/.claude/$'autopilot-data'/RULES.md",
                     'echo x > ~/.claude/$"autopilot-data"/RULES.md',
+                    "echo x > ~/.claude/autopilot$'-data'/x",
+                    'echo x > ~/.claude/autopilot$"-data"/x',
                     "echo x > ~/.claude/autopilot\\\n-data/RULES.md"):
             d = guard.decide(bash(cmd), self.W)
             self.assertIsNotNone(d, cmd)
@@ -61,6 +63,7 @@ class GuardTest(unittest.TestCase):
                     "'rm' ~/.claude/autopilot-data/x",
                     't"ee" ~/.claude/autopilot-data/x',
                     "$'rm' ~/.claude/autopilot-data/x",
+                    "c$'p' a ~/.claude/autopilot-data/x",
                     "s'ed' -i '' 's/a/b/' ~/.claude/autopilot-data/x",
                     "'dd' if=/dev/zero o\"f\"=~/.claude/autopilot-data/x"):
             self.assertIsNotNone(guard.decide(bash(cmd), self.W), cmd)
@@ -80,6 +83,7 @@ class GuardTest(unittest.TestCase):
     def test_guard_allows_near_misses_of_the_dd_open_and_sed_forms(self):
         for cmd in ("dd if=~/.claude/autopilot-data/x | cat",
                     "dd if=~/.claude/autopilot-data/x; echo of=1",
+                    "dd if=~/.claude/autopilot-data/x & echo of=1",
                     "python3 -c \"open('/x/autopilot-data/y')\"",
                     "python3 -c \"print(open('/x/autopilot-data/y').read(), 'w')\"",
                     "sed -n p ~/.claude/autopilot-data/x",
@@ -97,6 +101,14 @@ class GuardTest(unittest.TestCase):
             self._assert_fast((unit * (size // len(unit) + 1))[:size])
         self._assert_fast("1" * size + ">")
 
+    def test_guard_finds_dd_and_open_writes_in_linear_time(self):
+        size = 256 << 10
+        for unit in ("dd ", "open("):
+            text = (unit * (size // len(unit) + 1))[:size]
+            start = time.monotonic()
+            guard._writes(text)
+            self.assertLess(time.monotonic() - start, 1.0, unit)
+
     def test_guard_answers_a_64_kib_command_that_is_matched_in_linear_time(self):
         mark = " ~/.claude/autopilot-data/x "
         size = guard.MAX_COMMAND - len(mark) - 1
@@ -112,10 +124,14 @@ class GuardTest(unittest.TestCase):
         pad = "x" * (65 << 10)
         self.assertIsNotNone(guard.decide(bash("cat ~/.claude/autopilot-data/RULES.md " + pad), self.W))
         self.assertIsNotNone(guard.decide(bash('cat ~/.claude/"autopilot-data"/RULES.md ' + pad), self.W))
+        self.assertIsNotNone(guard.decide(bash("cat ~/.claude/autopilot\\\n-data/RULES.md " + pad), self.W))
+        cont = ": " + "a" * (64 << 10) + "; echo x > ~/.claude/autopilot$\\\n'-data/x'"
+        self.assertIsNotNone(guard.decide(bash(cont), self.W))
         self.assertIsNone(guard.decide(bash("echo x > /tmp/y " + pad), self.W))
         self.assertIsNone(guard.decide(bash("cat ~/.claude/autopilot-data/RULES.md " + pad), {}))
 
     def test_guard_reads_a_command_of_exactly_max_command_as_today(self):
+        self.assertEqual(guard.MAX_COMMAND, 64 << 10)
         head = "cat ~/.claude/autopilot-data/RULES.md "
         read = head + "x" * (guard.MAX_COMMAND - len(head))
         self.assertEqual(len(read), guard.MAX_COMMAND)
@@ -136,6 +152,21 @@ class GuardTest(unittest.TestCase):
 
     def test_guard_still_denies_a_write_after_an_ap_line_with_an_even_backslash_run(self):
         self.assertIsNotNone(guard.decide(bash("ap x \\\\\nrm ~/.claude/autopilot-data/y"), self.W))
+
+    def test_guard_does_not_join_a_line_after_an_escaped_backslash(self):
+        cmd = 'ap task show X \\\\\nc""p x ~/.claude/"autopilot-data"/y'
+        self.assertIsNotNone(guard.decide(bash(cmd), self.W))
+
+    def test_guard_joins_backslash_runs_of_64_kib_in_linear_time(self):
+        mark = " ~/.claude/autopilot-data/x "
+        size = guard.MAX_COMMAND - len(mark)
+        for unit in ("\\\\", "\\\n"):
+            self._assert_fast(mark + (unit * (size // len(unit) + 1))[:size])
+
+    def test_guard_checks_an_open_mode_as_written_when_the_path_is_quoted(self):
+        cmd = "python3 -c \"open('$HOME/.claude/\"autopilot-data\"/x', 'w')\""
+        self.assertIsNotNone(guard.decide(bash(cmd), self.W))
+        self.assertIsNone(guard.decide(bash("python3 -c \"open('$HOME/.claude/\"autopilot-data\"/x')\""), self.W))
 
 
 if __name__ == "__main__":

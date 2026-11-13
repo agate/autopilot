@@ -22,6 +22,7 @@ _HARMLESS = re.compile(r"\d+(?:>&\d+|>>?\s*/dev/null)?|>&\d+|&>>?\s*/dev/null|>>
 # What a second reading of each segment takes out: a line continuation, a `$` before a quote (`$"..."`, `$'...'`),
 # then any quote or backslash, so `c""p`, `'rm'` and `~/.claude/"autopilot-data"` read as bash runs them.
 _STRIP = re.compile(r"\\\n|\$(?=[\"'])|[\"'\\]")
+_ESCAPE = re.compile(r"\\(.)", re.S)  # a backslash and the one character it escapes
 # A command past this is not split and matched (a hook past its timeout lets the call through): it is denied when
 # it names a guarded path anywhere, as written or with `_STRIP` applied.
 MAX_COMMAND = 64 << 10
@@ -51,13 +52,23 @@ def _sed_in_place(text: str) -> bool:
     return bool(m) and any(_IN_PLACE.match(t) for t in text[m.end():].split())
 
 
+def _opens_to_write(text: str) -> bool:
+    """An `open(` with a `, 'w'` (or a, x, +) mode after it and no `)` between, found piece by piece."""
+    return any(_after_first(p, _OPEN, _MODE) for p in text.split(")"))
+
+
 def _writes(text: str) -> bool:
     """Whether a segment writes a file, in linear time: `_WRITE`, then `sed` with an in-place flag after it, `dd`
-    with an `of=` after it and no `|`, `;` or `&` between, and `open(` with a `, 'w'` (or a, x, +) mode after it
-    and no `)` between, each found piece by piece."""
+    with an `of=` after it and no `|`, `;` or `&` between, and `_opens_to_write`, each found piece by piece."""
     return bool(_WRITE.search(text) or _sed_in_place(text)
                 or any(_after_first(p, _DD, _OF) for p in re.split(r"[|;&]", text))
-                or any(_after_first(p, _OPEN, _MODE) for p in text.split(")")))
+                or _opens_to_write(text))
+
+
+def _join(cmd: str) -> str:
+    """`cmd` with each line continuation taken out: a `\\` + newline whose backslash is not itself escaped, read
+    pair by pair from the left (`\\\\` + newline is a literal backslash, and the newline still ends the line)."""
+    return _ESCAPE.sub(lambda m: "" if m.group(1) == "\n" else m.group(0), cmd)
 
 
 def _harmless(text: str) -> str:
@@ -72,9 +83,10 @@ def _denies(text: str, marks: list) -> bool:
 def decide(payload: dict, env) -> dict:
     """Deny shell writes into the data folder or the package from dispatcher, worker and one-off sessions.
     Each segment is read as written, and again with its quotes and backslashes taken out (`_STRIP`, after its
-    line continuations are joined), so a guarded path or a write verb split or escaped by them
-    (`"$AUTOPILOT_"DATA`, `~/.claude/autopilot\\-data`, `c""p`, `'rm'`) is still found. A command longer than
-    `MAX_COMMAND` is not split: it is denied when it names a guarded path anywhere.
+    line continuations are joined; an `open(..., 'w')` mode is still matched as written), so a guarded path or a
+    write verb split or escaped by them (`"$AUTOPILOT_"DATA`, `~/.claude/autopilot\\-data`, `c""p`, `'rm'`) is
+    still found. A command longer than `MAX_COMMAND` is not split: it is denied when it names a guarded path
+    anywhere.
     Best effort: it reads the command text, so a path built at run time (`$(...)`, a variable set earlier in the
     command, a script given to an interpreter) can get past it; the Edit/Write deny rules are the main guard."""
     if not env.get("AUTOPILOT_ROLE") or payload.get("tool_name") != "Bash":
@@ -83,14 +95,18 @@ def decide(payload: dict, env) -> dict:
     marks = _markers()
     plain = [_STRIP.sub("", m) for m in marks]
     if len(cmd) > MAX_COMMAND:
-        stripped = _STRIP.sub("", cmd)
+        stripped = _STRIP.sub("", _join(cmd))
         named = any(m in cmd for m in marks) or any(m in stripped for m in plain)
         return _deny() if named else None
     for seg in _SPLIT.split(cmd):  # as written: v1's reading before quotes were taken out
         if seg.strip() and not _is_ap(seg) and _denies(seg, marks):
             return _deny()
-    for seg in _SPLIT.split(cmd.replace("\\\n", "")):  # bash joins a `\` + newline into one line
-        if seg.strip() and not _is_ap(seg) and _denies(_STRIP.sub("", seg), plain):
+    for seg in _SPLIT.split(_join(cmd)):  # bash joins a `\` + newline into one line
+        if not seg.strip() or _is_ap(seg):
+            continue
+        stripped = _STRIP.sub("", seg)
+        # `_STRIP` takes out the quotes an open mode needs, so that one form is matched on the segment as written
+        if any(m in stripped for m in plain) and (_writes(_harmless(stripped)) or _opens_to_write(seg)):
             return _deny()
     return None
 
