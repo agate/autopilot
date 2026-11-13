@@ -961,10 +961,13 @@ class DeepRecordTest(unittest.TestCase):
 
     def test_deep_check_results_are_refused(self):
         # A repr of this value stops at the recursion limit on 3.12 but can walk all 100000 levels on 3.14: the
-        # fixed bound refuses it before any repr, so the refusal is the same on every Python.
+        # fixed bound refuses it before any repr, so the refusal is the same on every Python. A too-deep value that
+        # is not a dict is refused by the same bound, before the dict check reprs it.
         results = {"Correctness": [{"id": "check-1", "bucket": "fix", "text": deep(100000)}], "Test value": []}
         with self.assertRaisesRegex(PrLoopError, r"^record_check: results: nested too deep$"):
             prloop.record_check(at_limit(), results, "green")
+        with self.assertRaisesRegex(PrLoopError, r"^record_check: results: nested too deep$"):
+            prloop.record_check(at_limit(), deep(100000), "green")
 
     def results_with_depth(self, extra):
         """Check results whose Correctness finding text makes `results` nest MAX_DEPTH + extra deep, counted from
