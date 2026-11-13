@@ -91,8 +91,8 @@ def _parser() -> argparse.ArgumentParser:
     _import_v1_parser(sub)
     sub.add_parser("hook-guard", help="a worker's PreToolUse hook on Bash: deny shell writes into the data folder "
                                       "or the package")
-    sub.add_parser("hook-write", help="a read-only worker's PreToolUse hook on Write: deny a write outside its run "
-                                      "directory")
+    sub.add_parser("hook-write", help="a read-only worker's PreToolUse hook on Write: deny every write but its result "
+                                      "file or question.json in its run directory")
     return p
 
 

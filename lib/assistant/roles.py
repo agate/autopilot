@@ -24,13 +24,20 @@ FLOORS = MappingProxyType({
               "changing a template or a source asks first (design 3.6); the worker sessions (slice 6) add these "
               "as Edit and Write deny rules.",
     "read-only": "the worker floor, and no Edit or NotebookEdit: the role reads and runs commands that change "
-                 "nothing. Its one write is its result file: Write only there, which the worker sessions (slice 6) "
+                 "nothing, and the GitHub and git write commands (READ_ONLY_BASH_DENIED) are denied by rule. Its "
+                 "one write is its result file: Write only there, which the worker sessions (slice 6) "
                  "add as a deny rule for every other path. A role without Write (reviewer-angle) returns its "
                  "findings to the loop that started it.",
 })
 
 # Tools a read-only role never has. Write is not here: it writes the role's result file and nothing else.
 READ_ONLY_DENIED = ("Edit", "NotebookEdit")
+# Bash commands a read-only role never runs (v1's `perms.BASH_DENY` rule shape): its session holds the user's gh and
+# git logins, so the write verbs are denied by rule, not only by its process's prose. `gh api` with a field or a
+# method is not here.
+READ_ONLY_BASH_DENIED = ("Bash(gh pr merge:*)", "Bash(gh pr close:*)", "Bash(gh pr reopen:*)", "Bash(gh pr ready:*)",
+                         "Bash(gh pr edit:*)", "Bash(gh pr create:*)", "Bash(gh release:*)", "Bash(git push:*)",
+                         "Bash(git commit:*)")
 
 
 @dataclass(frozen=True)

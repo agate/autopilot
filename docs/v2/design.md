@@ -712,14 +712,20 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   it has acted on the workers on record, starts one `pr-review` worker for each card of kind `pr-review` that is not
   in lane `done`, has no worker on record and no line in this pass (so a card closed in a pass starts again only on
   the next one), has no open `ask`, whose `sessions["pr-review"].state` is absent or `ended`, and is not reviewed at
-  its head (`pr.reviewed_sha` missing, or not `pr.head_sha`). It runs in the card's run directory (made when
-  missing; the role reviews from GitHub, so `plan` says "no checkout given"), with the brief from the card's
-  template. Each start is a line `{card, role: "pr-review", state: "due", did: "started"}`; a start the cap, the key,
+  its head (`pr.reviewed_sha` missing, or not `pr.head_sha`). It runs in a fresh, empty folder of its own outside
+  the data folder (`tempfile.mkdtemp`, prefix `ap2-pr-review-`, mode 0700, one per start; the role reviews from
+  GitHub, so `plan` says "no checkout given"), with the brief from the card's template. Not the run directory:
+  the Bash guard judges the data-folder paths a command spells out, so from inside the data folder a relative
+  `../../config.yaml` would pass it, and the folder a session runs in is its project root, whose `.claude/`,
+  `.mcp.json` and `CLAUDE.md` a later session there would load. The run directory is still made when missing and
+  `AP2_RUN_DIR` still names it: the report goes there by its absolute path (`plan` prints it). A resume (`--resume`
+  or in place) keeps the folder on record; when it is gone, the resume says the worker's folder is gone. A refused
+  start removes its folder again. Each start is a line `{card, role: "pr-review", state: "due", did: "started"}`; a start the cap, the key,
   a pause, `max_workers` or the profile refuses is the same line with `did: "nothing"` and a `note`, and the later
   cards still get their try. Shadow mode starts none: each due card's line says so. The start lives in `check`, not
   the gate, because the gate starts no process (`gate.py`).
-- **[decided by the builder]** The done path. A `pr-review` worker is done when `prreview.json` is newer than its
-  start and its turn has ended (idle, done, failed or gone; 8.2 rule 1): while it still works or waits at a prompt
+- **[decided by the builder]** The done path. A `pr-review` worker is done when `prreview.json` is newer than the
+  round's first start and its turn has ended (idle, done, failed or gone; 8.2 rule 1): while it still works or waits at a prompt
   the report is a draft the role is still checking, so `check` leaves it. A turn that ended on a park or an API
   stop leaves a draft too: the worker is parked (or paused), not done. When `check` closes it as done, it
   runs `apply` and then `sync` on the card, by `check`'s `by`, once the worker list's lock is free (sync reads
@@ -730,15 +736,27 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   (8.2): any start of the role and `finish` close it, and so does a `check` that finds the card reviewed at its
   head (the user applied it by hand). A `sync` that sees `new_commits` writes the new `pr.head_sha`, so the next
   `check` starts a `delta`; `current` and the four done states start nothing (`not_reviewed` never follows an
-  `apply` that worked). A pass stopped between the close and the apply (Ctrl-C, a killed process) leaves the report unapplied
+  `apply` that worked). A turn that ends with no report (the plan failed twice, say, and the command says to write
+  nothing and end) is closed as idle after 60 minutes (8.2 rule 5) and also sets the card's `ask` (`type: fix`,
+  `reason: review_idle`): its turn ended with no report, resume it with `ap2 worker start CARD pr-review
+  --resume`. Without it the card would sit `paused`, never started again and never shown to the user. Like the
+  failed-apply ask it holds the next auto-start back, and any start of the role and `finish` close it. A pass
+  stopped between the close and the apply (Ctrl-C, a killed process) leaves the report unapplied
   and the session `ended` with no `reviewed_sha`, so the next `check` starts a whole new review: a worker run is
   lost, nothing on the card is.
 - **[decided by the builder]** The read-only floor (`roles.FLOORS["read-only"]`). The `pr-review` settings add
-  `Edit` and `NotebookEdit` as deny rules (`roles.READ_ONLY_DENIED`) to the worker floor, and a third PreToolUse
-  hook, `{"matcher": "Write", ...: "\"<package>/bin/ap2\" hook-write"}` (`workers.write_guard`), that denies a
-  Write whose path (links followed) is not inside the card's run directory (`AP2_RUN_DIR`), or is a
-  `settings-*.json` there; no run directory, or a path that is not absolute, is denied too. A deny rule cannot do
-  this: deny wins over allow, so no rule leaves one folder open. The hook runs through `cli.main` (not `bin/ap2`'s
+  `Edit` and `NotebookEdit` as deny rules (`roles.READ_ONLY_DENIED`) to the worker floor, the GitHub and git write
+  commands as Bash deny rules in v1's rule shape (`roles.READ_ONLY_BASH_DENIED`: `gh pr merge`, `gh pr close`,
+  `gh pr reopen`, `gh pr ready`, `gh pr edit`, `gh pr create`, `gh release`, `git push`, `git commit`, each as
+  `Bash(<command>:*)`), because the session holds the user's gh and git logins, and a third PreToolUse hook,
+  `{"matcher": "Write", ...: "\"<package>/bin/ap2\" hook-write"}` (`workers.write_guard`). The hook is an
+  allow-list: a Write passes only when its path (links followed) sits directly in the card's run directory
+  (`AP2_RUN_DIR`) and its name, in any case, is the role's result file (`prreview.json` for `pr-review`) or
+  `question.json`. Every other Write is denied: a settings file in any case (`SETTINGS-pr-review.json` is the same
+  file on a case-insensitive disk), `.claude/settings.json`, `.mcp.json`, `CLAUDE.md`, a subfolder. No run
+  directory, or a path that is not absolute, is denied too. A deny rule cannot do this: deny wins over allow, so no
+  rule leaves one file open. Not in the floor yet: `gh api` with a field or a method (`-f`, `--input`, `-X`), and a
+  sandbox. The hook runs through `cli.main` (not `bin/ap2`'s
   fast path), so it loads more than the Bash guard does; the role writes one file a round.
 - **[decided by the builder]** A session archive's name starts with its role in lowercase letters only
   (`transcripts.ROLE`), so a `pr-review` session is archived as `prreview-<session id>.jsonl.gz`.
@@ -931,8 +949,10 @@ Rules:
 
 1. **[decided, from v1]** A worker ends a round by writing its result file (`handback.json`, `review.json`,
    `prloop.json`; the `pr-review` role's is `prreview.json`, and its done path applies and syncs the review, 6.2).
-   A `prreview.json` counts only once the worker's turn has ended (the listing shows it idle, done or failed, or
-   the session is gone): the role checks its report after writing it and fixes it until the check passes, so while
+   A `prreview.json` counts from the round's first start (`round_started_at` on the worker's record, kept through
+   the in-place resumes of a parked or dead worker; `started_at` moves with each resume), so a report that passed
+   its check before a park is still the round's when the resumed turn ends without writing it again. It counts
+   only once the worker's turn has ended (the listing shows it idle, done or failed, or the session is gone): the role checks its report after writing it and fixes it until the check passes, so while
    the session still works or waits at a prompt the file is a draft and the worker stays running (or blocked). A
    turn that ended because the worker parked itself, or on a usage limit or a gateway's refusal, did not
    end on a checked report either: the worker is parked (or paused) as any other role, and the draft

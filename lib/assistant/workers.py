@@ -50,14 +50,19 @@ refresh holds new work instead, and an error older than the last refresh does no
 PR review cards review themselves (design 6.2 point 2). After acting on the workers on record, a live `check` starts
 one `pr-review` worker for each card of kind `pr-review` that is not in lane `done`, has no worker on record and no
 line in this pass, has no open ask, whose `sessions["pr-review"].state` is absent or `ended`, and is not reviewed at
-its head (`pr.reviewed_sha` missing or not `pr.head_sha`): in the card's run directory, with the template's brief,
-behind `/autopilot:pr-review <card> <stage>` (`delta` once the card's `reviews` list holds one, else `review`). A
-refused start (the cap, the key, a pause, `max_workers`, the profile) is a note on that card's line; shadow mode
-starts none and says so. Such a worker is done when `prreview.json` is newer than its start and its turn has ended
-(idle, done, failed or gone; while it works or waits at a prompt it is still checking a draft). Then `check` runs `prreview.apply` and then `prreview.sync` on its
-card, with the worker list's lock free; an apply that fails sets the card's `ask` (`fix`), which holds the next
-auto-start back, and a sync that fails is a note. Its floor is read-only: no Edit or NotebookEdit, and a Write hook
-(`ap2 hook-write`, `write_guard`) refuses a Write outside the card's run directory.
+its head (`pr.reviewed_sha` missing or not `pr.head_sha`): in a fresh, empty folder of its own outside the data
+folder (`tempfile.mkdtemp`, one per start; AP2_RUN_DIR still names the card's run directory, where its report goes),
+with the template's brief, behind `/autopilot:pr-review <card> <stage>` (`delta` once the card's `reviews` list holds
+one, else `review`). A refused start (the cap, the key, a pause, `max_workers`, the profile) is a note on that card's
+line; shadow mode starts none and says so. Such a worker is done when `prreview.json` is newer than the round's first
+start (`round_started_at`, kept through in-place resumes) and its turn has ended (idle, done, failed or gone; while it
+works or waits at a prompt it is still checking a draft). Then `check` runs `prreview.apply` and then `prreview.sync`
+on its card, with the worker list's lock free; an apply that fails sets the card's `ask` (`fix`), which holds the
+next auto-start back, and a sync that fails is a note. A turn that ends with no report is closed idle after IDLE_MIN
+minutes with the card's `ask` (`fix`, `review_idle`), which holds the auto-start back as well. Its floor is
+read-only: no Edit or NotebookEdit, no GitHub or git write commands (`roles.READ_ONLY_BASH_DENIED`), and a Write
+hook (`ap2 hook-write`, `write_guard`) allows a Write only to its report or `question.json` in the card's run
+directory.
 
 Starting (or resuming) a session can make branches and PRs, so it needs live mode; listing, classifying, ending
 and archiving work in shadow mode. v1 is reused by import (`lib/autopilot/workers.py`, `sessions.py`,
@@ -72,6 +77,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -103,9 +109,11 @@ AGENTS = dict(v1_workers.AGENTS)  # the pr role runs the PR loop command instead
 PR_COMMAND = "/autopilot:pr-loop "
 REVIEW_COMMAND = "/autopilot:pr-review "  # then the card id and the stage, the command's two arguments
 APPLY_FAILED = "review_apply_failed"  # the `reason` of the ask a pr-review report that could not be applied raises
+REVIEW_IDLE = "review_idle"  # the `reason` of the ask a pr-review worker closed idle with no report raises
+REVIEW_DIR = "ap2-pr-review-"  # the prefix of the empty folder an auto-started pr-review worker runs in
 SHADOW_REVIEW = "shadow mode starts no worker; this card waits for its review in live mode"
-WRITE_DENIED = ("a read-only v2 worker writes only in its own run directory (AP2_RUN_DIR), and never its settings "
-                "files there")
+WRITE_DENIED = ("a read-only v2 worker writes only its result file or question.json, at the top of its own run "
+                "directory (AP2_RUN_DIR)")
 QUESTION = "question.json"
 PERMISSION_MODE = "auto"  # v1's default `permission_mode`
 EFFORT = "xhigh"  # v1's default `worker_effort`: the built-in subscription profile's effort (`profiles.builtin`)
@@ -140,7 +148,8 @@ RUN_SKEW_MIN = 2  # an API error this many minutes before a run's start may stil
 #              Closed by every start and finish, like the paused hint.
 #   apply    - a pr-review report that could not be put on the card (`prreview.apply` failed). Closed by every
 #              start and finish, and by a check that finds the card reviewed at its head (applied by hand).
-WORKER_ASKS = ("attach", "paused", "question", "refused", "apply")
+#   idle     - a pr-review worker closed idle with no report: resume it. Closed by every start and finish.
+WORKER_ASKS = ("attach", "paused", "question", "refused", "apply", "idle")
 # Every way a worker is closed (`Workers._finish_close`): path -> (the state saved on the card, the line's `did`,
 # drop_on_error). drop_on_error drops the record when a step after the stop fails, where a kept record would be
 # misread as dead and resumed (end and both pauses); the other paths keep it, so the next check closes it again.
@@ -257,10 +266,11 @@ def floor(role: str, project: dict, data: Path, env: dict, profile: Optional[dic
         {"matcher": "*", "hooks": [{"type": "command", "command": f"\"{ap2}\" hook-park", "timeout": 5}]},
         {"matcher": "Bash", "hooks": [{"type": "command", "command": f"\"{ap2}\" hook-guard", "timeout": 5}]}]}
     if role in roles.ROLES and roles.ROLES[role].floor == "read-only":
-        # The read-only floor (roles.FLOORS): no Edit or NotebookEdit at all, and its one write, the result file, in
-        # its run directory only. A deny rule cannot leave one folder open (deny wins over allow), so a Write hook
-        # (`ap2 hook-write`, `write_guard`) refuses every Write outside the run directory.
-        deny += list(roles.READ_ONLY_DENIED)
+        # The read-only floor (roles.FLOORS): no Edit or NotebookEdit at all, no GitHub or git write command, and
+        # its one write, the result file (or its question), in its run directory only. A deny rule cannot leave one
+        # file open (deny wins over allow), so a Write hook (`ap2 hook-write`, `write_guard`) refuses every other
+        # Write.
+        deny += list(roles.READ_ONLY_DENIED) + list(roles.READ_ONLY_BASH_DENIED)
         hooks["PreToolUse"].append(
             {"matcher": "Write", "hooks": [{"type": "command", "command": f"\"{ap2}\" hook-write", "timeout": 5}]})
     out = {"permissions": {"deny": deny, "allow": allow}, "env": dict(env), "hooks": hooks}
@@ -268,20 +278,23 @@ def floor(role: str, project: dict, data: Path, env: dict, profile: Optional[dic
 
 
 def write_guard(payload, env) -> Optional[dict]:
-    """The Write hook's verdict on one tool call (`ap2 hook-write`, wired by the read-only floor): a PreToolUse deny
-    for a v2 worker's (`AP2_ROLE` set) Write whose `file_path`, every link followed, is not inside its run directory
-    (`AP2_RUN_DIR`), or is a `settings-*.json` there; None (no opinion) inside it, for any other tool, and outside a
-    v2 worker. No run directory, or a path that is not absolute text: denied."""
+    """The Write hook's verdict on one tool call (`ap2 hook-write`, wired by the read-only floor): an allow-list. A
+    v2 worker's (`AP2_ROLE` set) Write is let through (None, no opinion) only when its `file_path`, every link
+    followed, sits directly in its run directory (`AP2_RUN_DIR`) and is named, in any case, as the role's result file
+    (`RESULT_FILES`) or QUESTION; any other Write is a PreToolUse deny. None for any other tool and outside a v2
+    worker. No run directory, or a path that is not absolute text: denied."""
     if not env.get("AP2_ROLE") or not isinstance(payload, dict) or payload.get("tool_name") != "Write":
         return None
     tool_input = payload.get("tool_input")
     path = tool_input.get("file_path") if isinstance(tool_input, dict) else None
     run = env.get("AP2_RUN_DIR") or ""
+    names = {QUESTION.casefold()}
+    if RESULT_FILES.get(env.get("AP2_ROLE")):
+        names.add(RESULT_FILES[env["AP2_ROLE"]].casefold())
     ok = False
     if isinstance(path, str) and os.path.isabs(path) and os.path.isabs(run):
         real, home = os.path.realpath(path), os.path.realpath(run)
-        ok = (real != home and os.path.commonpath([real, home]) == home
-              and not re.fullmatch(r"settings-.*\.json", os.path.basename(real)))
+        ok = os.path.dirname(real) == home and os.path.basename(real).casefold() in names
     if ok:
         return None
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
@@ -772,6 +785,8 @@ class Workers:
             return "refused"
         if ask.get("type") == "fix" and ask.get("reason") == APPLY_FAILED:
             return "apply"
+        if ask.get("type") == "fix" and ask.get("reason") == REVIEW_IDLE:
+            return "idle"
         return None
 
     def _close_worker_asks(self, card_id: str, role: str, by: str, kinds=WORKER_ASKS) -> None:
@@ -885,7 +900,10 @@ class Workers:
             rec = {"card": card_id, "role": role, "project": project.get("name"), "session_name": name,
                    "session_id": "", "short_id": short, "ports": port_range, "needs": needs, "cwd": cwd,
                    "branch": branch, "profile": prof["name"], "started_at": cards.stamp(now), "resumes": 0,
-                   "parked": None, "idle_since": None, "blocked_since": None}
+                   "parked": None, "idle_since": None, "blocked_since": None,
+                   # The round's first start: a pr-review report newer than it is the round's own, through every
+                   # resume of a parked worker (`classify`). `started_at` moves with each resume.
+                   "round_started_at": (parked or {}).get("round_started_at") or cards.stamp(now)}
             if parked and parked.get("limit_parks"):
                 rec["limit_parks"] = parked["limit_parks"]  # the limit parks in a row go on through the resume
             # On record before the listing is asked for its id: a Ctrl-C or an error there still leaves a record
@@ -943,9 +961,10 @@ class Workers:
         """Close the worker for `mark` (`_mark`) and do that close's follow-up; return the fields for its line.
         Each close lives here only: its first try and the retry of a close that was started (the record's
         `closing`) both run it. Follow-ups: the question's `answer` ask, the `fix` ask of a worker that died twice
-        or cannot resume after parking, the blocked pause's resume hint and the gateway refusal's resume hint."""
+        or cannot resume after parking, the blocked pause's resume hint, the gateway refusal's resume hint and the
+        resume hint of a pr-review worker closed idle with no report (nothing else would start it again)."""
         card_id, role, path = rec["card"], rec["role"], mark["path"]
-        if path in ("blocked", "refused"):
+        if path in ("blocked", "refused") or (path == "idle" and role == REVIEW_ROLE):
             try:
                 closed = self._close(rec, records, mark, by)
             finally:
@@ -973,9 +992,14 @@ class Workers:
     @staticmethod
     def _pause_ask(rec: dict, path: str) -> dict:
         """The `fix` ask a pause leaves on the card: how to go on once the worker was stopped (`blocked`: after
-        BLOCKED_MIN minutes at a permission prompt; `refused`: a gateway's safety guard refuses its conversation)."""
+        BLOCKED_MIN minutes at a permission prompt; `refused`: a gateway's safety guard refuses its conversation;
+        `idle`: a pr-review worker's turn ended with no report)."""
         card_id, role = rec["card"], rec["role"]
         resume = f"ap2 worker start {card_id} {role} --resume"
+        if path == "idle":
+            return {"type": "fix", "role": role, "reason": REVIEW_IDLE,
+                    "text": f"Stopped after {IDLE_MIN} minutes idle: its turn ended with no report, so the review is "
+                            f"not on the card and does not start again on its own. Resume it with `{resume}`."}
         if path == "blocked":
             return {"type": "fix", "role": role, "reason": ATTACH, "stage": "paused",
                     "text": f"Stopped after {BLOCKED_MIN} minutes at a permission prompt. Resume it with `{resume}`."}
@@ -1051,9 +1075,13 @@ class Workers:
         `claude agents --json --all` (None when it failed: unknown, not empty). A pr-review report is done only once
         the session's turn has ended (idle, done, failed or gone): its process checks the report after writing it
         and fixes it until the check passes, so while the session works (or waits at a prompt) it is a draft. A
-        parked pr-review worker stopped itself before that check could pass, so its report is a draft too: parked."""
+        parked pr-review worker stopped itself before that check could pass, so its report is a draft too: parked.
+        A pr-review report counts from the round's first start (`round_started_at`), not the last resume's: a report
+        that passed its check before a park is still the round's once the resumed turn ends."""
         run = self.run_dir(rec["card"])
-        if self._newer(run / RESULT_FILES[rec["role"]], rec):
+        since = dict(rec, started_at=rec.get("round_started_at") or rec.get("started_at")) \
+            if rec["role"] == REVIEW_ROLE else rec
+        if self._newer(run / RESULT_FILES[rec["role"]], since):
             if rec["role"] != REVIEW_ROLE:
                 return "done"
             if rec.get("parked"):
@@ -1589,11 +1617,29 @@ class Workers:
                 run = self.run_dir(card["id"])
                 brief = self._review_brief(catalog, card)
                 run.mkdir(parents=True, exist_ok=True)
-                self.start(card["id"], REVIEW_ROLE, cwd=run, prompt=brief, by=by)
+                # Its own fresh, empty folder (0700) outside the data folder, not the run directory: the Bash guard
+                # judges the data-folder paths a command names, so a relative `../../config.yaml` from inside the data
+                # folder would pass it, and the folder is the session's project root, whose `.claude/`, `.mcp.json`
+                # and `CLAUDE.md` a later session there would load. Its report still goes to AP2_RUN_DIR. A refused
+                # start removes the folder again (when no record points at it), so a pass at the cap leaves none.
+                home = tempfile.mkdtemp(prefix=REVIEW_DIR)
+                try:
+                    self.start(card["id"], REVIEW_ROLE, cwd=home, prompt=brief, by=by)
+                except Exception:
+                    self._drop_review_dir(home)
+                    raise
                 entry["did"] = "started"
             except Exception as e:  # noqa: BLE001 - the cap, the key, a pause, max_workers, the profile: a note
                 self._note_error(entry, e)
         return out
+
+    def _drop_review_dir(self, home: str) -> None:
+        """Remove the empty folder made for a pr-review start that was refused, unless a record points at it."""
+        try:
+            if not any(r.get("cwd") == str(Path(home).resolve()) for r in self.registry.read()):
+                os.rmdir(home)
+        except Exception:  # noqa: BLE001 - the start's own error is the one raised
+            pass
 
     @staticmethod
     def _review_is_due(card: dict) -> bool:

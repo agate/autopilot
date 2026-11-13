@@ -3457,6 +3457,12 @@ class PrReviewCase(WorkerCase):
     def setUp(self):
         super().setUp()
         self.gh = prr.Replay([])
+        # The auto-started reviewer's own empty folder (`tempfile.mkdtemp`) is made here, outside the data folder.
+        self.scratch = self.tmp / "scratch"
+        self.scratch.mkdir()
+        patch = mock.patch.object(tempfile, "tempdir", str(self.scratch))
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def workers(self, cfg=None, **kw) -> Workers:
         kw.setdefault("gh", self.gh)
@@ -3586,6 +3592,14 @@ class PrReviewRoleTest(PrReviewCase):
         self.assertEqual(ro["hooks"]["PreToolUse"][2:], [{"matcher": "Write", "hooks": [
             {"type": "command", "command": f"\"{ROOT / 'bin' / 'ap2'}\" hook-write", "timeout": 5}]}])
         self.assertEqual(len(base["hooks"]["PreToolUse"]), 2)  # the worker roles keep their two hooks
+        # Its session holds the user's gh and git logins: the write verbs are denied by rule, not only by its prose.
+        for rule in ("Bash(gh pr merge:*)", "Bash(gh pr close:*)", "Bash(gh pr reopen:*)", "Bash(gh pr ready:*)",
+                     "Bash(gh pr edit:*)", "Bash(gh pr create:*)", "Bash(gh release:*)", "Bash(git push:*)",
+                     "Bash(git commit:*)"):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, roles.READ_ONLY_BASH_DENIED)
+                self.assertIn(rule, ro["permissions"]["deny"])
+                self.assertNotIn(rule, base["permissions"]["deny"])
 
     def test_a_write_outside_the_run_directory_is_denied(self):
         run = transcripts.run_dir(self.data, "c-20260105-090000-abcdef")
@@ -3595,11 +3609,16 @@ class PrReviewRoleTest(PrReviewCase):
         def write(path):
             return workers_mod.write_guard({"tool_name": "Write", "tool_input": {"file_path": str(path)}}, env)
 
+        # Only its two files, at the run directory's top level: its report and its question.
         self.assertIsNone(write(run / "prreview.json"))
-        self.assertIsNone(write(run / "notes" / "x.md"))
+        self.assertIsNone(write(run / "question.json"))
+        self.assertIsNone(write(run / "PRReview.json"))  # the same file on a case-insensitive disk
         for bad in (self.data / "config.yaml", run.parent / "c-20260105-090000-ffffff" / "prreview.json",
                     run / ".." / "c-20260105-090000-ffffff" / "x.json", self.wt / "README.md",
-                    run / "settings-pr-review.json", "relative.json", run.parent, ""):
+                    run / "settings-pr-review.json", "relative.json", run.parent, "", run / "notes" / "x.md",
+                    run / "SETTINGS-pr-review.json", run / "settings-implement.json",
+                    run / "settings-discover-pr-review.json", run / ".claude" / "settings.json", run / "CLAUDE.md",
+                    run / ".mcp.json", run / "handback.json", run / "notes" / "prreview.json", run):
             with self.subTest(bad=str(bad)):
                 out = write(bad)
                 self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
@@ -3607,9 +3626,13 @@ class PrReviewRoleTest(PrReviewCase):
         (run / "out").symlink_to(self.wt)
         self.assertEqual(write(run / "out" / "x")["hookSpecificOutput"]["permissionDecision"], "deny")
         # No run directory: fail closed. Not a v2 worker, or not a Write: no opinion.
-        self.assertEqual(workers_mod.write_guard({"tool_name": "Write", "tool_input": {"file_path": str(run / "x")}},
+        self.assertEqual(workers_mod.write_guard({"tool_name": "Write",
+                                                  "tool_input": {"file_path": str(run / "prreview.json")}},
                                                  {"AP2_ROLE": "pr-review"})["hookSpecificOutput"]["permissionDecision"],
                          "deny")
+        # A link named like the report that points out of the run directory is judged where it points.
+        (run / "prreview.json").symlink_to(self.wt / "prreview.json")
+        self.assertEqual(write(run / "prreview.json")["hookSpecificOutput"]["permissionDecision"], "deny")
         self.assertIsNone(workers_mod.write_guard({"tool_name": "Write", "tool_input": {"file_path": "/x"}}, {}))
         self.assertIsNone(workers_mod.write_guard({"tool_name": "Read", "tool_input": {"file_path": "/x"}}, env))
 
@@ -3628,6 +3651,11 @@ class PrReviewRoleTest(PrReviewCase):
 
         self.assertEqual(hook(run / "prreview.json"), "")
         self.assertEqual(json.loads(hook(self.wt / "x.py"))["hookSpecificOutput"]["permissionDecision"], "deny")
+        # A payload that is not JSON is denied: the hook fails closed.
+        r = subprocess.run([sys.executable, str(ROOT / "bin" / "ap2"), "hook-write"], input="{not json",
+                           capture_output=True, text=True, env=env, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)["hookSpecificOutput"]["permissionDecision"], "deny")
 
     def test_a_started_worker_gets_the_read_only_floor(self):
         cid = self.pr_card()
@@ -3650,7 +3678,18 @@ class PrReviewAutoStartTest(PrReviewCase):
         starts = self.review_starts()
         self.assertEqual(len(starts), 1)
         run = transcripts.run_dir(self.data, due)
-        self.assertEqual(starts[0]["cwd"], str(run))  # the card's run directory, made for it
+        self.assertTrue(run.is_dir())  # the card's run directory, made for it
+        self.assertEqual(starts[0]["env"]["AP2_RUN_DIR"], str(run))  # where it writes its report
+        # It runs in a fresh, empty folder of its own outside the data folder: a relative path in its shell is never
+        # a data-folder path, and nothing it writes there is loaded as a project's settings by a later session.
+        cwd = Path(starts[0]["cwd"])
+        self.assertTrue(cwd.is_dir())
+        self.assertNotEqual(cwd, run)
+        self.assertNotIn(self.data, [cwd, *cwd.parents])
+        self.assertEqual(cwd.parent, self.scratch)
+        self.assertTrue(cwd.name.startswith("ap2-pr-review-"), cwd.name)
+        self.assertEqual(cwd.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(resources.Registry(self.data).read()[0]["cwd"], str(cwd))
         prompt = starts[0]["argv"][-1]
         self.assertTrue(prompt.startswith(f"/autopilot:pr-review {due} review\n"))
         self.assertIn(f"Review the pull request on card {due} with commands/pr-review.md, read-only.", prompt)
@@ -3706,6 +3745,7 @@ class PrReviewAutoStartTest(PrReviewCase):
             self.assertNotIn("error", lines[cid])
         self.assertEqual(self.review_starts(), [])
         self.assertEqual([r["card"] for r in resources.Registry(self.data).read()], [busy["card"]])
+        self.assertEqual(list(self.scratch.iterdir()), [])  # a refused start leaves no folder behind
 
     def test_a_refused_start_does_not_stop_the_later_cards(self):
         a = self.pr_card()
@@ -3726,6 +3766,17 @@ class PrReviewAutoStartTest(PrReviewCase):
         lines = {e["card"]: e for e in out}
         self.assertEqual((lines[a]["did"], lines[a]["note"]), ("nothing", "no active profile"))
         self.assertEqual(lines[b]["did"], "started")
+
+    def test_a_pass_that_resumes_a_dead_worker_still_starts_the_due_reviews(self):
+        w = self.workers()
+        a = self.start(w)  # an implement worker on another card
+        self.drop_agent(a["short_id"])  # it died, with its one resume left
+        self.clock.advance(5)
+        due = self.pr_card()
+        out = w.check()
+        self.assertEqual([(e["card"], e["role"], e["did"]) for e in out],
+                         [(a["card"], "implement", "resumed"), (due, "pr-review", "started")])
+        self.assertEqual(len(self.review_starts()), 1)
 
     def test_shadow_mode_starts_nothing_and_says_so(self):
         cid = self.pr_card()
@@ -3775,6 +3826,7 @@ class PrReviewDonePathTest(PrReviewCase):
         self.assertNotIn("verdict", out[0])
         self.assertNotIn("sync", out[0])  # sync runs only after an apply that worked
         self.assertIn("the review was not applied", out[0]["note"])
+        self.assertNotIn("error", out[0])
         self.assertEqual(self.gh.log, [])
         ask = self.get(cid)["ask"]
         self.assertEqual((ask["type"], ask["role"], ask["from"]), ("fix", "pr-review", "worker"))
@@ -3808,6 +3860,7 @@ class PrReviewDonePathTest(PrReviewCase):
         self.assertNotIn("sync", out[0])
         self.assertIn("the PR was not synced", out[0]["note"])
         self.assertIn("no recorded reply", out[0]["note"])
+        self.assertNotIn("error", out[0])
         c = self.get(cid)
         self.assertEqual((c["verdict"]["verdict"], c["pr"]["reviewed_sha"]), ("changes", prr.A))
         self.assertIsNone(c.get("ask"))
@@ -3821,6 +3874,79 @@ class PrReviewDonePathTest(PrReviewCase):
         self.assertEqual(out[0]["did"], "ended")
         self.assertEqual(out[0]["error"], "KeyError")
         self.assertEqual(self.get(cid)["ask"]["role"], "pr-review")
+
+    def test_a_done_close_whose_stop_lands_late_is_applied_by_the_next_check(self):
+        cid = self.started()
+        self.the_worker_reviews(cid)
+        self.view("open_head_a")
+        with StoppedLeavesTheListTest.stop_lands_late():
+            self.assertEqual(self.workers().check()[0]["error"], "TimeoutExpired")
+        self.assertEqual(resources.Registry(self.data).read()[0]["closing"]["path"], "done")
+        self.assertNotIn("verdict", self.get(cid))
+        out = self.workers().check()
+        self.assertEqual((out[0]["card"], out[0]["did"], out[0]["verdict"], out[0]["sync"]),
+                         (cid, "ended", "changes", "current"))
+        self.assertEqual(self.get(cid)["pr"]["reviewed_sha"], prr.A)
+        self.assertEqual(resources.Registry(self.data).read(), [])
+
+    def test_a_question_close_whose_stop_lands_late_is_not_applied(self):
+        cid = self.started()
+        self.write_result(cid, "question.json", {"text": "Which base branch?"})
+        with StoppedLeavesTheListTest.stop_lands_late():
+            self.assertEqual(self.workers().check()[0]["error"], "TimeoutExpired")
+        self.assertEqual(resources.Registry(self.data).read()[0]["closing"]["path"], "question")
+        with mock.patch.object(prreview, "apply") as apply:
+            out = self.workers().check()
+        apply.assert_not_called()
+        self.assertEqual((out[0]["card"], out[0]["did"]), (cid, "asked"))
+        self.assertEqual(self.get(cid)["ask"]["type"], "answer")
+
+    def test_a_report_written_before_a_park_is_applied_after_the_resumed_turn_ends(self):
+        cid = self.started()
+        w = self.workers()
+        # A report that passed its check, written at the round's start time, then the worker parks itself.
+        self.the_worker_reviews(cid, end_turn=False)
+        at = self.clock().timestamp()
+        os.utime(transcripts.run_dir(self.data, cid) / prreview.REPORT_FILE, (at, at))
+        w.park(cid, "pr-review", "at the park line", usage_file=usage_file(self.tmp / "u.json", 95))
+        rec = resources.Registry(self.data).read()[0]
+        self.set_agent(rec["short_id"], state="done", status="idle")
+        self.clock.advance(4 * 60)  # past the 12:00 reset and its 5 minutes
+        fresh = usage_file(self.tmp / "fresh.json", 3, resets_at="2026-01-05T17:00:00+00:00", fetched=self.clock())
+        with mock.patch.object(prreview, "apply") as apply:
+            self.assertEqual([(e["state"], e["did"]) for e in w.check(usage_file=fresh)], [("parked", "resumed")])
+        apply.assert_not_called()
+        resumed = resources.Registry(self.data).read()[0]
+        self.assertEqual(resumed["started_at"], cards.stamp(self.clock()))
+        # The resumed turn ends without touching the report: the round's report is done, applied and synced.
+        self.set_agent(resumed["short_id"], state="done", status="idle")
+        self.view("open_head_a")
+        out = w.check(usage_file=fresh)
+        self.assertEqual((out[0]["card"], out[0]["state"], out[0]["did"], out[0]["verdict"]),
+                         (cid, "done", "ended", "changes"))
+        self.assertEqual(self.get(cid)["pr"]["reviewed_sha"], prr.A)
+
+    def test_a_turn_that_ends_with_no_report_asks_the_user_and_is_not_started_again(self):
+        cid = self.started()
+        rec = resources.Registry(self.data).read()[0]
+        self.set_agent(rec["short_id"], state="done", status="idle")  # e.g. its plan failed twice: no report
+        self.assertEqual(self.workers().check()[0]["did"], "nothing")
+        self.clock.advance(workers_mod.IDLE_MIN)
+        out = self.workers().check()
+        self.assertEqual((out[0]["card"], out[0]["state"], out[0]["did"]), (cid, "idle", "paused"))
+        c = self.get(cid)
+        self.assertEqual(c["sessions"]["pr-review"]["state"], "paused")
+        ask = c["ask"]
+        self.assertEqual((ask["type"], ask["role"], ask["from"], ask["reason"]),
+                         ("fix", "pr-review", "worker", workers_mod.REVIEW_IDLE))
+        self.assertIn("no report", ask["text"])
+        self.assertIn(f"ap2 worker start {cid} pr-review --resume", ask["text"])
+        # The ask holds the next auto-start back: no loop.
+        self.assertEqual(self.workers().check(), [])
+        self.assertEqual(len(self.review_starts()), 1)
+        # A start by hand closes it, as every start closes the role's own asks.
+        self.workers().start(cid, "pr-review", prompt="Again.", resume=True)
+        self.assertIsNone(self.get(cid).get("ask"))
 
     def assert_kept_as_a_draft(self, cid, out):
         """The worker is parked and on record; its report was neither applied nor turned into an ask."""
