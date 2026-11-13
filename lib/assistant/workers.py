@@ -42,10 +42,10 @@ which (`api_stop`) without writing anything. A `--resume` start stops the saved 
 still shows it.
 
 A gateway profile's key command is checked before every start and resume (`keys.py`, cached in
-`<data>/profile-key.json`): while it fails, they are refused the same way, and every close of a gateway worker whose
-session ended on a rejected key (HTTP 401 or 403) runs the refresh command once (`keys.note_session_end`); a second
-rejection within 10 minutes of that refresh holds new work instead, and an error older than the last refresh does
-nothing.
+`<data>/profile-key.json`): while it fails, they are refused with a CapError as at the cap, but no card opens and
+nothing falls back to the subscription. Every close of a gateway worker whose session ended on a rejected key (HTTP
+401 or 403) runs the refresh command once (`keys.note_session_end`); a second rejection within 10 minutes of that
+refresh holds new work instead, and an error older than the last refresh does nothing.
 
 Starting (or resuming) a session can make branches and PRs, so it needs live mode; listing, classifying, ending
 and archiving work in shadow mode. v1 is reused by import (`lib/autopilot/workers.py`, `sessions.py`,

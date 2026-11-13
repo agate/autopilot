@@ -146,6 +146,8 @@ class AllowanceKeyTest(capt.CapWorkerCase):
         with self.assertRaises(cap.CapError) as e:
             self.workers().start(cid, "implement", cwd=self.wt, prompt="Do the work.")
         msg = str(e.exception)
+        self.assertEqual(keys.KEY_FIX, "Run the profile's key command in a terminal (sign in again if it asks); the "
+                                       "next start or check tries it again.")  # the spec's fixed text
         self.assertIn(keys.KEY_FIX, msg)
         self.assertIn("the gateway key does not work", msg)
         self.assertIn("exit 1", msg)
@@ -390,6 +392,12 @@ class CheckTest(KeyCase):
         f.write_text(json.dumps({"at": NOW.isoformat(), "ok": "yes", "profile": "g"}))  # ok must be true itself
         self.assertIsNone(keys.check(self.data, p, NOW))
         self.assertEqual(runs(ran), len(bad) + 1)
+        # A fresh failing record with no error text is still a failure: it never reads as a working key.
+        f.write_text(json.dumps({"at": NOW.isoformat(), "ok": False, "profile": "g"}))
+        self.assertEqual(keys.check(self.data, p, NOW), "the key command failed")
+        self.assertEqual(keys.cached_error(self.data, p), "the key command failed")
+        self.assertEqual(runs(ran), len(bad) + 1)  # the cached failure is used: the command does not run
+        self.assertIn("the key command failed", cap.refusal({"reason": "key"}))
 
     def test_symlinked_state_is_refused(self):
         p = self.save()
@@ -412,6 +420,25 @@ class CheckTest(KeyCase):
         self.assertIn("symlink", keys.cached_error(self.data, p))  # `list` shows it and reads nothing through it
         self.assertFalse((self.tmp / "missing.json").exists())
         self.assertEqual(json.loads(elsewhere.read_text())["ok"], True)
+
+    def test_a_symlinked_state_is_never_written_or_removed(self):
+        # The hold writes the key record and the refresh removes it: a symlink there is refused on both paths, the
+        # link is kept and the file it points to is untouched.
+        self.save(refresh_command="true")
+        elsewhere = self.tmp / "elsewhere"
+        elsewhere.write_text("keep me")
+        link = self.data / keys.STATE
+        link.symlink_to(elsewhere)
+        (self.data / keys.REFRESH).write_text(json.dumps({"at": NOW.isoformat(), "profile": "g"}))
+        with self.assertRaisesRegex(profiles.ProfileError, "symlink"):  # a second rejection: the hold
+            self.end(self.transcript(auth_401(NOW + timedelta(minutes=2))), now=NOW + timedelta(minutes=3))
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(elsewhere.read_text(), "keep me")
+        (self.data / keys.REFRESH).unlink()
+        with self.assertRaisesRegex(profiles.ProfileError, "symlink"):  # a first rejection: the refresh
+            self.end(self.transcript(auth_401(NOW + timedelta(minutes=2))), now=NOW + timedelta(minutes=3))
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(elsewhere.read_text(), "keep me")
 
     def test_subscription_has_no_key_error(self):
         self.assertIsNone(keys.check(self.data, profiles.load(self.data, profiles.SUBSCRIPTION), NOW))
@@ -485,6 +512,7 @@ class RefreshTest(KeyCase):
         self.assertEqual(runs(ref), 1)  # no second refresh
         rec = self.state()
         self.assertEqual((rec["ok"], rec["auth"], rec["profile"], rec["error"]), (False, True, "g", keys.AUTH_AGAIN))
+        self.assertEqual(rec["error"], "the gateway rejected the key again right after a refresh")  # the spec's text
         self.assertEqual(keys.check(self.data, p, later + timedelta(minutes=5)), keys.AUTH_AGAIN)
         self.assertEqual(runs(key), 0)
         a = cap.allowance(self.data, self.projects, later + timedelta(minutes=5), p)
@@ -506,6 +534,19 @@ class RefreshTest(KeyCase):
         rec = self.state()
         self.assertEqual((rec["ok"], rec["auth"], rec["error"]), (False, True, keys.AUTH_AGAIN))
         self.assertEqual(datetime.fromisoformat(rec["at"]), NOW + timedelta(minutes=62))  # held from the close
+
+    def test_a_third_failure_keeps_the_hold(self):
+        # Every gateway worker is rejected at once: the first close refreshes, the second holds, and the third must
+        # keep that hold, not lift it and refresh again.
+        ref = self.tmp / "refreshed"
+        p = self.save(refresh_command=counter(ref))
+        self.assertTrue(self.end(self.transcript(auth_401(NOW))))  # the refresh, at NOW
+        self.assertTrue(self.end(self.transcript(auth_401(NOW + timedelta(minutes=1))), now=NOW + timedelta(minutes=2)))
+        self.assertTrue(self.end(self.transcript(auth_401(NOW + timedelta(minutes=2))), now=NOW + timedelta(minutes=3)))
+        self.assertEqual(runs(ref), 1)  # refreshed once
+        rec = self.state()
+        self.assertEqual((rec["auth"], rec["error"]), (True, keys.AUTH_AGAIN))
+        self.assertEqual(keys.check(self.data, p, NOW + timedelta(minutes=4)), keys.AUTH_AGAIN)
 
     def test_a_second_failure_long_after_the_refresh_refreshes_again(self):
         ref = self.tmp / "refreshed"
