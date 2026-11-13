@@ -44,7 +44,7 @@ from typing import Callable, Optional
 
 from autopilot import sessions as v1_sessions
 
-from assistant import cards, config, engine as engine_module, sources
+from assistant import cards, config, engine as engine_module, routines, sources
 from assistant.config import ConfigError
 from assistant.sources import SourceError
 from assistant.store import write_json
@@ -64,6 +64,9 @@ STAMP = "%Y%m%dT%H%M%SZ"
 VIAS = ("mcp", "connector", "skill")
 # The session's own file writes: never a tool's reply, so a skill scan does not log them.
 OWN_WRITES = ("Write", "Edit", "MultiEdit", "NotebookEdit", "TodoWrite")
+# The tool that loads a deferred tool's schema (MCP tools are deferred while tool search is on). The guard allows it
+# when the plan calls an MCP tool; its reply is a schema, never a source's text, so it is never logged.
+LOAD = "ToolSearch"
 # The line that marks a log cut short (past engine.MAX_OUTPUT in total).
 CUT = {"cut_short": True}
 VERSION = 1
@@ -77,7 +80,8 @@ BRIEF_HEAD = """\
 You are an ap2 scan session. You only read sources; you decide nothing about work.
 
 Rules:
-1. Call only the tools listed below, with exactly the arguments given.
+1. Call only the tools listed below, with exactly the arguments given. If a listed tool is not loaded
+   yet, load it with ToolSearch first; ToolSearch only loads a tool and calls nothing.
 2. Do not copy tool replies into files. ap2 saves every reply itself.
 3. For a call with a records file, write that file as a JSON list with one object per item. Use only the form's
    fields and category. Copy id, thread_id, at and place_id (or place, when there is no place_id) exactly as the
@@ -303,7 +307,7 @@ def keeps(p: dict, tool_name: str, tool_input=None, folder: Optional[Path] = Non
         return False
     if any(calls_tool(call, tool_name) for call in p["calls"]):
         return True  # a planned tool's reply is the source's own text, whatever it says
-    if not any(call["via"] == "skill" for call in p["calls"]) or tool_name in OWN_WRITES:
+    if not any(call["via"] == "skill" for call in p["calls"]) or tool_name in OWN_WRITES or tool_name == LOAD:
         return False
     return not _names(tool_response, words, paths)
 
@@ -646,7 +650,8 @@ def _decision(allow: bool, why: str) -> dict:
 def allows(p: dict, tool_name: str, tool_input: dict) -> tuple:
     """`(allowed, why)` for one tool call of the session of plan `p`: a tool of a planned call (`calls_tool`, the
     same match the take uses); `Write` to a planned records file; or, when the plan runs a skill, `Skill` with that
-    skill's name or a plain read (`SKILL_READS`). Nothing else."""
+    skill's name or a plain read (`SKILL_READS`); or, when the plan has an `mcp` or `connector` call, `ToolSearch`
+    (`LOAD`), which loads a deferred tool's schema and calls nothing. Nothing else."""
     if any(calls_tool(call, tool_name) for call in p["calls"]):
         return True, "a planned scan call"
     if tool_name == "Write":
@@ -654,6 +659,8 @@ def allows(p: dict, tool_name: str, tool_input: dict) -> tuple:
         wanted = {os.path.normpath(c["records"]) for c in p["calls"] if isinstance(c.get("records"), str)}
         if isinstance(path, str) and os.path.isabs(path) and os.path.normpath(path) in wanted:
             return True, "a planned records file"
+    if tool_name == LOAD and any(c["via"] in ("mcp", "connector") for c in p["calls"]):
+        return True, "loads a planned tool"
     skills = {c.get("skill") for c in p["calls"] if c["via"] == "skill"}
     if skills and ((tool_name == "Skill" and tool_input.get("skill") in skills) or tool_name in SKILL_READS):
         return True, "the planned skill"
@@ -779,8 +786,11 @@ def finish(data, now: datetime, claude: Optional[str] = None, transcripts_dir=No
            cfg: Optional[config.Config] = None) -> Optional[dict]:
     """Look at the open scan session (`<data>/scan-session.json`); None when there is none. Its turn ended (`state`
     done, blocked or failed, or `status` idle), it is gone, its process is dead, or it ran past SCAN_MAX_MIN minutes
-    (one more error): it is stopped (`claude stop`, its spend settled), taken (`take`) and the record removed.
-    A failed listing, or a session still working inside the time, waits for the next run. Returns `{open, ended,
+    (one more error), or it started more than `routines.GRACE` after now (one error that ends with
+    `routines.WENT_BACK`): it is stopped (`claude stop`, its spend settled), taken (`take`) and the record removed.
+    A failed listing, or a session still working inside the time, waits for the next run; a failed listing once the
+    session is that late adds one error. A take that fails on the store (a CardError or OSError) raises with the
+    record kept, so the next run stops and takes again. Returns `{open, ended,
     short_id, reads, errors}`; each read also says its `via`."""
     from assistant import spend, transcripts
 
@@ -798,13 +808,21 @@ def finish(data, now: datetime, claude: Optional[str] = None, transcripts_dir=No
         return out
     short, sid = rec["short_id"], rec.get("session_id") or ""
     out["short_id"] = short
+    started = cards.parse_stamp(rec["started_at"])
+    ahead = started - now > routines.GRACE  # a start later than now never grows old, so it counts as late
+    over = ahead or now - started >= timedelta(minutes=SCAN_MAX_MIN)
+    went_back = f"; {routines.WENT_BACK}" if ahead else ""
     listing = v1_sessions.list_all(claude)
-    if listing is None:
-        return out  # unknown, not gone: the next run looks again
+    if listing is None:  # unknown, not gone: the next run looks again
+        if over:
+            out["errors"].append({"scan": True, "error": f"cannot list the sessions; the scan session {short} has "
+                                                         f"been open since {rec['started_at']}, and the scan "
+                                                         f"watches wait{went_back}"})
+        return out
     s = v1_sessions.find_by_id(short, listing)
     ended = (s is None or (s.get("pid") is not None and not v1_sessions.pid_alive(s.get("pid")))
              or s.get("state") in ("done", "blocked", "failed") or s.get("status") == "idle")
-    late = not ended and now - cards.parse_stamp(rec["started_at"]) >= timedelta(minutes=SCAN_MAX_MIN)
+    late = not ended and over
     if not (ended or late):
         return out
     projects = Path(transcripts_dir) if transcripts_dir else transcripts.default_projects()
@@ -821,7 +839,11 @@ def finish(data, now: datetime, claude: Optional[str] = None, transcripts_dir=No
                          now=now)
         except Exception:  # noqa: BLE001 - bookkeeping never stops a finish
             pass
-    if late:
+    if late and ahead:
+        out["errors"].append({"scan": True, "error": f"the scan session {short} started at {rec['started_at']}, "
+                                                     f"later than now ({cards.stamp(now)}); it was stopped and "
+                                                     f"taken with what it logged{went_back}"})
+    elif late:
         out["errors"].append({"scan": True, "error": f"the scan session {short} was still working after "
                                                      f"{SCAN_MAX_MIN} minutes; it was stopped and taken with what "
                                                      f"it logged"})

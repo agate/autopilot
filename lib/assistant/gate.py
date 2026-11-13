@@ -52,7 +52,7 @@ EVERY = re.compile(r"([1-9][0-9]{0,3})(m|h)\Z", re.ASCII)
 BY = "gate"
 # Ends the watch error for a time ahead of now, the one error after which the watch still runs (the routine
 # error for a last_slot ahead of now says it too).
-WENT_BACK = "the clock may have gone back"
+WENT_BACK = routines.WENT_BACK
 
 
 @contextlib.contextmanager

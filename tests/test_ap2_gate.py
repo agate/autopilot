@@ -1613,10 +1613,55 @@ class ScanFinishTest(LoopCase):
 
     def test_a_failed_listing_changes_nothing(self):
         with mock.patch("autopilot.sessions.list_all", return_value=None):
+            soon = self.gate(self.T + timedelta(minutes=2))
             out = self.gate(self.T + timedelta(minutes=30))
         self.assertNotIn(["stop", "s0001"], self.argvs())
         self.assertEqual(self.scan_record(), self.rec)
+        self.assertEqual((soon["reads"], soon["errors"]), ([], []))
         self.assertEqual(out["reads"], [])
+        # Past SCAN_MAX_MIN the wait is reported, once per run; the record and the scan watches still wait.
+        self.assertEqual(out["errors"], [{"scan": True, "error": "cannot list the sessions; the scan session s0001 "
+                                                                  "has been open since 2026-11-10T14:00:00Z, and the "
+                                                                  "scan watches wait"}])
+        self.assertEqual(out["watches_due"], [])
+
+    def test_a_session_that_started_later_than_now_is_stopped_with_one_error(self):
+        self.assertEqual(self.gate(self.T - timedelta(minutes=2))["errors"], [])  # inside routines.GRACE
+        self.assertNotIn(["stop", "s0001"], self.argvs())
+        out = self.gate(self.T - timedelta(hours=1))
+        self.assertIn(["stop", "s0001"], self.argvs())
+        self.assertNotEqual(self.scan_record()["short_id"], "s0001")  # taken; the due watch started a new scan
+        [err] = [e for e in out["errors"] if e.get("scan")]
+        self.assertIn("started at 2026-11-10T14:00:00Z, later than now (2026-11-10T13:00:00Z)", err["error"])
+        self.assertTrue(err["error"].endswith(gate.WENT_BACK), err["error"])
+
+    def test_a_failed_listing_for_a_session_that_started_later_than_now_says_the_clock(self):
+        with mock.patch("autopilot.sessions.list_all", return_value=None):
+            out = self.gate(self.T - timedelta(hours=1))
+        self.assertEqual(self.scan_record(), self.rec)
+        [err] = [e for e in out["errors"] if e.get("scan")]
+        self.assertTrue(err["error"].startswith("cannot list the sessions"), err["error"])
+        self.assertTrue(err["error"].endswith(gate.WENT_BACK), err["error"])
+
+    def test_a_take_that_fails_on_the_store_keeps_the_record_and_the_next_run_takes_again(self):
+        hook = {"tool_name": "mcp__vendor__list_incidents", "tool_input": {},
+                "tool_response": json.dumps([item(1)])}
+        scan.save_raw(self.rec["plan"], json.dumps(hook).encode())
+        self.set_agent("s0001", state="done", status="idle")
+        times = (self.data / "watches.json").read_text()
+        with mock.patch("assistant.scan.take", side_effect=cards.CardError("the store is broken")) as take:
+            out = self.gate(self.T + timedelta(hours=2))  # vendor-a would be due again by its time
+        take.assert_called_once()
+        self.assertEqual(self.scan_record(), self.rec)
+        [err] = out["errors"]
+        self.assertTrue(err["scan"])
+        self.assertIn("the store is broken", err["error"])
+        self.assertEqual((out["reads"], out["watches_due"]), ([], []))  # the scan watches are not timed meanwhile
+        self.assertEqual((self.data / "watches.json").read_text(), times)
+        again = self.gate(self.T + timedelta(hours=2, minutes=1))
+        self.assertNotEqual(self.scan_record()["short_id"], "s0001")  # taken; the due watch started a new scan
+        self.assertEqual([r["made"] for r in again["reads"] if r["watch"] == "vendor-a"], [1])
+        self.assertEqual([c["key"] for c in self.store().list()], ["vendor-a:i1"])
 
     def test_a_session_that_is_gone_is_taken(self):
         (self.fake_home / "agents.json").write_text("[]")

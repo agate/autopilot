@@ -1479,16 +1479,28 @@ Calls the author made without asking (check them):
     with the profile's env, and writes `<data>/scan-session.json` `{plan, short_id, session_id, started_at,
     profile}` and a spend launch row of kind `scan`. `hook-allow` allows a call only for a planned call's tool
     (`calls_tool`, the take's own match), a `Write` to a planned records file, or, for a skill call, `Skill` with
-    that skill's name and `Read`, `Glob` and `Grep`; everything else is denied with a reason, and so is any call it
-    cannot decide (a bad plan or payload): it fails closed, never with no opinion. It runs before every tool call,
-    so `ap2` takes it before the argument parser, as it does `hook-park`. `scan.finish` looks the session up in
-    `claude agents --json --all`: its turn ended (`state` done, blocked or failed, or `status` idle), it is gone,
-    or its pid is dead; then it is stopped (`claude stop`, its spend settled first, as a worker's stop is), taken
-    (`scan.take`) and the record removed. Stop first, then take: a stop that fails keeps the record (the next run
-    tries again, so no session is left running with no record), and a session that ran too long logs nothing more
-    while it is taken. One still working after `SCAN_MAX_MIN` (15) minutes is stopped and taken with what it
-    logged, plus one error. A failed listing waits for the next run. A record that cannot be read is one error and
-    is removed, so it cannot hold every later scan back.
+    that skill's name and `Read`, `Glob` and `Grep`, or, when the plan has an `mcp` or `connector` call,
+    `ToolSearch`. While tool search is on (a gateway profile's overlay sets `ENABLE_TOOL_SEARCH`), MCP tools are
+    deferred: the session must load a tool's schema with `ToolSearch` before it can call the tool. `ToolSearch` only
+    loads; it calls nothing and writes nothing. The brief says the session may load a listed tool this way. Its
+    reply is a schema, not a source's text, so it is never logged, even in a plan with a skill. Everything else is
+    denied with a reason, and so is any call it cannot decide (a bad plan or payload): it fails closed, never with
+    no opinion. It runs before every tool call, so `ap2` takes it before the argument parser, as it does
+    `hook-park`. `scan.finish` looks the session up in `claude agents --json --all`: its turn ended (`state` done,
+    blocked or failed, or `status` idle), it is gone, or its pid is dead; then it is stopped (`claude stop`, its
+    spend settled first, as a worker's stop is), taken (`scan.take`) and the record removed. Stop first, then take:
+    a stop that fails keeps the record (the next run tries again, so no session is left running with no record), and
+    a session that ran too long logs nothing more while it is taken. A take that fails on the store (a `CardError`
+    or an `OSError`) keeps the record too: the gate reports one `{"scan": true}` error, the next run stops and takes
+    again, and the scan watches are not timed meanwhile. Nothing is lost, and it heals once the store works. One
+    still working after `SCAN_MAX_MIN` (15) minutes is stopped and taken with what it logged, plus one error. One
+    whose `started_at` is more than `routines.GRACE` (5 minutes) after now (a run with a later `--now` started it,
+    or the clock went back) is late too, since it would never grow old: it is stopped and taken, with one error that
+    ends with "the clock may have gone back". A failed listing waits for the next run: the record is kept and the
+    scan watches are not timed. Once the session is that late, each such run adds one error, `cannot list the
+    sessions; the scan session <short> has been open since <started_at>, and the scan watches wait`, so a listing
+    that keeps failing is not silent. A record that cannot be read is one error and is removed, so it cannot hold
+    every later scan back.
   - Not yet (later slices): measuring a scan's token cost; running `writes` in live mode; `plan: split_here`; one card for a Slack ask
     about a PR and the GitHub request for the same PR; `{setting}` patterns in `read.run`; pruning the scan
     folders under `.scan` (the gate prunes only `.raw`); tying a `fill: ai` source's follow-up reads (such as
