@@ -174,7 +174,10 @@ class GuardTest(unittest.TestCase):
     def test_guard_reads_a_line_after_a_comment_ending_in_a_backslash_on_its_own(self):
         # bash does not join a `\` + newline inside a comment, so the next line runs as its own command
         for cmd in ('ap task list v2 # see \\\necho x > ~/.claude/"autopilot-data"/x',
-                    'ap task list v2 # \\\nc""p a ~/.claude/autopilot-data/x'):
+                    'ap task list v2 # \\\nc""p a ~/.claude/autopilot-data/x',
+                    # no space before the `\`: joined, the verb glues to the comment, so only the split reading sees it
+                    "ap task list v2 # see\\\nrm ~/.claude/'autopilot-data'/x",
+                    'echo hi # note\\\nc""p a ~/.claude/autopilot-data/x'):
             self.assertIsNotNone(guard.decide(bash(cmd), self.W), cmd)
         self.assertIsNone(guard.decide(bash("ap decision add v2 \\\n~/.claude/autopilot-data/x.json"), self.W))
 
