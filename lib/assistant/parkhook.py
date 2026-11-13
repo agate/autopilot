@@ -22,7 +22,7 @@ from pathlib import Path
 
 from autopilot import budget as v1_budget
 
-ROLES = ("implement", "review", "pr")  # == workers.ROLES
+ROLES = ("implement", "review", "pr", "pr-review")  # == workers.ROLES
 PARK_RULES = {"window_pct": 85, "stale_min": 60, "credit_pct": 90, "park_pct": 90,
               "resume_after_min": 5}  # == workers.PARK_RULES (v1's default budget rules)
 MAX_STDIN = 1 << 20  # a payload past 1 MiB is not read: no opinion

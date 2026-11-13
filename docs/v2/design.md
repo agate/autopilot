@@ -630,7 +630,7 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   (`{"text": <reply_draft>, "sent": false}`, point 3); `pr` (`repo`, `number`, `url`, `head_sha`, `reviewed_sha`
   = the head); `reviews` (one `{stage, head_sha, verdict, at}` per apply, `at` the apply time); and `plain`. The
   same report (head and `reviewed_at`) applied twice is refused. The role never runs `apply` (its process ends
-  with `check`, as secretary's ends with `report validate`); the worker's done path will, once wired.
+  with `check`, as secretary's ends with `report validate`); the worker's done path does (below).
 - **[decided by the builder]** Plain words (point 4, 3.7): one function, `prreview.plain_for(record, card, langs)`,
   used by the source engine and by `apply`, so a re-read computes the same words. What: "<author> asked you to
   review PR #<n>: <title>" (n from the card's `key` when it is `<owner>/<repo>#<number>`, else the record's `id`,
@@ -705,9 +705,45 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   became a `question` card keyed on its thread; that card is not moved or closed. The next read keys the ask on its
   PR, so an ask still in the read window shows once more, as the PR's card, and the old `question` card is closed
   by hand.
-- Not built here: starting the `pr-review` role on its own when a card is made, and running `apply` and `sync` from
-  the worker's done path or the gate (they need the worker sessions); reopening a done PR card when a new review
-  ask arrives; and the PR loop's end (6.3).
+- **[decided by the builder]** The card reviews itself (point 2). `pr-review` is a worker role (`workers.py`): its
+  result file is `prreview.json`, and its prompt starts `/autopilot:pr-review <card id> <stage>` (the command's two
+  arguments; no `--agent`), then the template's brief and the usual worker lines. The stage is `delta` once the
+  card's `reviews` list holds one (`apply` adds one per review), else `review`. Every live `ap2 worker check`, after
+  it has acted on the workers on record, starts one `pr-review` worker for each card of kind `pr-review` that is not
+  in lane `done`, has no worker on record and no line in this pass (so a card closed in a pass starts again only on
+  the next one), has no open `ask`, whose `sessions["pr-review"].state` is absent or `ended`, and is not reviewed at
+  its head (`pr.reviewed_sha` missing, or not `pr.head_sha`). It runs in the card's run directory (made when
+  missing; the role reviews from GitHub, so `plan` says "no checkout given"), with the brief from the card's
+  template. Each start is a line `{card, role: "pr-review", state: "due", did: "started"}`; a start the cap, the key,
+  a pause, `max_workers` or the profile refuses is the same line with `did: "nothing"` and a `note`, and the later
+  cards still get their try. Shadow mode starts none: each due card's line says so. The start lives in `check`, not
+  the gate, because the gate starts no process (`gate.py`).
+- **[decided by the builder]** The done path. A `pr-review` worker is done when `prreview.json` is newer than its
+  start and its turn has ended (idle, done, failed or gone; 8.2 rule 1): while it still works or waits at a prompt
+  the report is a draft the role is still checking, so `check` leaves it. When `check` closes it as done, it
+  runs `apply` and then `sync` on the card, by `check`'s `by`, once the worker list's lock is free (sync reads
+  GitHub); the line gets `verdict` and `sync` (sync's `state`). Neither fails the pass. A failed `apply` is a note,
+  and the card's `ask` (`type: fix`, `reason: review_apply_failed`) with the error and "run `ap2 review check
+  CARD`, then `ap2 review apply CARD`", so the card is not started again in a loop; `sync` runs only after an
+  `apply` that worked, and a failed one is a note (the review stays applied). That ask is the role's own worker ask
+  (8.2): any start of the role and `finish` close it, and so does a `check` that finds the card reviewed at its
+  head (the user applied it by hand). A `sync` that sees `new_commits` writes the new `pr.head_sha`, so the next
+  `check` starts a `delta`; `current` and the four done states start nothing (`not_reviewed` never follows an
+  `apply` that worked). A pass stopped between the close and the apply (Ctrl-C, a killed process) leaves the report unapplied
+  and the session `ended` with no `reviewed_sha`, so the next `check` starts a whole new review: a worker run is
+  lost, nothing on the card is.
+- **[decided by the builder]** The read-only floor (`roles.FLOORS["read-only"]`). The `pr-review` settings add
+  `Edit` and `NotebookEdit` as deny rules (`roles.READ_ONLY_DENIED`) to the worker floor, and a third PreToolUse
+  hook, `{"matcher": "Write", ...: "\"<package>/bin/ap2\" hook-write"}` (`workers.write_guard`), that denies a
+  Write whose path (links followed) is not inside the card's run directory (`AP2_RUN_DIR`), or is a
+  `settings-*.json` there; no run directory, or a path that is not absolute, is denied too. A deny rule cannot do
+  this: deny wins over allow, so no rule leaves one folder open. The hook runs through `cli.main` (not `bin/ap2`'s
+  fast path), so it loads more than the Bash guard does; the role writes one file a round.
+- **[decided by the builder]** A session archive's name starts with its role in lowercase letters only
+  (`transcripts.ROLE`), so a `pr-review` session is archived as `prreview-<session id>.jsonl.gz`.
+- Not built here: a periodic `sync` of every open PR review card, to notice new commits or a closed PR between
+  reviews (today a sync runs only after a review); reopening a done PR card when a new review ask arrives; and the
+  PR loop's end (6.3).
 
 ### 6.3 How the PR loop ends **[decided by the user, 2026-11-10]**
 
@@ -893,7 +929,10 @@ which Claude Code labels "blocked", and v1 never stops blocked workers.
 Rules:
 
 1. **[decided, from v1]** A worker ends a round by writing its result file (`handback.json`, `review.json`,
-   `prloop.json`). The gate sees the file (newer than the worker's start) and runs `worker end`: stop the process,
+   `prloop.json`; the `pr-review` role's is `prreview.json`, and its done path applies and syncs the review, 6.2).
+   A `prreview.json` counts only once the worker's turn has ended (the listing shows it idle, done or failed, or
+   the session is gone): the role checks its report after writing it and fixes it until the check passes, so while
+   the session still works or waits at a prompt the file is a draft and the worker stays running (or blocked). The gate sees the file (newer than the worker's start) and runs `worker end`: stop the process,
    save the session id on the card. Session state can be lost; the card cannot.
 2. **[decided, from v1]** Dead (no session, or its process is gone, with no result file): resume once with
    "you were interrupted; check your worktree and run files first". Dead twice: stop and ask the user. A resume
