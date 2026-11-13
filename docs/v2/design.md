@@ -1090,7 +1090,9 @@ Calls the author made without asking (check them):
   `apistop.py` (what the end of a worker's transcript means; see the "Workers stopped by an API error" entry below);
   access profiles: `profiles.py` (the store, the overlay and merge, `ap2 profile`; see the access profiles entry
   below); the spend ledger: `spend.py` with the shipped `prices.json` next to it (`ap2 spend`; see the spend
-  ledger entry below); the daily cap: `cap.py` (`ap2 cap`; see the daily cap entry below); the local page:
+  ledger entry below); the daily cap: `cap.py` (`ap2 cap`; see the daily cap entry below); key health: `keys.py`
+  (the cached key check, one refresh on a rejected key, `ap2 profile rotate`; see the key health entry below); the
+  local page:
   `server.py` (the server, its JSON routes and the request guard, run by `ap2 serve`) and
   `builtin/page/local.html` (the one page, inline CSS and JS, found from `server.py`'s own path); and the
   phone page's data: `phone.py` (`build`, run by `ap2 phone build`). `ap2 config [--data PATH]` prints the
@@ -2008,7 +2010,8 @@ Calls the author made without asking (check them):
     `park CARD ROLE [--note T] [--usage P]`, `answer CARD TEXT...`, `finish CARD [--transcripts P]`.
     `ap2 spend [--mode M] [--json] [--transcripts P] [--data PATH]` prints what workers cost (see the spend ledger
     entry below). `ap2 cap [--json] [--transcripts P] [--data PATH]`, `ap2 cap answer OPTION` and `ap2 cap resume`
-    show and answer the daily cap (see the daily cap entry below).
+    show and answer the daily cap (see the daily cap entry below). `ap2 profile rotate NAME` mints a new gateway key
+    (see the key health entry below).
 - **[decided by the builder]** Access profiles (slice 1 of the port of v1's access profiles): the store,
   `ap2 profile`, and every worker start and resume on the active profile. Ported from v1's `lib/autopilot/profile.py`
   into `lib/assistant/profiles.py`, never imported (v1's version writes v1's data folder). v1 and v2 keep separate
@@ -2170,9 +2173,10 @@ Calls the author made without asking (check them):
     name at all: unreadable, bad JSON or no string `name`). `add` refuses a name that exists (`subscription` included)
     and the gateway flags on a `--subscription` profile, and prints the saved profile. `list` and `show` create
     nothing; `add`, `use` and `remove` write only inside the data folder, so they work in shadow mode.
-  - Not in this slice: the spend ledger and the daily cap (their own entries below), key health, refresh and
-    rotation (`rotate`), and the page's badge and switch. The daily cap entry below says how a gateway worker is
-    held at its cap and why the subscription's park line no longer parks it.
+  - Not in this slice: the spend ledger, the daily cap and key health, refresh and rotation (`rotate`) (their own
+    entries below), and the page's badge and switch. The daily cap entry below says how a gateway worker is held at
+    its cap and why the subscription's park line no longer parks it; the key health entry says how a gateway key
+    that does not work holds every start.
 - **[decided by the builder]** Spend ledger (slice 2 of the port of v1's access profiles): a gateway shows no
   dollars, so v2 adds up what its own workers cost. Ported from v1's `lib/autopilot/spend.py` into
   `lib/assistant/spend.py`, never imported (v1's version keeps v1's ledger). v1 and v2 totals are separate: v2
@@ -2295,8 +2299,10 @@ Calls the author made without asking (check them):
      `cap-state.json` reads as blank for today; a `paused.json` that exists but cannot be read, or is a symlink
      (never followed), counts as paused (fail closed: never start work by accident). `datadir.FOLDERS` is unchanged.
   3. The allowance. `allowance(data, projects, now, p, listing=None, store=None)` returns `{"allow": 0 | None,
-     "reason": "ok" | "cap" | "paused", "cause"?: "spent" | "unknown", "limit"?, "spent"?}` (`cap.REASONS`, a small
-     closed set the key-health slice extends). Paused, in any mode: `allow 0`, `reason paused`. A subscription
+     "reason": "ok" | "cap" | "paused" | "key", "cause"?: "spent" | "unknown", "limit"?, "spent"?, "error"?}`
+     (`cap.REASONS`, a small closed set; the key health slice added `key`, see its entry below: after the pause and
+     before any spend, a gateway key that fails is `allow 0`, `reason key`). Paused, in any mode: `allow 0`, `reason
+     paused`. A subscription
      profile: `allow None`, `reason ok`, with no spend parsed (its usage windows stay the park hook's); an
      unanswered card a gateway profile opened is taken back (`close_card`, which reads no spend), so switching to the
      subscription never leaves a P0 card saying no worker starts. A gateway profile: `spend.totals(..., "gateway",
@@ -2454,6 +2460,87 @@ Calls the author made without asking (check them):
      resume delay after a parsed reset is v1's `resume_after_min`, not a new setting. A listed session that is
      working or busy is never read, even when its status says idle. The reset is read after the error's own time.
      Not here: the park hook's extra credits (left open), a task flag that pins work to the subscription.
+- **[decided by the builder]** Key health (slice 4 of the port of v1's access profiles): a gateway profile reaches
+  the gateway through its key command (Claude Code runs it as `apiKeyHelper`). When that command stops working (a
+  sign-in that expired at night), every gateway worker would start and fail at once. So the key command is checked
+  before work starts, the answer is kept for a while, and every start and resume is refused while it fails, with no
+  fallback to the subscription. Ported from v1's `lib/autopilot/profile.py` "key health, refresh and rotation" into
+  `lib/assistant/keys.py`, never imported (v1's version keeps its records in v1's data folder). v1 and v2 key checks
+  are separate. A key value never appears anywhere: the key, refresh and rotate commands run with stdin, stdout and
+  stderr all `DEVNULL`, and only "exit N" or the exception's class name is kept or printed.
+  1. Own module. `keys.py` has `STATE = "profile-key.json"`, `REFRESH = "profile-refresh.json"`, `KEY_TTL` (10
+     minutes), `KEY_FAIL_TTL` (60 s), `KEY_FIX`, `check(data, p, now)`, `cached_error(data, p)`, `rotate(data, name,
+     now)`, `auth_failed(errors, after)` and `note_session_end(data, projects, session_id, profile_name, now)`. Every
+     function takes the data folder and the time; there is no module clock. It imports `profiles`, `store` and
+     `apistop` (which imports only `transcripts`), never `spend`, `workers` or `cap` (`cap` imports it).
+  2. The check is cached. `check` runs `gateway.key_command` (60 s) for a gateway profile and returns its error
+     text, or None when it works; the subscription runs nothing and is None. The answer is kept in
+     `<data>/profile-key.json` `{"at", "ok", "error", "profile", "auth"?}`: a working key is checked again after 10
+     minutes, a failing one after 60 s (the user may just have fixed it), and a failure set by a second rejection
+     (`auth: true`) holds 10 minutes, since the key command itself works. A record for another profile, one whose
+     `at` is off by more than its time to live either way, and one whose `ok` is not a boolean are not used. The
+     error text is "the key command failed (exit N)" or "(TimeoutExpired)" / "(<OSError class>)", never the
+     command's output. Both files are written by `store.write_json`; a symlink at either is refused (lstat, as the
+     cap's files), a ProfileError: at `profile-key.json` the start is refused with one line; at
+     `profile-refresh.json` a gateway worker's close prints one `ap2: key health: ...` line (no refresh runs) and
+     `ap2 profile rotate` exits 1 (after its rotate command ran and the key check was forgotten). An unreadable or
+     malformed record reads as never checked (the command runs again: fail towards checking, never towards a stale
+     "ok").
+  3. The allowance refuses on a key error. In `cap.allowance`, after the pause and for a gateway profile only:
+     `keys.check(...)`; an error returns `{"allow": 0, "reason": "key", "error": ...}` before any spend is read, and
+     opens no cap card. Nothing switches to the subscription. `cap.refusal` says "the gateway key does not work:
+     <error>. <KEY_FIX>", with `KEY_FIX` = "Run the profile's key command in a terminal (sign in again if it asks);
+     the next start or check tries it again." Every start, `--resume`, `answer` and in-place resume already goes
+     through `cap.allowance`, so they are all refused with a CapError and nothing is planned, discovered or
+     launched; a dead worker keeps its one resume and a parked one stays parked, as at the cap. Running workers are
+     not stopped. `Workers.check` runs the active profile's `keys.check` once before it locks the worker list (only
+     when not paused, with a worker listed, and in live mode or with a parked worker listed, as only then can a
+     resume ask for the allowance: a parked worker's due check asks for it before the live-mode check, a dead
+     worker's resume checks live mode first; best-effort, an error is left for the allowance to report), so an
+     in-place resume's allowance under the lock, at the same time, reads that cached answer and a key command that
+     hangs does not hold the lock. The refresh (choice 4) still runs inside `_close`, which `check` calls under the
+     lock, for up to 60 s.
+  4. One refresh on a rejected key. When `Workers._close` has stopped a worker (every close path: done, question,
+     died, idle, blocked, refused, end, parked_failed), `keys.note_session_end` reads that session's API errors
+     (`apistop.tail`, choice 5) for the worker's own `profile` (its record's; none is the subscription: nothing to
+     do). On a gateway profile whose session ended on an authentication failure newer than the last refresh, it runs
+     `gateway.refresh_command` (else `key_command`) once (60 s), writes `<data>/profile-refresh.json` `{"at",
+     "profile"}`, and deletes `profile-key.json`, so the next check runs the key command. A second failure within 10
+     minutes of that refresh writes the key record `{"ok": false, "auth": true, "error": "the gateway rejected the
+     key again right after a refresh"}` instead, which holds new work for 10 minutes. A hold written by a close
+     during a `check` pass also refuses that pass's planned in-place resumes on that profile (`_still_due` reads the
+     key record, no command run), whichever worker is listed first. The failure's own time is what counts (an error
+     with no time: the close time), as a session the gateway rejected ends its turn and is closed as idle up to an
+     hour later. v2 needs no `apply()`: every start writes its settings from the profile, and
+     Claude Code runs `apiKeyHelper` itself. `note_session_end` never raises out of `_close`: a failure prints one
+     `ap2: key health: ...` stderr line (at most `SPEND_LINE` characters) and the close goes on.
+  5. What an authentication failure is, and what it is not (lessons 4.3). The errors come from `apistop.tail(projects,
+     session_id)`, the reader the API-stop slice landed first (see the "Workers stopped by an API error" entry
+     above, its item 1): the API error lines after the session's last normal assistant reply, oldest first, each
+     `{"at", "text", "error", "status"}`, from the last 64 KiB of the file only; no transcript (None) is no errors.
+     **[decided by the builder]** The spec asked for a reader of its own in `transcripts` with a larger tail, and
+     also said that whichever of the two slices lands first owns the transcript-tail reader and the other rebases
+     onto it instead of adding a second one. The API-stop slice landed first, so key health reads `apistop.tail` and its
+     64 KiB: one reader, one rule for what an API error line is and how much of a transcript is read.
+     `auth_failed(errors, after)` is true for an error newer than `after` when its `status` is 401 or 403; when
+     `status` is missing, when its text or `error` names one (`\b40[13]\b`, `authentication_error`, `authentication
+     failed`, `invalid api key`). **A 400 from the gateway's safety guard ("API Error: 400 Request blocked by safety
+     guard") is never a key failure: the key is never refreshed or rotated on it.** An error whose `status` is any
+     other number (400, 429, 500, ...) is never an authentication failure, whatever its text says, and neither is
+     one whose text names the safety guard (any case): the guard refuses a conversation's content, and a new key
+     would not help. The limit and safety-guard checks of `Workers.check` read the same `apistop.tail`.
+  6. `ap2 profile rotate NAME` runs `gateway.rotate_command` (120 s), then deletes `profile-key.json` and, when it
+     is NAME's, `profile-refresh.json`; it prints `{"rotated": NAME}`, exit 0. The subscription, a profile with no
+     `rotate_command` and an unknown name are one `ap2: ...` line and exit 1 (a ProfileError); a failing rotate
+     command is "rotate_command failed (exit N)", exit 1, never its output, and clears nothing. Nothing rotates on
+     its own: only this command runs `rotate_command`. It writes only inside the data folder and runs a command the
+     user typed, so it works in shadow mode.
+  7. `ap2 profile list` shows the cached key error. Each row of a gateway profile has `key_error`:
+     `keys.cached_error(data, p)`, from the record only (no command runs, so `list` stays read-only); null when the
+     last check worked, was for another profile or never ran. A symlinked record shows as that error. The page's key
+     error is the page slice's.
+  8. Workers cannot edit the key state: `profile-key.json` and `profile-refresh.json` are in `PROTECTED`, so every
+     worker floor Edit-denies them (a worker must not mark a failing key as working).
 - **[decided by the builder]** v1 import (10, 11 question 5), read-only, in `importv1.py`.
   - Command: `ap2 import-v1 [--data PATH] [--from DIR] [--project NAME ...] [--dry-run]`. `--from` defaults to
     v1's own data root (`AUTOPILOT_DATA`, else `~/.claude/autopilot-data`, v1's `paths.data_root()`). A project is

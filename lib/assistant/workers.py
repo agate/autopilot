@@ -41,6 +41,12 @@ worker on the subscription. Only an error of the current run counts (from 2 minu
 which (`api_stop`) without writing anything. A `--resume` start stops the saved session it replaces when the listing
 still shows it.
 
+A gateway profile's key command is checked before every start and resume (`keys.py`, cached in
+`<data>/profile-key.json`): while it fails, they are refused with a CapError as at the cap, but no card opens and
+nothing falls back to the subscription. Every close of a gateway worker whose session ended on a rejected key (HTTP
+401 or 403) runs the refresh command once (`keys.note_session_end`); a second rejection within 10 minutes of that
+refresh holds new work instead, and an error older than the last refresh does nothing.
+
 Starting (or resuming) a session can make branches and PRs, so it needs live mode; listing, classifying, ending
 and archiving work in shadow mode. v1 is reused by import (`lib/autopilot/workers.py`, `sessions.py`,
 `budget.py`, `park.py`, `perms.py`) and never changed.
@@ -66,7 +72,7 @@ from autopilot import perms as v1_perms
 from autopilot import sessions as v1_sessions
 from autopilot import workers as v1_workers
 
-from assistant import apistop, cap, cards, config, profiles, projects, spend, transcripts
+from assistant import apistop, cap, cards, config, keys, profiles, projects, spend, transcripts
 from assistant.cards import CardError
 from assistant.resources import MAX_WORKERS, PORT_BASE, Registry, WorkerError, check_start, next_ports
 from assistant.store import Store, write_json
@@ -123,10 +129,12 @@ CLOSES = {"end": ("ended", "ended", True), "done": ("ended", "ended", False),
 # Files a worker may not edit in the data folder. Every card's run directory stays writable except its settings
 # files: a deny rule cannot keep one worker out of another card's result files. The user's templates and sources
 # are here as well (the worker floor in roles.py), the access profiles with the active one's name, and the spend
-# ledger with the data folder's price override, and the daily cap's state, pause and stop lock.
+# ledger with the data folder's price override, the daily cap's state, pause and stop lock, and the key health's
+# records (a worker must not mark a failing key as working).
 PROTECTED = ("config.yaml", "workers.json", ".workers.lock", ".store.lock", CAP_STOP_LOCK, "index.sqlite", "items/**",
              "restore/**", "projects/**", "templates/**", "sources/**", "sessions/**/settings-*.json",
-             f"{profiles.FOLDER}/**", profiles.ACTIVE, f"{spend.FOLDER}/**", spend.PRICES, cap.STATE, cap.PAUSED)
+             f"{profiles.FOLDER}/**", profiles.ACTIVE, f"{spend.FOLDER}/**", spend.PRICES, cap.STATE, cap.PAUSED,
+             keys.STATE, keys.REFRESH)
 SPEND_LINE = 300  # the longest stderr line a failed ledger step prints
 
 
@@ -305,12 +313,43 @@ class Workers:
         self._kill(short, session_id or "")
         self._close_worker_asks(card_id, role, by, kinds=("attach",))
 
+    def _note_key(self, session_id: str, profile_name: Optional[str]) -> None:
+        """The session has stopped: on a gateway key the gateway rejected, refresh it once (`keys.note_session_end`,
+        on the worker's own profile; a second rejection within 10 minutes of that refresh holds new work instead,
+        and an error older than the last refresh does nothing). Never raises: key bookkeeping never stops a worker
+        from closing."""
+        try:
+            keys.note_session_end(self.data, self.transcripts_dir, session_id, profile_name, self.clock())
+        except Exception as e:  # noqa: BLE001 - bookkeeping must not stop a close
+            line = " ".join(f"ap2: key health: {type(e).__name__}: {e}".split())[:SPEND_LINE]
+            try:
+                print(line, file=sys.stderr)
+            except (OSError, ValueError, AttributeError):
+                pass  # stderr is closed or full: nothing more to do
+
     # -- the daily cap (cap.py) ----------------------------------------------------------------------------------------
 
     def _allowance(self, prof: dict, now: datetime) -> dict:
         """`cap.allowance` on the active profile `prof`, today being the local day of `now`."""
         return cap.allowance(self.data, self.transcripts_dir, now.astimezone(), prof, listing=self._listing,
                              store=self.store)
+
+    def _warm_key(self, now: datetime) -> None:
+        """Best-effort, before `check` takes the worker list's lock: the active profile's key check
+        (`keys.check`, which runs nothing on the subscription or while its cached answer is fresh), so a resume's
+        allowance under the lock, at the same `now`, reads that cached answer instead of running the key command
+        (up to `keys.KEY_TIMEOUT` seconds) with the lock held. Only when a resume can ask for that allowance: not
+        paused (`cap.allowance` answers `paused` before it checks the key), with a worker listed (with none, nothing
+        can resume), and in live mode or with a parked worker listed (a parked worker's due check asks for the
+        allowance before the live-mode check; a dead worker's resume checks live mode first). Any error is left for
+        the in-lock allowance to raise or report."""
+        try:
+            recs = self.registry.read()
+            if cap.paused(self.data) is None and recs and (self.cfg.mode == "live"
+                                                            or any(r.get("parked") for r in recs)):
+                keys.check(self.data, profiles.active(self.data), now)
+        except Exception:  # noqa: BLE001 - the allowance under the lock checks again and reports
+            pass
 
     @staticmethod
     def _refuse_at_cap(a: dict) -> None:
@@ -790,6 +829,7 @@ class Workers:
         sid = rec.get("session_id") or ""
         rec["closing"] = mark
         self._kill(rec.get("short_id"), sid)  # outside the try: a stop that raised keeps the record on every path
+        self._note_key(sid, rec.get("profile"))
         saved = False
         try:
             self._close_worker_asks(rec["card"], rec["role"], by, kinds=("attach",))
@@ -1095,12 +1135,17 @@ class Workers:
         """Step 3, under the lock: the planned resume still applies to `rec` (the card and role's record on the
         list as it is now): the same session in the same folder, no close started, and a classification of the
         record as it is now (with step 1's `listing`) that says the same state (dead with its one resume left, or
-        parked and still due)."""
+        parked and still due). A key error for the plan's profile on the key record refuses it too: a close later
+        in step 1 (a second rejection right after a refresh) can write that hold after this worker's allowance said
+        ok, and that allowance is the pass's one. Only the record is read (`keys.cached_error`): no command runs
+        under the lock, and step 1's allowance already ran any stale check, so a failing record is new."""
         if rec is None or rec.get("closing") or (rec.get("short_id"), rec.get("cwd")) != (plan["short_id"],
                                                                                         plan["cwd"]):
             return False
+        if keys.cached_error(self.data, plan["profile"]) is not None:
+            return False
         state = self.classify(rec, listing)
-        if plan["why"] == "dead":  # a pause written while its tools were listed refuses it too
+        if plan["why"] == "dead":  # a pause written while its tools were listed refuses it too, as a key hold does
             return state == "dead" and rec.get("resumes", 0) < 1 and cap.paused(self.data) is None
         return state == "parked" and self._parked_due(rec, now, b, allow or self._pass_allowance(now))
 
@@ -1170,7 +1215,8 @@ class Workers:
         with its one resume left, a parked worker that is due) is only planned; (2) with the lock free, each planned
         resume's tools are listed; (3) under the lock again, each planned resume runs on the list as it is then,
         or is skipped with a note when its record changed meanwhile (gone, another session or folder, or a fresh
-        classification that no longer says the same state): the next check looks at it again. A Ctrl-C (any
+        classification that no longer says the same state) or a key error on record (a hold a close of this pass
+        wrote) refuses it: the next check looks at it again. A Ctrl-C (any
         BaseException) stops the pass where it is; every change already made is written back."""
         now = self.clock()
         b = None
@@ -1181,6 +1227,7 @@ class Workers:
             # Paused at the daily cap: a worker whose stop failed gets the stop again, until it works. Skipped
             # while another cap_stop runs (the pause): that one is stopping them, and they show as cap-parked.
             retry = {(f["card"], f["role"]): f["note"] for f in self.cap_stop(by, blocking=False)["failed"]}
+        self._warm_key(now)
         allow = self._pass_allowance(now)  # one allowance (one `spend.totals`) per pass, only when a resume asks
         out, planned = [], []
         stopped = None
@@ -1236,7 +1283,10 @@ class Workers:
                 try:
                     rec = self._find(records, plan["card"], plan["role"])
                     if not self._still_due(rec, plan, listing, b, now, allow):
-                        entry["note"] = ("its record changed while its tools were listed, so it was not resumed; "
+                        err = keys.cached_error(self.data, plan["profile"])  # a hold a close of this pass wrote
+                        entry["note"] = (f"the gateway key does not work ({err}), so it was not resumed; the next "
+                                         "check tries it again" if err is not None else
+                                         "its record changed while its tools were listed, so it was not resumed; "
                                          "the next check looks at it again")
                         continue
 

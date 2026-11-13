@@ -184,7 +184,7 @@ class AllowanceTest(CapCase):
         self.assertEqual((c["lane"], c["ask"]["type"]), ("needs", "approve"))
 
     def test_reasons_are_a_small_closed_set(self):
-        self.assertEqual(cap.REASONS, ("ok", "cap", "paused"))
+        self.assertEqual(cap.REASONS, ("ok", "cap", "paused", "key"))  # `key`: the key health slice (keys.py)
 
 
 # -- 2. raises, accepting unknown cost, one card per day ---------------------------------------------------------------

@@ -293,10 +293,11 @@ def cmd_restore(args) -> int:
 # -- ap2 profile (access profiles, design section 12) -----------------------------------------------------------------
 # A profile says how workers reach Claude: the subscription, or a gateway through a key command. `use` writes only
 # inside <data> (active-profile.json, and the profile's file when it asks for a choice), so it works in shadow mode;
-# `list` and `show` create nothing.
+# `list` and `show` create nothing. `rotate` runs the profile's rotate command (its output thrown away) and forgets
+# the cached key check (keys.py); it writes only inside <data>, so it works in shadow mode too.
 
 def _profile_parser(sub) -> None:
-    pr = sub.add_parser("profile", help="list, show, add, choose, use or remove access profiles",
+    pr = sub.add_parser("profile", help="list, show, add, choose, use, rotate or remove access profiles",
                         description="Access profiles: how workers reach Claude (the subscription, or a gateway "
                                     "reached with a key command). Every worker start or resume runs on the active "
                                     "one; a running worker keeps its own. A profile whose model and effort "
@@ -305,10 +306,14 @@ def _profile_parser(sub) -> None:
     ps = pr.add_subparsers(dest="profile_command", metavar="<profile command>", title="profile commands")
     ps.required = True
     li = ps.add_parser("list", help="print every profile and which one is active",
-                       description="Print {active, active_error, profiles} as JSON. Reads only.")
+                       description="Print {active, active_error, profiles} as JSON; a gateway profile's row has "
+                                   "key_error, the last key check's error (null when it worked or never ran). "
+                                   "Reads only: no key command runs.")
     li.add_argument("--data", metavar="PATH", help=DATA_HELP)
     for name, help_ in (("show", "print one profile as JSON (its commands, never a key)"),
                         ("use", "make NAME the active profile; prints {active, was}"),
+                        ("rotate", "mint a new key: run NAME's rotate command (its output thrown away) and forget "
+                                   "the cached key check; prints {rotated}"),
                         ("remove", "delete a stored profile (not the subscription, not the active one)")):
         c = ps.add_parser(name, help=help_, description=help_[0].upper() + help_[1:] + ".")
         c.add_argument("name", metavar="NAME")
@@ -352,7 +357,7 @@ def _profile_parser(sub) -> None:
 
 
 def cmd_profile(args) -> int:
-    from assistant import profiles
+    from assistant import keys, profiles
 
     sub = args.profile_command
     data = datadir.resolve(args.data)
@@ -371,6 +376,8 @@ def cmd_profile(args) -> int:
             try:
                 p = profiles.load(data, name)
                 row.update({k: p[k] for k in ("mode", "label", "model", "effort", "daily_cap_usd")})
+                if p.get("mode") == "gateway":
+                    row["key_error"] = keys.cached_error(data, p)  # the record only: no command runs
             except profiles.ProfileError as e:
                 row["error"] = str(e)
             rows.append(row)
@@ -387,6 +394,10 @@ def cmd_profile(args) -> int:
             return _profile_choose(data, args)
         if sub == "use":
             return _profile_use(data, args.name)
+        if sub == "rotate":
+            from datetime import datetime
+            _print_json(keys.rotate(data, args.name, datetime.now().astimezone()))
+            return 0
         out = profiles.remove(data, args.name)
     _print_json(out)
     return 0
