@@ -4,11 +4,14 @@ back-off for a limit with no readable reset. Every test reads temp folders only.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 from tests import helpers  # noqa: F401 - puts lib/ on the path
 from assistant import apistop
@@ -180,6 +183,26 @@ class TailTest(Case):
         except OSError:
             self.assertIsNone(self.tail())  # not when running as root, which reads it anyway
 
+    def test_a_transcript_that_is_a_fifo_when_opened_is_none_without_waiting(self):
+        # A process the worker left can swap its transcript for a FIFO after `transcripts.find` saw a file: a plain
+        # open would wait for a writer forever, with the worker list's lock held.
+        fifo = self.folder / f"{SID}.jsonl"
+        os.mkfifo(fifo)
+        out = []
+        with mock.patch.object(apistop.transcripts, "find", return_value=fifo):
+            t = threading.Thread(target=lambda: out.append(self.tail()), daemon=True)
+            t.start()
+            t.join(10)
+        hung = t.is_alive()
+        if hung:  # let the stuck open go, so the test run can end
+            os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+            t.join(10)
+        self.assertFalse(hung, "the read waited on the FIFO")
+        self.assertEqual(out, [None])
+        fifo.unlink()
+        self.transcript([limit_line()])  # a regular transcript still reads
+        self.assertEqual(len(self.tail()["errors"]), 1)
+
     def test_a_line_with_a_naive_or_bad_time(self):
         self.transcript([limit_line(at="nonsense")])
         self.assertIsNone(self.tail()["errors"][0]["at"])
@@ -194,6 +217,21 @@ class TailTest(Case):
         apistop._when("9999-12-31T23:59:59")  # None or a time, never a raise
         self.transcript([limit_line(), reply(at="0001-01-01T00:00:00")])
         self.assertEqual(self.tail(), {"errors": [], "reply_at": None})
+
+    def test_a_naive_time_whose_local_zone_overflows_is_none(self):
+        # Some platforms raise OverflowError, not ValueError, when a naive time cannot be put in the local zone.
+        class Naive(datetime):
+            def astimezone(self, tz=None):
+                raise OverflowError("date value out of range")
+
+        class Parsed(datetime):
+            @classmethod
+            def fromisoformat(cls, text):
+                d = datetime.fromisoformat(text)
+                return Naive(d.year, d.month, d.day, d.hour, d.minute, d.second, d.microsecond)
+
+        with mock.patch.object(apistop, "datetime", Parsed):
+            self.assertIsNone(apistop._when("2026-01-01T00:00:00"))
 
 
 class StopTest(Case):

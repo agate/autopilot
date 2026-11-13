@@ -1232,7 +1232,7 @@ class Workers:
         if replied and not t["errors"]:
             rec.pop("limit_parks", None)
             return False
-        stop = apistop.stop(t, since, until=self._until(now))
+        stop = apistop.stop(t, since, until=self._until(self.clock()))  # the pass may have waited since `now`
         if stop is None:
             return False
         # The transcript is outside the data folder: a process the worker left behind can write its last line.

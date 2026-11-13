@@ -3194,9 +3194,10 @@ Calls the author made without asking (check them):
   1. What is read. `apistop.tail(projects, session_id)` finds the session's jsonl (`transcripts.find`) and reads its
      last 65536 bytes only (the first, cut line is dropped). It returns the API error lines after the last normal
      assistant reply, oldest first (`{at, text, error, status}`), and that reply's time (`reply_at`); None when there
-     is no transcript or it cannot be read, which is "no API error seen". An API error line is an `assistant` or
-     `system` line with `isApiErrorMessage: true`, or the model `<synthetic>`, or a non-empty string `error`; a
-     line that does not parse is skipped. `apistop.stop(tail, since)` reads the last error only, and only when it
+     is no transcript or it cannot be read, which is "no API error seen". A transcript is read (and archived)
+     only as a regular file, opened without waiting: a FIFO or a symlink there is no transcript. An API error line
+     is an `assistant` or `system` line with `isApiErrorMessage: true`, or the model `<synthetic>`, or a non-empty
+     string `error`; a line that does not parse is skipped. `apistop.stop(tail, since)` reads the last error only, and only when it
      is dated at or after `since` (the run's `started_at` less 2 minutes: a resumed copy repeats the old
      conversation with the old times). An error line dated in the future (later than now plus 2 minutes), or a
      time that cannot be read, is ignored. It is `limit` for a 429, `error: rate_limit` or a text that names a

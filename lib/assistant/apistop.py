@@ -74,7 +74,10 @@ def tail(projects, session_id) -> Optional[dict]:
         path = transcripts.find(projects, session_id) if session_id else None
         if path is None:
             return None
-        with open(path, "rb") as h:
+        h = transcripts.open_regular(path)  # never waits: a FIFO swapped in after `find` is no transcript
+        if h is None:
+            return None
+        with h:
             h.seek(0, 2)
             start = max(0, h.tell() - TAIL_BYTES)
             h.seek(start)

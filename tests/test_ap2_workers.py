@@ -2177,6 +2177,35 @@ class TranscriptsTest(WorkerCase):
         self.assertEqual(gzip.decompress(archive.read_bytes()), self.original(a).read_bytes())
         self.assertTrue(self.original(a).exists())  # the original stays, so the session can resume
 
+    def test_a_transcript_that_is_a_fifo_when_opened_is_not_archived_and_does_not_wait(self):
+        # A process the worker left can swap its transcript for a FIFO after `transcripts.find` saw a file: a plain
+        # open would wait for a writer forever, with the worker list's lock held by the close.
+        a = self.start()
+        cfg = Config(mode="live", keep_transcripts="always")
+        fifo = self.tmp / "swapped.jsonl"
+        os.mkfifo(fifo)
+        out = []
+
+        def archive():
+            out.append(transcripts.archive(self.data, cfg, a["card"], "implement", a["session_id"],
+                                           self.fake_home / "projects"))
+
+        with mock.patch.object(transcripts, "find", return_value=fifo):
+            t = threading.Thread(target=archive, daemon=True)
+            t.start()
+            t.join(10)
+        hung = t.is_alive()
+        if hung:  # let the stuck open go, so the test run can end
+            os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+            t.join(10)
+        self.assertFalse(hung, "the archive waited on the FIFO")
+        self.assertEqual(out, [None])
+        folder = self.data / "sessions" / a["card"]
+        self.assertEqual([p.name for p in folder.iterdir() if ".jsonl" in p.name], [])  # no copy, no temp file
+        # A regular transcript is still archived.
+        got = transcripts.archive(self.data, cfg, a["card"], "implement", a["session_id"], self.fake_home / "projects")
+        self.assertEqual(gzip.decompress(got.read_bytes()), self.original(a).read_bytes())
+
     def test_never_keeps_only_the_summary_files(self):
         w = self.workers(cfg=Config(mode="live", keep_transcripts="never"))
         a = self.start(w)
@@ -3108,6 +3137,22 @@ class LimitParkFromTranscriptTest(ApiStopCase):
         out = w.check(usage_file=self.quiet())
         self.assertEqual([(o["state"], o["did"]) for o in out], [("parked", "resumed")])
         self.assertEqual(self.bg_calls()[-1]["argv"][1:3], ["--resume", a["session_id"]])
+
+    def test_a_limit_line_dated_the_skew_after_the_check_still_parks(self):
+        w = self.workers()
+        a = self.start(w)
+        self.stopped_on(a, limit_line(iso(self.clock() + timedelta(minutes=workers_mod.RUN_SKEW_MIN))))
+        self.assertEqual(w.check()[0]["did"], "parked")
+
+    def test_a_limit_line_dated_a_second_past_the_skew_does_not_park(self):
+        w = self.workers()
+        a = self.start(w)
+        at = self.clock() + timedelta(minutes=workers_mod.RUN_SKEW_MIN, seconds=1)
+        self.stopped_on(a, limit_line(iso(at)))
+        self.assertNotIn("api_stop", w.list()[0])
+        out = w.check()
+        self.assertNotEqual(out[0]["did"], "parked")
+        self.assertIsNone(self.rec()["parked"])
 
     def test_parking_needs_no_live_mode(self):
         a = self.start()
@@ -4659,6 +4704,25 @@ class PrReviewDonePathTest(PrReviewCase):
         self.assert_kept_as_a_draft(cid, out)
         self.assertEqual(out[0]["did"], "parked")
         self.assertEqual(resources.Registry(self.data).read()[0]["parked"]["reason"], "limit")
+
+    def test_a_limit_hit_while_the_check_stalls_before_its_lock_still_parks(self):
+        # The check's clock is read at its start; the pass can then wait minutes (the key command, a blocked lock)
+        # while the worker's turn really ends on a limit. That error is dated after the start plus the skew, and
+        # must not be taken for one from the future: the draft would be applied as done.
+        cid = self.started()
+        w = self.workers()
+        w.check()  # fills in its session id
+        rec = resources.Registry(self.data).read()[0]
+        self.the_worker_reviews(cid, report={"card": cid})
+
+        def stall(self_, now):
+            self.clock.advance(5)
+            say(self.fake_home, rec["session_id"], limit_line(iso(self.clock())))
+
+        with mock.patch.object(Workers, "_warm_key", stall), mock.patch.object(prreview, "apply") as apply:
+            out = w.check()
+        apply.assert_not_called()
+        self.assertEqual([(e["state"], e["did"]) for e in out], [("parked", "parked")])
 
     def reviewed_then_said(self, cid, line):
         """The worker writes a valid report and ends its turn; then a process it left behind appends `line` (an
