@@ -164,7 +164,9 @@ def _read_quietly(path: Path):
 
 def text_for(value, lang: str, labels: Labels) -> str:
     """One v1 text field in one language: `{en, zh, ...}` gives the language, else its base language, else `en`,
-    else its first non-blank string; `{key, args}` is filled from v1's labels; a plain string is itself."""
+    else its first non-blank string, else ""; `{key, args}` is filled from v1's labels; a plain string is itself.
+    Non-blank is `cards.blank`, so a slot of only U+FEFF and white space is skipped like a slot of spaces, and words
+    next to U+FEFF are returned as they are."""
     if isinstance(value, str):
         return value
     if not isinstance(value, dict):
@@ -173,9 +175,9 @@ def text_for(value, lang: str, labels: Labels) -> str:
         return labels.fill(value, lang)
     for each in (lang, lang.split("-")[0], "en"):
         got = value.get(each)
-        if isinstance(got, str) and got.strip():
+        if not cards.blank(got):
             return got
-    return next((v for v in value.values() if isinstance(v, str) and v.strip()), "")
+    return next((v for v in value.values() if not cards.blank(v)), "")
 
 
 # -- finding and reading v1's projects ------------------------------------------------------------------------------
@@ -294,7 +296,13 @@ class _Maker:
         self.name, self.folder, self.langs, self.labels = name, folder, langs, labels
 
     def texts(self, value, fallback: str) -> dict:
-        return {lang: (text_for(value, lang, self.labels).strip() or fallback) for lang in self.langs}
+        """`value`'s text in each configured language (`text_for`), stripped, or `fallback` when it is blank
+        (`cards.blank`): a text of only U+FEFF and white space gives `fallback` like an empty one."""
+        out = {}
+        for lang in self.langs:
+            text = text_for(value, lang, self.labels)
+            out[lang] = fallback if cards.blank(text) else text.strip()
+        return out
 
     def card(self, kind: str, key: str, lane: str, what: dict, where: dict, do: dict, record: dict,
              parent_key: Optional[str], **more) -> dict:
@@ -349,7 +357,9 @@ class _Maker:
         as `cards.title_for` picks it when that is not blank (a one-text title the old import wrote as it is; an
         object title's non-blank text slot in that language, then the primary's, then the first other one in sorted
         key order), else the decision id. Blank is `cards.blank` in both checks, so old `plain.what` words or a
-        one-text title of only U+FEFF are skipped too. In a language no longer configured, the old `what` and `where`
+        one-text title of only U+FEFF are skipped too. Each configured language's `where` is the old text when it is
+        not blank (`cards.blank`), else the fresh `question_where` phrase, so an old slot that is missing, not a text,
+        or only U+FEFF and white space gets the phrase. In a language no longer configured, the old `what` and `where`
         words are kept, as v1 cannot make them again, and `do` is the closed phrase (none in a language without
         phrases)."""
         plain = old.get("plain") if isinstance(old.get("plain"), dict) else {}
@@ -366,7 +376,8 @@ class _Maker:
             text = cards.title_for(old, lang, self.langs[0])  # a one-text title is returned as it is, blank or not
             words[lang] = decision if cards.blank(text) else text
         what = self.kept(what, words)
-        where = self.kept(where, {lang: where.get(lang) or fresh[lang] for lang in self.langs})
+        where = self.kept(where, {lang: fresh[lang] if cards.blank(where.get(lang)) else where[lang]
+                                  for lang in self.langs})
         do = self.say("do_closed")
         for lang in sorted({*what, *where, *self.kept(plain.get("do"), {})} - set(self.langs)):
             if phrases(lang):  # the old `do` may still say to go answer it: write the closed phrase instead

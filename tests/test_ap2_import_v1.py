@@ -553,6 +553,70 @@ class ImportV1Test(unittest.TestCase):
         for card in self.by_key().values():
             cards.check_title(card, ("en", "zh"))
 
+    def test_an_invisible_title_in_one_language_falls_back_like_a_blank_one(self):
+        # cards.blank: an en slot of only U+FEFF (and white space) has no words, so the zh words are used, as for
+        # an en slot of spaces; the store would refuse the card with plain.what.en is empty otherwise.
+        for en in ("\ufeff", "\ufeff \x1c"):
+            with self.subTest(en=en):
+                self.setUp()
+                self.set_config("secondary_language: zh\n")
+                self.edit_state("projects/shop", lambda s: s["tasks"][0].update(title={"en": en, "zh": "加购物车"}))
+                self.ok("--project", "shop")
+                c = self.by_key()["v1:shop:PROJ-1"]
+                self.assertEqual(c["title"], {"en": "加购物车", "zh": "加购物车"})
+                self.assertEqual(c["plain"]["what"], {"en": "加购物车", "zh": "加购物车"})
+                cards.check_title(c, ("en", "zh"))
+
+    def test_an_invisible_title_falls_back_to_the_task_id(self):
+        for title in ("\ufeff", {"en": "\ufeff"}, " \ufeff\x1c"):
+            with self.subTest(title=title):
+                self.setUp()
+                self.set_config("secondary_language: zh\n")
+                self.edit_state("projects/shop", lambda s: s["tasks"][0].update(title=title))
+                self.ok("--project", "shop")
+                c = self.by_key()["v1:shop:PROJ-1"]
+                self.assertEqual(c["title"], {"en": "PROJ-1", "zh": "PROJ-1"})
+                self.assertEqual(c["plain"]["what"], {"en": "PROJ-1", "zh": "PROJ-1"})
+                cards.check_title(c, ("en", "zh"))
+                cards.check_plain(c, ("en", "zh"))
+
+    def test_an_open_question_with_an_invisible_title_has_the_decision_id_as_its_words(self):
+        for title in ("\ufeff", {"en": "\ufeff", "zh": "\ufeff"}):
+            with self.subTest(title=title):
+                self.setUp()
+                self.set_config("secondary_language: zh\n")
+                self.edit_state("projects/shop", lambda s: s["decisions"][0].update(title=title))
+                self.ok("--project", "shop")
+                c = self.by_key()["v1:shop:D1"]
+                self.assertEqual((c["kind"], c["lane"]), ("question", "needs"))
+                self.assertEqual(c["plain"]["what"], {"en": "D1", "zh": "D1"})
+                self.assertEqual(c["title"], {"en": "D1", "zh": "D1"})
+                cards.check_title(c, ("en", "zh"))
+
+    def test_words_next_to_an_invisible_character_are_kept_and_spaces_are_still_stripped(self):
+        for title, want in (("\ufeffAdd to cart", "\ufeffAdd to cart"),
+                            ({"en": "\ufeffAdd to cart"}, "\ufeffAdd to cart"),
+                            ("  Add to cart ", "Add to cart"), ({"en": "  Add to cart "}, "Add to cart")):
+            with self.subTest(title=title):
+                self.setUp()
+                self.edit_state("projects/shop", lambda s: s["tasks"][0].update(title=title))
+                self.ok("--project", "shop")
+                c = self.by_key()["v1:shop:PROJ-1"]
+                self.assertEqual(c["title"], {"en": want})
+                self.assertEqual(c["plain"]["what"], {"en": want})
+
+    def test_text_for_skips_an_invisible_slot_like_a_slot_of_spaces(self):
+        labels = importv1.Labels(self.v1)
+        for blank in ("", "  ", "\ufeff", "\ufeff \x1c", None, 3):
+            with self.subTest(blank=blank):
+                self.assertEqual(importv1.text_for({"en": blank, "zh": "加购物车"}, "en", labels), "加购物车")
+                self.assertEqual(importv1.text_for({"zh": blank, "en": "Cart"}, "zh", labels), "Cart")
+                self.assertEqual(importv1.text_for({"de": blank, "fr": "Panier"}, "en", labels), "Panier")
+                self.assertEqual(importv1.text_for({"en": blank}, "en", labels), "")
+        # A plain string is itself, blank or not; words next to U+FEFF are words.
+        self.assertEqual(importv1.text_for("\ufeff", "en", labels), "\ufeff")
+        self.assertEqual(importv1.text_for({"en": "\ufeffCart", "zh": "加"}, "en", labels), "\ufeffCart")
+
     def test_each_title_is_its_own_copy_of_the_plain_words(self):
         entries, _ = importv1.plan("shop", self.v1 / "projects" / "shop", ("en", "zh"),
                                    importv1.Labels(self.v1), {}, [])
@@ -632,6 +696,33 @@ class ImportV1Test(unittest.TestCase):
         self.edit_state("projects/shop", lambda s: s["decisions"].pop(0))
         report = self.ok("--project", "shop")
         return self.actions(report)["v1:shop:D1"], self.by_key()["v1:shop:D1"]
+
+    def test_a_question_card_with_an_invisible_old_where_is_closed_with_the_fresh_phrase(self):
+        # cards.blank: a configured-language plain.where slot of only U+FEFF (and white space), of only white space,
+        # or of a non-text value has no words, so the fresh question_where phrase is written, as for a missing one;
+        # the store would refuse it as is empty.
+        fresh = {lang: importv1.PHRASES[lang]["question_where"].format(project="shop", about="") for lang in ("en", "zh")}
+        for lang, text, want in (("en", "\ufeff", fresh["en"]), ("zh", "\ufeff \x1c", fresh["zh"]),
+                                 ("en", "   ", fresh["en"]), ("zh", 5, fresh["zh"]),
+                                 ("zh", "这里有字", "这里有字")):
+            with self.subTest(lang=lang, text=text):
+                self.setUp()  # a fresh temp v1 and data folder: D1 must still be in state.json
+                self.set_config("secondary_language: zh\n")
+                self.ok("--project", "shop")
+                d1 = self.by_key()["v1:shop:D1"]
+                path = Store(self.data).path(d1["id"])
+                old = json.loads(path.read_text(encoding="utf-8"))
+                old["plain"]["where"][lang] = text  # a hand-edited old card
+                path.write_text(json.dumps(old), encoding="utf-8")
+                self.edit_state("projects/shop", lambda s: s["decisions"].pop(0))
+                report = self.ok("--project", "shop")
+                self.assertEqual(self.actions(report)["v1:shop:D1"], "update")
+                card = self.by_key()["v1:shop:D1"]
+                self.assertEqual((card["lane"], card["ask"]), ("done", None))
+                self.assertEqual(card["plain"]["where"][lang], want)
+                other = "zh" if lang == "en" else "en"
+                self.assertEqual(card["plain"]["where"][other], old["plain"]["where"][other])
+                cards.validate(card, ("en", "zh"))
 
     def test_a_question_card_with_invisible_old_words_is_closed_with_its_title(self):
         # cards.blank: old plain.what words of only U+FEFF have no words, so the old title is used instead.
