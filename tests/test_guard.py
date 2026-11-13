@@ -78,7 +78,9 @@ class GuardTest(unittest.TestCase):
                     "sed -e 's/a/b/' -i ~/.claude/autopilot-data/x",
                     "sed -ni p ~/.claude/autopilot-data/x",
                     "sed --in-place 's/a/b/' ~/.claude/autopilot-data/x",
-                    "sed -I '' 's/a/b/' ~/.claude/autopilot-data/x"):
+                    "sed -I '' 's/a/b/' ~/.claude/autopilot-data/x",
+                    "sed -Ei 's/a/b/' ~/.claude/autopilot-data/x",
+                    "sed -nEi p ~/.claude/autopilot-data/x"):
             self.assertIsNotNone(guard.decide(bash(cmd), self.W), cmd)
 
     def test_guard_allows_near_misses_of_the_dd_open_and_sed_forms(self):
@@ -90,13 +92,37 @@ class GuardTest(unittest.TestCase):
                     "sed -n p ~/.claude/autopilot-data/x",
                     "sed -n p ~/.claude/autopilot-data/x | rg -i y",
                     "sed -n 1p ~/.claude/autopilot-data/runs/P-1/run-index.md",
-                    "find ~/.claude/autopilot-data/ -iname '*.md' -exec sed -n 1p {} +"):
+                    "find ~/.claude/autopilot-data/ -iname '*.md' -exec sed -n 1p {} +",
+                    "rg -n parsed -i ~/.claude/autopilot-data/x"):
             self.assertIsNone(guard.decide(bash(cmd), self.W), cmd)
 
     def test_guard_allows_reads_with_other_harmless_redirects(self):
         for cmd in ("cat ~/.claude/autopilot-data/x >&2",
-                    "rg -n x ~/.claude/autopilot-data/x >>/dev/null"):
+                    "rg -n x ~/.claude/autopilot-data/x >>/dev/null",
+                    "cat ~/.claude/autopilot-data/x 2> /dev/null",
+                    "cat ~/.claude/autopilot-data/x > /dev/null"):
             self.assertIsNone(guard.decide(bash(cmd), self.W), cmd)
+
+    def test_guard_still_denies_every_write_verb(self):
+        for cmd in ("mv a ~/.claude/autopilot-data/x",
+                    "touch ~/.claude/autopilot-data/x",
+                    "chmod 600 ~/.claude/autopilot-data/x",
+                    "ln -s a ~/.claude/autopilot-data/x",
+                    "install a ~/.claude/autopilot-data/x",
+                    "truncate -s 0 ~/.claude/autopilot-data/x",
+                    "perl -pi -e 's/a/b/' ~/.claude/autopilot-data/x",
+                    "python3 -c \"import pathlib; pathlib.Path('/x/autopilot-data/y').write_text('')\"",
+                    "python3 -c \"open('/x/autopilot-data/y', 'r+').write('')\""):
+            d = guard.decide(bash(cmd), self.W)
+            self.assertIsNotNone(d, cmd)
+            self.assertEqual(d["hookSpecificOutput"]["permissionDecision"], "deny", cmd)
+
+    def test_guard_still_denies_a_redirect_into_a_file_with_ampersand(self):
+        for cmd in ("echo x >& ~/.claude/autopilot-data/x",
+                    "echo x >&~/.claude/autopilot-data/x"):
+            d = guard.decide(bash(cmd), self.W)
+            self.assertIsNotNone(d, cmd)
+            self.assertEqual(d["hookSpecificOutput"]["permissionDecision"], "deny", cmd)
 
     def _assert_fast(self, cmd):
         start = time.monotonic()
