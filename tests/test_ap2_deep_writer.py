@@ -331,6 +331,16 @@ class CycleTest(WriterCase):
             check_writable(top)
         self.assertLess(time.monotonic() - start, 2)
 
+    def test_an_update_with_a_cycle_past_the_budget_gets_the_depth_words(self):
+        # The budget refusal names the caller's subject and comes before the card checks, as for add.
+        new = self.store.add(card(), by="w")
+        top = bottom = [1]
+        for _ in range(40):
+            top = [top, top]
+        bottom.append(top)
+        self.assert_refused(lambda: self.store.update(new["id"], {"x": top}, by="w"),
+                            "changes are nested too deeply to copy or write")
+
     def test_a_cycle_through_wide_containers_is_refused_fast(self):
         filler = [0] * 1000
         top = bottom = list(filler)
