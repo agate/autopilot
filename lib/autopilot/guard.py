@@ -101,14 +101,13 @@ def decide(payload: dict, env) -> dict:
     for seg in _SPLIT.split(cmd):  # as written: v1's reading before quotes were taken out
         if seg.strip() and not _is_ap(seg) and _denies(seg, marks):
             return _deny()
-    # bash may or may not join a `\` + newline (not after a `#`), so the lines are read both split and joined. A `\`
-    # ending a comment does not continue the line, so an `ap` segment with a `#` that a continuation was joined into
-    # (marked by a NUL glue) is read like any other.
+    # bash may or may not join a `\` + newline (not after a `#`, and a NUL-glued `&&` hides a split), so the lines
+    # are read both split and joined, and a joined segment (marked by the NUL glue) is never exempt as an `ap` call.
     readings = [(s, True) for s in _SPLIT.split(cmd)]
     for s in _SPLIT.split(_join(cmd, "\0")):
         joined = "\0" in s
         s = s.replace("\0", "")
-        readings.append((s, not (joined and "#" in s)))
+        readings.append((s, not joined))
     for seg, may_be_ap in readings:
         if not seg.strip() or (may_be_ap and _is_ap(seg)):
             continue

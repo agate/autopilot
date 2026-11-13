@@ -178,16 +178,26 @@ class GuardTest(unittest.TestCase):
             self.assertIsNotNone(guard.decide(bash(cmd), self.W), cmd)
         self.assertIsNone(guard.decide(bash("ap decision add v2 \\\n~/.claude/autopilot-data/x.json"), self.W))
 
-    def test_guard_reads_a_joined_ap_line_with_a_comment_like_any_other(self):
-        # the joined reading glues the lines after the comment onto the `ap` line, so it is not exempt
+    def test_guard_reads_a_joined_ap_line_like_any_other(self):
+        # an `ap` segment a continuation was joined into is not exempt, whatever a `#` or a split `&&` hides
         for cmd in ("ap note v2 x # see below \\\ncp /tmp/evil.yaml \\\n~/.claude/autopilot-data/config.yaml",
                     "ap note v2 x # \\\nrm -rf \\\n~/.claude/autopilot-data/projects",
                     "ap note v2 x #\\\ncp /tmp/evil.yaml \\\n~/.claude/autopilot-data/config.yaml",
                     "ap note v2 x\t# see \\\ncp /tmp/evil.yaml \\\n~/.claude/autopilot-data/config.yaml",
                     # the glued line repeated on its own (a comment line in bash) does not make it exempt
-                    "ap x # \\\ncp a \\\n~/.claude/autopilot-data/y\nap x # cp a ~/.claude/autopilot-data/y"):
+                    "ap x # \\\ncp a \\\n~/.claude/autopilot-data/y\nap x # cp a ~/.claude/autopilot-data/y",
+                    # bash joins `&\` + newline + `&` into `&&`, so the write runs on its own
+                    "ap x &\\\n& r\\\nm -rf ~/.claude/autopilot-data/x",
+                    "ap x &\\\n& echo y > ~/.claude/autopilot\\\n-data/x",
+                    # a separator inside the comment does not end the joined `ap` segment
+                    "# ; ap \\\ncp a \\\n~/.claude/autopilot-data/x",
+                    "ap x # ; ap \\\ncp a \\\n~/.claude/autopilot-data/x",
+                    # the comment sits on a later, joined-in line
+                    "ap x \\\n# \\\ncp a \\\n~/.claude/autopilot-data/y"):
             self.assertIsNotNone(guard.decide(bash(cmd), self.W), cmd)
-        self.assertIsNone(guard.decide(bash('ap task set v2 PROJ-1 note="see #3" \\\nstatus=done'), self.W))
+        for cmd in ('ap task set v2 PROJ-1 note="see #3" \\\nstatus=done',
+                    "cat ~/.claude/autopilot-data/x \\\n| head"):
+            self.assertIsNone(guard.decide(bash(cmd), self.W), cmd)
 
     def test_guard_allows_a_one_line_ap_call_with_a_hash(self):
         # no continuation is joined into these, so they stay exempt
