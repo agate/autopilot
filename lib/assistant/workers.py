@@ -123,7 +123,7 @@ APPLY_FAILED = "review_apply_failed"  # the `reason` of the ask a pr-review repo
 REVIEW_IDLE = "review_idle"  # the `reason` of the ask a pr-review worker closed idle with no report raises
 REVIEW_DIR = "ap2-pr-review-"  # the prefix of the empty folder an auto-started pr-review worker runs in
 QUESTION_MAX = 64 * 1024  # the most of question.json `check` reads (under the worker list's lock)
-WORKER_TEXT_MAX = 2000  # the most characters of worker-derived text (`_safe_text`) that go into an ask or a note
+WORKER_TEXT_MAX = 2000  # the most characters of worker-derived text (`_safe_text`) in a failed apply's ask or a note
 SHADOW_REVIEW = "shadow mode starts no worker; this card waits for its review in live mode"
 WRITE_DENIED = ("a read-only v2 worker writes only its result file or question.json, at the top of its own run "
                 "directory (AP2_RUN_DIR)")
@@ -1245,27 +1245,29 @@ class Workers:
             return 0.0
 
     @staticmethod
-    def _safe_text(text: str) -> str:
+    def _safe_text(text: str, limit: Optional[int] = WORKER_TEXT_MAX) -> str:
         """Worker-derived text made fit for a card, the worker list and a line: what is not valid Unicode (a lone
         surrogate, from a `\\ud800` escape in a file the worker wrote) is escaped, as a card refuses it and the
-        ask would never be set, and it is cut to WORKER_TEXT_MAX characters."""
+        ask would never be set, and it is cut to `limit` characters (none: not cut)."""
         text = text.encode("utf-8", "backslashreplace").decode("utf-8")
-        return text if len(text) <= WORKER_TEXT_MAX else text[:WORKER_TEXT_MAX] + " [cut]"
+        return text if limit is None or len(text) <= limit else text[:limit] + " [cut]"
 
     def _read_question(self, card_id: str):
         """The question's text. Only a regular file is read (`sources.read_regular_capped`: opened without following
         a link and without waiting, as a FIFO the worker put there would hold the worker list's lock forever), and
         at most QUESTION_MAX bytes of it (a huge file would be read whole into memory under that lock), so anything
-        else reads as none."""
+        else reads as none. Only a text that is a non-empty string is kept (anything else, a list, a dict or NaN,
+        say, reads as none: kept raw, the card would refuse it), escaped where it is not valid Unicode but never
+        cut, as the question is often at its end (QUESTION_MAX already bounds it)."""
         try:
             q = json.loads(sources.read_regular_capped(self.run_dir(card_id) / QUESTION, QUESTION_MAX,
                                                        "too large").decode("utf-8"))
         except (OSError, ValueError, sources.SourceError):
             q = None
         text = q.get("text") if isinstance(q, dict) else q
-        if isinstance(text, str):
-            text = self._safe_text(text)
-        return text if text else "The worker asked a question but its question.json could not be read."
+        if isinstance(text, str) and text:
+            return self._safe_text(text, limit=None)
+        return "The worker asked a question but its question.json could not be read."
 
     # An in-place resume (a dead worker's, or a parked one's whose window reset) runs in three steps, so its tool
     # discovery (up to DISCOVER_TIMEOUT seconds) never holds the worker list's lock: `_plan_resume` under the lock

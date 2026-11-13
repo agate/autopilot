@@ -1251,6 +1251,53 @@ class NobodyWaitsTest(WorkerCase):
         with self.assertRaisesRegex(WorkerError, "no question from a worker"):
             w.answer(cid, "again")
 
+    def assert_question_text_not_read(self, body):
+        # Kept raw, text that is not a string (a list or dict holding a lone surrogate, a deep nesting, NaN) goes
+        # into the close's mark: the card refuses to save it, and the worker list's write-back then fails every
+        # check after.
+        w = self.workers()
+        a = self.start(w)
+        (transcripts.run_dir(self.data, a["card"]) / "question.json").write_text(body)
+        out = w.check()
+        self.assertEqual([(e["card"], e["did"]) for e in out], [(a["card"], "asked")])
+        fixed = "The worker asked a question but its question.json could not be read."
+        self.assertEqual(self.get(a["card"])["ask"]["text"], fixed)
+        self.assertEqual(self.get(a["card"])["sessions"]["implement"]["question"], fixed)
+        self.assertEqual(resources.Registry(self.data).read(), [])  # written back: closed as a question
+        self.assertEqual(w.check(), [])
+
+    def test_a_question_text_that_is_a_list_is_not_read(self):
+        self.assert_question_text_not_read('{"text": ["Which \\ud800 base?"]}')
+
+    def test_a_question_text_that_is_a_dict_is_not_read(self):
+        self.assert_question_text_not_read('{"text": {"q": "\\ud800"}}')
+
+    def test_a_question_file_that_is_a_list_is_not_read(self):
+        self.assert_question_text_not_read('["\\ud800"]')
+
+    def test_a_question_text_that_is_deeply_nested_is_not_read(self):
+        self.assert_question_text_not_read('{"text": ' + "[" * 5000 + "]" * 5000 + "}")
+
+    def test_a_question_text_that_is_nan_is_not_read(self):
+        self.assert_question_text_not_read('{"text": NaN}')
+
+    def test_a_question_text_that_is_a_number_or_true_is_not_read(self):
+        for body in ('{"text": 5}', '{"text": true}'):
+            with self.subTest(body):
+                self.assert_question_text_not_read(body)
+
+    def test_a_long_question_is_kept_whole(self):
+        w = self.workers()
+        a = self.start(w)
+        text = "Some context. " * 170 + "So which base branch should the fix go on?"
+        self.assertEqual(len(text), 2422)
+        self.write_result(a["card"], "question.json", {"text": text})
+        self.assertEqual(w.check()[0]["did"], "asked")
+        self.assertEqual(self.get(a["card"])["ask"]["text"], text)
+        self.assertEqual(self.get(a["card"])["sessions"]["implement"]["question"], text)
+        w.answer(a["card"], "Main.")
+        self.assertIn(f"Your question: {text}\n", self.bg_calls()[-1]["argv"][-1])
+
     def test_blocked_at_a_permission_prompt_asks_for_attach_then_stops_after_30_minutes(self):
         w = self.workers()
         a = self.start(w)
@@ -4007,6 +4054,29 @@ class PrReviewDonePathTest(PrReviewCase):
         self.assertIn(f"run `ap2 review check {cid}`, then `ap2 review apply {cid}`", ask["text"])
         self.assertEqual(self.workers().check(), [])
         self.assertEqual(len(self.review_starts()), 1)
+
+    def test_an_apply_ask_the_card_refuses_twice_leaves_safe_notes(self):
+        cid = self.started()
+        self.the_worker_reviews(cid, report={"card": cid, "verdict": "approve"})
+        texts = []
+
+        def set_ask(self_, card_id, ask, by):
+            texts.append(ask["text"])
+            raise workers_mod.WorkerError("refused \ud800" + "y" * 5000)
+
+        with mock.patch.object(Workers, "_set_ask", set_ask):
+            out = self.workers().check()
+        self.assertEqual(len(texts), 2)
+        self.assertIn("does not pass ap2 review check", texts[0])
+        self.assertNotIn("does not pass", texts[1])
+        self.assertEqual(out[0]["did"], "ended")
+        note = out[0]["note"]
+        self.assertIn("the review was not applied", note)
+        self.assertEqual(note.count("the ask could not be set"), 2)
+        note.encode("utf-8")  # the line's note is valid text
+        self.assertIn("\\ud800", note)
+        self.assertIn("[cut]", note)
+        self.assertIsNone(self.get(cid).get("ask"))
 
     def test_an_apply_by_hand_closes_the_ask_on_the_next_check(self):
         cid = self.started()
