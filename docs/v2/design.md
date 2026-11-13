@@ -3247,7 +3247,9 @@ Calls the author made without asking (check them):
      `option` must be one of that card's `ask.options`, else 409 (so `accept_unknown` cannot answer a `spent`
      card); an option that is no answer at all is 400. Then `cap.answer(data, option, now, workers=w)`, `w` being
      `Workers(data, cfg)` in live mode and None in shadow mode, exactly as `ap2 cap answer`: `cap.answer` stays the
-     one entry. The reply is 200 with its dict; a CapError naming a file is 500. The page draws the buttons only on
+     one entry. The reply is 200 with its dict; a CapError naming a file, a damaged card, or (live `pause` only) a
+     worker list `cap_stop` cannot read is 500; in that last case `paused.json` and the answer are already
+     written, as with `ap2 cap answer pause`. The page draws the buttons only on
      a card of kind `cap` whose ask is `from: cap` and whose id is `access.cap.card_id` while the card is open,
      with labels from its tables, `pause` as the quiet button. After a 200 the page reloads the state and the
      card; a 409 shows a label in the page's language with the server's reason under it.
