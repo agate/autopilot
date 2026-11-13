@@ -4,17 +4,21 @@
 port); `ap2 serve` runs it. Routes:
 
 - `GET /`: the page, `builtin/page/local.html`, with a strict Content-Security-Policy.
-- `GET /api/state`: the mode, languages, lane counts, projects, the gate's heartbeat and the page's URL.
+- `GET /api/state`: the mode, languages, lane counts, projects, the gate's heartbeat, the page's URL, and what
+  `profileview.summary` says about access (`access`: the profile, its key, the cap card and pause) and `usage`.
 - `GET /api/cards?lane=&kind=&parent=&q=&limit=`: card rows, in lane order; `GET /api/cards/<id>`: the full card,
   with its template's view, source block, children, links and activity.
 - `GET /api/sources[/<name>]`, `GET /api/templates[/<kind>]`, `GET /api/settings`: the Manage screens.
-- `POST /api/cards/<id>/questions`: save a question about a card (design 9.4). The only write.
+- `POST /api/cards/<id>/questions`: save a question about a card (design 9.4).
+- `POST /api/cap/answer`: answer today's open cap card through `cap.answer`, as `ap2 cap answer` does.
 
-Every request must name this server in its `Host` header (`127.0.0.1:<port>` or `localhost:<port>`), so a page on
-another site whose name points at 127.0.0.1 (DNS rebinding) cannot read cards. The one POST also refuses another
-site's `Origin` and any body that is not `application/json`, so a plain HTML form elsewhere cannot post. No route
-runs a process, calls Jira, Slack, GitHub or `claude`, or writes outside the data folder; the GETs write nothing
-(a search may build `index.sqlite`, the store's own cache, as `ap2 search` does).
+These two POSTs are the only writes. Every request must name this server in its `Host` header (`127.0.0.1:<port>`
+or `localhost:<port>`), so a page on another site whose name points at 127.0.0.1 (DNS rebinding) cannot read cards.
+Each POST also refuses another site's `Origin` and any body that is not `application/json`, so a plain HTML form
+elsewhere cannot post. No route calls Jira, Slack, GitHub or the model API, or writes outside the data folder; the
+GETs write nothing (a search may build `index.sqlite`, the store's own cache, as `ap2 search` does) and run no key
+command. One route may start a process: in live mode only, the cap answer `pause` stops every running worker with
+`claude stop` (`Workers.cap_stop`), exactly as `ap2 cap answer pause` does. No other route starts one.
 """
 from __future__ import annotations
 
@@ -26,6 +30,7 @@ import socket
 import sqlite3
 import stat
 import sys
+import threading
 from collections import Counter
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -34,9 +39,10 @@ from socketserver import TCPServer
 from typing import Callable, Optional
 from urllib.parse import parse_qs, unquote
 
-from assistant import cards, config, datadir, gate, index, templates
+from assistant import cap, cards, config, datadir, gate, index, profileview, templates
 from assistant.cards import CardError
 from assistant.config import ConfigError
+from assistant.resources import WorkerError
 from assistant.sources import Loader, SourceError
 from assistant.store import LOCK, Store
 
@@ -256,6 +262,22 @@ def _size(path: Path) -> int:
     return total
 
 
+class _CapStop:
+    """The workers a live `pause` hands `cap.answer`: `cap_stop()` is the real one, but a WorkerError from it (a
+    damaged worker list) comes back as `{"stopped": [], "failed": [], "stop_error": <its text>}`. `cap.answer` calls
+    it after writing `paused.json` and the answer, so the reply says the card is answered and the workers were not
+    stopped, instead of a 500 that reads as "not answered"."""
+
+    def __init__(self, workers):
+        self.workers = workers
+
+    def cap_stop(self) -> dict:
+        try:
+            return self.workers.cap_stop()
+        except WorkerError as e:
+            return {"stopped": [], "failed": [], "stop_error": str(e)}
+
+
 # --- the server ------------------------------------------------------------------------------------------------
 
 class Server(ThreadingHTTPServer):
@@ -267,6 +289,8 @@ class Server(ThreadingHTTPServer):
     clock: Callable[[], datetime]
     log_stream = None
     url: str
+    usage_file: Optional[Path]
+    write_lock: threading.Lock
 
     def server_bind(self):
         # HTTPServer.server_bind looks the address up by name (socket.getfqdn); this server has no name to find.
@@ -289,10 +313,11 @@ class Server(ThreadingHTTPServer):
 
 
 def make_server(data, port: int = PORT, cfg: Optional[config.Config] = None, plugin_dir: Optional[Path] = None,
-                clock: Callable[[], datetime] = cards.now_utc) -> Server:
+                clock: Callable[[], datetime] = cards.now_utc, usage_file=None) -> Server:
     """The server for the data folder `data`, bound to 127.0.0.1:`port` (0 takes a free port), not yet serving.
-    `cfg` None reads `config.yaml` on every request; `plugin_dir` is the built-in sources folder. Raises
-    ConfigError when the port cannot be used."""
+    `cfg` None reads `config.yaml` on every request; `plugin_dir` is the built-in sources folder; `usage_file` is
+    Claude Code's usage cache (None: `~/.claude.json`, looked up at each request). Raises ConfigError when the port
+    cannot be used."""
     if port != 0:
         # SO_REUSEADDR (kept for quick restarts) lets macOS bind 127.0.0.1:<port> while another program listens on
         # all addresses at that port; whatever answers there first means the port is taken.
@@ -311,6 +336,8 @@ def make_server(data, port: int = PORT, cfg: Optional[config.Config] = None, plu
     srv.cfg = cfg
     srv.plugin_dir = Path(plugin_dir) if plugin_dir is not None else None
     srv.clock = clock
+    srv.usage_file = Path(usage_file) if usage_file is not None else None
+    srv.write_lock = threading.Lock()  # the cap answers, one at a time
     srv.log_stream = sys.stderr
     srv.url = f"http://{HOST}:{srv.server_address[1]}/"
     return srv
@@ -443,9 +470,13 @@ class Handler(BaseHTTPRequestHandler):
             if method != "POST":
                 raise HTTPError(405, f"{method} is not allowed here; questions are saved with POST", allow="POST")
             return self.ask(parts[2])
+        if parts == ["api", "cap", "answer"]:
+            if method != "POST":
+                raise HTTPError(405, f"{method} is not allowed here; cap answers are sent with POST", allow="POST")
+            return self.cap_answer()
         if method != "GET":
-            raise HTTPError(405, f"{method} is not allowed: this page is read-only but for saving a question",
-                            allow="GET")
+            raise HTTPError(405, f"{method} is not allowed: this page is read-only but for saving a question and "
+                                 "answering the cap card", allow="GET")
         if raw_path == "/":
             return 200, self.page()
         if raw_path == "/favicon.ico":  # browsers ask for it on every open; no icon, and no error line in the log
@@ -515,10 +546,15 @@ class Handler(BaseHTTPRequestHandler):
                      "done": sum(1 for k in children.get(c["id"], []) if k.get("lane") == "done"),
                      "total": len(children.get(c["id"], []))}
                     for c in found if c.get("kind") == "project"]
+        view = profileview.summary(self.server.data, self.server.clock().astimezone(), self.usage_file())
         return {"mode": cfg.mode, "primary_language": cfg.primary_language,
                 "secondary_language": cfg.secondary_language, "languages": list(langs),
                 "lanes": lanes, "running": lanes["running"], "projects": projects,
-                "heartbeat": heartbeat(self.server.data, self.server.clock()), "usage": None, "url": self.server.url}
+                "heartbeat": heartbeat(self.server.data, self.server.clock()), "access": view["access"],
+                "usage": view["usage"], "url": self.server.url}
+
+    def usage_file(self) -> Path:
+        return self.server.usage_file if self.server.usage_file is not None else Path.home() / ".claude.json"
 
     # -- GET /api/cards ------------------------------------------------------------------------------------------
 
@@ -578,20 +614,22 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- POST /api/cards/<id>/questions --------------------------------------------------------------------------
 
-    def ask(self, card_id: str):
+    def _check_origin(self, what: str) -> None:
+        """A POST from another site's page is refused (403); a request with no `Origin` (curl) passes."""
         origin = self.headers.get("Origin")
         if origin is not None and origin.strip().lower() not in self._own_origins():
-            raise HTTPError(403, f"refused: a question can only be posted from this page, not from {origin!r}")
-        try:
-            cards.check_id(card_id)
-        except CardError as e:
-            raise HTTPError(404, str(e)) from e
+            raise HTTPError(403, f"refused: {what} can only be posted from this page, not from {origin!r}")
+
+    def _json_body(self, what: str, shape: str) -> dict:
+        """The POST's body as a JSON object: `application/json` (415), a `Content-Length` (411) that is a number
+        (400) of at most BODY_MAX bytes (413), the whole body (400), JSON (400) and an object (400). `what` and
+        `shape` name the post in the refusals ("a question", `{"text": "..."}`)."""
         ctype = self.headers.get("Content-Type", "").split(";")[0].strip().lower()
         if ctype != "application/json":
-            raise HTTPError(415, "a question is posted as application/json: {\"text\": \"...\"}")
+            raise HTTPError(415, f"{what} is posted as application/json: {shape}")
         length = self.headers.get("Content-Length")
         if length is None:
-            raise HTTPError(411, "a question needs a Content-Length")
+            raise HTTPError(411, f"{what} needs a Content-Length")
         if not DIGITS.match(length.strip()):
             raise HTTPError(400, f"Content-Length is not a number: {length!r}")
         if int(length) > BODY_MAX:
@@ -605,7 +643,16 @@ class Handler(BaseHTTPRequestHandler):
         except (UnicodeDecodeError, ValueError, RecursionError) as e:
             raise HTTPError(400, f"the body is not JSON: {e}") from e
         if not isinstance(body, dict):
-            raise HTTPError(400, "the body must be a JSON object: {\"text\": \"...\"}")
+            raise HTTPError(400, f"the body must be a JSON object: {shape}")
+        return body
+
+    def ask(self, card_id: str):
+        self._check_origin("a question")
+        try:
+            cards.check_id(card_id)
+        except CardError as e:
+            raise HTTPError(404, str(e)) from e
+        body = self._json_body("a question", '{"text": "..."}')
         text = body.get("text")
         if not isinstance(text, str):
             raise HTTPError(400, "text missing" if text is None else f"text must be text, not {type(text).__name__}")
@@ -630,6 +677,51 @@ class Handler(BaseHTTPRequestHandler):
                 raise HTTPError(404, str(e)) from e
             raise HTTPError(409, str(e)) from e
         return 201, {"question": card["questions"][-1], "card": card}
+
+    # -- POST /api/cap/answer -------------------------------------------------------------------------------------
+
+    def cap_answer(self):
+        """Answer today's open cap card with one of its options, through `cap.answer` (the one entry, as `ap2 cap
+        answer`). A card that is not today's open one, or an option it does not offer, is 409 and changes nothing.
+        In live mode a `pause` stops every running worker (`Workers.cap_stop`); in shadow mode it stops none. A
+        worker list that `cap_stop` cannot read comes after `paused.json` and the answer are written, so the reply
+        is still 200, with `stop_error` (see `_CapStop`)."""
+        self._check_origin("a cap answer")
+        body = self._json_body("a cap answer", '{"card_id": "...", "option": "..."}')
+        card_id, option = body.get("card_id"), body.get("option")
+        if not isinstance(option, str) or option not in cap.ANSWERS:
+            raise HTTPError(400, f"option must be one of {', '.join(cap.ANSWERS)}, not {option!r}")
+        if not isinstance(card_id, str):
+            raise HTTPError(400, "card_id missing" if card_id is None
+                            else f"card_id must be text, not {type(card_id).__name__}")
+        cfg = self.cfg()
+        data = self.server.data
+        now = self.server.clock().astimezone()  # the local day, as the workers' allowance counts it
+        with self.server.write_lock:
+            try:
+                s = cap.state(data, now)
+            except ConfigError as e:  # CapError: a symlink where the cap state is kept
+                raise HTTPError(500, str(e)) from e
+            if s["card"] != "open" or s.get("card_id") != card_id or not cards.CARD_ID.match(card_id):
+                raise HTTPError(409, f"this cap card is no longer open (today's cap card is "
+                                     f"{s.get('card_id') or 'none'}, {s['card'] or 'not open'})")
+            store = self.reader(cfg)
+            if not store.path(card_id).exists():
+                raise HTTPError(409, f"this cap card is no longer open (no card {card_id})")
+            ask = self._store_call(store.get, card_id).get("ask")
+            offered = ask.get("options") if isinstance(ask, dict) and ask.get("from") == "cap" else None
+            if not isinstance(offered, list) or option not in offered:
+                raise HTTPError(409, f"{option} is not an answer on this cap card (it offers "
+                                     f"{', '.join(str(o) for o in offered or []) or 'none'})")
+            try:
+                w = None
+                if cfg.mode == "live":  # the pause stops workers in live mode only, as `ap2 cap answer`
+                    from assistant.workers import Workers
+                    w = _CapStop(Workers(data, cfg=cfg))  # Workers() failing: nothing written yet, a 500
+                return 200, cap.answer(data, option, now, workers=w)
+            # WorkerError: a safety net for any other one raised before the writes (cap_stop's own becomes a 200)
+            except (ConfigError, CardError, OSError, WorkerError) as e:
+                raise HTTPError(500, str(e)) from e
 
     # -- GET /api/sources, /api/templates, /api/settings ---------------------------------------------------------
 

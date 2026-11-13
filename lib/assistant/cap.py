@@ -13,7 +13,9 @@ and resume too (`reason: key`), with no card and no fallback to the subscription
 
 "Today" is the calendar day of `now`: an aware `now` at its own offset, a naive one by this computer's local rules,
 as in `spend.totals`. Every function takes the data folder and the time; there is no module clock. Everything is
-kept inside the data folder (`cap-state.json`, `paused.json`), so it works in shadow mode.
+kept inside the data folder (`cap-state.json`, `paused.json`), so it works in shadow mode. Each gateway allowance
+also keeps the totals it read (`spend.remember`, `spend/last.json`), so the pages show today's count without reading
+the ledger; a failed write there never changes the allowance.
 """
 from __future__ import annotations
 
@@ -356,6 +358,10 @@ def allowance(data, projects, now, p: dict, listing=None, store: Optional[Store]
         t = spend.totals(data, projects, now, "gateway", listing)
     except OSError as e:
         raise CapError(f"cannot read the spend ledger for the daily cap: {e}") from e
+    try:
+        spend.remember(data, t, now)  # for the pages: they never read the ledger themselves
+    except Exception:  # noqa: BLE001 - a count the pages show must never change the allowance; they show the older one
+        pass
     over = limit is not None and t["today"] >= limit
     unknown = bool(t.get("unknown_today")) and not unknown_accepted(data, now)
     if over or unknown:

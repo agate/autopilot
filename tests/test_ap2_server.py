@@ -11,6 +11,7 @@ import socket
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -19,9 +20,10 @@ from unittest import mock
 from tests.helpers import ROOT
 from tests.test_ap2_store import BLANK_SLOTS, NOT_BLANK_SLOTS
 
-from assistant import cards, datadir, gate, server, templates
+from assistant import cap, cards, datadir, gate, profiles, server, templates
 from assistant.config import Config, ConfigError
 from assistant.engine import Engine
+from assistant.resources import WorkerError
 from assistant.store import Store
 
 FIXTURES = ROOT / "tests" / "fixtures" / "ap2"
@@ -94,7 +96,7 @@ class ServerCase(unittest.TestCase):
 
     def start(self, cfg="default"):
         srv = server.make_server(self.data, port=0, cfg=self.cfg if cfg == "default" else cfg,
-                                 plugin_dir=self.plugin, clock=self.clock)
+                                 plugin_dir=self.plugin, clock=self.clock, usage_file=self.tmp / "claude.json")
         srv.log_stream = io.StringIO()
         self.addCleanup(srv.server_close)
         thread = threading.Thread(target=srv.serve_forever, daemon=True)
@@ -375,10 +377,35 @@ class ListTest(ServerCase):
         self.assertEqual(st["primary_language"], "en")
         self.assertIsNone(st["secondary_language"])
         self.assertEqual(st["languages"], ["en"])
-        self.assertIsNone(st["usage"])
+        self.assertEqual(st["usage"]["mode"], "subscription")
+        self.assertIsNone(st["usage"]["windows"])  # the test's usage file does not exist
+        self.assertEqual(st["access"]["profile"]["name"], "subscription")
+        self.assertEqual(set(st["access"]), {"profile", "profile_error", "page_sessions", "profiles",
+                                             "broken_profiles", "key_error", "cap"})
+        self.assertEqual(set(st["usage"]), {"mode", "windows", "stale", "credits_used_usd", "credits_limit_usd",
+                                            "gateway"})
         self.assertEqual(st["url"], self.srv.url)
         self.assertEqual(set(st), {"mode", "primary_language", "secondary_language", "languages", "lanes",
-                                   "running", "projects", "heartbeat", "usage", "url"})
+                                   "running", "projects", "heartbeat", "access", "usage", "url"})
+
+    def test_with_no_usage_file_the_state_reads_homes_claude_json(self):
+        # `make_server` with no `usage_file` reads `~/.claude.json` at each request: HOME is a temp folder here.
+        from tests.test_ap2_profileview import usage_json
+        home = self.tmp / "home"
+        home.mkdir()
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            srv = server.make_server(self.data, port=0, cfg=self.cfg, plugin_dir=self.plugin, clock=self.clock)
+            srv.log_stream = io.StringIO()
+            self.addCleanup(srv.server_close)
+            thread = threading.Thread(target=srv.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(thread.join, 10)
+            self.addCleanup(srv.shutdown)
+            self.srv, self.port = srv, srv.server_address[1]
+            self.assertIsNone(self.ok("/api/state")["usage"]["windows"])  # no file yet
+            usage_json(home / ".claude.json", now=self.clock(), percent=63)  # looked up again at the next request
+            windows = self.ok("/api/state")["usage"]["windows"]
+        self.assertEqual([(w["kind"], w["percent"]) for w in windows], [("five_hour", 63), ("seven_day", 7)])
 
     def test_an_open_lane_is_by_priority_then_newest(self):
         body = self.ok("/api/cards?lane=needs")
@@ -998,6 +1025,18 @@ class ReadOnlyTest(ServerCase):
                     status, _, _ = self.call(method, f"/api/cards/{card['id']}/questions", {"text": "hi"})
                     self.assertEqual(status, 405)
                     self.assertEqual(tree(self.data), before)
+            for method in ("GET", "PUT", "PATCH", "DELETE"):
+                with self.subTest(mode=mode, method=method, route="cap answer"):
+                    before = tree(self.data)
+                    status, hdrs, reply = self.call(method, "/api/cap/answer", {"card_id": card["id"],
+                                                                                "option": "pause"})
+                    self.assertEqual(status, 405, reply)
+                    self.assertEqual(hdrs.get("allow"), "POST")
+                    self.assertEqual(tree(self.data), before)
+            status, _, reply = self.call("POST", "/api/state", {})
+            self.assertIn("saving a question and answering the cap card", reply["error"])
+            # The profile switch is not a route yet (it is its own later task): POST is 405 like any other.
+            self.assertEqual(self.call("POST", "/api/profile/use", {"name": "subscription"})[0], 405)
 
     def test_a_question_in_shadow_mode_writes_only_inside_the_data_folder(self):
         home = self.tmp / "home"
@@ -1006,6 +1045,8 @@ class ReadOnlyTest(ServerCase):
         sibling.mkdir()
         (sibling / "keep.txt").write_text("keep", encoding="utf-8")
         card = self.add()
+        profiles.save(self.data, gateway_profile("g"))
+        cap_id = open_cap_card(self, "spent")
         real_connect = socket.create_connection
         outside = []
 
@@ -1023,6 +1064,8 @@ class ReadOnlyTest(ServerCase):
             data_before, outside_before = tree(self.data), self.outside_data()
             status, _, body = self.ask(card["id"], "Why?")
             self.assertEqual(status, 201, body)
+            status, _, body = self.call("POST", "/api/cap/answer", {"card_id": cap_id, "option": "pause"})
+            self.assertEqual(status, 200, body)
             for route in ("/api/state", "/api/cards", f"/api/cards/{card['id']}", "/api/sources", "/api/settings"):
                 self.ok(route)
             self.assertEqual(tree(home), home_before)
@@ -1030,8 +1073,186 @@ class ReadOnlyTest(ServerCase):
             self.assertEqual(tree(self.plugin), plugin_before)
             self.assertEqual(self.outside_data(), outside_before)
             self.assertNotEqual(tree(self.data), data_before)
+            self.assertTrue((self.data / cap.PAUSED).exists())
         self.assertEqual(outside, [])
         live.assert_not_called()
+
+
+# --- the cap card's answers -----------------------------------------------------------------------------------
+
+def gateway_profile(name) -> dict:
+    """A gateway profile whose key command is never run here (the page reads only the cached key record)."""
+    return {"name": name, "mode": "gateway", "label": name.upper(), "model": "big", "small_model": "small",
+            "effort": "high", "daily_cap_usd": 500, "chosen_at": "2026-11-01T09:00:00-05:00",
+            "gateway": {"base_url": "https://gateway.example.com/v1", "key_command": "exit 7",
+                        "refresh_command": None, "rotate_command": None, "models_command": None}}
+
+
+def open_cap_card(case, cause="spent") -> str:
+    """Open today's cap card (the server's local day) as the cap does at the limit; its id."""
+    now = case.clock().astimezone()
+    t = {"today": 510.0, "week": 510.0, "month": 510.0, "unknown": cause == "unknown",
+         "unknown_today": cause == "unknown", "unknown_models": [], "unknown_launches": 0}
+    cap.open_card(case.data, now, 500.0, cause, t, "g", case.store())
+    return cap.state(case.data, now)["card_id"]
+
+
+class CapAnswerRouteTest(ServerCase):
+    def setUp(self):
+        # A zone whose day differs from UTC's at START, so a cap day read in UTC is the wrong day. Cleanups run
+        # last-first: the second tzset runs after the zone is put back.
+        self.addCleanup(time.tzset)
+        tz = mock.patch.dict(os.environ, {"TZ": "Pacific/Kiritimati"})
+        tz.start()
+        self.addCleanup(tz.stop)
+        time.tzset()
+        super().setUp()
+        profiles.save(self.data, gateway_profile("g"))
+        profiles.use(self.data, "g")
+        self.card_id = open_cap_card(self)
+
+    def answer(self, option, card_id=None, headers=None):
+        return self.call("POST", "/api/cap/answer", {"card_id": card_id or self.card_id, "option": option}, headers)
+
+    def test_raise50_answers_todays_open_card(self):
+        st = self.ok("/api/state")
+        self.assertEqual((st["access"]["cap"]["card"], st["access"]["cap"]["card_id"]), ("open", self.card_id))
+        status, _, body = self.answer("raise50")
+        self.assertEqual(status, 200, body)
+        self.assertEqual((body["answered"], body["raise_pct"], body["card"], body["card_id"]),
+                         ("raise50", 50, "answered", self.card_id))
+        now = self.clock().astimezone()
+        self.assertEqual(cap.state(self.data, now)["card"], "answered")
+        self.assertEqual(cap.today_limit(self.data, profiles.active(self.data), now), 750.0)
+        card = self.store().get(self.card_id)
+        self.assertIsNone(card.get("ask"))
+        self.assertEqual(card["lane"], "done")
+        self.assertEqual(card["audit"][-1]["did"], "daily cap answered: raise50")
+        st = self.ok("/api/state")
+        self.assertEqual((st["access"]["cap"]["card"], st["access"]["cap"]["limit"]), ("answered", 750.0))
+
+    def test_a_stale_card_id_is_409_and_changes_nothing(self):
+        other = self.add()["id"]
+        for card_id in (other, "c-20250101-000000-abcdef", "nope"):
+            with self.subTest(card_id):
+                before = tree(self.data)
+                status, _, body = self.answer("raise50", card_id=card_id)
+                self.assertEqual(status, 409, body)
+                self.assertIn("this cap card is no longer open", body["error"])
+                self.assertEqual(tree(self.data), before)
+        self.clock.tick(86400)  # tomorrow: yesterday's card is not today's
+        before = tree(self.data)
+        status, _, body = self.answer("raise50")
+        self.assertEqual(status, 409, body)
+        self.assertEqual(tree(self.data), before)
+
+    def test_an_option_not_on_the_card_is_409(self):
+        before = tree(self.data)
+        status, _, body = self.answer("accept_unknown")  # a `spent` card does not offer it
+        self.assertEqual(status, 409, body)
+        self.assertIn("accept_unknown is not an answer on this cap card", body["error"])
+        self.assertEqual(tree(self.data), before)
+        for option in ("raise7", None, 5, ""):
+            with self.subTest(option):
+                status, _, body = self.answer(option)
+                self.assertEqual(status, 400, body)
+                self.assertEqual(tree(self.data), before)
+        status, _, body = self.call("POST", "/api/cap/answer", {"option": "raise50"})
+        self.assertEqual((status, body["error"]), (400, "card_id missing"))
+        self.assertEqual(tree(self.data), before)
+
+    def test_an_answered_card_is_409(self):
+        self.assertEqual(self.answer("raise100")[0], 200)
+        before = tree(self.data)
+        status, _, body = self.answer("raise50")
+        self.assertEqual(status, 409, body)
+        self.assertEqual(tree(self.data), before)
+        self.assertEqual(cap.state(self.data, self.clock().astimezone())["raise_pct"], 100)
+
+    def test_pause_in_shadow_mode_stops_nothing(self):
+        with mock.patch("assistant.workers.Workers", side_effect=AssertionError("Workers built")) as built:
+            status, _, body = self.answer("pause")
+        self.assertEqual(status, 200, body)
+        built.assert_not_called()
+        self.assertTrue(body["paused"])
+        self.assertIn("shadow mode", body["note"])
+        self.assertTrue((self.data / cap.PAUSED).exists())
+        self.assertTrue(self.ok("/api/state")["access"]["cap"]["paused"])
+
+    def test_pause_in_live_mode_calls_cap_stop(self):
+        self.start(cfg=Config(mode="live"))
+        with mock.patch("assistant.workers.Workers.cap_stop", return_value={"stopped": ["w1"]}) as stop:
+            status, _, body = self.answer("pause")
+        self.assertEqual(status, 200, body)
+        stop.assert_called_once_with()
+        self.assertEqual(body["stopped"], ["w1"])
+        self.assertNotIn("note", body)
+        self.assertTrue((self.data / cap.PAUSED).exists())
+
+    def test_a_damaged_worker_list_in_live_mode_answers_and_says_the_stop_failed(self):
+        # cap_stop runs after paused.json and the answer are written: the reply is 200 with `stop_error`, never a 500
+        # that the page would read as "not answered".
+        self.start(cfg=Config(mode="live"))
+        err = WorkerError("<data>/workers.json: cannot read the worker list")
+        with mock.patch("assistant.workers.Workers.cap_stop", side_effect=err):
+            status, _, body = self.answer("pause")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["answered"], "pause")
+        self.assertIs(body["paused"], True)
+        self.assertEqual(body["stop_error"], "<data>/workers.json: cannot read the worker list")
+        self.assertEqual((body["stopped"], body["failed"]), ([], []))
+        self.assertTrue((self.data / cap.PAUSED).exists())
+        self.assertEqual(cap.state(self.data, self.clock().astimezone())["card"], "answered")
+
+    def test_a_worker_setup_error_in_live_mode_is_a_500_with_nothing_written(self):
+        self.start(cfg=Config(mode="live"))
+        before = tree(self.data)
+        err = WorkerError("<data>/workers.json: cannot open the worker list")
+        with mock.patch("assistant.workers.Workers.__init__", side_effect=err):
+            status, _, body = self.answer("pause")
+        self.assertEqual(status, 500, body)
+        self.assertIn("<data>/workers.json: cannot open the worker list", body["error"])
+        self.assertEqual(tree(self.data), before)
+        self.assertFalse((self.data / cap.PAUSED).exists())
+        self.assertEqual(cap.state(self.data, self.clock().astimezone())["card"], "open")
+
+    def test_two_answers_at_once_raise_once(self):
+        self.start()
+        statuses, ready = [], threading.Barrier(2)
+        real = cap.answer
+
+        def slow(*args, **kwargs):  # hold the first answer open, so a second one without the lock overlaps it
+            time.sleep(0.3)
+            return real(*args, **kwargs)
+
+        def go():
+            ready.wait()
+            statuses.append(self.answer("raise50")[0])
+
+        with mock.patch.object(cap, "answer", side_effect=slow):
+            threads = [threading.Thread(target=go) for _ in range(2)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(30)
+        self.assertEqual(sorted(statuses), [200, 409])
+        self.assertEqual(cap.state(self.data, self.clock().astimezone())["raise_pct"], 50)
+
+    def test_another_origin_or_a_form_post_is_refused(self):
+        self.start()
+        before = tree(self.data)
+        body = json.dumps({"card_id": self.card_id, "option": "raise50"}).encode()
+        for headers, want in (({"Origin": "https://cards.example.com"}, 403), ({"Origin": "null"}, 403),
+                              ({"Content-Type": "application/x-www-form-urlencoded"}, 415),
+                              ({"Content-Type": "text/plain"}, 415)):
+            with self.subTest(headers):
+                status, _, reply = self.call("POST", "/api/cap/answer", body, headers)
+                self.assertEqual(status, want, reply)
+                self.assertEqual(tree(self.data), before)
+        status, _, reply = self.call("POST", "/api/cap/answer", b"x" * (64 * 1024 + 1))
+        self.assertEqual(status, 413)
+        own = {"Origin": f"http://localhost:{self.port}"}
+        self.assertEqual(self.answer("raise50", headers=own)[0], 200)
 
 
 # --- criterion 8: the page -------------------------------------------------------------------------------------
@@ -1044,7 +1265,10 @@ def page_functions(*names) -> str:
     text = PAGE.read_text(encoding="utf-8")
     out = []
     for name in names:
-        src = text[text.index(f"  function {name}("):]
+        head = f"  function {name}("
+        if head not in text:
+            head = f"  async function {name}("
+        src = text[text.index(head):]
         out.append(src[:src.index("\n  }\n") + 5])
     return "".join(out)
 
@@ -1192,6 +1416,505 @@ process.stdin.on('end', () => { console.log(JSON.stringify(JSON.parse(input).map
         self.assertEqual([t for t, a, b in zip(texts, page, python) if a != b], [])
         self.assertEqual(page[:len(BLANK_SLOTS) + len(NOT_BLANK_SLOTS)],
                          [True] * len(BLANK_SLOTS) + [False] * len(NOT_BLANK_SLOTS))
+
+    def run_access(self, script: str):
+        """Run the page's access functions under node with a label stub (`[key {vars}]`) and return the JSON the
+        script prints."""
+        js = page_functions("money", "badge", "windowName", "topWindow", "usageShort", "accessAlerts", "capOptions",
+                            "usageRows") + """
+const S = {lang: 'en'};
+const L = (key, vars) => '[' + key + (vars ? ' ' + JSON.stringify(vars) : '') + ']';
+const text = v => (v === null || v === undefined ? '' : String(v));
+const route = (...parts) => '#/' + parts.map(p => encodeURIComponent(p)).join('/');
+const ago = s => 'ago:' + Math.round(s);
+const parseStamp = s => Date.parse(s);
+const when = s => 'when:' + s;
+""" + script
+        out = subprocess.run(["node", "-e", js], capture_output=True, text=True, timeout=30)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(out.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_badge_text_by_mode(self):
+        out = self.run_access("""
+console.log(JSON.stringify([
+  badge({profile: {name: 'subscription', mode: 'subscription', label: 'Subscription'}}),
+  badge({profile: {name: 'g', mode: 'gateway', label: 'Team Proj', model: 'claude-opus-5-5[1m]', effort: 'high'}}),
+  badge({profile: {name: 'g', mode: 'gateway', label: null, model: null, effort: 'high'}}),
+  badge({profile: null, profile_error: 'broken'}), badge(null)]));
+""")
+        self.assertEqual(out[0], {"cls": "abadge", "text": "[access.subscription]", "detail": None, "pages": None})
+        self.assertEqual(out[1], {"cls": "abadge gw", "text": '[access.workers {"label":"Team Proj"}]',
+                                  "detail": "claude-opus-5-5[1m] · high", "pages": "[access.page_sessions]"})
+        self.assertEqual((out[2]["text"], out[2]["detail"]), ('[access.workers {"label":"g"}]', "high"))
+        self.assertEqual(out[3:], [None, None])
+        labels = self.labels()
+        self.assertEqual(labels["en"]["access.workers"], "Workers: Gateway · {label}")
+        self.assertEqual(labels["en"]["access.page_sessions"], "Page sessions: Subscription")
+        self.assertEqual(labels["en"]["access.subscription"], "Subscription")
+        text = PAGE.read_text(encoding="utf-8")
+        self.assertIn('<span id="access" class="access"></span>', text)
+        self.assertIn("parts.push(h('a', {class: b.cls, href: '#/settings', text: b.text}));", text)
+        # The top bar draws the badge on each state, and the settings screen opens with the access set.
+        self.assertIn("    drawAccess();\n    const sw = $('lang-switch');", text)
+        self.assertIn("body.replaceChildren(h('div', {class: 'sets'}, accessSet(),", text)
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_key_and_profile_errors_show_a_label_and_the_server_text(self):
+        out = self.run_access("""
+console.log(JSON.stringify([
+  accessAlerts({profile: null, profile_error: 'the active profile cannot be loaded; run X', cap: {}}),
+  accessAlerts({profile: {mode: 'gateway'}, key_error: 'the gateway key does not work: exit 1. Run it.',
+                cap: {card: 'open', card_id: 'c-20261111-150000-abcdef', paused: true, pause: {reason: 'cap'}}}),
+  accessAlerts({profile: {mode: 'subscription'}, cap: {card: 'answered', card_id: 'c-1', paused: false}})]));
+""")
+        self.assertEqual(out[0], [{"cls": "keyerr", "label": "[access.profile_error]",
+                                   "detail": "the active profile cannot be loaded; run X", "href": "#/settings"}])
+        self.assertEqual(out[1], [
+            {"cls": "keyerr", "label": "[access.key_error]", "detail": "the gateway key does not work: exit 1. Run it.",
+             "href": None},
+            {"cls": "capnote", "label": "[cap.reached]", "detail": None, "href": "#/card/c-20261111-150000-abcdef"},
+            {"cls": "keyerr", "label": "[cap.paused]", "detail": None, "href": None}])
+        self.assertEqual(out[2], [])
+        labels = self.labels()
+        self.assertEqual(labels["en"]["access.key_error"], "Gateway key not working; new workers wait")
+        self.assertEqual(labels["en"]["access.profile_error"], "Profile not working; new workers wait")
+        self.assertEqual(labels["en"]["cap.reached"], "Daily cap reached: answer the card")
+        self.assertEqual(labels["en"]["cap.paused"], "Paused at the daily cap; run `ap2 cap resume`")
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_cap_buttons_only_on_todays_open_cap_card(self):
+        out = self.run_access("""
+const id = 'c-20261111-150000-abcdef';
+const card = (over) => Object.assign({id, kind: 'cap', ask: {type: 'approve', from: 'cap',
+  options: ['raise50', 'raise100', 'pause']}}, over || {});
+const open = {cap: {card: 'open', card_id: id}};
+console.log(JSON.stringify([
+  capOptions(card(), open),
+  capOptions(card({ask: {from: 'cap', options: ['raise50', 'raise100', 'accept_unknown', 'pause', 'other']}}), open),
+  capOptions(card(), {cap: {card: 'answered', card_id: id}}),
+  capOptions(card(), {cap: {card: 'open', card_id: 'c-20261110-150000-abcdef'}}),
+  capOptions(card(), {cap: {card: null, card_id: null}}),
+  capOptions(card({kind: 'errand'}), open),
+  capOptions(card({ask: {from: 'user', options: ['raise50']}}), open),
+  capOptions(card({ask: null}), open),
+  capOptions(card(), null), capOptions(null, open)]));
+""")
+        self.assertEqual(out[0], ["raise50", "raise100", "pause"])
+        self.assertEqual(out[1], ["raise50", "raise100", "accept_unknown", "pause"])
+        self.assertEqual(out[2:], [[]] * 8)
+        text = PAGE.read_text(encoding="utf-8")
+        self.assertIn("class: o === 'pause' ? 'btn quiet' : 'btn'", text)  # pause is the quiet button
+        self.assertIn("await post('/api/cap/answer', {card_id: card.id, option});", text)
+        self.assertIn("if (e.status === 409) status.replaceChildren(h('p', {text: L('cap.stale')}), "
+                      "h('p', {class: 'mono', text: e.message}));", text)
+        self.assertIn("    const area = capArea(c);  // the cap card's answer buttons, or the note of its answer\n"
+                      "    if (area) det.append(area);\n", text)  # the card view draws capArea
+        self.assertEqual(set(cap.ANSWERS), {"raise50", "raise100", "accept_unknown", "pause"})
+
+    # A plain-object `h` (tag, attrs, kids) and `flat`, every text of a tree in order, for running the page's
+    # drawing functions under node.
+    DOM_STUBS = """
+const h = (tag, attrs, ...kids) => ({tag, attrs: attrs || {}, kids,
+  replaceChildren(...k) { this.kids = k; }});
+const flat = n => (n === null || n === undefined || n === false) ? []
+  : Array.isArray(n) ? n.flatMap(flat)
+  : typeof n === 'object' ? [...(n.attrs && n.attrs.text != null ? [String(n.attrs.text)] : []), ...flat(n.kids)]
+  : [String(n)];
+const find = (n, tag) => (n === null || n === undefined || typeof n !== 'object') ? []
+  : Array.isArray(n) ? n.flatMap(k => find(k, tag)) : [...(n.tag === tag ? [n] : []), ...find(n.kids, tag)];
+"""
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_cap_buttons_post_their_own_answer_and_reload_the_list(self):
+        out = self.run_access(page_functions("capStopNote", "capSection") + self.DOM_STUBS + """
+const calls = [];
+const post = async (path, body) => { calls.push(['post', path, body]); return {}; };
+const poll = async () => { calls.push(['poll']); };
+const loadList = async () => { calls.push(['loadList']); };
+const loadCard = async id => { calls.push(['loadCard', id]); };
+S.route = null;
+const opts = ['raise50', 'raise100', 'pause'];
+(async () => {
+  const shown = find(capSection({id: 'C1', kind: 'cap'}, opts), 'button').map(b => [b.attrs.text, b.attrs.class]);
+  const clicks = [];
+  for (let i = 0; i < opts.length; i++) {
+    calls.length = 0;
+    const b = find(capSection({id: 'C1', kind: 'cap'}, opts), 'button')[i];
+    await b.attrs.onclick();
+    clicks.push(calls.slice());
+  }
+  console.log(JSON.stringify({shown, clicks}));
+})();
+""")
+        self.assertEqual(out["shown"], [["[cap.raise50]", "btn"], ["[cap.raise100]", "btn"],
+                                        ["[cap.pause]", "btn quiet"]])
+        for opt, calls in zip(["raise50", "raise100", "pause"], out["clicks"]):
+            with self.subTest(opt):
+                self.assertEqual(calls[0], ["post", "/api/cap/answer", {"card_id": "C1", "option": opt}])
+                self.assertIn(["loadList"], calls)
+                self.assertEqual(len([c for c in calls if c[0] == "post"]), 1)
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_post_sends_json_the_server_accepts(self):
+        # The cap buttons post through the page's own `post`: a POST with a JSON body and the JSON content type,
+        # which the server needs (text/plain is 415, a non-JSON body is 400).
+        out = self.run_access(page_functions("api", "post") + """
+const sent = [];
+globalThis.fetch = async (path, opts) => { sent.push([path, opts]); return {ok: true, json: async () => ({ok: 1})}; };
+(async () => {
+  const reply = await post('/api/cap/answer', {card_id: 'C1', option: 'raise50'});
+  const [path, opts] = sent[0];
+  console.log(JSON.stringify({reply, path, method: opts.method, type: opts.headers && opts.headers['Content-Type'],
+                              body: JSON.parse(opts.body)}));
+})();
+""")
+        self.assertEqual(out, {"reply": {"ok": 1}, "path": "/api/cap/answer", "method": "POST",
+                               "type": "application/json", "body": {"card_id": "C1", "option": "raise50"}})
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_a_refused_answer_says_why_and_a_good_one_redraws_the_card_on_screen(self):
+        # A 409 or 500 shows a label and the server's reason and turns the buttons back on, so the user can try
+        # again; a good answer redraws the card only when that card is the one on screen.
+        out = self.run_access(page_functions("capStopNote", "capSection") + self.DOM_STUBS + """
+const calls = [];
+let post = null;
+const poll = async () => {}, loadList = async () => {};
+const loadCard = async id => { calls.push(id); };
+const fail = status => async () => { throw Object.assign(new Error('REASON'), {status}); };
+(async () => {
+  const runs = {};
+  S.route = null;
+  for (const [name, p] of [['stale', fail(409)], ['failed', fail(500)]]) {
+    post = p;
+    const sec = capSection({id: 'C1', kind: 'cap'}, ['raise50', 'pause']);
+    const buttons = find(sec, 'button');
+    await buttons[0].attrs.onclick();
+    const status = sec.kids[2];
+    runs[name] = {hidden: status.hidden, cls: status.className, text: flat(status.kids),
+                  disabled: buttons.map(b => b.disabled)};
+  }
+  post = async () => ({});
+  for (const [name, route] of [['here', {name: 'card', arg: 'C1'}], ['other', {name: 'card', arg: 'OTHER'}]]) {
+    S.route = route;
+    calls.length = 0;
+    await find(capSection({id: 'C1', kind: 'cap'}, ['raise50']), 'button')[0].attrs.onclick();
+    runs[name] = calls.slice();
+  }
+  console.log(JSON.stringify(runs));
+})();
+""")
+        self.assertEqual(out["stale"], {"hidden": False, "cls": "warn", "text": ["[cap.stale]", "REASON"],
+                                        "disabled": [False, False]})
+        self.assertEqual(out["failed"], {"hidden": False, "cls": "warn", "text": ["[cap.failed] REASON"],
+                                         "disabled": [False, False]})
+        self.assertEqual(out["here"], ["C1"])
+        self.assertEqual(out["other"], [])
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_an_answer_whose_workers_did_not_all_stop_says_so_in_a_neutral_line(self):
+        # A 200 with workers that did not stop (`failed`), another stop under way (`busy`) or a worker list it could
+        # not read (`stop_error`): the status box shows a neutral line (the card is answered), never "Not answered:".
+        out = self.run_access(page_functions("capStopNote", "capNoteSection", "capSection") + self.DOM_STUBS + """
+const replies = [{answered: 'pause', stopped: [], failed: ['w-1']},
+                 {answered: 'pause', stopped: [], failed: [{card: 'c-9', role: 'impl', note: 'n'}]},
+                 {answered: 'pause', stopped: [], failed: [], busy: true},
+                 {answered: 'pause', paused: true, stopped: [], failed: [],
+                  stop_error: '<data>/workers.json: cannot read the worker list'},
+                 {answered: 'pause', stopped: ['w-1'], failed: []}, {answered: 'raise50'}];
+let post = null;
+const poll = async () => {}, loadList = async () => {}, loadCard = async () => {};
+S.route = null;
+(async () => {
+  const seen = [];
+  for (const reply of replies) {
+    post = async () => reply;
+    const sec = capSection({id: 'C1', kind: 'cap'}, ['pause']);
+    await find(sec, 'button')[0].attrs.onclick();
+    const status = sec.kids[2];
+    const redrawn = S.capNote ? flat(capNoteSection(S.capNote.reply)) : null;
+    seen.push({hidden: status.hidden !== false, cls: status.className || status.attrs.class,
+               text: flat(status.kids), note: S.capNote && S.capNote.id, redrawn});
+  }
+  console.log(JSON.stringify(seen));
+})();
+""")
+        failed, failed_dict, busy, stop_error, clean, raised = out
+        self.assertEqual((failed["hidden"], failed["cls"]), (False, "capinfo"))
+        self.assertEqual(failed["text"], ["[cap.not_stopped]", "w-1"])
+        self.assertEqual(failed["note"], "C1")
+        self.assertEqual(failed["redrawn"], ["[cap.title]", "[cap.not_stopped]", "w-1"])  # kept after the redraw
+        self.assertEqual(failed_dict["text"], ["[cap.not_stopped]", "c-9 impl"])
+        self.assertEqual((busy["hidden"], busy["cls"], busy["text"]), (False, "capinfo", ["[cap.stop_busy]"]))
+        self.assertEqual((stop_error["hidden"], stop_error["cls"]), (False, "capinfo"))
+        self.assertEqual(stop_error["text"], ["[cap.stop_error]", "<data>/workers.json: cannot read the worker list"])
+        for name, quiet in (("clean", clean), ("raise", raised)):
+            with self.subTest(name):
+                self.assertEqual((quiet["hidden"], quiet["text"], quiet["note"]), (True, [], None))
+        for got in (failed, busy, stop_error):
+            self.assertNotIn("[cap.failed]", " ".join(got["text"]))
+        text = PAGE.read_text(encoding="utf-8")
+        labels = self.labels()
+        for key in ("cap.not_stopped", "cap.stop_busy", "cap.stop_error"):
+            with self.subTest(key):
+                self.assertTrue(labels["en"][key])
+                self.assertRegex(labels["zh"][key], r"[\u4e00-\u9fff]")
+        self.assertEqual(labels["en"]["cap.not_stopped"],
+                         "Answered, but these workers did not stop yet (the next check tries again):")
+        self.assertEqual(labels["en"]["cap.stop_error"],
+                         "Answered and paused, but the running workers could not be stopped:")
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_a_cap_note_is_dropped_once_the_page_leaves_its_card(self):
+        # The note of a pause answer is for the card it was answered on: a lane, Settings or another card in between
+        # drops it, so coming back to that card later draws no stale note; a redraw of the same card keeps it.
+        out = self.run_access(page_functions("capStopNote", "capNoteSection", "show") + self.DOM_STUBS + """
+const LANES = ['needs'];
+let next = null;
+const parseRoute = () => next;
+const drawRail = () => {}, panes = () => {}, loadList = async () => {};
+const $ = () => ({});
+const drawn = [];
+const redraw = () => drawn.push(S.capNote ? flat(capNoteSection(S.capNote.reply)) : []);
+const drawCard = c => { if (c) redraw(); };
+const loadCard = async () => redraw();  // the card redraw: the note under the card's answer section
+const drawSources = async () => {}, drawTemplates = async () => {}, drawSettings = async () => {};
+const note = {id: 'X', reply: {answered: 'pause', stopped: [], failed: ['w-1']}};
+(async () => {
+  const runs = {};
+  for (const [name, away] of [['same', null], ['lane', {name: 'lane', arg: 'needs'}],
+                              ['settings', {name: 'settings', arg: null}], ['other', {name: 'card', arg: 'Y'}]]) {
+    S.capNote = note;
+    drawn.length = 0;
+    if (away) { next = away; await show(); }
+    next = {name: 'card', arg: 'X'};
+    await show();
+    runs[name] = drawn.slice();
+  }
+  console.log(JSON.stringify(runs));
+})();
+""")
+        self.assertEqual(out["same"], [["[cap.title]", "[cap.not_stopped]", "w-1"]])
+        for name in ("lane", "settings", "other"):
+            with self.subTest(name):
+                self.assertNotIn("[cap.not_stopped]", json.dumps(out[name]))
+                self.assertEqual(out[name][-1], [])
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_the_card_view_shows_the_buttons_or_its_own_answers_note(self):
+        # capArea: the buttons on today's open cap card; after the page's answer, that answer's note; the card
+        # opening again drops the note, so a later answer from elsewhere never shows the earlier answer's note.
+        out = self.run_access(page_functions("capStopNote", "capNoteSection", "capSection", "capArea")
+                              + self.DOM_STUBS + """
+const post = async () => ({}), poll = async () => {}, loadList = async () => {}, loadCard = async () => {};
+const card = {id: 'X', kind: 'cap', ask: {from: 'cap', options: ['raise50', 'pause']}};
+const at = state => ({access: {cap: {card: state, card_id: 'X'}}});
+const show = () => { const a = capArea(card); return a ? flat(a) : []; };
+const note = {id: 'X', reply: {answered: 'pause', stopped: [], failed: ['w-1']}};
+const runs = {};
+S.state = at('open'); S.capNote = null; runs.open = show();
+S.state = at('answered'); S.capNote = note; runs.answered = show();
+S.state = at('open'); runs.reopened = show(); runs.noteAfterReopen = S.capNote;
+S.state = at('answered'); runs.answeredElsewhere = show();
+S.state = at('answered'); S.capNote = {id: 'Y', reply: note.reply}; runs.otherCardsNote = show();
+console.log(JSON.stringify(runs));
+""")
+        self.assertIn("[cap.raise50]", out["open"])
+        self.assertEqual(out["answered"], ["[cap.title]", "[cap.not_stopped]", "w-1"])
+        self.assertIn("[cap.raise50]", out["reopened"])
+        self.assertIsNone(out["noteAfterReopen"])
+        self.assertEqual(out["answeredElsewhere"], [])
+        self.assertEqual(out["otherCardsNote"], [])
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_the_settings_access_box_follows_the_state(self):
+        # Settings left open: each tick redraws its Access box from the new state, so it never disagrees with the
+        # top bar; other screens, and a tick whose route changed while it ran, leave the box alone.
+        out = self.run_access(page_functions("capKey", "tick") + """
+let states = [], onPoll = null;
+const poll = async () => { S.state = states.shift(); if (onPoll) onPoll(); };
+const loadList = async () => {}, loadCard = async () => {};
+const replaced = [];
+const box = {replaceWith: n => replaced.push(n)};
+const $ = id => (id === 'access-set' ? box : null);
+const accessSet = () => 'today ' + S.state.usage.gateway.today;
+const st = today => ({access: {cap: {}}, usage: {gateway: {today}}});
+(async () => {
+  const runs = {};
+  for (const [name, route, act] of [['settings', {name: 'settings', arg: null}],
+                                    ['lane', {name: 'lane', arg: 'needs'}],
+                                    ['left', {name: 'settings', arg: null}, () => { S.route = {name: 'lane', arg: 'needs'}; }]]) {
+    S.route = route; S.state = st(8); states = [st(42)]; replaced.length = 0; onPoll = act || null;
+    await tick();
+    runs[name] = replaced.slice();
+  }
+  console.log(JSON.stringify(runs));
+})();
+""")
+        self.assertEqual(out, {"settings": ["today 42"], "lane": [], "left": []})
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_the_open_card_is_redrawn_when_the_cap_card_opens_again(self):
+        # Answered on the page, the card is drawn without buttons; when spend passes the raised limit the same card
+        # opens again, and the 10-second tick redraws the card on screen so its buttons come back.
+        out = self.run_access(page_functions("capKey", "tick") + """
+const cap = (card, raise_pct) => ({access: {cap: {card, card_id: 'X', raise_pct}}});
+let states = [];
+const poll = async () => { S.state = states.shift(); };
+const loads = [];
+let onList = null;  // what the user does while the list loads
+const loadList = async () => { if (onList) onList(); }, loadCard = async id => { loads.push(id); };
+(async () => {
+  const runs = {};
+  for (const [name, route, before, after, act] of [
+      ['reopened', {name: 'card', arg: 'X'}, cap('answered', 50), cap('open', 50)],
+      ['same', {name: 'card', arg: 'X'}, cap('open', 50), cap('open', 50)],
+      ['lane', {name: 'lane', arg: 'needs'}, cap('answered', 50), cap('open', 50)],
+      ['other card', {name: 'card', arg: 'Y'}, cap('answered', 50), cap('open', 50)],
+      // The day ends while the cap card is on screen: its buttons must go (the card named before the poll).
+      ['day over', {name: 'card', arg: 'X'}, cap('open', 0), {access: {cap: {card: null, card_id: null, raise_pct: 0}}}],
+      // A new cap card opens while it is already on screen: its buttons must come (the card named after the poll).
+      ['new card', {name: 'card', arg: 'Z'}, {access: {cap: {card: null, card_id: null, raise_pct: 0}}},
+       {access: {cap: {card: 'open', card_id: 'Z', raise_pct: 0}}}],
+      // The user clicks a lane while the list loads: the tick must not bring the cap card back.
+      ['left during the list', {name: 'card', arg: 'X'}, cap('answered', 50), cap('open', 50),
+       () => { S.route = {name: 'lane', arg: 'planned'}; }],
+      // ...or clicks another card in the list: that card stays, the cap card is not pulled back over it.
+      ['left for another card', {name: 'card', arg: 'X'}, cap('answered', 50), cap('open', 50),
+       () => { S.route = {name: 'card', arg: 'Y'}; }]]) {
+    S.route = route; S.state = before; states = [after]; loads.length = 0; onList = act || null;
+    await tick();
+    runs[name] = loads.slice();
+  }
+  console.log(JSON.stringify(runs));
+})();
+""")
+        self.assertEqual(out, {"reopened": ["X"], "same": [], "lane": [], "other card": [], "day over": ["X"],
+                               "new card": ["Z"], "left during the list": [],
+                               "left for another card": []})
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_a_cap_state_that_cannot_be_read_is_a_red_line_and_a_settings_error(self):
+        out = self.run_access(page_functions("drawAccess", "accessSet") + self.DOM_STUBS + """
+const boxes = {};
+const $ = id => (boxes[id] = boxes[id] || h('span', {id}));
+const access = {profile: {name: 's', mode: 'subscription', label: 'Subscription'},
+                cap: {card: null, card_id: null, paused: false, error: 'CAP-STATE-ERR-C'}};
+S.state = {access, usage: {mode: 'subscription', windows: []}};
+const alerts = accessAlerts(access);
+drawAccess();
+console.log(JSON.stringify({alerts, top: flat(boxes.access), set: flat(accessSet()),
+                            none: accessAlerts({profile: null, cap: {error: null}})}));
+""")
+        self.assertEqual(out["alerts"], [{"cls": "keyerr", "label": "[access.cap_error]", "detail": "CAP-STATE-ERR-C",
+                                          "href": "#/settings"}])
+        self.assertIn("[access.cap_error]", out["top"])
+        self.assertIn(" CAP-STATE-ERR-C", out["top"])
+        self.assertIn("[access.cap_error]", out["set"])
+        self.assertIn("CAP-STATE-ERR-C", out["set"])
+        self.assertEqual(out["none"], [])
+        labels = self.labels()
+        self.assertEqual(labels["en"]["access.cap_error"],
+                         "Daily cap state not readable; new gateway workers may wait")
+        self.assertRegex(labels["zh"]["access.cap_error"], r"[\u4e00-\u9fff]")
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_the_top_bar_and_the_access_set_draw_every_text(self):
+        out = self.run_access(page_functions("drawAccess", "accessSet") + self.DOM_STUBS + """
+const boxes = {};
+const $ = id => (boxes[id] = boxes[id] || h('span', {id}));
+const gwUsage = {mode: 'gateway', windows: [], gateway: {today: 512, limit: 500, week: 900, month: 2300,
+                 counted_at: null}};
+S.state = {access: {profile: {name: 'g', mode: 'gateway', label: 'Team', model: 'big', effort: 'high'},
+                    key_error: 'KEY-BROKEN-K', cap: {}}, usage: gwUsage};
+drawAccess();
+const top = flat(boxes.access);
+S.state = {access: {profile: null, profile_error: 'PROFILE-ERR-P', error: 'FOLDER-ERR-F', cap: {},
+                    key_error: 'KEY-SET-K',
+                    broken_profiles: [{name: 'x', error: 'BROKEN-E'}]}, usage: gwUsage};
+const set = flat(accessSet());
+// The top bar's alerts are links: the open cap card, and Settings for a profile that does not work.
+S.state = {access: {profile: null, profile_error: 'PROFILE-ERR-P', cap: {card: 'open', card_id: 'c-1'}}, usage: gwUsage};
+drawAccess();
+const links = find(boxes.access, 'a').map(a => [a.attrs.href, a.attrs.text]);
+// Settings with a working gateway profile: the profile, its model and effort, and the page sessions' mode.
+S.state = {access: {profile: {name: 'g', mode: 'gateway', label: 'Team', model: 'big', effort: 'high'}, cap: {}},
+           usage: gwUsage};
+const profileSet = flat(accessSet());
+console.log(JSON.stringify({top, set, links, profileSet}));
+""")
+        top, sett = out["top"], out["set"]
+        self.assertIn("[access.page_sessions]", top)  # the badge says page sessions stay on the subscription
+        self.assertIn(["#/card/c-1", "[cap.reached]"], out["links"])
+        self.assertIn(["#/settings", "[access.profile_error]"], out["links"])
+        for t in ("[access.profile]", '[access.workers {"label":"Team"}]', "[access.model]", "big · high",
+                  "[access.pages]", "[access.subscription]"):
+            with self.subTest(t):
+                self.assertIn(t, out["profileSet"])
+        self.assertIn(" KEY-BROKEN-K", top)  # the alert's server text, after its label
+        self.assertIn("[access.key_error]", top)
+        self.assertIn('[usage.today_short {"spent":"$512.00","limit":"$500.00"}]', top)
+        self.assertIn("big · high", top)  # the badge's model and effort
+        self.assertIn('[access.workers {"label":"Team"}]', top)
+        for t in ("PROFILE-ERR-P", "FOLDER-ERR-F", "[access.profile_error]", "KEY-SET-K", "BROKEN-E",
+                  '[access.broken {"name":"x"}]', "$512.00 / $500.00", "[usage.today]"):
+            with self.subTest(t):
+                self.assertIn(t, sett)
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_usage_values_are_shown_in_full(self):
+        out = self.run_access("""
+const gw = (g) => ({mode: 'gateway', windows: [{kind: 'five_hour', percent: 42.4, resets_at: 'R'}], gateway: g});
+console.log(JSON.stringify([
+  money(512), money(500), money(2300), money(1234567.891), money(0), money(null), money(Number.MAX_VALUE),
+  usageShort(gw({today: 512, limit: 500})), usageShort(gw({today: 2300, limit: null})),
+  usageShort(gw({today: null, limit: 500})),
+  usageShort({mode: 'subscription', windows: [{kind: 'seven_day', percent: 7}, {kind: 'five_hour', percent: 81.6}]}),
+  usageShort({mode: 'subscription', windows: null}), usageShort({mode: null}),
+  usageRows(gw({today: 512, week: 900, month: 2300, limit: 500, counted_at: null, unknown: true})),
+  usageRows({mode: 'subscription', windows: [{kind: 'opus_week', percent: 3}], stale: true,
+             credits_used_usd: 2300, credits_limit_usd: 5000}),
+  usageRows({mode: 'subscription', windows: null})]));
+""")
+        self.assertEqual(out[:7], ["$512.00", "$500.00", "$2,300.00", "$1,234,567.89", "$0.00", "$?",
+                                   "[usage.too_large]"])
+        self.assertEqual(out[7], '[usage.today_short {"spent":"$512.00","limit":"$500.00"}]')
+        self.assertEqual(out[8], '[usage.today_only {"spent":"$2,300.00"}]')
+        self.assertEqual(out[9], "[usage.not_today]")
+        self.assertEqual(out[10], '[usage.window_short {"kind":"[usage.five_hour]","pct":82}]')
+        self.assertEqual(out[11:13], ["", ""])
+        self.assertEqual([r["value"] for r in out[13]],
+                         ["$512.00 / $500.00", "$900.00", "$2,300.00", "[usage.never]", "[usage.unknown]",
+                          '[usage.resets {"pct":42,"when":"when:R"}]'])
+        self.assertEqual(out[13][-1]["label"], '[usage.page_sessions {"kind":"[usage.five_hour]"}]')
+        self.assertEqual([(r["label"], r["value"]) for r in out[14]],
+                         [("opus_week", "3%"), ("[usage.credits]", "$2,300.00 / $5,000.00"), ("", "[usage.stale]")])
+        self.assertEqual(out[15], [{"label": "[usage.windows]", "value": "[usage.no_windows]", "warn": True}])
+        # A real count: "Counted" says how long ago, from the page's clock (five minutes here).
+        counted = self.run_access("""
+Date.now = () => Date.parse('2026-11-11T20:05:00Z');
+const rows = usageRows({mode: 'gateway', windows: [], gateway: {today: 1, limit: 2, counted_at: '2026-11-11T15:00:00-05:00'}});
+console.log(JSON.stringify(rows.filter(r => r.label === '[usage.counted]').map(r => r.value)));
+""")
+        self.assertEqual(counted, ["ago:300"])
+        # The two window kinds Claude Code names get a label in the page's language; any other kind shows as it is.
+        names = self.run_access("""
+console.log(JSON.stringify(['seven_day', 'five_hour', 'opus_week'].map(kind => windowName({kind}))));
+""")
+        self.assertEqual(names, ["[usage.seven_day]", "[usage.five_hour]", "opus_week"])
+        labels = self.labels()
+        self.assertEqual(labels["en"]["usage.today_short"], "{spent} / {limit} today")
+        css = re.search(r"<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"), re.S).group(1)
+        for sel in (".uval", ".access", ".abadge", ".status", ".kv dd"):
+            for rule in re.findall(r"([^{}]*)\{([^}]*)\}", css):
+                if sel in [x.strip() for x in rule[0].split(",")]:
+                    with self.subTest(sel=sel, rule=rule[0]):
+                        self.assertNotRegex(rule[1], r"overflow\s*:\s*hidden|text-overflow|(?<![-\w])width\s*:")
+
+    def labels(self) -> dict:
+        text = PAGE.read_text(encoding="utf-8")
+        return json.loads(re.search(r'<script type="application/json" id="labels">(.*?)</script>', text,
+                                    re.S).group(1))
 
     def test_the_pages_search_caps_match_the_servers(self):
         text = PAGE.read_text(encoding="utf-8")

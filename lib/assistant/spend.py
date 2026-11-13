@@ -7,8 +7,9 @@ transcript times the list price in `prices.json` next to this file (`<data>/pric
 time). A model with no price counts as unknown spend; it never counts as free silently.
 
 Everything is kept in `<data>/spend/`: `launches.jsonl` (one row per worker start or resume), `settled.jsonl` (a
-session's requests, kept when it is stopped or removed, so its spend outlives the transcript) and `cache.json`
-(each transcript file's priced requests, keyed by its mtime and size, and the short ids resolved to session ids).
+session's requests, kept when it is stopped or removed, so its spend outlives the transcript), `cache.json`
+(each transcript file's priced requests, keyed by its mtime and size, and the short ids resolved to session ids) and
+`last.json` (the totals the daily cap read last, `remember`, so the pages show a count without reading the ledger).
 Every function takes the data folder, and the transcripts folder where it reads transcripts; the `claude` session
 listing is a function the caller passes in (`listing`), so tests never run `claude`. It writes only inside the data
 folder, so it works in shadow mode.
@@ -29,12 +30,15 @@ from typing import Callable, NamedTuple, Optional
 
 from assistant import transcripts
 from assistant.config import ConfigError
+from assistant.store import write_json
 
 FOLDER = "spend"
 PRICES = "prices.json"  # the data folder's override, one model at a time
 LAUNCHES = "launches.jsonl"
 SETTLED = "settled.jsonl"
 CACHE = "cache.json"
+LAST = "last.json"  # the totals `cap.allowance` read last, for the pages (`remember`, `last`)
+LAST_KEYS = ("today", "week", "month", "unknown", "unknown_today", "unknown_models", "unknown_launches")
 KINDS = ("worker", "dispatcher", "replies", "refresh", "discover", "oneoff")  # only `worker` is recorded today
 _PRICE_KEYS = ("input", "output", "cache_read", "cache_write_5m", "cache_write_1h")
 _LONG_PROMPT_TOKENS = 100_000
@@ -107,6 +111,49 @@ def _read_lines(data, name: str) -> list:
         if isinstance(d, dict):
             out.append(d)
     return out
+
+
+def remember(data, t: dict, now: Optional[datetime]) -> None:
+    """Keep the totals `t` (what `totals` returned) in `<data>/spend/last.json` as `{"at", "day", <LAST_KEYS>}`:
+    `at` is `now` with its offset, `day` its calendar day (an aware `now` at its own offset, a naive one as it is,
+    as `cap.day`). The pages read it with `last`, so no page request reads the ledger. Raises SpendError for a
+    symlink (never followed) and OSError when it cannot be written."""
+    f = _file(data, LAST)
+    at = now if now is not None else datetime.now()
+    rec = {k: t.get(k) for k in LAST_KEYS}
+    rec.update(at=(at if at.tzinfo is not None else at.astimezone()).isoformat(), day=at.strftime("%Y-%m-%d"))
+    write_json(f, rec)
+
+
+def _finite(n) -> bool:
+    """True when `n` is a finite number; an integer too big for a float (10**400) is not."""
+    try:
+        return math.isfinite(n)
+    except OverflowError:
+        return False
+
+
+def last(data) -> Optional[dict]:
+    """What `remember` kept last, or None when it is missing, unreadable, not the shape `remember` writes, or a
+    symlink (the file or the spend folder). Never raises."""
+    try:
+        f = _file(data, LAST)
+        raw = json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError, SpendError):  # UnicodeDecodeError is a ValueError; RecursionError
+        return None  # is a JSON nest too deep, on some Pythons
+    if not isinstance(raw, dict) or not all(isinstance(raw.get(k), str) for k in ("at", "day")):
+        return None
+    for k in ("today", "week", "month"):
+        if not _number(raw.get(k)) or not _finite(raw[k]):  # json.loads reads Infinity and NaN
+            return None
+    if not (isinstance(raw.get("unknown"), bool) and isinstance(raw.get("unknown_today"), bool)):
+        return None
+    models, launches = raw.get("unknown_models"), raw.get("unknown_launches")
+    if not (isinstance(models, list) and all(isinstance(m, str) for m in models)):
+        return None
+    if isinstance(launches, bool) or not isinstance(launches, int):
+        return None
+    return {k: raw[k] for k in ("at", "day", *LAST_KEYS)}
 
 
 def _local(at: Optional[datetime]) -> datetime:

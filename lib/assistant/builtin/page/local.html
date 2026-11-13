@@ -147,6 +147,21 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
 .sets{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr));gap:14px;padding:16px}
 .set{border:1px solid var(--line);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:12px;min-width:0}
 .set h3{font-size:13px;margin:0;font-weight:650}
+/* Access: the badge, the compact usage and the red lines in the top bar; the cap card's answers.
+   No value is cut: money wraps only at its spaces, never inside an amount, and nothing here has a fixed width. */
+.access{display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px;min-width:0}
+.access:empty{display:none}
+.abadge{display:inline-flex;align-items:center;padding:1px 9px;border-radius:999px;background:var(--sunk);color:var(--ink);font-weight:600;text-decoration:none;overflow-wrap:anywhere}
+.abadge.gw{background:var(--need-soft);color:var(--need)}
+.uval,.kv dd.uval{overflow-wrap:normal;font-variant-numeric:tabular-nums;color:var(--ink-2);text-decoration:none}
+.keyerr{color:var(--bad);font-weight:600;overflow-wrap:anywhere}
+.keyerr a,.capnote a{color:inherit}
+.capnote{color:var(--need);font-weight:600}
+.capinfo{color:var(--muted);font-size:13px}
+.btnrow{display:flex;flex-wrap:wrap;gap:6px}
+.btn.quiet{background:transparent;color:var(--muted);border-style:dashed}
+.btn:disabled{cursor:default;opacity:.75}
+.capans{border:1px solid var(--need);border-left-width:3px;border-radius:10px;padding:12px 16px}
 
 @media (max-width:980px){
   body{display:block;height:auto}
@@ -166,6 +181,7 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
   <div class="status">
     <span id="heartbeat" class="beat late" role="status"></span>
     <span id="running"></span>
+    <span id="access" class="access"></span>
     <div id="lang-switch" class="seg" role="group" data-l-aria="lang.switch" hidden></div>
   </div>
 </header>
@@ -341,6 +357,49 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     "settings.total": "Total",
     "settings.unset": "not set",
     "error.load": "Could not load:",
+    "access.title": "Access",
+    "access.subscription": "Subscription",
+    "access.workers": "Workers: Gateway · {label}",
+    "access.page_sessions": "Page sessions: Subscription",
+    "access.profile": "Active profile",
+    "access.model": "Model and effort",
+    "access.pages": "Page sessions",
+    "access.broken": "{name} cannot be loaded:",
+    "access.profile_error": "Profile not working; new workers wait",
+    "access.key_error": "Gateway key not working; new workers wait",
+    "access.cap_error": "Daily cap state not readable; new gateway workers may wait",
+    "cap.reached": "Daily cap reached: answer the card",
+    "cap.paused": "Paused at the daily cap; run `ap2 cap resume`",
+    "cap.title": "Answer the daily cap",
+    "cap.raise50": "Raise today's limit by 50%",
+    "cap.raise100": "Raise today's limit by 100%",
+    "cap.accept_unknown": "Accept today's unknown cost",
+    "cap.pause": "Pause all workers",
+    "cap.stale": "Not answered: this cap card is no longer open.",
+    "cap.failed": "Not answered:",
+    "cap.not_stopped": "Answered, but these workers did not stop yet (the next check tries again):",
+    "cap.stop_busy": "Answered; another stop of the running workers is already under way.",
+    "cap.stop_error": "Answered and paused, but the running workers could not be stopped:",
+    "usage.title": "Usage",
+    "usage.today": "Today",
+    "usage.week": "This week",
+    "usage.month": "This month",
+    "usage.today_short": "{spent} / {limit} today",
+    "usage.today_only": "{spent} today",
+    "usage.not_today": "not counted yet today",
+    "usage.counted": "Counted",
+    "usage.never": "not counted yet",
+    "usage.unknown": "Some cost could not be priced, so these numbers may be too low.",
+    "usage.window_short": "{kind}: {pct}%",
+    "usage.five_hour": "5-hour window",
+    "usage.seven_day": "7-day window",
+    "usage.page_sessions": "{kind} (page sessions)",
+    "usage.resets": "{pct}% · resets {when}",
+    "usage.credits": "Extra usage credits",
+    "usage.windows": "Usage windows",
+    "usage.no_windows": "unknown: Claude Code's usage cache could not be read",
+    "usage.stale": "These usage numbers are more than an hour old.",
+    "usage.too_large": "too large to show",
     "error.offline": "The local server is not answering. Is ap2 serve running?"
   },
   "zh": {
@@ -472,6 +531,49 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     "settings.total": "合计",
     "settings.unset": "未设置",
     "error.load": "加载失败：",
+    "access.title": "访问方式",
+    "access.subscription": "订阅",
+    "access.workers": "Worker：网关 · {label}",
+    "access.page_sessions": "页面会话：订阅",
+    "access.profile": "当前配置",
+    "access.model": "模型和推理强度",
+    "access.pages": "页面会话",
+    "access.broken": "{name} 无法加载：",
+    "access.profile_error": "访问配置不可用；新的 worker 会等待",
+    "access.key_error": "网关密钥不可用；新的 worker 会等待",
+    "access.cap_error": "无法读取每日上限状态；新的网关 worker 可能会等待",
+    "cap.reached": "已到每日上限：请回答卡片",
+    "cap.paused": "已在每日上限处暂停；运行 `ap2 cap resume` 解除",
+    "cap.title": "回答每日上限",
+    "cap.raise50": "今天的上限提高 50%",
+    "cap.raise100": "今天的上限提高 100%",
+    "cap.accept_unknown": "接受今天无法计价的花费",
+    "cap.pause": "暂停所有 worker",
+    "cap.stale": "没有回答：这张上限卡片已经不再开放。",
+    "cap.failed": "没有回答：",
+    "cap.not_stopped": "已回答，但这些 worker 还没有停下（下一次检查会再试）：",
+    "cap.stop_busy": "已回答；另一次停止运行中 worker 的操作已经在进行。",
+    "cap.stop_error": "已回答并暂停，但运行中的 worker 没能停下：",
+    "usage.title": "用量",
+    "usage.today": "今天",
+    "usage.week": "本周",
+    "usage.month": "本月",
+    "usage.today_short": "今天 {spent} / {limit}",
+    "usage.today_only": "今天 {spent}",
+    "usage.not_today": "今天还没有统计",
+    "usage.counted": "统计于",
+    "usage.never": "还没有统计",
+    "usage.unknown": "有部分花费无法计价，所以这些数字可能偏低。",
+    "usage.window_short": "{kind}：{pct}%",
+    "usage.five_hour": "5 小时窗口",
+    "usage.seven_day": "7 天窗口",
+    "usage.page_sessions": "{kind}（页面会话）",
+    "usage.resets": "{pct}% · {when} 重置",
+    "usage.credits": "额外用量额度",
+    "usage.windows": "用量窗口",
+    "usage.no_windows": "未知：无法读取 Claude Code 的用量缓存",
+    "usage.stale": "这些用量数字已超过一小时。",
+    "usage.too_large": "太大，无法显示",
     "error.offline": "本地服务器没有响应。ap2 serve 在运行吗？"
   }
 }
@@ -624,6 +726,7 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     $('mode-tag').textContent = L('mode.' + (st.mode === 'live' ? 'live' : 'shadow'));
     drawBeat();
     $('running').textContent = L('running.count', {n: st.running});
+    drawAccess();
     const sw = $('lang-switch');
     sw.replaceChildren();
     sw.hidden = !st.secondary_language;
@@ -649,6 +752,202 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     el.classList.toggle('late', late);
     el.title = hb.error ? hb.error : late ? L('beat.late') : text(hb.last_run_at);
   }
+
+  // --- access: the profile badge, the usage by mode, the key and profile errors, the cap card -------------------
+  function money(x) {
+    // Dollars with two decimals and thousands separators, in full: `$2,300.00`, never cut. A total the server
+    // clamped (the largest number) is a marker, not a 309-digit amount that looks real.
+    if (typeof x !== 'number' || !isFinite(x)) return '$?';
+    if (x === Number.MAX_VALUE) return L('usage.too_large');
+    return '$' + x.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+  }
+  function badge(a) {
+    // How workers are paid: the subscription, or a gateway with its label, model and effort; page sessions always
+    // run on the subscription. null when the active profile cannot be loaded (its error says so).
+    if (!a || !a.profile) return null;
+    const p = a.profile;
+    if (p.mode !== 'gateway') return {cls: 'abadge', text: L('access.subscription'), detail: null, pages: null};
+    const detail = [p.model, p.effort].filter(x => typeof x === 'string' && x).join(' · ');
+    return {cls: 'abadge gw', text: L('access.workers', {label: p.label || p.name}), detail: detail || null,
+            pages: L('access.page_sessions')};
+  }
+  function windowName(w) {
+    // The two window kinds Claude Code names today get a label; any other kind shows as it is.
+    const kind = w && w.kind;
+    if (kind === 'five_hour' || kind === 'seven_day') return L('usage.' + kind);
+    return text(kind);
+  }
+  function topWindow(u) {
+    const ws = u && Array.isArray(u.windows) ? u.windows.filter(w => w && typeof w.percent === 'number') : [];
+    return ws.length ? ws.reduce((a, b) => (b.percent > a.percent ? b : a)) : null;
+  }
+  function usageShort(u) {
+    // The top bar's usage: on the subscription the highest window; on a gateway today's dollars and today's limit.
+    if (!u) return '';
+    if (u.mode === 'gateway') {
+      const g = u.gateway || {};
+      if (typeof g.today !== 'number') return L('usage.not_today');
+      if (typeof g.limit !== 'number') return L('usage.today_only', {spent: money(g.today)});
+      return L('usage.today_short', {spent: money(g.today), limit: money(g.limit)});
+    }
+    if (u.mode !== 'subscription') return '';
+    const w = topWindow(u);
+    return w ? L('usage.window_short', {kind: windowName(w), pct: Math.round(w.percent)}) : '';
+  }
+  function accessAlerts(a) {
+    // The top bar's lines after the usage: a profile or key that does not work (red, a label in the page's language
+    // and the server's own text after it), the open cap card (a link to it) and the pause.
+    const out = [];
+    if (!a) return out;
+    if (a.profile_error) out.push({cls: 'keyerr', label: L('access.profile_error'), detail: a.profile_error, href: '#/settings'});
+    if (a.key_error) out.push({cls: 'keyerr', label: L('access.key_error'), detail: a.key_error, href: null});
+    const c = a.cap || {};
+    if (c.error) out.push({cls: 'keyerr', label: L('access.cap_error'), detail: c.error, href: '#/settings'});
+    if (c.card === 'open' && typeof c.card_id === 'string' && c.card_id) {
+      out.push({cls: 'capnote', label: L('cap.reached'), detail: null, href: route('card', c.card_id)});
+    }
+    if (c.paused) out.push({cls: 'keyerr', label: L('cap.paused'), detail: (c.pause && c.pause.error) || null, href: null});
+    return out;
+  }
+  function capOptions(card, a) {
+    // The cap card's answers, as its own ask lists them: only on today's open cap card (a card of kind `cap` whose
+    // ask is the cap's and whose id is the one `access.cap` names while it is open).
+    const c = a && a.cap, ask = card && card.ask;
+    if (!c || c.card !== 'open' || !card || card.kind !== 'cap' || card.id !== c.card_id) return [];
+    if (!ask || typeof ask !== 'object' || ask.from !== 'cap' || !Array.isArray(ask.options)) return [];
+    return ask.options.filter(o => ['raise50', 'raise100', 'accept_unknown', 'pause'].includes(o));
+  }
+  function usageRows(u) {
+    // The Settings screen's usage, one {label, value, warn} row each, every value in full.
+    const rows = [];
+    if (!u) return rows;
+    const gw = u.mode === 'gateway';
+    if (gw) {
+      const g = u.gateway || {};
+      const today = typeof g.today !== 'number' ? L('usage.not_today')
+        : typeof g.limit === 'number' ? money(g.today) + ' / ' + money(g.limit) : money(g.today);
+      const or = v => (typeof v === 'number' ? money(v) : '—');
+      rows.push({label: L('usage.today'), value: today}, {label: L('usage.week'), value: or(g.week)},
+                {label: L('usage.month'), value: or(g.month)},
+                {label: L('usage.counted'), value: g.counted_at ? ago((Date.now() - (parseStamp(g.counted_at) || Date.now())) / 1000) : L('usage.never')});
+      if (g.unknown || g.unknown_today) rows.push({label: '', value: L('usage.unknown'), warn: true});
+    }
+    if (!Array.isArray(u.windows)) {
+      rows.push({label: L('usage.windows'), value: L('usage.no_windows'), warn: true});
+      return rows;
+    }
+    for (const w of u.windows) {
+      if (!w || typeof w.percent !== 'number') continue;
+      const name = gw ? L('usage.page_sessions', {kind: windowName(w)}) : windowName(w);
+      rows.push({label: name, value: w.resets_at ? L('usage.resets', {pct: Math.round(w.percent), when: when(w.resets_at)}) : Math.round(w.percent) + '%'});
+    }
+    if (!gw && typeof u.credits_limit_usd === 'number' && u.credits_limit_usd > 0) {
+      rows.push({label: L('usage.credits'), value: money(u.credits_used_usd) + ' / ' + money(u.credits_limit_usd)});
+    }
+    if (u.stale) rows.push({label: '', value: L('usage.stale'), warn: true});
+    return rows;
+  }
+  function drawAccess() {
+    const st = S.state, box = $('access');
+    box.replaceChildren();
+    if (!st || !st.access) return;
+    const b = badge(st.access), u = usageShort(st.usage);
+    const parts = [];
+    if (b) {
+      parts.push(h('a', {class: b.cls, href: '#/settings', text: b.text}));
+      if (b.detail) parts.push(h('span', {class: 'mono', text: b.detail}));
+      if (b.pages) parts.push(h('span', {text: b.pages}));
+    }
+    if (u) parts.push(h('a', {class: 'uval', href: '#/settings', text: u}));
+    for (const al of accessAlerts(st.access)) {
+      parts.push(h('span', {class: al.cls, role: al.cls === 'keyerr' ? 'alert' : null},
+        al.href ? h('a', {href: al.href, text: al.label}) : al.label,
+        al.detail ? h('span', {class: 'mono', text: ' ' + al.detail}) : null));
+    }
+    box.replaceChildren(...parts);
+  }
+  async function post(path, body) {
+    return api(path, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+  }
+  function capStopNote(reply) {
+    // After a 200: the pause's workers that did not stop (`failed`), another stop under way (`busy`), or a worker
+    // list it could not read (`stop_error`). Each is a neutral line (the card is answered), or null when all is well.
+    const r = reply && typeof reply === 'object' ? reply : {};
+    const who = w => (w && typeof w === 'object' ? [w.card, w.role].filter(Boolean).join(' ') : text(w));
+    if (r.stop_error) return [h('p', {text: L('cap.stop_error')}), h('p', {class: 'mono', text: text(r.stop_error)})];
+    if (Array.isArray(r.failed) && r.failed.length) {
+      return [h('p', {text: L('cap.not_stopped')}), h('p', {class: 'mono', text: r.failed.map(who).join(', ')})];
+    }
+    if (r.busy === true) return [h('p', {text: L('cap.stop_busy')})];
+    return null;
+  }
+  function capNoteSection(reply) {
+    // The answered cap card, redrawn without its buttons: the note of its answer stays (see capStopNote).
+    return h('section', {class: 'sec capans', 'data-block': 'cap_answer'}, h('h3', {text: L('cap.title')}),
+      h('div', {class: 'capinfo', role: 'status'}, capStopNote(reply)));
+  }
+  function capSection(card, opts) {
+    // One button per answer; a click runs the server's `cap.answer`, the same as `ap2 cap answer`.
+    const status = h('div', {class: 'warn', role: 'status', hidden: true});
+    const buttons = opts.map(o => h('button', {class: o === 'pause' ? 'btn quiet' : 'btn', type: 'button', text: L('cap.' + o),
+                                               onclick: () => send(o)}));
+    const send = async option => {
+      if (buttons.some(b => b.disabled)) return;  // a second click while the first answer is still posting
+      for (const b of buttons) b.disabled = true;
+      try {
+        const reply = await post('/api/cap/answer', {card_id: card.id, option});
+        const note = capStopNote(reply);  // answered: a neutral line, never "Not answered:"
+        S.capNote = note ? {id: card.id, reply} : null;  // the card's redraw below keeps it (capNoteSection)
+        await poll();
+        await loadList();  // the answered card leaves Needs you now, not at the next poll
+        if (S.route && S.route.name === 'card' && S.route.arg === card.id) await loadCard(card.id);
+        if (note) {
+          status.className = 'capinfo';
+          status.replaceChildren(...note);
+          status.hidden = false;
+        }
+      } catch (e) {
+        // The server's reason is English: a label in the page's language, the reason under it.
+        status.className = 'warn';
+        if (e.status === 409) status.replaceChildren(h('p', {text: L('cap.stale')}), h('p', {class: 'mono', text: e.message}));
+        else status.replaceChildren(h('p', {text: L('cap.failed') + ' ' + e.message}));
+        status.hidden = false;
+        for (const b of buttons) b.disabled = false;
+      }
+    };
+    return h('section', {class: 'sec capans', 'data-block': 'cap_answer'}, h('h3', {text: L('cap.title')}),
+      h('div', {class: 'btnrow'}, buttons), status);
+  }
+  function capArea(c) {
+    // The card view's cap part: the answer buttons on today's open cap card, else the note of the page's own answer
+    // on that card (a neutral line), else nothing. The note is for the card it was answered on, and an answer of
+    // that card: another card drops it, and so does the card opening again (that earlier answer is over).
+    const answers = capOptions(c, S.state && S.state.access);
+    if (S.capNote && (S.capNote.id !== c.id || answers.length)) S.capNote = null;
+    if (answers.length) return capSection(c, answers);
+    return S.capNote ? capNoteSection(S.capNote.reply) : null;
+  }
+  function accessSet() {
+    // The Settings screen's first box: the profile, the profiles that do not load, and the full usage.
+    const st = S.state || {}, a = st.access;
+    if (!a) return null;
+    const b = badge(a);
+    const errs = [[L('access.profile_error'), a.profile_error], [L('access.key_error'), a.key_error], ['', a.error],
+                  [L('access.cap_error'), a.cap && a.cap.error]]
+      .filter(e => e[1]).map(e => h('div', {class: 'warn'}, e[0] ? h('p', {text: e[0]}) : null, h('p', {class: 'mono', text: e[1]})));
+    const broken = (a.broken_profiles || []).map(x => h('div', {class: 'warn'},
+      h('p', {text: L('access.broken', {name: x.name})}), h('p', {class: 'mono', text: x.error})));
+    return h('div', {class: 'set', id: 'access-set'}, h('h3', {text: L('access.title')}), errs,
+      b ? h('dl', {class: 'kv'},
+        h('dt', {text: L('access.profile')}), h('dd', {}, h('span', {class: b.cls, text: b.text})),
+        b.detail ? [h('dt', {text: L('access.model')}), h('dd', {class: 'mono', text: b.detail})] : null,
+        h('dt', {text: L('access.pages')}), h('dd', {text: L('access.subscription')})) : null,
+      broken,
+      h('h3', {text: L('usage.title')}),
+      h('dl', {class: 'kv'}, usageRows(st.usage).map(r => [h('dt', {text: r.label}),
+        h('dd', {class: r.warn ? 'warn' : 'uval', text: r.value})])));
+  }
+
   function navLink(href, label, count, current, hot) {
     return h('a', {class: 'nav', href, 'aria-current': current ? 'true' : null},
       h('span', {class: 'nav-t', text: label}),
@@ -853,6 +1152,8 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
         return [h('dt', {text: L('plain.' + line)}), h('dd', {class: t === null ? 'muted' : null, text: t === null ? L('plain.missing') : t})];
       }))));
     if (d.template_error) det.append(h('div', {class: 'warn'}, h('p', {text: L('card.template_error')}), h('p', {class: 'mono', text: d.template_error})));
+    const area = capArea(c);  // the cap card's answer buttons, or the note of its answer
+    if (area) det.append(area);
     for (const block of d.view) {
       if (block === 'source_block') { if (d.source_block) det.append(sourceSection(d.source_block)); }
       else if (block === 'children') det.append(rowsSection('children', d.children));
@@ -974,7 +1275,7 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     const disk = s.disk || {};
     const total = Object.values(disk).reduce((a, b) => a + (typeof b === 'number' ? b : 0), 0);
     const unset = v => (v === null || v === undefined || v === '' ? L('settings.unset') : String(v));
-    body.replaceChildren(h('div', {class: 'sets'},
+    body.replaceChildren(h('div', {class: 'sets'}, accessSet(),
       h('div', {class: 'set'}, h('h3', {text: L('settings.config')}),
         h('dl', {class: 'kv'},
           h('dt', {text: L('settings.mode')}), h('dd', {class: 'mono', text: unset(cfg.mode)}),
@@ -1005,6 +1306,9 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
   function drawAll() { drawStatic(); drawTop(); drawRail(); drawList(); }
   async function show() {
     const r = S.route = parseRoute();
+    // A cap note is for the card it was answered on, right after the answer: leaving that card drops it, so a
+    // later visit draws no stale note (a lane or Settings, Sources, Templates never reach drawCard's check).
+    if (S.capNote && !(r.name === 'card' && r.arg === S.capNote.id)) S.capNote = null;
     drawRail();
     if (r.name === 'lane' || r.name === 'search' || r.name === 'project' || r.name === 'card') {
       panes('list', 'card');
@@ -1032,11 +1336,30 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     drawTop();
     drawRail();
   }
+  function capKey(st) {
+    // What the open card's cap buttons depend on: today's cap card, its state and the raise.
+    const c = st && st.access && st.access.cap;
+    return c ? [c.card, c.card_id, c.raise_pct].join('|') : '';
+  }
   async function tick() {
     // Every 10 seconds: the heartbeat, the counts and the open list, without a reload.
+    const cap = capKey(S.state), capId = st => st && st.access && st.access.cap && st.access.cap.card_id;
+    const before = capId(S.state);
     await poll();
     const r = S.route;
     if (r.name === 'lane' || r.name === 'search' || r.name === 'project' || r.name === 'card') await loadList();
+    // The cap card opened again (or was answered elsewhere): redraw it when it is the card on screen, so its
+    // buttons match. Any other card is left alone (a redraw would wipe a question being typed).
+    // Only when the route is still the one this tick started on: a click while the list loaded moved on.
+    if (S.route === r && r.name === 'card' && capKey(S.state) !== cap && (r.arg === before || r.arg === capId(S.state))) {
+      await loadCard(r.arg);
+    }
+    // Settings: its Access box is drawn from the state, so redraw it with the new one (the top bar's links to
+    // Settings land on the screen already open and draw nothing).
+    if (r.name === 'settings') {
+      const old = $('access-set');
+      if (old) old.replaceWith(accessSet());
+    }
   }
 
   $('search').addEventListener('keydown', e => {

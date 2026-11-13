@@ -215,6 +215,9 @@ class Ap2ServeCommandTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0)
         self.assertIn("--port", r.stdout)
         self.assertIn("4317", r.stdout)
+        said = " ".join(r.stdout.split())  # argparse wraps the description
+        self.assertIn("answering today's cap card", said)
+        self.assertIn("in live mode a pause answer stops the running workers", said)
 
 
 if __name__ == "__main__":
