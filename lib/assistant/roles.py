@@ -11,8 +11,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from types import MappingProxyType
 
-# Permission floors. A floor is the deny list a role's session starts under; tools outside `Role.tools` are not
-# given at all. The worker sessions (slice 6) turn a floor into settings with v1's `ap perms write` code.
+# Permission floors. A floor is the deny list a role's session starts under; a read-only role is denied every MCP
+# tool outside its `Role.tools` (and every MCP server whole), so those are not given at all. The worker sessions
+# (slice 6) turn a floor into settings with v1's `ap perms write` code.
 FLOORS = MappingProxyType({
     "worker": "v1's worker floor (lib/autopilot/perms.py, generate(role='worker')): MCP tools that post, comment, "
               "reply, send or create are denied; the data folder's protected files and the plugin cannot be "
@@ -25,7 +26,9 @@ FLOORS = MappingProxyType({
               "as Edit and Write deny rules.",
     "read-only": "the worker floor, and no Edit or NotebookEdit: the role reads and runs commands that change "
                  "nothing, and the GitHub and git write commands (READ_ONLY_BASH_DENIED) and the ap2 commands a "
-                 "review does not run (READ_ONLY_AP2_DENIED) are denied by rule, best effort. Its "
+                 "review does not run (READ_ONLY_AP2_DENIED) are denied by rule, best effort. Every MCP tool "
+                 "the session loads that the role does not list is denied, and every MCP server whole, so a "
+                 "server's write tool (delete, update, submit, merge) that v1's outward list misses stays shut. Its "
                  "one write is its result file: Write only there, which the worker sessions (slice 6) "
                  "add as a deny rule for every other path. A role without Write (reviewer-angle) returns its "
                  "findings to the loop that started it.",

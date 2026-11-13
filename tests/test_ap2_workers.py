@@ -3943,6 +3943,46 @@ class PrReviewRoleTest(PrReviewCase):
         self.assertIn("Edit", deny)
         self.assertIn("NotebookEdit", deny)
 
+    def test_the_read_only_floor_denies_every_mcp_tool_and_server(self):
+        # A read-only role lists no MCP tool, so every MCP tool its session loads is denied, the write ones (that
+        # v1's outward-verb list does not name) and the read ones alike, and each server is denied whole, so a tool
+        # that shows up later on a known server is covered too. The built-in tools are left as they are.
+        env = {"AP2_RUN_DIR": str(transcripts.run_dir(self.data, "c-20260105-090000-abcdef"))}
+        mcp = ["mcp__docs__delete", "mcp__docs__update", "mcp__builds__submit", "mcp__builds__run",
+               "mcp__drive__delete_file", "mcp__docs__read_page", "mcp__chat__send_message"]
+        builtin = ["Bash", "Read", "Glob", "Grep", "Write", "Agent", "Skill", "WebFetch"]
+        project = {"tools": builtin + mcp, "deny_servers": ["mcp__tracker"]}
+        ro = workers_mod.floor("pr-review", project, self.data, env)["permissions"]["deny"]
+        for rule in mcp + ["mcp__docs", "mcp__builds", "mcp__drive", "mcp__chat", "mcp__tracker"]:
+            with self.subTest(rule=rule):
+                self.assertIn(rule, ro)
+        for tool in builtin:
+            self.assertNotIn(tool, ro)
+        self.assertEqual(len(ro), len(set(ro)))  # each rule once
+        # The worker roles keep today's floor: only the outward-verb tools and the not-connected servers.
+        base = workers_mod.floor("implement", project, self.data, env)["permissions"]["deny"]
+        self.assertEqual([r for r in base if r.startswith("mcp__")], ["mcp__chat__send_message", "mcp__tracker"])
+
+    def test_a_started_read_only_worker_denies_every_listed_server_whole(self):
+        # Every server the discovery lists is denied whole for a read-only role, a connected one with no tool in the
+        # init event as well; an implement worker keeps only the not-connected ones.
+        servers = "slack:connected,quiet:connected,tracker:pending"
+        cid = self.pr_card()
+        with mock.patch.dict(os.environ, {"FAKE_MCP_SERVERS": servers}):
+            self.workers().start(cid, "pr-review", cwd=self.wt, prompt="Review it.")
+        deny = self.deny(cid, "pr-review")
+        for rule in ("mcp__slack", "mcp__quiet", "mcp__tracker", "mcp__slack__slack_read_channel",
+                     "mcp__slack__slack_send_message"):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, deny)
+        other = self.add_card()
+        with mock.patch.dict(os.environ, {"FAKE_MCP_SERVERS": servers}):
+            self.workers().start(other, "implement", cwd=self.wt)
+        deny = self.deny(other)
+        self.assertIn("mcp__tracker", deny)
+        for rule in ("mcp__slack", "mcp__quiet", "mcp__slack__slack_read_channel"):
+            self.assertNotIn(rule, deny)
+
 
 class PrReviewAutoStartTest(PrReviewCase):
     # criterion 4

@@ -533,7 +533,8 @@ to-do.
    card.
 2. **Start**: reviewing starts on its own (3.6). The `pr-review` role reads the PR, the ticket or the PR body as the
    requirement, the code around the change and CI at the head, then runs its angles (6.1) in parallel. Each
-   finding is checked against the code before it counts.
+   finding is checked against the code before it counts. It gets no MCP tool: the PR is untrusted input, so every
+   MCP tool and server the session would load is denied (the read-only floor, below).
 3. **Report**: the first line is a TL;DR that leads with the verdict, `approve`, `changes` or `question` ("Approve:
    does what the ticket asks; 1 nit."). Then background, problem, solution, and the findings in four groups:
    confirmed, out of scope, rejected (with the reason) and questions for the author. A draft review comment may be
@@ -788,7 +789,11 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   commands as Bash deny rules in v1's rule shape (`roles.READ_ONLY_BASH_DENIED`: `gh pr merge`, `gh pr close`,
   `gh pr reopen`, `gh pr ready`, `gh pr edit`, `gh pr create`, `gh release`, `git push`, `git commit`, each as
   `Bash(<command>:*)`), because the session holds the user's gh and git logins, every `ap2` command the review
-  does not run (`roles.READ_ONLY_AP2_DENIED`) as Bash deny rules in the same shape, and a third PreToolUse hook,
+  does not run (`roles.READ_ONLY_AP2_DENIED`) as Bash deny rules in the same shape, every MCP tool the session
+  loads that `Role.tools` does not list (no read-only role lists one) and every MCP server whole (each server those
+  tools are on and each one the tool discovery lists, connected or not, so a tool it adds later is covered too),
+  because v1's outward-verb list leaves a server's `delete`, `update`, `submit` or `merge` tool open (the built-in
+  tools are left as they are), and a third PreToolUse hook,
   `{"matcher": "Write", ...: "\"<package>/bin/ap2\" hook-write"}` (`workers.write_guard`). The hook is an
   allow-list: a Write passes only when its path (links followed) sits directly in the card's run directory
   (`AP2_RUN_DIR`) and its name, in any case, is the role's result file (`prreview.json` for `pr-review`) or

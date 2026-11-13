@@ -238,6 +238,22 @@ def _not_connected(event: dict) -> list:
     return list(dict.fromkeys(rules))
 
 
+def _listed(event: dict) -> list:
+    """The server-level deny rule (`_server_rule`) of every MCP server the init event lists, connected or not: the
+    read-only floor denies each whole, so a tool that shows up later on a known server is denied as well."""
+    servers = event.get("mcp_servers")
+    rules = [_server_rule(str(s["name"])) for s in (servers if isinstance(servers, list) else [])
+             if isinstance(s, dict) and s.get("name")]
+    return list(dict.fromkeys(rules))
+
+
+def _mcp_server(tool: str) -> str:
+    """The server-level rule an MCP tool name `mcp__<server>__<tool>` belongs to (`mcp__<server>`), or "" for a
+    tool that is not an MCP tool."""
+    server, sep, _ = tool[len("mcp__"):].partition("__") if tool.startswith("mcp__") else ("", "", "")
+    return f"mcp__{server}" if server and sep else ""
+
+
 # Characters a gitignore pattern reads as syntax. Claude Code matches Read/Edit rules as gitignore patterns, so a
 # path holding one (or ending in a space, which gitignore strips) would make the floor's Edit denials match nothing.
 PATTERN_CHARS = "[]*?\\!#"
@@ -257,8 +273,10 @@ def floor(role: str, project: dict, data: Path, env: dict, profile: Optional[dic
     """The worker's permission floor (`--settings`): v1's outward-tool denials (`perms.denied_tools`, from the
     project's `tools`; `Workers._tools` fills them in when it lists none, with `deny_servers`, the whole-server
     rules) and Bash denials, the data folder's own files and the package, the park and Bash guard hooks, and the
-    worker's env. With `profile`, its overlay is merged under it (`profiles.merge`): the deny and allow lists, the
-    hooks and the AP2_* env stay exactly as they are. Refused for a path a gitignore pattern cannot name literally
+    worker's env. A read-only role also denies every MCP tool in `tools` that its `Role.tools` does not list, and
+    every MCP server whole: each one those tools are on and each one `_tools` found listed (`listed_servers`).
+    With `profile`, its overlay is merged under it (`profiles.merge`): the deny and allow lists, the hooks and the
+    AP2_* env stay exactly as they are. Refused for a path a gitignore pattern cannot name literally
     (`require_literal`)."""
     if role not in ROLES:
         raise WorkerError(f"role must be one of {', '.join(ROLES)}, not {role!r}")
@@ -287,6 +305,18 @@ def floor(role: str, project: dict, data: Path, env: dict, profile: Optional[dic
         # allow), so a Write hook (`ap2 hook-write`, `write_guard`) refuses every other Write.
         deny += list(roles.READ_ONLY_DENIED) + list(roles.READ_ONLY_BASH_DENIED)
         deny += [f"Bash({cmd} {verb}:*)" for verb in roles.READ_ONLY_AP2_DENIED for cmd in ("ap2", ap2)]
+        # No MCP tool its role does not list (no read-only role lists one): v1's outward-verb list leaves an MCP
+        # server's delete, update, submit or merge tool open, and the session loads every server the user's
+        # sessions do. Each server is denied whole as well, so a tool it adds later is covered; a server the role
+        # takes a tool from is not.
+        own = set(roles.ROLES[role].tools)
+        tools = [t for t in project.get("tools") or [] if isinstance(t, str)]
+        kept = {_mcp_server(t) for t in own} - {""}
+        servers = [_mcp_server(t) for t in tools] + list(project.get("listed_servers") or [])
+        servers += list(project.get("deny_servers") or [])
+        extra = [t for t in tools if _mcp_server(t) and t not in own]
+        extra += [s for s in servers if s and s not in kept]
+        deny += [r for r in dict.fromkeys(extra) if r not in deny]
         hooks["PreToolUse"].append(
             {"matcher": "Write", "hooks": [{"type": "command", "command": f"\"{ap2}\" hook-write", "timeout": 5}]})
     out = {"permissions": {"deny": deny, "allow": allow}, "env": dict(env), "hooks": hooks}
@@ -659,7 +689,7 @@ class Workers:
         return PR_COMMAND + text if role not in AGENTS else text
 
     def _discover(self, cwd: str, env: dict, settings: Path) -> tuple:
-        """(tools, whole-server deny rules) of a session in `cwd` with `env` and the `settings` file (a profile's
+        """(tools, whole-server deny rules of the servers not connected, of every server listed) of a session in `cwd` with `env` and the `settings` file (a profile's
         overlay, no floor): one `claude -p ... --output-format stream-json`, read line by line and killed at its
         first init event, before the model runs, so nothing in the folder can make it call a tool. It runs in its
         own process group, and every kill ends the whole group. Raises RuntimeError (no init event, also past
@@ -689,7 +719,7 @@ class Workers:
                 if isinstance(event, dict) and event.get("type") == "system" and event.get("subtype") == "init":
                     _kill_group(proc)  # stopped at its init event: no model reply, so no tool call, ever happens
                     proc.wait()
-                    return list(v1_perms.parse_discovery(line)), _not_connected(event)
+                    return list(v1_perms.parse_discovery(line)), _not_connected(event), _listed(event)
             code = proc.wait()
             if late.is_set():
                 raise RuntimeError(f"no init event within {timeout} s")
@@ -705,7 +735,8 @@ class Workers:
         tools the project file lists (`projects/**` is Edit-denied) are used as they are, always first. Otherwise
         they are found on every floor written, in the worker's own folder `cwd` with its env (so the folder's
         local-scope and `.mcp.json` servers and the plugins are seen), by a session killed at its init event
-        (`_discover`), with `deny_servers`: every MCP server not connected at that init event, denied whole. Never
+        (`_discover`), with `deny_servers`: every MCP server not connected at that init event, denied whole, and
+        `listed_servers`: every MCP server it lists, which only the read-only floor denies whole. Never
         from a card. A worker never starts without its outward tools denied: no list, no start.
 
         The probe runs with the worker's `profile` (`settings-discover-<role>.json` in the run directory: its overlay
@@ -722,17 +753,18 @@ class Workers:
         page = profiles.page_profile(self.data)
         if page["name"] != profile["name"]:
             probes.append((run / f"settings-discover-{role}-page.json", page))
-        tools, servers = [], []
+        tools, servers, listed = [], [], []
         try:
             for settings, prof in probes:
                 write_json(settings, profiles.overlay(prof))
-                found, off = self._discover(cwd, env, settings)
+                found, off, *more = self._discover(cwd, env, settings)
                 tools += [t for t in found if t not in tools]
                 servers += [s for s in off if s not in servers]
+                listed += [s for s in (more[0] if more else []) if s not in listed]
         except (OSError, RuntimeError, subprocess.SubprocessError) as e:
             raise WorkerError(f"cannot list the session's tools for the permission floor: {e}; {ask}list them in "
                               f"{where}") from e
-        return dict(project, tools=tools, deny_servers=servers)
+        return dict(project, tools=tools, deny_servers=servers, listed_servers=listed)
 
     def _launch(self, argv: list, cwd: str, env: dict) -> str:
         """Run `claude --bg ...`; return its short id. The caller puts it on record before it asks the listing for
