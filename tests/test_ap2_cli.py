@@ -411,9 +411,10 @@ class HelpAndUsageInProcessTest(unittest.TestCase):
 
     def test_serve_help_names_every_write_and_what_it_may_run(self):
         out = io.StringIO()
-        with contextlib.redirect_stdout(out):
+        # A wide fixed width: argparse wraps at the terminal's width and may break "Read-only" at its hyphen.
+        with mock.patch.dict(os.environ, {"COLUMNS": "1000"}), contextlib.redirect_stdout(out):
             self.assert_exits(["serve", "--help"], 0)
-        words = " ".join(out.getvalue().split())  # argparse wraps the text at the terminal's width
+        words = " ".join(out.getvalue().split())
         for want in ("Read-only, but for saving a question on a card, answering today's cap card and switching the "
                      "access profile;",
                      "in live mode a pause answer stops the running workers,",

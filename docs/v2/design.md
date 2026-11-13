@@ -3309,7 +3309,7 @@ Calls the author made without asking (check them):
        `RecursionError`, or an `ArithmeticError`, as `profileview.ODD`) still gets a JSON reply: the profile's own
        file is 409 `<name>: <error>`, and an `active-profile.json` that deep reads as no current profile for the
        needs-choice check, while the switch itself (which `profiles.use` makes only after reading the old name) is
-       409 with that text, nothing written. Both routes end with one last guard: a `profileview.ODD` that no
+       409 `cannot switch to <name>: active-profile.json: <error>`, nothing written. Both routes end with one last guard: a `profileview.ODD` that no
        handler inside turned into its own status is 500 `<type>: <error>`, never a dropped connection.
      - The choice loads the profile (400, 404, 409 as above), fetches the list fresh (never a list the page sent),
        then `profiles.choose(data, name, model, effort, models, known)` and `profiles.use`: 200 `{"chosen": {"name",

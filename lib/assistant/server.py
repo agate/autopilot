@@ -798,7 +798,7 @@ class Handler(BaseHTTPRequestHandler):
         except profiles.ProfileError as e:
             raise HTTPError(500 if isinstance(e.__cause__, OSError) else 409, str(e)) from e
         except profileview.ODD as e:  # active-profile.json nested too deeply: `profiles.use` cannot read what it held
-            raise HTTPError(409, profileview._odd(name, e)) from e
+            raise HTTPError(409, f"cannot switch to {name}: {profileview._odd(profiles.ACTIVE, e)}") from e
 
     def profile_use(self):
         """Switch the active profile through `profiles.use`, in `ap2 profile use`'s order: load, the current name,

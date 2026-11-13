@@ -1275,6 +1275,10 @@ class CapAnswerRouteTest(ServerCase):
 LISTED = '["big", "small", "claude-opus-5-5"]'
 
 
+# Deep enough that json.loads raises RecursionError on every Python CI runs: 3.12 counts frames, while 3.14
+# measures the C stack and decodes 100000 levels without an error.
+DEEP = 5_000_000
+
 # What json.loads raises on a price override nested too deeply, in the words CPython uses.
 DEEP_PRICES = RecursionError("maximum recursion depth exceeded while decoding a JSON array from a unicode string")
 
@@ -1371,7 +1375,7 @@ class ProfileUseRouteTest(ProfileRouteCase):
         # json.loads raises RecursionError, not ValueError: it still gets a JSON reply, never a dropped connection.
         self.listed("g")
         profiles.use(self.data, "g")
-        profiles.path(self.data, "deep").write_text("[" * 200000, encoding="utf-8")
+        profiles.path(self.data, "deep").write_text("[" * DEEP, encoding="utf-8")
         before, active = tree(self.data), self.active_bytes()
         status, _, body = self.use("deep")
         self.assertEqual(status, 409, body)
@@ -1384,11 +1388,11 @@ class ProfileUseRouteTest(ProfileRouteCase):
         # refused with the error (409) instead of dropping the connection; nothing is written.
         self.listed("g")
         h = self.listed("h", chosen=False)
-        profiles.active_file(self.data).write_text("[" * 200000, encoding="utf-8")
+        profiles.active_file(self.data).write_text("[" * DEEP, encoding="utf-8")
         before = tree(self.data)
         status, _, body = self.use("g")
         self.assertEqual(status, 409, body)
-        self.assertTrue(body["error"].startswith("g: RecursionError: "), body)
+        self.assertTrue(body["error"].startswith(f"cannot switch to g: {profiles.ACTIVE}: RecursionError: "), body)
         self.assertEqual(tree(self.data), before)
         # The unreadable active file counts as no current profile: an unchosen one still opens its choice box.
         status, _, body = self.use("h")
@@ -1570,7 +1574,7 @@ class ProfileChooseRouteTest(ProfileRouteCase):
         self.assertEqual(self.runs(), 0)
 
     def test_a_profile_file_nested_too_deeply_is_409_before_any_fetch(self):
-        profiles.path(self.data, "deep").write_text("[" * 200000, encoding="utf-8")
+        profiles.path(self.data, "deep").write_text("[" * DEEP, encoding="utf-8")
         before = self.unchanged()
         status, _, body = self.choose("deep", "big", "high")
         self.assertEqual(status, 409, body)
@@ -2529,6 +2533,46 @@ const byId = (n, id) => find(n, 'div').filter(d => d.attrs.id === id).map(flat);
         self.assertEqual(out["switched"], ["access:title", True, None])
         self.assertEqual(out["chose"], ["access:title", True, None, None])
         self.assertEqual(out["movedOut"], [True, None])
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_settings_drawn_anew_keeps_focus_a_tick_already_put_back(self):
+        # The race: after a switch, the tick's own redraw lands first and puts focus on the heading (spending
+        # S.focusKey); then afterSwitch's drawSettings replaces the whole screen. Focus must land on the heading of
+        # the new box, not fall to the page.
+        out = self.run_access(page_functions("errBox", "accessKey", "refocus", "onSettings", "choiceBox", "accessSet",
+                                             "drawSettings") + self.DOM_STUBS + """
+let shown = null;
+const settingsBody = {replaceChildren(...k) {
+  if (shown && shown.contains(document.activeElement)) document.activeElement = document.body;
+  shown = find(k, 'div').find(d => d.attrs.id === 'access-set') || null;
+}};
+const $ = id => (id === 'settings-body' ? settingsBody : id === 'access-set' ? shown : null);
+const api = async () => ({config: {}, disk: {}});
+const showError = () => {}, size = v => String(v), grid = () => null;
+S.route = {name: 'settings', arg: null}; S.choice = null; S.switchError = null; S.switching = false;
+S.state = {access: {profile: {name: 'g', mode: 'gateway', label: 'Team'}, cap: {}, profiles: [
+  {name: 'g', label: 'Team', mode: 'gateway', needs_choice: false},
+  {name: 'subscription', label: 'subscription', mode: 'subscription', needs_choice: false}]},
+  usage: {mode: 'gateway', windows: [], gateway: {}}};
+const heading = () => shown.querySelectorAll('[data-focus]').find(n => n.dataset.focus === 'access:title');
+(async () => {
+  const runs = {};
+  await drawSettings();
+  heading().focus();
+  S.focusKey = null;  // spent by the tick's redraw, which already focused the heading
+  const before = shown;
+  await drawSettings();
+  runs.raced = [shown !== before, document.activeElement === heading(), S.focusKey];
+  // Focus the user put outside the box is left alone.
+  const search = {tag: 'input'};
+  document.activeElement = search;
+  await drawSettings();
+  runs.outside = [document.activeElement === search, S.focusKey];
+  console.log(JSON.stringify(runs));
+})();
+""")
+        self.assertEqual(out["raced"], [True, True, None])
+        self.assertEqual(out["outside"], [True, None])
 
     @unittest.skipUnless(shutil.which("node"), "needs node")
     def test_the_error_is_tied_to_the_focused_control_and_a_switch_closes_another_box(self):

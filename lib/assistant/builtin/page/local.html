@@ -1457,6 +1457,10 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     const disk = s.disk || {};
     const total = Object.values(disk).reduce((a, b) => a + (typeof b === 'number' ? b : 0), 0);
     const unset = v => (v === null || v === undefined || v === '' ? L('settings.unset') : String(v));
+    // The Access box is drawn anew below: keep the key of a control focused in the old one (a tick's redraw may
+    // have spent S.focusKey while this fetch ran), so refocus puts focus back on it.
+    const was = document.activeElement, old = $('access-set');
+    if (!S.focusKey && old && was && old.contains(was) && was.dataset && was.dataset.focus) S.focusKey = was.dataset.focus;
     const acc = accessSet();
     body.replaceChildren(h('div', {class: 'sets'}, acc,
       h('div', {class: 'set'}, h('h3', {text: L('settings.config')}),
