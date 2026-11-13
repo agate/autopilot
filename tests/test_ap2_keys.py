@@ -399,6 +399,22 @@ class CheckTest(KeyCase):
         self.assertEqual(runs(ran), len(bad) + 1)  # the cached failure is used: the command does not run
         self.assertIn("the key command failed", cap.refusal({"reason": "key"}))
 
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root reads any file")
+    def test_unreadable_record_runs_the_command_again(self):
+        # A record that cannot be read (here: no read permission) reads as never checked, like a malformed one:
+        # the key command runs again and its answer replaces the record.
+        ran = self.tmp / "ran"
+        p = self.save(key=counter(ran))
+        f = self.data / keys.STATE
+        f.write_text(json.dumps({"at": NOW.isoformat(), "ok": False, "error": "the key command failed (exit 1)",
+                                 "profile": "g"}))
+        os.chmod(f, 0)
+        self.addCleanup(lambda: f.exists() and os.chmod(f, 0o600))
+        self.assertIsNone(keys.check(self.data, p, NOW))
+        self.assertEqual(runs(ran), 1)
+        self.assertIsNone(keys.cached_error(self.data, p))  # the rewritten record: the key works
+        self.assertEqual((self.state()["ok"], self.state()["profile"]), (True, "g"))
+
     def test_symlinked_state_is_refused(self):
         p = self.save()
         elsewhere = self.tmp / "elsewhere.json"
@@ -547,6 +563,19 @@ class RefreshTest(KeyCase):
         rec = self.state()
         self.assertEqual((rec["auth"], rec["error"]), (True, keys.AUTH_AGAIN))
         self.assertEqual(keys.check(self.data, p, NOW + timedelta(minutes=4)), keys.AUTH_AGAIN)
+
+    def test_resumed_copy_rejected_again_holds(self):
+        # A resumed copy repeats the old conversation with its old errors and old times: a worker resumed after the
+        # refresh and rejected again ends on [the old 401 from before the refresh, the new 401]. The old one is
+        # skipped, not taken as the answer, so the new one still holds.
+        ref = self.tmp / "refreshed"
+        self.save(refresh_command=counter(ref))
+        self.assertTrue(self.end(self.transcript(auth_401(NOW))))  # the refresh, at NOW
+        sid = self.transcript(auth_401(NOW - timedelta(minutes=1)), auth_401(NOW + timedelta(minutes=2)))
+        self.assertEqual(len(self.errors(sid)), 2)
+        self.assertTrue(self.end(sid, now=NOW + timedelta(minutes=3)))
+        self.assertEqual(runs(ref), 1)  # no second refresh
+        self.assertIs(self.state()["auth"], True)
 
     def test_a_second_failure_long_after_the_refresh_refreshes_again(self):
         ref = self.tmp / "refreshed"
@@ -762,6 +791,15 @@ class AuthTextTest(KeyCase):
     def test_429_limit_is_not_auth(self):
         self.assert_not_auth(api_error(NOW, LIMIT, status=429, error="rate_limit"))
         self.assert_not_auth(api_error(NOW, "API Error: 500 authentication service down 401", status=500))
+
+    def test_a_non_auth_error_before_a_401_still_counts(self):
+        # A limit or a safety-guard refusal earlier in the tail is skipped, not taken as the answer: the 401 after
+        # it is still an auth failure.
+        for first in (api_error(NOW, LIMIT, status=429, error="rate_limit"),
+                      api_error(NOW, SAFETY, status=400, error="invalid_request")):
+            sid = self.transcript(first, auth_401(NOW + timedelta(seconds=5)))
+            self.assertEqual(len(self.errors(sid)), 2)
+            self.assertTrue(keys.auth_failed(self.errors(sid), None), first["message"]["content"][0]["text"])
 
     def test_403_status_is_auth(self):
         sid = self.transcript(api_error(NOW, "Forbidden", status=403, error="unknown"))
