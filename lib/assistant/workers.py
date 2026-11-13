@@ -123,6 +123,7 @@ APPLY_FAILED = "review_apply_failed"  # the `reason` of the ask a pr-review repo
 REVIEW_IDLE = "review_idle"  # the `reason` of the ask a pr-review worker closed idle with no report raises
 REVIEW_DIR = "ap2-pr-review-"  # the prefix of the empty folder an auto-started pr-review worker runs in
 QUESTION_MAX = 64 * 1024  # the most of question.json `check` reads (under the worker list's lock)
+WORKER_TEXT_MAX = 2000  # the most characters of worker-derived text (`_safe_text`) that go into an ask or a note
 SHADOW_REVIEW = "shadow mode starts no worker; this card waits for its review in live mode"
 WRITE_DENIED = ("a read-only v2 worker writes only its result file or question.json, at the top of its own run "
                 "directory (AP2_RUN_DIR)")
@@ -1243,6 +1244,14 @@ class Workers:
         except (TypeError, ValueError):
             return 0.0
 
+    @staticmethod
+    def _safe_text(text: str) -> str:
+        """Worker-derived text made fit for a card, the worker list and a line: what is not valid Unicode (a lone
+        surrogate, from a `\\ud800` escape in a file the worker wrote) is escaped, as a card refuses it and the
+        ask would never be set, and it is cut to WORKER_TEXT_MAX characters."""
+        text = text.encode("utf-8", "backslashreplace").decode("utf-8")
+        return text if len(text) <= WORKER_TEXT_MAX else text[:WORKER_TEXT_MAX] + " [cut]"
+
     def _read_question(self, card_id: str):
         """The question's text. Only a regular file is read (`sources.read_regular_capped`: opened without following
         a link and without waiting, as a FIFO the worker put there would hold the worker list's lock forever), and
@@ -1254,6 +1263,8 @@ class Workers:
         except (OSError, ValueError, sources.SourceError):
             q = None
         text = q.get("text") if isinstance(q, dict) else q
+        if isinstance(text, str):
+            text = self._safe_text(text)
         return text if text else "The worker asked a question but its question.json could not be read."
 
     # An in-place resume (a dead worker's, or a parked one's whose window reset) runs in three steps, so its tool
@@ -1639,17 +1650,27 @@ class Workers:
         return True
 
     def _apply_failed(self, entry: dict, cid: str, why: str, by: str, error: Optional[str] = None) -> None:
+        """A failed apply always leaves the card's hold, so it is not started again in a loop: `why` (built from
+        the worker's report) is made safe first (`_safe_text`), and an ask the card still refuses is set again with
+        a fixed text that carries nothing from the worker."""
+        why = self._safe_text(why)
         self._add_note(entry, f"the review was not applied: {why}")
         if error:
             entry["error"] = error
-        text = (f"The PR review finished, but its report could not be put on the card: {why}. To go on, run "
-                f"`ap2 review check {cid}`, then `ap2 review apply {cid}`.")
-        try:
-            if not self._set_ask(cid, {"type": "fix", "role": REVIEW_ROLE, "reason": APPLY_FAILED,
-                                       "text": text}, by):
-                self._add_note(entry, "the card already has an open ask, so this one is not on it")
-        except Exception as e2:  # noqa: BLE001 - the note above already says what failed
-            self._add_note(entry, f"the ask could not be set: {str(e2) or type(e2).__name__}")
+        steps = f"run `ap2 review check {cid}`, then `ap2 review apply {cid}`."
+        texts = (f"The PR review finished, but its report could not be put on the card: {why}. To go on, {steps}",
+                 f"The PR review finished, but its report could not be put on the card. To see why and go on, "
+                 f"{steps}")
+        for i, text in enumerate(texts):
+            try:
+                if not self._set_ask(cid, {"type": "fix", "role": REVIEW_ROLE, "reason": APPLY_FAILED,
+                                           "text": text}, by):
+                    self._add_note(entry, "the card already has an open ask, so this one is not on it")
+                elif i:
+                    self._add_note(entry, "the ask was set with a fixed text")
+                return
+            except Exception as e2:  # noqa: BLE001 - the note above already says what failed
+                self._add_note(entry, f"the ask could not be set: {self._safe_text(str(e2) or type(e2).__name__)}")
 
     def _review_sync(self, entry: dict, by: str) -> None:
         """After an apply that worked, with the worker list's lock free: `prreview.sync` asks GitHub where the PR

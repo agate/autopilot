@@ -754,7 +754,10 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   hanging every later check, start, end and park); that is a failed `apply` whose error says the file is not a
   regular file (or is a symbolic link). A failed `apply` is a note,
   and the card's `ask` (`type: fix`, `reason: review_apply_failed`) with the error and "run `ap2 review check
-  CARD`, then `ap2 review apply CARD`", so the card is not started again in a loop; `sync` runs only after an
+  CARD`, then `ap2 review apply CARD`", so the card is not started again in a loop. The error comes from the
+  worker's report, so it is escaped where it is not valid Unicode and cut to 2000 characters
+  (`workers.WORKER_TEXT_MAX`, as for a question's text); an ask the card still refuses is set again with a fixed
+  text that carries nothing from the worker, so a failed `apply` always holds the card. `sync` runs only after an
   `apply` that worked, and a failed one is a note (the review stays applied). That ask is the role's own worker ask
   (8.2): any start of the role and `finish` close it, and so does a `check` that finds the card reviewed at its
   head (the user applied it by hand). A `sync` that sees `new_commits` writes the new `pr.head_sha`, so the next

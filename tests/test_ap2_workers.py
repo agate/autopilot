@@ -3940,6 +3940,7 @@ class PrReviewDonePathTest(PrReviewCase):
         self.the_worker_reviews(cid, report={"card": cid, "verdict": "approve"})
         out = self.workers().check()
         self.assertEqual(out[0]["did"], "ended")
+        self.assertEqual(list(self.scratch.iterdir()), [])  # the round's folder goes even when the apply fails
         self.assertNotIn("verdict", out[0])
         self.assertNotIn("sync", out[0])  # sync runs only after an apply that worked
         self.assertIn("the review was not applied", out[0]["note"])
@@ -3957,6 +3958,55 @@ class PrReviewDonePathTest(PrReviewCase):
         # A start by hand is the user's new try: it closes that ask, as every start closes the role's own asks.
         self.workers().start(cid, "pr-review", cwd=transcripts.run_dir(self.data, cid), prompt="Again.")
         self.assertIsNone(self.get(cid).get("ask"))
+
+    def test_a_report_with_a_lone_surrogate_key_still_asks_the_user(self):
+        # The check's error names the key: put raw into the ask, the card would refuse it (not valid Unicode), and
+        # with no ask and no reviewed_sha the next check would start a new paid review, again and again.
+        cid = self.started()
+        self.the_worker_reviews(cid, report={"card": cid, "\ud800": 1})
+        out = self.workers().check()
+        self.assertEqual([(e["card"], e["did"]) for e in out], [(cid, "ended")])
+        self.assertIn("\\ud800", out[0]["note"])
+        out[0]["note"].encode("utf-8")  # the line's note is valid text too
+        ask = self.get(cid)["ask"]
+        self.assertEqual((ask["type"], ask["role"], ask["reason"]), ("fix", "pr-review", workers_mod.APPLY_FAILED))
+        self.assertIn("\\ud800", ask["text"])
+        self.assertEqual(self.workers().check(), [])
+        self.assertEqual(len(self.review_starts()), 1)
+
+    def test_a_long_apply_error_is_cut_in_the_ask(self):
+        cid = self.started()
+        self.the_worker_reviews(cid, report={"card": cid, "x" * 50000: 1})
+        self.workers().check()
+        ask = self.get(cid)["ask"]
+        self.assertEqual(ask["reason"], workers_mod.APPLY_FAILED)
+        self.assertLess(len(ask["text"]), 5000)  # not the 50000-character key
+        self.assertIn("[cut]", ask["text"])
+        self.assertIn(f"`ap2 review apply {cid}`", ask["text"])
+
+    def test_an_apply_ask_the_card_refuses_is_set_again_with_a_fixed_text(self):
+        cid = self.started()
+        self.the_worker_reviews(cid, report={"card": cid, "verdict": "approve"})
+        real, texts = Workers._set_ask, []
+
+        def set_ask(self_, card_id, ask, by):
+            texts.append(ask["text"])
+            if len(texts) == 1:
+                raise workers_mod.WorkerError("text is not valid Unicode")
+            return real(self_, card_id, ask, by)
+
+        with mock.patch.object(Workers, "_set_ask", set_ask):
+            out = self.workers().check()
+        self.assertEqual(len(texts), 2)
+        self.assertIn("does not pass ap2 review check", texts[0])
+        self.assertIn("the ask could not be set: text is not valid Unicode", out[0]["note"])
+        ask = self.get(cid)["ask"]
+        self.assertEqual((ask["type"], ask["role"], ask["reason"]), ("fix", "pr-review", workers_mod.APPLY_FAILED))
+        self.assertEqual(ask["text"], texts[1])
+        self.assertNotIn("does not pass", ask["text"])  # no worker-derived text in it
+        self.assertIn(f"run `ap2 review check {cid}`, then `ap2 review apply {cid}`", ask["text"])
+        self.assertEqual(self.workers().check(), [])
+        self.assertEqual(len(self.review_starts()), 1)
 
     def test_an_apply_by_hand_closes_the_ask_on_the_next_check(self):
         cid = self.started()
@@ -4205,6 +4255,15 @@ class PrReviewDonePathTest(PrReviewCase):
         self.assertEqual(self.get(cid)["ask"]["text"],
                          "The worker asked a question but its question.json could not be read.")
 
+    def test_a_question_with_a_lone_surrogate_still_asks_the_user(self):
+        cid = self.started()
+        self.write_result(cid, "question.json", {"text": "Which base \ud800 branch?"})  # `\ud800` in the JSON
+        out = self.workers().check()
+        self.assertEqual([(e["card"], e["did"]) for e in out], [(cid, "asked")])
+        ask = self.get(cid)["ask"]
+        self.assertEqual(ask["type"], "answer")
+        self.assertEqual(ask["text"], "Which base \\ud800 branch?")
+
     def assert_too_large_question_not_read(self, size):
         cid = self.started()
         q = transcripts.run_dir(self.data, cid) / "question.json"
@@ -4214,13 +4273,23 @@ class PrReviewDonePathTest(PrReviewCase):
         else:
             q.write_bytes(body)
             os.truncate(q, size)  # sparse: no disk used, but a whole read takes `size` bytes of memory
+        real_read, got = workers_mod.sources.os.read, []
+
+        def counted(fd, n):
+            chunk = real_read(fd, n)
+            got.append(len(chunk))
+            return chunk
+
         with mock.patch.object(workers_mod.sources, "read_regular_capped",
-                               wraps=workers_mod.sources.read_regular_capped) as read:
+                               wraps=workers_mod.sources.read_regular_capped) as read, \
+                mock.patch.object(workers_mod.sources.os, "read", counted):
             out = self.check_in_a_thread(q)
         self.assertEqual([(e["card"], e["did"]) for e in out], [(cid, "asked")])
         self.assertEqual(self.get(cid)["ask"]["text"],
                          "The worker asked a question but its question.json could not be read.")
         self.assertEqual([c.args[1] for c in read.call_args_list], [workers_mod.QUESTION_MAX])
+        self.assertLessEqual(sum(got), 1 << 20)  # the cap itself stays small: never a whole huge file in memory
+        self.assertLessEqual(workers_mod.QUESTION_MAX, 1 << 20)
         self.assertEqual(resources.Registry(self.data).read(), [])  # closed as a question
 
     def test_a_question_file_one_byte_over_its_cap_is_not_read(self):
