@@ -14,7 +14,7 @@ Named `profileview`, not `access`: the design keeps `access.py` for the health c
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -124,13 +124,27 @@ def usage(data: Path, now: datetime, usage_file, p: Optional[dict], limit) -> di
 
 def gateway_usage(data: Path, now: datetime, limit) -> dict:
     """`{day, counted_at, today, week, month, unknown, unknown_today, limit}` from `spend.last`: `day` is the day
-    the count was made; a count from another day leaves `today` and `unknown_today` null (not counted yet today)."""
+    the count was made. Each total is kept only while its period is still the current one, as `spend.totals` counts
+    them (the week from Monday, the month from the 1st): a count from another day leaves `today` and `unknown_today`
+    null (not counted yet today), one from an earlier week leaves `week` null, and one from an earlier month leaves
+    `month` and `unknown` null."""
     t = spend.last(data)
     out = {"day": None, "counted_at": None, "today": None, "week": None, "month": None, "unknown": None,
            "unknown_today": None, "limit": limit}
     if t is None:
         return out
-    out.update(day=t["day"], counted_at=t["at"], week=t["week"], month=t["month"], unknown=t["unknown"])
-    if t["day"] == cap.day(now):
+    out.update(day=t["day"], counted_at=t["at"])
+    today = date.fromisoformat(cap.day(now))
+    try:
+        counted = date.fromisoformat(t["day"])
+    except ValueError:  # not a day: none of its totals is this period's
+        return out
+    if counted > today:  # a count from a later day (the clock moved back): none of its periods is this one
+        return out
+    if counted >= today - timedelta(days=today.weekday()):
+        out["week"] = t["week"]
+    if (counted.year, counted.month) == (today.year, today.month):
+        out.update(month=t["month"], unknown=t["unknown"])
+    if counted == today:
         out.update(today=t["today"], unknown_today=t["unknown_today"])
     return out

@@ -3245,7 +3245,10 @@ Calls the author made without asking (check them):
      changes the allowance, and the page then shows the older count. `spend.last(data)` returns it, or None when it
      is missing, unreadable, malformed or a symlink. `usage.gateway` is `{day, counted_at, today, week, month,
      unknown, unknown_today, limit}`: `day` is the day of the count; a count from another day leaves `today` and
-     `unknown_today` null and the page says "not counted yet today" (week and month still from it). `spend/**` is
+     `unknown_today` null and the page says "not counted yet today"; week and month still come from it while they
+     are this period's, as `spend.totals` counts them (the week from Monday, the month from the 1st): a count from an
+     earlier week leaves `week` null and one from an earlier month leaves `month` and `unknown` null (the page shows
+     "—"), so a Monday or a 1st never shows the last period's money as this one's. `spend/**` is
      in `PROTECTED`, so workers cannot edit it.
   3. **[decided by the builder]** The cap card's buttons: `POST /api/cap/answer` `{"card_id", "option"}`, with the
      question's body rules (JSON, at most 64 KiB, this page's `Origin` only; the checks are two helpers,
