@@ -136,7 +136,7 @@ def last(data) -> Optional[dict]:
     if not isinstance(raw, dict) or not all(isinstance(raw.get(k), str) for k in ("at", "day")):
         return None
     for k in ("today", "week", "month"):
-        if not _number(raw.get(k)):
+        if not _number(raw.get(k)) or not math.isfinite(raw[k]):  # json.loads reads Infinity and NaN
             return None
     if not (isinstance(raw.get("unknown"), bool) and isinstance(raw.get("unknown_today"), bool)):
         return None

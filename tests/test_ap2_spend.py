@@ -1735,7 +1735,9 @@ class LastCountTest(unittest.TestCase):
         f = self.data / spend.FOLDER / spend.LAST
         f.parent.mkdir()
         for raw in ("not json", "[]", "{}", json.dumps({"at": "x", "day": "2026-11-11", "today": "1"}),
-                    json.dumps({**self.t, "at": "x", "day": "2026-11-11", "week": True}), "\udcff"):
+                    json.dumps({**self.t, "at": "x", "day": "2026-11-11", "week": True}), "\udcff",
+                    json.dumps({**self.t, "at": "x", "day": "2026-11-11", "today": float("inf")}),
+                    json.dumps({**self.t, "at": "x", "day": "2026-11-11", "month": float("nan")})):
             with self.subTest(raw):
                 f.write_text(raw, encoding="utf-8", errors="surrogateescape")
                 self.assertIsNone(spend.last(self.data))

@@ -239,7 +239,7 @@ class WindowTest(PhoneCase):
         (self.data / "config.yaml").write_text("phone_lanes: [running]\nmode: live\n", encoding="utf-8")
         running = self.add(lane="running")
         self.add(lane="needs")
-        data = phone.build(self.data, now=NOW, plugin_dir=self.plugin)
+        data = phone.build(self.data, now=NOW, plugin_dir=self.plugin, usage_file=self.tmp / "claude.json")
         self.assertEqual([r["id"] for r in data["cards"]], [running["id"]])
         self.assertEqual(data["mode"], "live")
 
@@ -333,7 +333,7 @@ class ScrubTest(PhoneCase):
         link.symlink_to(self.data, target_is_directory=True)
         card = self.bad_template_and_gate()
         asked = self.ask(f"{self.data}/workers.json: cannot read; see '{link}/logs/x.log'")
-        data = phone.build(link, cfg=self.cfg, now=NOW, plugin_dir=self.plugin)
+        data = phone.build(link, cfg=self.cfg, now=NOW, plugin_dir=self.plugin, usage_file=self.tmp / "claude.json")
         text = json.dumps(data, ensure_ascii=False)
         for path in (str(link), str(self.data), str(self.tmp)):
             self.assertNotIn(path, text)
@@ -642,7 +642,7 @@ class ReadOnlyTest(PhoneCase):
 
     def test_a_missing_data_folder_creates_nothing(self):
         missing = self.tmp / "nowhere"
-        data = phone.build(missing, cfg=Config(), now=NOW, plugin_dir=self.plugin)
+        data = phone.build(missing, cfg=Config(), now=NOW, plugin_dir=self.plugin, usage_file=self.tmp / "claude.json")
         self.assertEqual(data["cards"], [])
         self.assertFalse(missing.exists())
 

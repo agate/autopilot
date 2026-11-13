@@ -11,6 +11,7 @@ import socket
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1164,16 +1165,22 @@ class CapAnswerRouteTest(ServerCase):
     def test_two_answers_at_once_raise_once(self):
         self.start()
         statuses, ready = [], threading.Barrier(2)
+        real = cap.answer
+
+        def slow(*args, **kwargs):  # hold the first answer open, so a second one without the lock overlaps it
+            time.sleep(0.3)
+            return real(*args, **kwargs)
 
         def go():
             ready.wait()
             statuses.append(self.answer("raise50")[0])
 
-        threads = [threading.Thread(target=go) for _ in range(2)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(30)
+        with mock.patch.object(cap, "answer", side_effect=slow):
+            threads = [threading.Thread(target=go) for _ in range(2)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(30)
         self.assertEqual(sorted(statuses), [200, 409])
         self.assertEqual(cap.state(self.data, self.clock().astimezone())["raise_pct"], 50)
 

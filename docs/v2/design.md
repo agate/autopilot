@@ -2826,7 +2826,7 @@ Calls the author made without asking (check them):
   - Not in this slice: the spend ledger, the daily cap and key health, refresh and rotation (`rotate`) (their own
     entries below), and the page's badge and switch (the "Access on the pages" entry below). The daily cap entry below says how a gateway worker is held at
     its cap and why the subscription's park line no longer parks it; the key health entry says how a gateway key
-    that does not work holds every start. The page's badge and switch are in the "Access on the pages" entry.
+    that does not work holds every start.
 - **[decided by the builder]** Spend ledger (slice 2 of the port of v1's access profiles): a gateway shows no
   dollars, so v2 adds up what its own workers cost. Ported from v1's `lib/autopilot/spend.py` into
   `lib/assistant/spend.py`, never imported (v1's version keeps v1's ledger). v1 and v2 totals are separate: v2
