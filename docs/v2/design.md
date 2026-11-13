@@ -1649,7 +1649,8 @@ Calls the author made without asking (check them):
     another web site cannot time searches to learn what the cards hold; a browser that does not send the header
     gets no such guard. The page `/` is still served, so a link from elsewhere opens it. While it runs, the server
     trusts every account and process on this Mac: the Host and Origin checks stop other web sites, not other
-    local users, who can read every card, source and setting and post questions. A per-run token is later work
+    local users, who can read every card, source and setting, post questions and answer the cap card (in live
+    mode, a pause stops every running worker). A per-run token is later work
     if that is not acceptable. Every reply has
     `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`,
     `Cross-Origin-Opener-Policy: same-origin` (a page on another site that opens this page in a window keeps no

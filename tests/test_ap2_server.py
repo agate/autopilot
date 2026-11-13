@@ -1686,9 +1686,24 @@ const top = flat(boxes.access);
 S.state = {access: {profile: null, profile_error: 'PROFILE-ERR-P', error: 'FOLDER-ERR-F', cap: {},
                     broken_profiles: [{name: 'x', error: 'BROKEN-E'}]}, usage: gwUsage};
 const set = flat(accessSet());
-console.log(JSON.stringify({top, set}));
+// The top bar's alerts are links: the open cap card, and Settings for a profile that does not work.
+S.state = {access: {profile: null, profile_error: 'PROFILE-ERR-P', cap: {card: 'open', card_id: 'c-1'}}, usage: gwUsage};
+drawAccess();
+const links = find(boxes.access, 'a').map(a => [a.attrs.href, a.attrs.text]);
+// Settings with a working gateway profile: the profile, its model and effort, and the page sessions' mode.
+S.state = {access: {profile: {name: 'g', mode: 'gateway', label: 'Team', model: 'big', effort: 'high'}, cap: {}},
+           usage: gwUsage};
+const profileSet = flat(accessSet());
+console.log(JSON.stringify({top, set, links, profileSet}));
 """)
         top, sett = out["top"], out["set"]
+        self.assertIn("[access.page_sessions]", top)  # the badge says page sessions stay on the subscription
+        self.assertIn(["#/card/c-1", "[cap.reached]"], out["links"])
+        self.assertIn(["#/settings", "[access.profile_error]"], out["links"])
+        for t in ("[access.profile]", '[access.workers {"label":"Team"}]', "[access.model]", "big · high",
+                  "[access.pages]", "[access.subscription]"):
+            with self.subTest(t):
+                self.assertIn(t, out["profileSet"])
         self.assertIn(" KEY-BROKEN-K", top)  # the alert's server text, after its label
         self.assertIn("[access.key_error]", top)
         self.assertIn('[usage.today_short {"spent":"$512.00","limit":"$500.00"}]', top)
