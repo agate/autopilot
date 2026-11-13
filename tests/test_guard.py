@@ -248,7 +248,10 @@ class GuardTest(unittest.TestCase):
         # no continuation is joined into these, so they stay exempt
         for cmd in ('ap journal add v2 X "PR #101: rm stale lock under ~/.claude/autopilot-data/locks"',
                     'ap task note v2 X "fix #12: moved ~/.claude/autopilot-data/a -> ~/.claude/autopilot-data/b"',
-                    'ap note v2 "see #3: cp notes into ~/.claude/autopilot-data/x"'):
+                    'ap note v2 "see #3: cp notes into ~/.claude/autopilot-data/x"',
+                    # a continuation on another line does not take the exemption from this one
+                    'ap journal add v2 X "rm stale lock under ~/.claude/autopilot-data/locks"\n'
+                    'cat ~/.claude/autopilot-data/x \\\n| head'):
             self.assertIsNone(guard.decide(bash(cmd), self.W), cmd)
 
     def test_guard_checks_an_open_mode_with_escaped_quotes(self):
