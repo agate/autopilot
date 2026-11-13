@@ -8,6 +8,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 if sys.argv[1:2] == ["hook-park"]:  # runs before every worker tool call: skip cli's imports
     from assistant import parkhook  # noqa: E402
     sys.exit(parkhook.main(sys.argv[2:], sys.stdin))
+if sys.argv[1:2] == ["hook-guard"]:  # runs before every worker Bash call: skip cli's imports
+    from assistant import guard  # noqa: E402
+    sys.exit(guard.main(sys.argv[2:], sys.stdin))
 
 from assistant import cli  # noqa: E402
 

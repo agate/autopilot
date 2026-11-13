@@ -128,13 +128,15 @@ CLOSES = {"end": ("ended", "ended", True), "done": ("ended", "ended", False),
           "refused": ("paused", "paused", True), "parked_failed": ("stopped", "stopped", False)}
 # Files a worker may not edit in the data folder. Every card's run directory stays writable except its settings
 # files: a deny rule cannot keep one worker out of another card's result files. The user's templates and sources
-# are here as well (the worker floor in roles.py), the access profiles with the active one's name, and the spend
-# ledger with the data folder's price override, the daily cap's state, pause and stop lock, and the key health's
-# records (a worker must not mark a failing key as working).
-PROTECTED = ("config.yaml", "workers.json", ".workers.lock", ".store.lock", CAP_STOP_LOCK, "index.sqlite", "items/**",
-             "restore/**", "projects/**", "templates/**", "sources/**", "sessions/**/settings-*.json",
-             f"{profiles.FOLDER}/**", profiles.ACTIVE, f"{spend.FOLDER}/**", spend.PRICES, cap.STATE, cap.PAUSED,
-             keys.STATE, keys.REFRESH)
+# are here as well (the worker floor in roles.py), the access profiles with the active one's name, the spend ledger
+# with the data folder's price override, the daily cap's state, pause and stop lock, the key health's records (a worker
+# must not mark a failing key as working), and the gate's heartbeat, SQLite's files next to the index (`-wal`, `-shm`,
+# `-journal`), routines and chat. A worker's Bash is kept out of the whole data folder but its own run directory by
+# the guard hook (`ap2 hook-guard`, guard.py), best effort.
+PROTECTED = ("config.yaml", "workers.json", ".workers.lock", ".store.lock", CAP_STOP_LOCK, "index.sqlite",
+             "index.sqlite-*", "gate.json", "items/**", "restore/**", "projects/**", "templates/**", "sources/**",
+             "routines/**", "chat/**", "sessions/**/settings-*.json", f"{profiles.FOLDER}/**", profiles.ACTIVE,
+             f"{spend.FOLDER}/**", spend.PRICES, cap.STATE, cap.PAUSED, keys.STATE, keys.REFRESH)
 SPEND_LINE = 300  # the longest stderr line a failed ledger step prints
 
 
@@ -204,9 +206,10 @@ def require_literal(data: Path) -> None:
 def floor(role: str, project: dict, data: Path, env: dict, profile: Optional[dict] = None) -> dict:
     """The worker's permission floor (`--settings`): v1's outward-tool denials (`perms.denied_tools`, from the
     project's `tools`; `Workers._tools` fills them in when it lists none, with `deny_servers`, the whole-server
-    rules) and Bash denials, the data folder's own files and the package, and the worker's env. With `profile`, its
-    overlay is merged under it (`profiles.merge`): the deny and allow lists, the hooks and the AP2_* env stay
-    exactly as they are. Refused for a path a gitignore pattern cannot name literally (`require_literal`)."""
+    rules) and Bash denials, the data folder's own files and the package, the park and Bash guard hooks, and the
+    worker's env. With `profile`, its overlay is merged under it (`profiles.merge`): the deny and allow lists, the
+    hooks and the AP2_* env stay exactly as they are. Refused for a path a gitignore pattern cannot name literally
+    (`require_literal`)."""
     if role not in ROLES:
         raise WorkerError(f"role must be one of {', '.join(ROLES)}, not {role!r}")
     require_literal(data)
@@ -218,9 +221,13 @@ def floor(role: str, project: dict, data: Path, env: dict, profile: Optional[dic
     # the same for `ap worker park`).
     allow = [f"Bash({package_root() / 'bin' / 'ap2'} worker park:*)"]
     # The park hook (`ap2 hook-park`, parkhook.py) runs before every tool call of the worker and its subagents and
-    # denies all but that command while usage is at the park line (v1's `perms.park_hook` shape).
-    hooks = {"PreToolUse": [{"matcher": "*", "hooks": [
-        {"type": "command", "command": f"\"{package_root() / 'bin' / 'ap2'}\" hook-park", "timeout": 5}]}]}
+    # denies all but that command while usage is at the park line (v1's `perms.park_hook` shape). Then the Bash
+    # guard (`ap2 hook-guard`, guard.py) denies a shell write into the data folder (but the worker's own run
+    # directory) or the package: best effort, it reads the command text; the Edit denials stay the main guard.
+    ap2 = package_root() / "bin" / "ap2"
+    hooks = {"PreToolUse": [
+        {"matcher": "*", "hooks": [{"type": "command", "command": f"\"{ap2}\" hook-park", "timeout": 5}]},
+        {"matcher": "Bash", "hooks": [{"type": "command", "command": f"\"{ap2}\" hook-guard", "timeout": 5}]}]}
     out = {"permissions": {"deny": deny, "allow": allow}, "env": dict(env), "hooks": hooks}
     return profiles.merge(out, profiles.overlay(profile)) if profile is not None else out
 
