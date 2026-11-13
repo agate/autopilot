@@ -1704,5 +1704,56 @@ class SpendCliTest(unittest.TestCase):
         self.assertEqual(json.loads(r.stdout)["month"], 0.0)
 
 
+class LastCountTest(unittest.TestCase):
+    """`spend.remember` / `spend.last`: the last totals the cap read, kept for the pages, which never read the
+    ledger themselves."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="ap2-spend-last-")).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.data = self.tmp / "data"
+        self.data.mkdir()
+        self.t = {"today": 12.5, "week": 40.0, "month": 2300.0, "unknown": True, "unknown_today": False,
+                  "unknown_models": ["mystery-1"], "unknown_launches": 2}
+
+    def test_remember_then_last_round_trip(self):
+        self.assertIsNone(spend.last(self.data))
+        spend.remember(self.data, self.t, NOW)
+        got = spend.last(self.data)
+        self.assertEqual(got, {**self.t, "at": NOW.isoformat(), "day": "2026-11-11"})
+        self.assertEqual(spend.LAST, "last.json")
+        self.assertTrue((self.data / spend.FOLDER / spend.LAST).is_file())
+        later = NOW + timedelta(hours=1)
+        spend.remember(self.data, dict(self.t, today=13.0), later)
+        self.assertEqual(spend.last(self.data)["today"], 13.0)
+        self.assertEqual(spend.last(self.data)["at"], later.isoformat())
+        # Only the totals' own keys are kept.
+        spend.remember(self.data, dict(self.t, extra="x"), NOW)
+        self.assertNotIn("extra", spend.last(self.data))
+
+    def test_last_ignores_a_symlink_or_bad_json(self):
+        f = self.data / spend.FOLDER / spend.LAST
+        f.parent.mkdir()
+        for raw in ("not json", "[]", "{}", json.dumps({"at": "x", "day": "2026-11-11", "today": "1"}),
+                    json.dumps({**self.t, "at": "x", "day": "2026-11-11", "week": True}), "\udcff"):
+            with self.subTest(raw):
+                f.write_text(raw, encoding="utf-8", errors="surrogateescape")
+                self.assertIsNone(spend.last(self.data))
+        f.unlink()
+        real = self.tmp / "real.json"
+        real.write_text(json.dumps({**self.t, "at": NOW.isoformat(), "day": "2026-11-11"}))
+        f.symlink_to(real)
+        self.assertIsNone(spend.last(self.data))
+        with self.assertRaises(spend.SpendError):
+            spend.remember(self.data, self.t, NOW)
+        self.assertEqual(json.loads(real.read_text())["today"], 12.5)  # the link's target is never written
+        f.unlink()
+        shutil.rmtree(f.parent)
+        (self.data / spend.FOLDER).symlink_to(self.tmp)
+        self.assertIsNone(spend.last(self.data))
+        with self.assertRaises(spend.SpendError):
+            spend.remember(self.data, self.t, NOW)
+
+
 if __name__ == "__main__":
     unittest.main()

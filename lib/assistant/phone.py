@@ -1,7 +1,8 @@
 """The phone page's data (design 9.2): the card store turned into one JSON document, read only.
 
-`build(data, cfg=None, now=None, plugin_dir=None)` returns `{generated_at, mode, primary_language,
-secondary_language, languages, settings, lanes, projects, heartbeat, cards, full}`; `ap2 phone build` prints it.
+`build(data, cfg=None, now=None, plugin_dir=None, usage_file=None)` returns `{generated_at, mode, primary_language,
+secondary_language, languages, settings, lanes, projects, heartbeat, cards, full, access, usage}`; `ap2 phone build`
+prints it.
 
 - The window: a card is on the phone when its lane is in `phone_lanes` and it is open (not `done`), or it is `done`
   and its `updated_at` is at most `phone_history_days` days before `now` (0 shows no History; a `done` card with no
@@ -24,9 +25,14 @@ secondary_language, languages, settings, lanes, projects, heartbeat, cards, full
   it, so a folder `/Users/xé` reads `~é`: a wrong name, never a leak. An ask text that is not a string (an object per
   language, a list) has each of its strings scrubbed, an object's keys and values alike. A home of `/` is left
   alone. Other paths (`/private/var/...`) stay.
+- `access` and `usage` are the local page's (`profileview.summary`, with `usage_file`, Claude Code's usage cache,
+  `~/.claude.json` by default), read only: the profile badge, the key or profile error, the cap card's state and
+  the usage by mode. The texts there that can name a file on this Mac are scrubbed the same way:
+  `access.profile_error`, `access.key_error`, each `access.broken_profiles[].error`, and every `error` field
+  (`access.error`, `access.cap.error`, `access.cap.pause.error`).
 
 Building writes nothing (the store is read without its lock file, as the local page's GETs do), starts no process
-and opens no connection. Publishing the data is a later dispatcher step, live mode only.
+(no key command: only the cached key record is read) and opens no connection. Publishing the data is a later dispatcher step, live mode only.
 """
 from __future__ import annotations
 
@@ -37,7 +43,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
-from assistant import cards, config, engine, server, templates
+from assistant import cards, config, engine, profileview, server, templates
 from assistant.config import ConfigError
 from assistant.sources import Loader, SourceError
 
@@ -152,10 +158,11 @@ class _Hider:
 
 
 def build(data, cfg: Optional[config.Config] = None, now: Optional[datetime] = None,
-          plugin_dir: Optional[Path] = None) -> dict:
+          plugin_dir: Optional[Path] = None, usage_file=None) -> dict:
     """The phone page's data for the data folder `data`. `cfg` defaults to its config.yaml, `now` to the clock,
-    `plugin_dir` to the plugin's `sources/` (read only to name a hidden record's kind). Raises ConfigError (a bad
-    config, or hiding asked for in a language with no phrases) and CardError (a damaged card file)."""
+    `plugin_dir` to the plugin's `sources/` (read only to name a hidden record's kind), `usage_file` to
+    `~/.claude.json`. Raises ConfigError (a bad config, or hiding asked for in a language with no phrases) and
+    CardError (a damaged card file)."""
     data = Path(data)
     cfg = cfg if cfg is not None else config.load(data)
     now = now if now is not None else cards.now_utc()
@@ -229,7 +236,26 @@ def build(data, cfg: Optional[config.Config] = None, now: Optional[datetime] = N
             "settings": {"history_days": cfg.phone_history_days, "lanes": list(cfg.phone_lanes),
                          "hide_quotes": cfg.phone_hide_quotes},
             "lanes": lanes, "projects": projects, "heartbeat": _scrubbed_heartbeat(data, now, scrub),
-            "cards": [phone_row(c) for c in shown], "full": full}
+            "cards": [phone_row(c) for c in shown], "full": full,
+            **_scrubbed_access(data, now, usage_file, scrub)}
+
+
+def _scrubbed_access(data: Path, now: datetime, usage_file, scrub: _Scrub) -> dict:
+    """`profileview.summary` at the local day of `now`, with the texts that can name a path scrubbed."""
+    view = profileview.summary(data, now.astimezone(), usage_file if usage_file is not None
+                               else Path.home() / ".claude.json")
+    a = view["access"]
+    for key in ("profile_error", "key_error", "error"):
+        if a.get(key) is not None:
+            a[key] = scrub(a[key])
+    for b in a["broken_profiles"]:
+        b["error"] = scrub(b["error"])
+    c = a["cap"]
+    if "error" in c:
+        c["error"] = scrub(c["error"])
+    if isinstance(c.get("pause"), dict):
+        c["pause"] = scrub(c["pause"])  # every string in it: a pause file it cannot read names its path
+    return view
 
 
 def _scrubbed_heartbeat(data: Path, now: datetime, scrub: _Scrub) -> dict:

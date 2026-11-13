@@ -1448,5 +1448,41 @@ class CapCliTest(unittest.TestCase):
         self.assertIn("cap", cli.COMMANDS)
 
 
+class RememberTest(CapCase):
+    """Each gateway allowance keeps the totals it read in `spend/last.json`, so the pages show a count without
+    reading the ledger; a failed write never changes the allowance."""
+
+    def test_gateway_allowance_remembers_totals(self):
+        self.spent = totals(123.25, models=["m"], launches=1)
+        a = self.allow()
+        self.assertEqual((a["allow"], a["reason"]), (None, "ok"))
+        last = spend.last(self.data)
+        self.assertEqual({k: last[k] for k in self.spent}, self.spent)
+        self.assertEqual((last["day"], last["at"]), ("2026-11-11", NOW.isoformat()))
+        self.spent = totals(600.0)
+        self.assertEqual(self.allow()["reason"], "cap")
+        self.assertEqual(spend.last(self.data)["today"], 600.0)
+
+    def test_failed_remember_never_changes_the_allowance(self):
+        self.spent = totals(600.0)
+        want = self.allow(p=dict(self.p))
+        for raised in (OSError("disk full"), spend.SpendError("a symlink"), ValueError("odd"), RuntimeError("x")):
+            with self.subTest(raised):
+                with mock.patch.object(spend, "remember", side_effect=raised) as remember:
+                    self.assertEqual(self.allow(), want)
+                remember.assert_called_once()
+        (self.data / spend.FOLDER).mkdir(exist_ok=True)
+        f = self.data / spend.FOLDER / spend.LAST
+        if f.exists():
+            f.unlink()
+        f.symlink_to(self.tmp / "elsewhere.json")
+        self.assertEqual(self.allow(), want)
+        self.assertFalse((self.tmp / "elsewhere.json").exists())
+
+    def test_a_subscription_allowance_remembers_nothing(self):
+        self.allow(p=profiles.builtin())
+        self.assertIsNone(spend.last(self.data))
+
+
 if __name__ == "__main__":
     unittest.main()

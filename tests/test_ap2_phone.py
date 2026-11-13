@@ -16,7 +16,7 @@ from unittest import mock
 
 from tests.helpers import ROOT
 
-from assistant import cards, datadir, engine, phone, server
+from assistant import cap, cards, datadir, engine, keys, phone, profiles, profileview, server, spend
 from assistant.config import Config, ConfigError
 from assistant.engine import Engine
 from assistant.store import Store
@@ -25,7 +25,7 @@ FIXTURES = ROOT / "tests" / "fixtures" / "ap2"
 NOW = datetime(2026, 11, 10, 14, 30, 5, tzinfo=timezone.utc)
 MARKER = "Zephyrquill"  # a made-up word put in a record's text, to find wherever that text went
 FIELDS = {"generated_at", "mode", "primary_language", "secondary_language", "languages", "settings", "lanes",
-          "projects", "heartbeat", "cards", "full"}
+          "projects", "heartbeat", "cards", "full", "access", "usage"}
 
 
 def plain(text="a thing", langs=("en",)) -> dict:
@@ -78,7 +78,14 @@ class PhoneCase(unittest.TestCase):
 
     def build(self, cfg=None, **settings) -> dict:
         cfg = cfg or Config(**{**self.cfg.__dict__, **settings})
-        return phone.build(self.data, cfg=cfg, now=NOW, plugin_dir=self.plugin)
+        return phone.build(self.data, cfg=cfg, now=NOW, plugin_dir=self.plugin, usage_file=self.tmp / "claude.json")
+
+    def gateway(self, name="g", key_command="exit 1", chosen="2026-11-01T09:00:00-05:00") -> dict:
+        p = {"name": name, "mode": "gateway", "label": "Team Proj", "model": "big", "small_model": "small",
+             "effort": "high", "daily_cap_usd": 500, "chosen_at": chosen,
+             "gateway": {"base_url": "https://gateway.example.com/v1", "key_command": key_command,
+                         "refresh_command": None, "rotate_command": None, "models_command": None}}
+        return profiles.save(self.data, p)
 
     def read_gh(self, cfg=None, marker=True, age=timedelta(hours=1)) -> list:
         """The gh-mine fixture's cards, read by the engine; with `marker`, PR 42's title holds MARKER."""
@@ -604,6 +611,11 @@ class ReadOnlyTest(PhoneCase):
         card = self.add(lane="done")
         self.add(links=[card["id"]], sessions={"x": {"id": "s"}})
         (self.data / "gate.json").write_text(json.dumps({"last_run_at": cards.stamp(NOW)}))
+        counter = self.tmp / "key-runs"
+        self.gateway(key_command=f"echo run >> {counter}")
+        profiles.use(self.data, "g")
+        (self.data / keys.STATE).write_text(json.dumps({"at": NOW.isoformat(), "ok": False, "profile": "g",
+                                                       "error": "the key command failed (exit 1)"}))
         for name in (".store.lock", "index.sqlite", ".index.stale"):
             path = self.data / name
             if path.exists():
@@ -619,6 +631,8 @@ class ReadOnlyTest(PhoneCase):
                         data = self.build(mode=mode, phone_hide_quotes=hide)
                     self.assertEqual(data["mode"], mode)
                     self.assertGreater(len(data["cards"]), 0)
+                    self.assertIn("exit 1", data["access"]["key_error"])
+                    self.assertFalse(counter.exists())  # the key command never ran
                     popen.assert_not_called()
                     connect.assert_not_called()
                     self.assertEqual(tree(self.data), before_data)
@@ -631,6 +645,56 @@ class ReadOnlyTest(PhoneCase):
         data = phone.build(missing, cfg=Config(), now=NOW, plugin_dir=self.plugin)
         self.assertEqual(data["cards"], [])
         self.assertFalse(missing.exists())
+
+
+# --- access and usage, read only ---------------------------------------------------------------------------------
+
+class PhoneAccessTest(PhoneCase):
+    def test_phone_data_has_access_and_usage(self):
+        self.gateway()
+        profiles.use(self.data, "g")
+        spend.remember(self.data, {"today": 512.0, "week": 2300.0, "month": 2300.0, "unknown": False,
+                                   "unknown_today": False, "unknown_models": [], "unknown_launches": 0},
+                       NOW.astimezone())
+        now = NOW.astimezone()
+        store = Store(self.data, cfg=self.cfg, clock=lambda: NOW)
+        cap.open_card(self.data, now, 500.0, "spent", {"today": 512.0}, "g", store)
+        data = self.build()
+        want = profileview.summary(self.data, now, self.tmp / "claude.json")
+        self.assertEqual(data["access"], as_json(want["access"]))
+        self.assertEqual(data["usage"], as_json(want["usage"]))
+        a, u = data["access"], data["usage"]
+        self.assertEqual((a["profile"]["label"], a["page_sessions"]), ("Team Proj", "subscription"))
+        self.assertEqual((a["cap"]["card"], a["cap"]["limit"]), ("open", 500.0))
+        self.assertEqual(a["cap"]["card_id"], cap.state(self.data, now)["card_id"])
+        self.assertIsNone(a["key_error"])
+        self.assertEqual((u["mode"], u["gateway"]["today"], u["gateway"]["month"]), ("gateway", 512.0, 2300.0))
+        self.assertIsNone(u["windows"])
+
+    def test_paths_in_errors_are_scrubbed(self):
+        home = self.tmp / "home"
+        home.mkdir()
+        (self.data / profiles.FOLDER).mkdir(exist_ok=True)
+        (self.data / profiles.FOLDER / "x.json").write_text("{nope")
+        self.gateway()
+        profiles.use(self.data, "g")
+        (self.data / cap.PAUSED).symlink_to(self.tmp / "nowhere.json")
+        with mock.patch.dict(os.environ, {"HOME": str(home)}), \
+                mock.patch.object(keys, "cached_error", return_value=f"{home}/bin/key.sh failed (exit 1)"):
+            data = self.build()
+        a = data["access"]
+        self.assertEqual([b["name"] for b in a["broken_profiles"]], ["x"])
+        self.assertTrue(a["broken_profiles"][0]["error"].startswith("<data>/profiles/x.json: cannot read"),
+                        a["broken_profiles"][0]["error"])
+        self.assertIn("~/bin/key.sh failed (exit 1)", a["key_error"])
+        self.assertEqual(a["cap"]["pause"]["error"], "<data>/paused.json is a symlink")
+        self.assertNotIn(str(self.tmp), json.dumps(data["access"]))
+        (self.data / profiles.ACTIVE).write_text(json.dumps({"name": "x"}))
+        (self.data / cap.STATE).symlink_to(self.tmp / "nowhere.json")
+        a = self.build()["access"]
+        self.assertIn("<data>/profiles/x.json", a["profile_error"])
+        self.assertIn("<data>/cap-state.json is a symlink", a["cap"]["error"])
+        self.assertNotIn(str(self.tmp), json.dumps(a))
 
 
 if __name__ == "__main__":

@@ -19,7 +19,7 @@ from unittest import mock
 from tests.helpers import ROOT
 from tests.test_ap2_store import BLANK_SLOTS, NOT_BLANK_SLOTS
 
-from assistant import cards, datadir, gate, server, templates
+from assistant import cap, cards, datadir, gate, profiles, server, templates
 from assistant.config import Config, ConfigError
 from assistant.engine import Engine
 from assistant.store import Store
@@ -94,7 +94,7 @@ class ServerCase(unittest.TestCase):
 
     def start(self, cfg="default"):
         srv = server.make_server(self.data, port=0, cfg=self.cfg if cfg == "default" else cfg,
-                                 plugin_dir=self.plugin, clock=self.clock)
+                                 plugin_dir=self.plugin, clock=self.clock, usage_file=self.tmp / "claude.json")
         srv.log_stream = io.StringIO()
         self.addCleanup(srv.server_close)
         thread = threading.Thread(target=srv.serve_forever, daemon=True)
@@ -375,10 +375,16 @@ class ListTest(ServerCase):
         self.assertEqual(st["primary_language"], "en")
         self.assertIsNone(st["secondary_language"])
         self.assertEqual(st["languages"], ["en"])
-        self.assertIsNone(st["usage"])
+        self.assertEqual(st["usage"]["mode"], "subscription")
+        self.assertIsNone(st["usage"]["windows"])  # the test's usage file does not exist
+        self.assertEqual(st["access"]["profile"]["name"], "subscription")
+        self.assertEqual(set(st["access"]), {"profile", "profile_error", "page_sessions", "profiles",
+                                             "broken_profiles", "key_error", "cap"})
+        self.assertEqual(set(st["usage"]), {"mode", "windows", "stale", "credits_used_usd", "credits_limit_usd",
+                                            "gateway"})
         self.assertEqual(st["url"], self.srv.url)
         self.assertEqual(set(st), {"mode", "primary_language", "secondary_language", "languages", "lanes",
-                                   "running", "projects", "heartbeat", "usage", "url"})
+                                   "running", "projects", "heartbeat", "access", "usage", "url"})
 
     def test_an_open_lane_is_by_priority_then_newest(self):
         body = self.ok("/api/cards?lane=needs")
@@ -998,6 +1004,18 @@ class ReadOnlyTest(ServerCase):
                     status, _, _ = self.call(method, f"/api/cards/{card['id']}/questions", {"text": "hi"})
                     self.assertEqual(status, 405)
                     self.assertEqual(tree(self.data), before)
+            for method in ("GET", "PUT", "PATCH", "DELETE"):
+                with self.subTest(mode=mode, method=method, route="cap answer"):
+                    before = tree(self.data)
+                    status, hdrs, reply = self.call(method, "/api/cap/answer", {"card_id": card["id"],
+                                                                                "option": "pause"})
+                    self.assertEqual(status, 405, reply)
+                    self.assertEqual(hdrs.get("allow"), "POST")
+                    self.assertEqual(tree(self.data), before)
+            status, _, reply = self.call("POST", "/api/state", {})
+            self.assertIn("saving a question and answering the cap card", reply["error"])
+            # The profile switch is not a route yet (it is its own later task): POST is 405 like any other.
+            self.assertEqual(self.call("POST", "/api/profile/use", {"name": "subscription"})[0], 405)
 
     def test_a_question_in_shadow_mode_writes_only_inside_the_data_folder(self):
         home = self.tmp / "home"
@@ -1006,6 +1024,8 @@ class ReadOnlyTest(ServerCase):
         sibling.mkdir()
         (sibling / "keep.txt").write_text("keep", encoding="utf-8")
         card = self.add()
+        profiles.save(self.data, gateway_profile("g"))
+        cap_id = open_cap_card(self, "spent")
         real_connect = socket.create_connection
         outside = []
 
@@ -1023,6 +1043,8 @@ class ReadOnlyTest(ServerCase):
             data_before, outside_before = tree(self.data), self.outside_data()
             status, _, body = self.ask(card["id"], "Why?")
             self.assertEqual(status, 201, body)
+            status, _, body = self.call("POST", "/api/cap/answer", {"card_id": cap_id, "option": "pause"})
+            self.assertEqual(status, 200, body)
             for route in ("/api/state", "/api/cards", f"/api/cards/{card['id']}", "/api/sources", "/api/settings"):
                 self.ok(route)
             self.assertEqual(tree(home), home_before)
@@ -1030,8 +1052,146 @@ class ReadOnlyTest(ServerCase):
             self.assertEqual(tree(self.plugin), plugin_before)
             self.assertEqual(self.outside_data(), outside_before)
             self.assertNotEqual(tree(self.data), data_before)
+            self.assertTrue((self.data / cap.PAUSED).exists())
         self.assertEqual(outside, [])
         live.assert_not_called()
+
+
+# --- the cap card's answers -----------------------------------------------------------------------------------
+
+def gateway_profile(name) -> dict:
+    """A gateway profile whose key command is never run here (the page reads only the cached key record)."""
+    return {"name": name, "mode": "gateway", "label": name.upper(), "model": "big", "small_model": "small",
+            "effort": "high", "daily_cap_usd": 500, "chosen_at": "2026-11-01T09:00:00-05:00",
+            "gateway": {"base_url": "https://gateway.example.com/v1", "key_command": "exit 7",
+                        "refresh_command": None, "rotate_command": None, "models_command": None}}
+
+
+def open_cap_card(case, cause="spent") -> str:
+    """Open today's cap card (the server's local day) as the cap does at the limit; its id."""
+    now = case.clock().astimezone()
+    t = {"today": 510.0, "week": 510.0, "month": 510.0, "unknown": cause == "unknown",
+         "unknown_today": cause == "unknown", "unknown_models": [], "unknown_launches": 0}
+    cap.open_card(case.data, now, 500.0, cause, t, "g", case.store())
+    return cap.state(case.data, now)["card_id"]
+
+
+class CapAnswerRouteTest(ServerCase):
+    def setUp(self):
+        super().setUp()
+        profiles.save(self.data, gateway_profile("g"))
+        profiles.use(self.data, "g")
+        self.card_id = open_cap_card(self)
+
+    def answer(self, option, card_id=None, headers=None):
+        return self.call("POST", "/api/cap/answer", {"card_id": card_id or self.card_id, "option": option}, headers)
+
+    def test_raise50_answers_todays_open_card(self):
+        st = self.ok("/api/state")
+        self.assertEqual((st["access"]["cap"]["card"], st["access"]["cap"]["card_id"]), ("open", self.card_id))
+        status, _, body = self.answer("raise50")
+        self.assertEqual(status, 200, body)
+        self.assertEqual((body["answered"], body["raise_pct"], body["card"], body["card_id"]),
+                         ("raise50", 50, "answered", self.card_id))
+        now = self.clock().astimezone()
+        self.assertEqual(cap.state(self.data, now)["card"], "answered")
+        self.assertEqual(cap.today_limit(self.data, profiles.active(self.data), now), 750.0)
+        card = self.store().get(self.card_id)
+        self.assertIsNone(card.get("ask"))
+        self.assertEqual(card["lane"], "done")
+        self.assertEqual(card["audit"][-1]["did"], "daily cap answered: raise50")
+        st = self.ok("/api/state")
+        self.assertEqual((st["access"]["cap"]["card"], st["access"]["cap"]["limit"]), ("answered", 750.0))
+
+    def test_a_stale_card_id_is_409_and_changes_nothing(self):
+        other = self.add()["id"]
+        for card_id in (other, "c-20250101-000000-abcdef", "nope"):
+            with self.subTest(card_id):
+                before = tree(self.data)
+                status, _, body = self.answer("raise50", card_id=card_id)
+                self.assertEqual(status, 409, body)
+                self.assertIn("this cap card is no longer open", body["error"])
+                self.assertEqual(tree(self.data), before)
+        self.clock.tick(86400)  # tomorrow: yesterday's card is not today's
+        before = tree(self.data)
+        status, _, body = self.answer("raise50")
+        self.assertEqual(status, 409, body)
+        self.assertEqual(tree(self.data), before)
+
+    def test_an_option_not_on_the_card_is_409(self):
+        before = tree(self.data)
+        status, _, body = self.answer("accept_unknown")  # a `spent` card does not offer it
+        self.assertEqual(status, 409, body)
+        self.assertIn("accept_unknown is not an answer on this cap card", body["error"])
+        self.assertEqual(tree(self.data), before)
+        for option in ("raise7", None, 5, ""):
+            with self.subTest(option):
+                status, _, body = self.answer(option)
+                self.assertEqual(status, 400, body)
+                self.assertEqual(tree(self.data), before)
+        status, _, body = self.call("POST", "/api/cap/answer", {"option": "raise50"})
+        self.assertEqual((status, body["error"]), (400, "card_id missing"))
+        self.assertEqual(tree(self.data), before)
+
+    def test_an_answered_card_is_409(self):
+        self.assertEqual(self.answer("raise100")[0], 200)
+        before = tree(self.data)
+        status, _, body = self.answer("raise50")
+        self.assertEqual(status, 409, body)
+        self.assertEqual(tree(self.data), before)
+        self.assertEqual(cap.state(self.data, self.clock().astimezone())["raise_pct"], 100)
+
+    def test_pause_in_shadow_mode_stops_nothing(self):
+        with mock.patch("assistant.workers.Workers", side_effect=AssertionError("Workers built")) as built:
+            status, _, body = self.answer("pause")
+        self.assertEqual(status, 200, body)
+        built.assert_not_called()
+        self.assertTrue(body["paused"])
+        self.assertIn("shadow mode", body["note"])
+        self.assertTrue((self.data / cap.PAUSED).exists())
+        self.assertTrue(self.ok("/api/state")["access"]["cap"]["paused"])
+
+    def test_pause_in_live_mode_calls_cap_stop(self):
+        self.start(cfg=Config(mode="live"))
+        with mock.patch("assistant.workers.Workers.cap_stop", return_value={"stopped": ["w1"]}) as stop:
+            status, _, body = self.answer("pause")
+        self.assertEqual(status, 200, body)
+        stop.assert_called_once_with()
+        self.assertEqual(body["stopped"], ["w1"])
+        self.assertNotIn("note", body)
+        self.assertTrue((self.data / cap.PAUSED).exists())
+
+    def test_two_answers_at_once_raise_once(self):
+        self.start()
+        statuses, ready = [], threading.Barrier(2)
+
+        def go():
+            ready.wait()
+            statuses.append(self.answer("raise50")[0])
+
+        threads = [threading.Thread(target=go) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(30)
+        self.assertEqual(sorted(statuses), [200, 409])
+        self.assertEqual(cap.state(self.data, self.clock().astimezone())["raise_pct"], 50)
+
+    def test_another_origin_or_a_form_post_is_refused(self):
+        self.start()
+        before = tree(self.data)
+        body = json.dumps({"card_id": self.card_id, "option": "raise50"}).encode()
+        for headers, want in (({"Origin": "https://cards.example.com"}, 403), ({"Origin": "null"}, 403),
+                              ({"Content-Type": "application/x-www-form-urlencoded"}, 415),
+                              ({"Content-Type": "text/plain"}, 415)):
+            with self.subTest(headers):
+                status, _, reply = self.call("POST", "/api/cap/answer", body, headers)
+                self.assertEqual(status, want, reply)
+                self.assertEqual(tree(self.data), before)
+        status, _, reply = self.call("POST", "/api/cap/answer", b"x" * (64 * 1024 + 1))
+        self.assertEqual(status, 413)
+        own = {"Origin": f"http://localhost:{self.port}"}
+        self.assertEqual(self.answer("raise50", headers=own)[0], 200)
 
 
 # --- criterion 8: the page -------------------------------------------------------------------------------------
@@ -1192,6 +1352,139 @@ process.stdin.on('end', () => { console.log(JSON.stringify(JSON.parse(input).map
         self.assertEqual([t for t, a, b in zip(texts, page, python) if a != b], [])
         self.assertEqual(page[:len(BLANK_SLOTS) + len(NOT_BLANK_SLOTS)],
                          [True] * len(BLANK_SLOTS) + [False] * len(NOT_BLANK_SLOTS))
+
+    def run_access(self, script: str):
+        """Run the page's access functions under node with a label stub (`[key {vars}]`) and return the JSON the
+        script prints."""
+        js = page_functions("money", "badge", "windowName", "topWindow", "usageShort", "accessAlerts", "capOptions",
+                            "usageRows") + """
+const S = {lang: 'en'};
+const L = (key, vars) => '[' + key + (vars ? ' ' + JSON.stringify(vars) : '') + ']';
+const text = v => (v === null || v === undefined ? '' : String(v));
+const route = (...parts) => '#/' + parts.map(p => encodeURIComponent(p)).join('/');
+const ago = s => 'ago:' + Math.round(s);
+const parseStamp = s => Date.parse(s);
+const when = s => 'when:' + s;
+""" + script
+        out = subprocess.run(["node", "-e", js], capture_output=True, text=True, timeout=30)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(out.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_badge_text_by_mode(self):
+        out = self.run_access("""
+console.log(JSON.stringify([
+  badge({profile: {name: 'subscription', mode: 'subscription', label: 'Subscription'}}),
+  badge({profile: {name: 'g', mode: 'gateway', label: 'Team Proj', model: 'claude-opus-5-5[1m]', effort: 'high'}}),
+  badge({profile: {name: 'g', mode: 'gateway', label: null, model: null, effort: 'high'}}),
+  badge({profile: null, profile_error: 'broken'}), badge(null)]));
+""")
+        self.assertEqual(out[0], {"cls": "abadge", "text": "[access.subscription]", "detail": None, "pages": None})
+        self.assertEqual(out[1], {"cls": "abadge gw", "text": '[access.workers {"label":"Team Proj"}]',
+                                  "detail": "claude-opus-5-5[1m] · high", "pages": "[access.page_sessions]"})
+        self.assertEqual((out[2]["text"], out[2]["detail"]), ('[access.workers {"label":"g"}]', "high"))
+        self.assertEqual(out[3:], [None, None])
+        labels = self.labels()
+        self.assertEqual(labels["en"]["access.workers"], "Workers: Gateway · {label}")
+        self.assertEqual(labels["en"]["access.page_sessions"], "Page sessions: Subscription")
+        self.assertEqual(labels["en"]["access.subscription"], "Subscription")
+        text = PAGE.read_text(encoding="utf-8")
+        self.assertIn('<span id="access" class="access"></span>', text)
+        self.assertIn("parts.push(h('a', {class: b.cls, href: '#/settings', text: b.text}));", text)
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_key_and_profile_errors_show_a_label_and_the_server_text(self):
+        out = self.run_access("""
+console.log(JSON.stringify([
+  accessAlerts({profile: null, profile_error: 'the active profile cannot be loaded; run X', cap: {}}),
+  accessAlerts({profile: {mode: 'gateway'}, key_error: 'the gateway key does not work: exit 1. Run it.',
+                cap: {card: 'open', card_id: 'c-20261111-150000-abcdef', paused: true, pause: {reason: 'cap'}}}),
+  accessAlerts({profile: {mode: 'subscription'}, cap: {card: 'answered', card_id: 'c-1', paused: false}})]));
+""")
+        self.assertEqual(out[0], [{"cls": "keyerr", "label": "[access.profile_error]",
+                                   "detail": "the active profile cannot be loaded; run X", "href": "#/settings"}])
+        self.assertEqual(out[1], [
+            {"cls": "keyerr", "label": "[access.key_error]", "detail": "the gateway key does not work: exit 1. Run it.",
+             "href": None},
+            {"cls": "capnote", "label": "[cap.reached]", "detail": None, "href": "#/card/c-20261111-150000-abcdef"},
+            {"cls": "keyerr", "label": "[cap.paused]", "detail": None, "href": None}])
+        self.assertEqual(out[2], [])
+        labels = self.labels()
+        self.assertEqual(labels["en"]["access.key_error"], "Gateway key not working; new workers wait")
+        self.assertEqual(labels["en"]["access.profile_error"], "Profile not working; new workers wait")
+        self.assertEqual(labels["en"]["cap.reached"], "Daily cap reached: answer the card")
+        self.assertEqual(labels["en"]["cap.paused"], "Paused at the daily cap; run `ap2 cap resume`")
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_cap_buttons_only_on_todays_open_cap_card(self):
+        out = self.run_access("""
+const id = 'c-20261111-150000-abcdef';
+const card = (over) => Object.assign({id, kind: 'cap', ask: {type: 'approve', from: 'cap',
+  options: ['raise50', 'raise100', 'pause']}}, over || {});
+const open = {cap: {card: 'open', card_id: id}};
+console.log(JSON.stringify([
+  capOptions(card(), open),
+  capOptions(card({ask: {from: 'cap', options: ['raise50', 'raise100', 'accept_unknown', 'pause', 'other']}}), open),
+  capOptions(card(), {cap: {card: 'answered', card_id: id}}),
+  capOptions(card(), {cap: {card: 'open', card_id: 'c-20261110-150000-abcdef'}}),
+  capOptions(card(), {cap: {card: null, card_id: null}}),
+  capOptions(card({kind: 'errand'}), open),
+  capOptions(card({ask: {from: 'user', options: ['raise50']}}), open),
+  capOptions(card({ask: null}), open),
+  capOptions(card(), null), capOptions(null, open)]));
+""")
+        self.assertEqual(out[0], ["raise50", "raise100", "pause"])
+        self.assertEqual(out[1], ["raise50", "raise100", "accept_unknown", "pause"])
+        self.assertEqual(out[2:], [[]] * 8)
+        text = PAGE.read_text(encoding="utf-8")
+        self.assertIn("class: o === 'pause' ? 'btn quiet' : 'btn'", text)  # pause is the quiet button
+        self.assertIn("await post('/api/cap/answer', {card_id: card.id, option});", text)
+        self.assertIn("if (e.status === 409) status.replaceChildren(h('p', {text: L('cap.stale')}), "
+                      "h('p', {class: 'mono', text: e.message}));", text)
+        self.assertEqual(set(cap.ANSWERS), {"raise50", "raise100", "accept_unknown", "pause"})
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_usage_values_are_shown_in_full(self):
+        out = self.run_access("""
+const gw = (g) => ({mode: 'gateway', windows: [{kind: 'five_hour', percent: 42.4, resets_at: 'R'}], gateway: g});
+console.log(JSON.stringify([
+  money(512), money(500), money(2300), money(1234567.891), money(0), money(null), money(Number.MAX_VALUE),
+  usageShort(gw({today: 512, limit: 500})), usageShort(gw({today: 2300, limit: null})),
+  usageShort(gw({today: null, limit: 500})),
+  usageShort({mode: 'subscription', windows: [{kind: 'seven_day', percent: 7}, {kind: 'five_hour', percent: 81.6}]}),
+  usageShort({mode: 'subscription', windows: null}), usageShort({mode: null}),
+  usageRows(gw({today: 512, week: 2300, month: 2300, limit: 500, counted_at: null, unknown: true})),
+  usageRows({mode: 'subscription', windows: [{kind: 'opus_week', percent: 3}], stale: true,
+             credits_used_usd: 2300, credits_limit_usd: 5000}),
+  usageRows({mode: 'subscription', windows: null})]));
+""")
+        self.assertEqual(out[:7], ["$512.00", "$500.00", "$2,300.00", "$1,234,567.89", "$0.00", "$?",
+                                   "[usage.too_large]"])
+        self.assertEqual(out[7], '[usage.today_short {"spent":"$512.00","limit":"$500.00"}]')
+        self.assertEqual(out[8], '[usage.today_only {"spent":"$2,300.00"}]')
+        self.assertEqual(out[9], "[usage.not_today]")
+        self.assertEqual(out[10], '[usage.window_short {"kind":"[usage.five_hour]","pct":82}]')
+        self.assertEqual(out[11:13], ["", ""])
+        self.assertEqual([r["value"] for r in out[13]],
+                         ["$512.00 / $500.00", "$2,300.00", "$2,300.00", "[usage.never]", "[usage.unknown]",
+                          '[usage.resets {"pct":42,"when":"when:R"}]'])
+        self.assertEqual(out[13][-1]["label"], '[usage.page_sessions {"kind":"[usage.five_hour]"}]')
+        self.assertEqual([(r["label"], r["value"]) for r in out[14]],
+                         [("opus_week", "3%"), ("[usage.credits]", "$2,300.00 / $5,000.00"), ("", "[usage.stale]")])
+        self.assertEqual(out[15], [{"label": "[usage.windows]", "value": "[usage.no_windows]", "warn": True}])
+        labels = self.labels()
+        self.assertEqual(labels["en"]["usage.today_short"], "{spent} / {limit} today")
+        css = re.search(r"<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"), re.S).group(1)
+        for sel in (".uval", ".access", ".abadge", ".status", ".kv dd"):
+            for rule in re.findall(r"([^{}]*)\{([^}]*)\}", css):
+                if sel in [x.strip() for x in rule[0].split(",")]:
+                    with self.subTest(sel=sel, rule=rule[0]):
+                        self.assertNotRegex(rule[1], r"overflow\s*:\s*hidden|text-overflow|(?<![-\w])width\s*:")
+
+    def labels(self) -> dict:
+        text = PAGE.read_text(encoding="utf-8")
+        return json.loads(re.search(r'<script type="application/json" id="labels">(.*?)</script>', text,
+                                    re.S).group(1))
 
     def test_the_pages_search_caps_match_the_servers(self):
         text = PAGE.read_text(encoding="utf-8")

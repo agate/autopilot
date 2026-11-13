@@ -1097,8 +1097,9 @@ Calls the author made without asking (check them):
   access profiles: `profiles.py` (the store, the overlay and merge, `ap2 profile`; see the access profiles entry
   below); the spend ledger: `spend.py` with the shipped `prices.json` next to it (`ap2 spend`; see the spend
   ledger entry below); the daily cap: `cap.py` (`ap2 cap`; see the daily cap entry below); key health: `keys.py`
-  (the cached key check, one refresh on a rejected key, `ap2 profile rotate`; see the key health entry below); the
-  local page:
+  (the cached key check, one refresh on a rejected key, `ap2 profile rotate`; see the key health entry below); what
+  the pages show about access: `profileview.py` (the badge, the key and profile errors, the cap card's state and the
+  usage by mode, read only; see the "Access on the pages" entry below); the local page:
   `server.py` (the server, its JSON routes and the request guard, run by `ap2 serve`) and
   `builtin/page/local.html` (the one page, inline CSS and JS, found from `server.py`'s own path); and the
   phone page's data: `phone.py` (`build`, run by `ap2 phone build`). `ap2 config [--data PATH]` prints the
@@ -1658,7 +1659,8 @@ Calls the author made without asking (check them):
     405, so no other site passes a preflight. Replies of 400 and up are logged to stderr, the UTC time first;
     2xx replies are not (the page polls).
   - Routes, JSON in and out: `GET /` (the page), `GET /api/state` (mode, languages, lane counts, `running`, the
-    projects with `done`/`total` from their children, the heartbeat, `usage: null` and the page's `url`),
+    projects with `done`/`total` from their children, the heartbeat, `access` and `usage` (see "Access on the
+    pages" below) and the page's `url`),
     `GET /api/cards?lane=&kind=&parent=&q=&limit=` (`{total, cards}`, each a row: `id`, `title`
     (`{<lang>: text}` for each configured language, a gap filled as `cards.title_for` picks it (the primary language's
     slot, else any other non-blank slot, the first in sorted key order), or null when no slot has words; the projects in
@@ -1699,15 +1701,18 @@ Calls the author made without asking (check them):
     questions, runs the read-only session in the card's folder and writes `answer`, `answered_at` and the files
     or messages it used.** Until then the page shows "Saved. Your Mac answers it when question answering is
     turned on." Nothing in this slice answers it: no session, no process.
-  - Read-only and shadow mode: the question POST is the only route that changes anything. Every other `POST`,
-    `PUT`, `PATCH` and `DELETE` is 405 and writes nothing, in shadow and live mode alike. **Saving a question is
-    allowed in shadow mode, because it writes only inside the data folder, which shadow mode allows (10).** No
-    route calls `config.require_live`, because none writes outside the data folder; a later route that does must
-    call it first. The GETs write nothing: they read the store without creating its lock file, except a search
-    (`q`), which may build `index.sqlite`, the store's own cache, as `ap2 search` does. The question route may
-    create `.store.lock`, the store's own empty lock file, when it is missing, even for a refused question;
-    nothing else is written on a refusal. The server starts no process and calls no Jira, Slack, GitHub or
-    `claude`.
+  - Read-only and shadow mode: two POSTs change anything: the question and the cap card's answer (`POST
+    /api/cap/answer`; see "Access on the pages" below). Every other `POST`, `PUT`, `PATCH` and `DELETE`, and every
+    other method on those two, is 405 and writes nothing, in shadow and live mode alike. **Saving a question and
+    answering the cap card are allowed in shadow mode, because they write only inside the data folder, which
+    shadow mode allows (10).** No route calls
+    `config.require_live`, because none writes outside the data folder; a later route that does must call it
+    first. The GETs write nothing: they read the store without creating its lock file, except a search (`q`),
+    which may build `index.sqlite`, the store's own cache, as `ap2 search` does. The question route may create
+    `.store.lock`, the store's own empty lock file, when it is missing, even for a refused question; nothing else
+    is written on a refusal. The server calls no Jira, Slack, GitHub or model API and runs no key command. **One
+    route may start a process: in live mode only, the cap answer `pause` stops every running worker with `claude
+    stop` (`Workers.cap_stop`), exactly as `ap2 cap answer pause` does.** No other route starts one.
   - The page is one file with inline CSS and JS and no fonts or scripts from another host. It writes card text
     only as text (`textContent`), never as HTML. Screens by hash route: `#/lane/<lane>`, `#/search/<words>`,
     `#/project/<id>` (its children), `#/card/<id>`, `#/sources[/<name>]`, `#/templates[/<kind>]`, `#/settings`.
@@ -1717,7 +1722,8 @@ Calls the author made without asking (check them):
     remembered in the browser. Labels are a table per language in the page, `en` and `zh` so far (a code such as `zh-Hans` uses `zh`);
     a text that is missing in the chosen language says so instead of showing another language.
   - Later work: template buttons (lane change, restore, child), the chat box (9.3), the Restore points screen,
-    usage, real worker counts, answering questions (the workers slice), "started at login" (launchd), and labels for languages other than `en` and `zh`.
+    real worker counts, answering questions (the workers slice), "started at login" (launchd), a pause lift (`ap2
+    cap resume`) on the page, and labels for languages other than `en` and `zh`.
 - **[decided by the builder]** The phone page data (design 9.2, 9.4, 10). `phone.build(data, cfg=None, now=None,
   plugin_dir=None)` in `lib/assistant/phone.py` turns the card store into one JSON document; `ap2 phone build
   [--data PATH] [--out PATH]` prints it (UTF-8, sorted keys, one line) or writes it to `--out` through a temp file
@@ -1732,7 +1738,8 @@ Calls the author made without asking (check them):
     `done` and its `updated_at` is at or after `now` minus `phone_history_days` days. `0` shows no History; a
     `done` card with no readable `updated_at` stays off. A project's children count the same way.
   - The document: `{generated_at, mode, primary_language, secondary_language, languages, settings:
-    {history_days, lanes, hide_quotes}, lanes, projects, heartbeat, cards, full}`. `lanes` (all four keys) counts
+    {history_days, lanes, hide_quotes}, lanes, projects, heartbeat, cards, full, access, usage}` (`access` and
+    `usage`: see "Access on the pages" below). `lanes` (all four keys) counts
     only the cards on the phone; `projects` is the local page's project list over those cards (each `title` per
     language, as there), `done`/`total` from the children on the phone; `heartbeat` is the local page's (its
     `error` scrubbed, see Local paths); `cards` are the local page's rows in its order. These are the JSON shapes of
@@ -2817,9 +2824,9 @@ Calls the author made without asking (check them):
     and the gateway flags on a `--subscription` profile, and prints the saved profile. `list` and `show` create
     nothing; `add`, `use` and `remove` write only inside the data folder, so they work in shadow mode.
   - Not in this slice: the spend ledger, the daily cap and key health, refresh and rotation (`rotate`) (their own
-    entries below), and the page's badge and switch. The daily cap entry below says how a gateway worker is held at
+    entries below), and the page's badge and switch (the "Access on the pages" entry below). The daily cap entry below says how a gateway worker is held at
     its cap and why the subscription's park line no longer parks it; the key health entry says how a gateway key
-    that does not work holds every start.
+    that does not work holds every start. The page's badge and switch are in the "Access on the pages" entry.
 - **[decided by the builder]** Spend ledger (slice 2 of the port of v1's access profiles): a gateway shows no
   dollars, so v2 adds up what its own workers cost. Ported from v1's `lib/autopilot/spend.py` into
   `lib/assistant/spend.py`, never imported (v1's version keeps v1's ledger). v1 and v2 totals are separate: v2
@@ -2963,8 +2970,8 @@ Calls the author made without asking (check them):
      `pause`, and `accept_unknown` only when the cause is `unknown`. Its id is kept as `card_id`; opened again the
      same day, the same card is updated (back to `needs` with a new ask). `close_card` and every answer close the
      card's ask (only an ask `from: cap`, so a user's own ask stays) and move it to `done`. A card left open on an
-     earlier day is closed the next time the cap state is written. The page's buttons are the page slice's; this
-     slice makes and answers the card from the command line.
+     earlier day is closed the next time the cap state is written. This slice makes and answers the card from the
+     command line; the page's buttons are in the "Access on the pages" entry below.
   5. Answers. `answer(data, option, now, workers=None)`: `raise50` / `raise100` add to today's `raise_pct` (a second
      raise adds to the first); `accept_unknown` counts today's unknown cost as $0 for the cap until local midnight
      (it still shows as unknown in `ap2 spend`); `pause` writes `paused.json` first, then `workers.cap_stop()`. Any
@@ -3199,9 +3206,95 @@ Calls the author made without asking (check them):
   7. `ap2 profile list` shows the cached key error. Each row of a gateway profile has `key_error`:
      `keys.cached_error(data, p)`, from the profile's own record only (no command runs, so `list` stays
      read-only); null when its last check worked or never ran. A symlinked record shows as that error. The page's key
-     error is the page slice's.
+     error is in the "Access on the pages" entry below.
   8. Workers cannot edit the key state: `profile-key.json` and `profile-refresh.json` are in `PROTECTED`, so every
      worker floor Edit-denies them (a worker must not mark a failing key as working).
+- **[decided by the builder]** Access on the pages (slice 5 of the port of v1's access profiles: v1 showed it through
+  `meta.access` in the published page and page replies; v2's local page is a server on this Mac, so the two answers
+  are POST routes that call the same functions the command line calls, and the phone data gets the same facts read
+  only). Each numbered choice is reversible.
+  1. **[decided by the builder]** One read for both pages: `profileview.summary(data, now, usage_file)` in
+     `lib/assistant/profileview.py` returns `{"access", "usage"}`, used as they are by `/api/state` and
+     `phone.build`. `access`: `{profile: {name, label, mode, model, effort, daily_cap_usd} | null, profile_error,
+     page_sessions: "subscription", profiles: [{name, label, mode, needs_choice}], broken_profiles: [{name, error}],
+     key_error, cap: {day, card, card_id, limit, raise_pct, paused, pause}}`. `profile_error` is the ProfileError
+     text of `profiles.active` (it holds `profiles.FIX`); then `profile` is null. `key_error` (gateway only) is
+     `cap.refusal({"reason": "key", "error": keys.cached_error(data, p)})` when the cached record holds an error: the
+     exact line a refused start prints, `KEY_FIX` included, so a later change to that line reaches the page with no
+     page change. `cap.limit` is `cap.today_limit` (null on the subscription); `paused` and `pause` are
+     `cap.paused` (any mode). A ProfileError or CapError becomes an `error` field in the block it comes from
+     (`access.error` for the profile listing, `access.cap.error` for the cap state), never a 500. `usage`: `{mode,
+     windows: [{kind, model, percent, resets_at}] | null, stale, credits_used_usd, credits_limit_usd, gateway}`.
+     The windows and credits come from v1's `budget.read(usage_file)` (Claude Code's `~/.claude.json`, looked up at
+     each request; `ap2 serve` and `ap2 phone build` use that default); on a gateway they are the page sessions'
+     windows, which still use the subscription. A file it cannot read gives null windows. The module is named
+     `profileview` because `access.py` is kept for the health checks.
+  2. **[decided by the builder]** The pages read a remembered count, never the ledger: `spend.totals` reads
+     transcripts, writes `cache.json` and may list sessions, so no GET calls it. `cap.allowance` (every gateway
+     start, resume and check) calls `spend.remember(data, t, now)` right after its `totals`:
+     `<data>/spend/last.json` `{at, day, today, week, month, unknown, unknown_today, unknown_models,
+     unknown_launches}`, written with `store.write_json`, a symlink refused. A failed write is ignored: it never
+     changes the allowance, and the page then shows the older count. `spend.last(data)` returns it, or None when it
+     is missing, unreadable, malformed or a symlink. `usage.gateway` is `{day, counted_at, today, week, month,
+     unknown, unknown_today, limit}`: `day` is the day of the count; a count from another day leaves `today` and
+     `unknown_today` null and the page says "not counted yet today" (week and month still from it). `spend/**` is
+     in `PROTECTED`, so workers cannot edit it.
+  3. **[decided by the builder]** The cap card's buttons: `POST /api/cap/answer` `{"card_id", "option"}`, with the
+     question's body rules (JSON, at most 64 KiB, this page's `Origin` only; the checks are one helper,
+     `_json_body`, used by both POSTs with the same status codes). Under the server's write lock it reads
+     `cap.state` at the server's local day: the card must be today's open one (`card == "open"`, the same
+     `card_id`), else 409 "this cap card is no longer open" and nothing changes (v1 ignored stale cap replies);
+     `option` must be one of that card's `ask.options`, else 409 (so `accept_unknown` cannot answer a `spent`
+     card); an option that is no answer at all is 400. Then `cap.answer(data, option, now, workers=w)`, `w` being
+     `Workers(data, cfg)` in live mode and None in shadow mode, exactly as `ap2 cap answer`: `cap.answer` stays the
+     one entry. The reply is 200 with its dict; a CapError naming a file is 500. The page draws the buttons only on
+     a card of kind `cap` whose ask is `from: cap` and whose id is `access.cap.card_id` while the card is open,
+     with labels from its tables, `pause` as the quiet button. After a 200 the page reloads the state and the
+     card; a 409 shows a label in the page's language with the server's reason under it.
+  4. **[decided by the builder]** The one route that may start a process: because of choice 3, `pause` in live mode
+     runs `claude stop` for each running worker (`Workers.cap_stop`). The server's docstring and the read-only
+     bullet say so; no other route starts one. The simplest reverse: always pass `workers=None` and tell the user
+     to run `ap2 cap answer pause`.
+  5. **[decided by the builder]** The profile switch is split off to its own task (this slice passed its size
+     limit). Planned there: `POST /api/profile/use` `{"name"}`, under the same write lock and body rules. A name
+     that does not match `profiles.PROFILE_NAME` is 400; `profiles.load` failing is 404 for an unknown name and 409
+     for a broken one (nothing written); a profile that `profiles.needs_choice` and is not the active one is 409
+     with the command line's words ("NAME has no model and effort chosen yet, so nothing switched: run `ap2
+     profile choose NAME --model M --effort E`, then switch again") and no models command runs (the page's choice
+     card replaces this 409 later); otherwise `profiles.use` and 200 `{"active", "was"}`. The switch takes effect
+     at once: the next start or resume uses it and running workers keep their own profile; v1's "takes up to 5
+     minutes" note is not ported, since v2 applies it at once. One button per profile that loads, on the Settings
+     screen, the active one pressed and disabled. Until then `ap2 profile use NAME` switches, and this slice's
+     Settings screen shows the active profile and lists the profiles that do not load in the warning style;
+     `access.profiles` (with `needs_choice`) is already in the data. The top bar's badge links there.
+  6. **[decided by the builder]** The top bar, after the running count: the badge (`Subscription`, or `Workers:
+     Gateway · <label or name>` with `model · effort` and `Page sessions: Subscription`); the compact usage (the
+     subscription's highest window percent and its kind, or a gateway's `$today / $limit today`); a red line for
+     `profile_error` ("Profile not working; new workers wait") or `key_error` ("Gateway key not working; new
+     workers wait"), each followed by the server's own text; "Daily cap reached: answer the card", a link to
+     `#/card/<card_id>`, while the card is open; "Paused at the daily cap; run `ap2 cap resume`" while paused. The
+     Settings screen's first box has the full usage rows (today against today's limit, this week, this month, when
+     it was counted, each window with its reset, the extra-usage credits on the subscription). **No value is cut
+     (lessons 3.1: v1's value column showed `$512/$500` as `$512/$5`): money is `$` with two decimals and
+     thousands separators (`$512.00 / $500.00`, `$2,300.00`), wraps only at its spaces, and no value has
+     `overflow: hidden`, `text-overflow` or a fixed width; on a narrow screen the status row wraps.**
+  7. **[decided by the builder]** Phone data: `phone.build(..., usage_file=None)` returns `access` and `usage` from
+     the same `summary`, with the texts that can name a path on this Mac scrubbed as the phone's other texts are
+     (`<data>`, then `~`): `access.profile_error`, every `broken_profiles[].error`, `access.key_error` (a symlinked
+     key record names its path) and every `error` field (`access.error`, `access.cap.error`,
+     `access.cap.pause.error`). Building stays read only: no key command, no `totals`, no write. The phone page
+     itself, its buttons and its answers wait for the phone page's HTML.
+  8. **[decided by the builder]** Concurrency: the cap answer holds one `threading.Lock` on the server (the profile
+     switch will share it), so two clicks at once answer the card once (the second sees `answered` and gets 409). An `ap2 cap answer` at the
+     same moment is not locked against, as between two command-line runs today.
+  9. **[decided by the builder]** Labels: about 40 new keys per table (`access.*`, `cap.*`, `usage.*`), ported
+     from v1's English words, each with its `zh` text. The window kinds `five_hour` and `seven_day` get labels; any
+     other kind shows as it is.
+  - Lessons 3: 3.1 (values never cut) is choice 6 and its tests (`$512.00 / $500.00` and `$2,300.00`, checked in
+    the page's CSS and at 1280 px and 390 px wide). 3.2 (republish the phone page when the HTML it would build
+    differs from the published one, keeping a hash of the published page) needs a phone publish step v2 does not
+    have yet: later work, with the phone page's buttons, the profile switch (choice 5) and a "lift the pause"
+    button on the local page.
 - **[decided by the builder]** v1 import (10, 11 question 5), read-only, in `importv1.py`.
   - Command: `ap2 import-v1 [--data PATH] [--from DIR] [--project NAME ...] [--dry-run]`. `--from` defaults to
     v1's own data root (`AUTOPILOT_DATA`, else `~/.claude/autopilot-data`, v1's `paths.data_root()`). A project is
