@@ -25,10 +25,16 @@ FLOORS = MappingProxyType({
               "changing a template or a source asks first (design 3.6); the worker sessions (slice 6) add these "
               "as Edit and Write deny rules.",
     "read-only": "the worker floor, and no Edit or NotebookEdit: the role reads and runs commands that change "
-                 "nothing, and every gh command group a review does not need, reads included, with `git push` "
-                 "and `git commit` (READ_ONLY_BASH_DENIED), and the ap2 commands a review does not run "
-                 "(READ_ONLY_AP2_DENIED) are denied by rule, best effort; the investigate and analyze roles, not "
-                 "startable as workers today, would need their own gh reads when they are. Every MCP tool "
+                 "nothing, and every gh command group a review does not need, reads included, the git commands "
+                 "that push, commit or set an alias, a config value or a remote (READ_ONLY_GIT_DENIED), and "
+                 "`claude` itself, which would start a session under the user's own settings, not this floor "
+                 "(READ_ONLY_BASH_DENIED, and the claude path the worker runs), every v1 `ap` command "
+                 "(V1_AP_COMMANDS), and the ap2 commands a review does not run (READ_ONLY_AP2_DENIED) are denied "
+                 "by rule. The session reads no global or system git config, so the user's git aliases and "
+                 "credential helper are not loaded (READ_ONLY_GIT_ENV). These rules are best effort: they match "
+                 "the command's text, so a program that runs `claude` or `git` for the worker (`python3 -c`, say) "
+                 "gets past them; full enforcement is the deferred sandbox follow-up. The investigate and analyze "
+                 "roles, not startable as workers today, would need their own gh reads when they are. Every MCP tool "
                  "the session loads that the role does not list is denied, and every MCP server whole, so a "
                  "server's write tool (delete, update, submit, merge) that v1's outward list misses stays shut. "
                  "Every built-in tool the role does not list is denied too (the ones the session finds, and "
@@ -62,16 +68,36 @@ READ_ONLY_GH_RUN_KEPT = ("view", "list", "watch")
 # another review). So every gh command group a review does not need is denied whole, reads included, not only its
 # write verbs: each top-level gh command but READ_ONLY_GH_KEPT, each `gh pr` subcommand but READ_ONLY_GH_PR_KEPT
 # (the worker floor, v1's `perms.BASH_DENY`, already denies `gh pr comment` and `gh pr review`, so they are not
-# repeated here), each `gh run` subcommand but READ_ONLY_GH_RUN_KEPT, and `git push` and `git commit`. `gh api` with
-# a field or a method is not here. The investigate and analyze roles, not startable as workers today, would need
-# their own gh reads (`gh issue view`, say) when they are.
+# repeated here), each `gh run` subcommand but READ_ONLY_GH_RUN_KEPT, the git commands in READ_ONLY_GIT_DENIED, and
+# `claude` itself. `gh api` with a field or a method is not here. The investigate and analyze roles, not startable as
+# workers today, would need their own gh reads (`gh issue view`, say) when they are.
 _WORKER_FLOOR_GH_PR = ("comment", "review")
+# Git commands a read-only role never runs: a push or a commit, and the ones that set an alias, a config value or a
+# remote, or push another way (`git ps` with an alias `ps = push` gets past the `git push` rule).
+READ_ONLY_GIT_DENIED = ("Bash(git push:*)", "Bash(git commit:*)", "Bash(git config:*)", "Bash(git -c:*)",
+                        "Bash(git --config-env:*)", "Bash(git remote:*)", "Bash(git send-pack:*)",
+                        "Bash(git subtree:*)")
+# The git env a read-only session runs with (`workers.floor` sets it after a profile's env, so a profile cannot undo
+# it): no global or system git config, so the user's aliases and credential helper (which pushes with the user's gh
+# login) are not loaded, and no password prompt. A review's git reads (`git show`, `git log`, `git cat-file`,
+# `git rev-parse`, `git ls-tree`, and `ap2 review plan --checkout`) need neither.
+READ_ONLY_GIT_ENV = MappingProxyType({"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
+                                      "GIT_TERMINAL_PROMPT": "0"})
 READ_ONLY_BASH_DENIED = (tuple(f"Bash(gh {cmd}:*)" for cmd in GH_COMMANDS if cmd not in READ_ONLY_GH_KEPT)
                          + tuple(f"Bash(gh pr {sub}:*)" for sub in GH_PR_COMMANDS
                                  if sub not in READ_ONLY_GH_PR_KEPT + _WORKER_FLOOR_GH_PR)
                          + tuple(f"Bash(gh run {sub}:*)" for sub in GH_RUN_COMMANDS
                                  if sub not in READ_ONLY_GH_RUN_KEPT)
-                         + ("Bash(git push:*)", "Bash(git commit:*)"))
+                         + READ_ONLY_GIT_DENIED + ("Bash(claude:*)",))
+# v1's `ap` commands, a snapshot of v1's own list (`ap` with no arguments prints it; a test keeps the two equal). A
+# review runs none, and some start a session or change v1's state (`ap oneoff` runs `claude -p` with a tool allowed,
+# after `ap decision add` and `ap decision resolve`; `ap worker`, `ap tick`, `ap kick`), so a read-only role is
+# denied each one, reads included. `workers.floor` writes each as `ap <command>`, `<package>/bin/ap <command>` and
+# the `ap` on PATH; never a bare `ap`, which would prefix every `ap2` command.
+V1_AP_COMMANDS = ("access", "archive", "bind", "budget", "check-package", "config", "decision", "dir", "doctor",
+                  "event", "evidence", "gate", "hook-guard", "hook-park", "hook-prompt", "install", "kick",
+                  "merge-check", "next", "oneoff", "page", "pass", "pause", "perms", "publish", "report", "resume",
+                  "status", "stop", "task", "tasks", "tick", "unbind", "uninstall", "worker")
 # Built-in tools a read-only role is denied even when the tool discovery does not list them, less the role's own
 # tools (`workers.floor` drops those): v1's `replies.DISALLOWED` without `Task`, plus the claude.ai page tools and the
 # task list. Each one acts outside the floor (a scheduled cloud agent, the user's pages, a push, a message) or is not

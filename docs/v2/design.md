@@ -791,11 +791,18 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   names; a prefix rule cannot say "every gh command but these", so a command a newer gh adds is covered only once
   added there) but `gh pr`, `gh run`, `gh api`, `gh search`, `gh status`, `gh help` and `gh version`, every `gh pr`
   subcommand but `view`, `diff`, `checks`, `list` and `status` (`gh pr comment` and `gh pr review` are already the
-  worker floor's), every `gh run` subcommand but `view`, `list` and `watch`, and `git push` and `git commit`; a
+  worker floor's), every `gh run` subcommand but `view`, `list` and `watch`, the git commands that push, commit or
+  set an alias, a config value or a remote (`roles.READ_ONLY_GIT_DENIED`: `git push`, `git commit`, `git config`,
+  `git -c`, `git --config-env`, `git remote`, `git send-pack`, `git subtree`), and `claude` itself, as typed, as the
+  path the worker runs, as the one on PATH and where each link leads, because `claude -p ...` would start a session
+  under the user's own settings, not this floor; a
   review reads with `gh pr view`, `gh pr diff`, `gh pr checks` and `gh api`, which no rule prefixes; one plain gh
   command left open would change GitHub as the user (`gh ssh-key add` gives a key push to every repo the user can;
   `gh pr update-branch` would push a merge onto the PR's branch and move its head, so the next check starts
-  another review), because the session holds the user's gh and git logins, every `ap2` command the review
+  another review), because the session holds the user's gh and git logins, every v1 `ap` command
+  (`roles.V1_AP_COMMANDS`, a snapshot of v1's own list, reads included: `ap oneoff` runs `claude -p` with a tool
+  allowed) as `Bash(ap <command>:*)`, `Bash(<package>/bin/ap <command>:*)` and the same for the `ap` on PATH, never a
+  bare `ap` rule, which would prefix every `ap2` command, every `ap2` command the review
   does not run (`roles.READ_ONLY_AP2_DENIED`) as Bash deny rules in the same shape, every MCP tool the session
   loads that `Role.tools` does not list (no read-only role lists one) and every MCP server whole (each server those
   tools are on and each one the tool discovery lists, connected or not, so a tool it adds later is covered too),
@@ -804,7 +811,11 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   `replies.DISALLOWED` without `Task` plus `Artifact`, `ArtifactData`, `TaskCreate`, `TaskUpdate` and `TodoWrite`,
   even when it finds none), because the session starts with every built-in and some act outside the floor
   (`RemoteTrigger` schedules a cloud agent, `Artifact` and `ArtifactData` overwrite the user's claude.ai pages), but
-  `ToolSearch` and `Task` (the Agent tool's older name) stay open (`roles.READ_ONLY_KEPT`), and a third PreToolUse
+  `ToolSearch` and `Task` (the Agent tool's older name) stay open (`roles.READ_ONLY_KEPT`), the git env
+  `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1` and `GIT_TERMINAL_PROMPT=0` (`roles.READ_ONLY_GIT_ENV`, set
+  after a profile's env so a profile cannot undo it), so the user's git aliases (`ps = push` would get past the
+  `git push` rule) and credential helper are not loaded; a review's git reads (`git show`, `git log`, `git cat-file`,
+  `git rev-parse`, `git ls-tree`, and `ap2 review plan --checkout`) need neither, and a third PreToolUse
   hook,
   `{"matcher": "Write", ...: "\"<package>/bin/ap2\" hook-write"}` (`workers.write_guard`). The hook is an
   allow-list: a Write passes only when its path (links followed) sits directly in the card's run directory
@@ -824,8 +835,10 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   real usage file and ignores `--usage`, and the floor's park allow rule names only the worker's own card and role,
   so an injected review cannot rewrite another card's plan or park any worker until a date it made up; a user at a
   terminal (no `AP2_ROLE`) still runs them on any card. Each is written in two spellings, `Bash(ap2 <command>:*)`
-  and `Bash(<package>/bin/ap2 <command>:*)` (`workers.floor`). They are best effort: they match the command's text, so a spelling such as
-  `"$(echo ap2)" cap` gets past them; full enforcement is the deferred sandbox follow-up. Not in the floor yet:
+  and `Bash(<package>/bin/ap2 <command>:*)` (`workers.floor`). These rules, the gh, git, `claude` and `ap` ones too,
+  are best effort: they match the command's text, so a spelling such as `"$(echo ap2)" cap`, or a program that runs
+  `claude` or `git` for the worker (`python3 -c`, say), gets past them; full enforcement is the deferred sandbox
+  follow-up. Not in the floor yet:
   `gh api` with a field or a method (`-f`, `--input`, `-X`), and a sandbox. The hook runs through `cli.main` (not `bin/ap2`'s
   fast path), so it loads more than the Bash guard does; the role writes one file a round.
 - **[decided by the builder]** A session archive's name starts with its role in lowercase letters only

@@ -3858,8 +3858,16 @@ class PrReviewRoleTest(PrReviewCase):
             with self.subTest(rule=cmd):
                 self.assertIn(f"Bash({cmd}:*)", ro)
         kept = {"pr", "run", "api", "search", "status", "help", "version"}
-        self.assertIn("ssh-key", roles.GH_COMMANDS)
-        self.assertGreaterEqual(len(roles.GH_COMMANDS), 30)
+        # The gh 2.80.0 snapshots, pinned: a name dropped from one would leave its command open.
+        self.assertEqual(set(roles.GH_COMMANDS), {
+            "auth", "browse", "codespace", "gist", "issue", "org", "pr", "project", "release", "repo", "cache", "run",
+            "workflow", "co", "agent-task", "alias", "api", "attestation", "completion", "config", "extension",
+            "gpg-key", "label", "preview", "ruleset", "search", "secret", "ssh-key", "status", "variable"})
+        self.assertEqual(set(roles.GH_PR_COMMANDS), {
+            "create", "list", "status", "checkout", "checks", "close", "comment", "diff", "edit", "lock", "merge",
+            "ready", "reopen", "review", "unlock", "update-branch", "view"})
+        self.assertEqual(set(roles.GH_RUN_COMMANDS),
+                         {"cancel", "delete", "download", "list", "rerun", "view", "watch"})
         for cmd in roles.GH_COMMANDS:
             with self.subTest(cmd=cmd):
                 if cmd in kept:
@@ -3884,6 +3892,108 @@ class PrReviewRoleTest(PrReviewCase):
                      "gh status", "gh help", "gh version", "gh --version"):
             with self.subTest(read=read):
                 self.assertEqual([p for p in prefixes if (read + " ").startswith(p + " ")], [])
+
+    def _review_reads(self, cid: str) -> list:
+        """The commands a review runs (its ap2 steps in both spellings, its gh and git reads, the park): no read-only
+        rule may prefix one."""
+        ap2 = ROOT / "bin" / "ap2"
+        out = []
+        for cmd in ("ap2", str(ap2)):
+            out += [f"{cmd} card show {cid}", f"{cmd} review plan {cid} --stage review --checkout /w",
+                    f"{cmd} review check {cid}", f"{cmd} review verdict {cid}",
+                    f"{cmd} worker park {cid} pr-review --note x"]
+        return out + ["gh pr view 42", "gh pr diff 42", "gh pr checks 42", "gh api repos/o/r/pulls/42",
+                      "git show HEAD:x", "git log -1", "git cat-file -e x", "git rev-parse HEAD",
+                      "git ls-tree HEAD", "rg foo"]
+
+    def test_the_read_only_floor_denies_a_nested_claude_session_and_v1s_commands(self):
+        # One plain `claude -p ...` starts a session under the user's own settings, not this floor (every MCP server,
+        # the claude.ai pages, gh writes, no park or guard hook); v1's `ap` starts one too (`ap oneoff` runs
+        # `claude -p` with a tool allowed, after `ap decision add` and `ap decision resolve`). A review runs neither,
+        # so `claude` is denied in each spelling (bare, the path the worker was started with, the one on PATH, and
+        # where each link leads), and every v1 command in both spellings, reads included.
+        cid = "c-20260105-090000-abcdef"
+        env = {"AP2_ROLE": "pr-review", "AP2_CARD": cid, "AP2_RUN_DIR": str(transcripts.run_dir(self.data, cid))}
+        real = self.tmp / "versions" / "9.9.9"
+        real.parent.mkdir(parents=True)
+        real.write_text("")
+        link = self.tmp / "made-up-bin" / "claude"
+        link.parent.mkdir()
+        link.symlink_to(real)
+        on_path = {"claude": "/opt/made-up/bin/claude", "ap": "/opt/made-up/v1/bin/ap"}
+        with mock.patch.object(workers_mod.shutil, "which", side_effect=lambda name, *a, **k: on_path.get(name)):
+            base = workers_mod.floor("implement", {"tools": ["Read"]}, self.data, env, claude=str(link))
+            ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env, claude=str(link))
+            default = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+        base, ro = base["permissions"]["deny"], ro["permissions"]["deny"]
+        claude_rules = ["Bash(claude:*)", f"Bash({link}:*)", f"Bash({real}:*)", "Bash(/opt/made-up/bin/claude:*)"]
+        for rule in claude_rules:
+            with self.subTest(rule=rule):
+                self.assertIn(rule, ro)
+                self.assertNotIn(rule, base)
+        self.assertIn("Bash(/opt/made-up/bin/claude:*)", default)  # no path given: the one on PATH
+        # v1's command list, pinned to v1's own CLI: a command it adds fails here instead of staying open.
+        from autopilot import cli as v1_cli
+        v1_cli.load_all()
+        self.assertEqual(set(roles.V1_AP_COMMANDS), set(v1_cli.COMMANDS))
+        v1_rules = []
+        for cmd in roles.V1_AP_COMMANDS:
+            for ap in ("ap", str(ROOT / "bin" / "ap"), "/opt/made-up/v1/bin/ap"):
+                v1_rules.append(f"Bash({ap} {cmd}:*)")
+        for rule in v1_rules:
+            with self.subTest(rule=rule):
+                self.assertIn(rule, ro)
+                self.assertNotIn(rule, base)
+        for cmd in ("oneoff", "decision", "worker", "tick", "kick", "resume", "task", "perms", "evidence"):
+            self.assertIn(f"Bash(ap {cmd}:*)", ro)
+            self.assertIn(f"Bash({ROOT / 'bin' / 'ap'} {cmd}:*)", ro)
+        self.assertNotIn("Bash(ap:*)", ro)  # it would prefix every `ap2` command, the park and the review's own
+        self.assertEqual(len(ro), len(set(ro)))  # each rule once
+        prefixes = [r[len("Bash("):-len(":*)")] for r in ro if r.startswith("Bash(") and r.endswith(":*)")]
+        for read in self._review_reads(cid):
+            with self.subTest(read=read):
+                self.assertEqual([p for p in prefixes if read.startswith(p)], [])
+
+    def test_a_started_read_only_worker_denies_the_claude_it_was_started_with(self):
+        cid = self.pr_card()
+        self.workers().start(cid, "pr-review", cwd=self.wt, prompt="Review it.")
+        deny = self.deny(cid, "pr-review")
+        self.assertIn("Bash(claude:*)", deny)
+        self.assertIn(f"Bash({FAKE}:*)", deny)
+        settings = json.loads((transcripts.run_dir(self.data, cid) / "settings-pr-review.json").read_text())
+        for k, v in roles.READ_ONLY_GIT_ENV.items():
+            self.assertEqual(settings["env"].get(k), v)
+
+    def test_the_read_only_floor_shuts_out_the_users_git_config(self):
+        # The user's global git config can hold aliases (`ps = push`) and a credential helper that pushes as the user,
+        # so `git ps <url> --delete <branch>` gets past the `git push` rule. A read-only session reads no global or
+        # system git config, never prompts, and is denied the git commands that set an alias or a remote or push.
+        cid = "c-20260105-090000-abcdef"
+        env = {"AP2_ROLE": "pr-review", "AP2_CARD": cid, "AP2_RUN_DIR": str(transcripts.run_dir(self.data, cid))}
+        want = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0"}
+        self.assertEqual(dict(roles.READ_ONLY_GIT_ENV), want)
+        prof = dict(profiles.builtin(), env={"GIT_CONFIG_GLOBAL": "/made/up/gitconfig"})
+        for p in (None, profiles.builtin(), prof):
+            with self.subTest(profile=p and p.get("env")):
+                ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env, p)
+                base = workers_mod.floor("implement", {"tools": ["Read"]}, self.data, env, p)
+                for k, v in want.items():
+                    self.assertEqual(ro["env"].get(k), v)  # a profile's env cannot undo them
+                self.assertEqual({k for k in base["env"] if k in want and base["env"][k] == want[k]}, set())
+                self.assertEqual({k: v for k, v in ro["env"].items() if k.startswith("AP2_")},
+                                 {k: v for k, v in base["env"].items() if k.startswith("AP2_")})
+        ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+        base = workers_mod.floor("implement", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+        for cmd in ("git push", "git commit", "git config", "git -c", "git --config-env", "git remote",
+                    "git send-pack", "git subtree"):
+            rule = f"Bash({cmd}:*)"
+            with self.subTest(rule=rule):
+                self.assertIn(rule, ro)
+                self.assertNotIn(rule, base)
+        prefixes = [r[len("Bash("):-len(":*)")] for r in ro if r.startswith("Bash(") and r.endswith(":*)")]
+        for read in self._review_reads(cid):
+            with self.subTest(read=read):
+                self.assertEqual([p for p in prefixes if read.startswith(p)], [])
 
     def test_the_floor_allows_only_the_workers_own_park(self):
         # Allowed by rule, the park skips the classifier: the rule names the worker's own card and role, so parking

@@ -70,10 +70,12 @@ when it is a regular file, and at most QUESTION_MAX bytes of it. A turn that end
 after IDLE_MIN minutes with the card's `ask` (`fix`, `review_idle`), which holds the auto-start back as well; when
 another ask is open then, the line's note says so, and a later `check` raises the idle ask once the card has none
 (`paused`, `closed: idle`). Its floor is read-only: no Edit or NotebookEdit, no gh command group the review does not
-need and no git write command (`roles.READ_ONLY_BASH_DENIED`), no `ap2` command the review does not run
-(`roles.READ_ONLY_AP2_DENIED`, best effort), and a Write hook (`ap2 hook-write`, `write_guard`) allows a Write
-only to its report or `question.json` in the card's run directory; a path it cannot resolve, and any error in the
-hook, is denied.
+need, no git command that pushes, commits or sets an alias, a config value or a remote, and no `claude`, which would
+start a session outside the floor (`roles.READ_ONLY_BASH_DENIED`, and the worker's own claude path), no v1 `ap`
+command (`roles.V1_AP_COMMANDS`), no `ap2` command the review does not run (`roles.READ_ONLY_AP2_DENIED`), all best
+effort, no global or system git config in its env (`roles.READ_ONLY_GIT_ENV`), and a Write hook (`ap2 hook-write`,
+`write_guard`) allows a Write only to its report or `question.json` in the card's run directory; a path it cannot
+resolve, and any error in the hook, is denied.
 
 Starting (or resuming) a session can make branches and PRs, so it needs live mode; listing, classifying, ending
 and archiving work in shadow mode. v1 is reused by import (`lib/autopilot/workers.py`, `sessions.py`,
@@ -270,7 +272,20 @@ def require_literal(data: Path) -> None:
                               "edits in it; use a folder name without those characters")
 
 
-def floor(role: str, project: dict, data: Path, env: dict, profile: Optional[dict] = None) -> dict:
+def _spellings(name: str, *paths: Optional[str]) -> list:
+    """`name`, each of `paths` that is set, and where each such path leads (links followed), each once: the ways a
+    command can be typed (`claude`, `/usr/local/bin/claude`, the version it links to)."""
+    out = [name]
+    for p in paths:
+        if p:
+            out.append(str(p))
+            if os.sep in str(p):
+                out.append(os.path.realpath(p))
+    return list(dict.fromkeys(out))
+
+
+def floor(role: str, project: dict, data: Path, env: dict, profile: Optional[dict] = None,
+          claude: Optional[str] = None) -> dict:
     """The worker's permission floor (`--settings`): v1's outward-tool denials (`perms.denied_tools`, from the
     project's `tools`; `Workers._tools` fills them in when it lists none, with `deny_servers`, the whole-server
     rules) and Bash denials, the data folder's own files and the package, the park and Bash guard hooks, and the
@@ -278,8 +293,9 @@ def floor(role: str, project: dict, data: Path, env: dict, profile: Optional[dic
     not list but `roles.READ_ONLY_KEPT`, the same for `roles.READ_ONLY_BUILTIN_DENIED`, and every MCP server whole:
     each one those tools are on and each one `_tools` found listed (`listed_servers`).
     With `profile`, its overlay is merged under it (`profiles.merge`): the deny and allow lists, the hooks and the
-    AP2_* env stay exactly as they are. Refused for a path a gitignore pattern cannot name literally
-    (`require_literal`)."""
+    AP2_* env stay exactly as they are. `claude` is the claude CLI the worker runs (`Workers.claude`; default the
+    one on PATH): a read-only role is denied running it, in every spelling. Refused for a path a gitignore pattern
+    cannot name literally (`require_literal`)."""
     if role not in ROLES:
         raise WorkerError(f"role must be one of {', '.join(ROLES)}, not {role!r}")
     require_literal(data)
@@ -308,6 +324,14 @@ def floor(role: str, project: dict, data: Path, env: dict, profile: Optional[dic
         # Write.
         deny += list(roles.READ_ONLY_DENIED) + list(roles.READ_ONLY_BASH_DENIED)
         deny += [f"Bash({cmd} {verb}:*)" for verb in roles.READ_ONLY_AP2_DENIED for cmd in ("ap2", ap2)]
+        # No nested session: `claude -p ...` would run under the user's own settings, not this floor, so `claude` is
+        # denied as typed, as the worker's own path and the one on PATH, and where each link leads. No v1 command
+        # either (`ap oneoff` runs `claude -p`): bare, at `<package>/bin/ap`, and the `ap` on PATH. Best effort.
+        found = shutil.which("claude")
+        nested = [f"Bash({c}:*)" for c in _spellings("claude", claude or found or "claude", found)]
+        v1_ap = _spellings("ap", str(package_root() / "bin" / "ap"), shutil.which("ap"))
+        nested += [f"Bash({cmd} {verb}:*)" for verb in roles.V1_AP_COMMANDS for cmd in v1_ap]
+        deny += [r for r in dict.fromkeys(nested) if r not in deny]
         # No tool its role does not list, MCP or built-in, but the tool search and `Task` (READ_ONLY_KEPT): v1's
         # outward-verb list leaves an MCP server's delete, update, submit or merge tool open, the session loads
         # every server the user's sessions do, and it starts with every built-in tool (a scheduled cloud agent, the
@@ -327,7 +351,12 @@ def floor(role: str, project: dict, data: Path, env: dict, profile: Optional[dic
         hooks["PreToolUse"].append(
             {"matcher": "Write", "hooks": [{"type": "command", "command": f"\"{ap2}\" hook-write", "timeout": 5}]})
     out = {"permissions": {"deny": deny, "allow": allow}, "env": dict(env), "hooks": hooks}
-    return profiles.merge(out, profiles.overlay(profile)) if profile is not None else out
+    out = profiles.merge(out, profiles.overlay(profile)) if profile is not None else out
+    if role in roles.ROLES and roles.ROLES[role].floor == "read-only":
+        # Set after the profile's env, so a profile cannot undo it: no global or system git config (the user's
+        # aliases, such as `ps = push`, and the credential helper that pushes with their login), and no prompt.
+        out["env"].update(roles.READ_ONLY_GIT_ENV)
+    return out
 
 
 def write_guard(payload, env) -> Optional[dict]:
@@ -964,7 +993,7 @@ class Workers:
             settings = self.run_dir(card_id) / f"settings-{role}.json"
             argv = self._argv(role, name, settings, self._prompt(prompt, card, role, project, port_range, branch),
                               prof, sid)
-            write_json(settings, floor(role, found, self.data, env, prof))
+            write_json(settings, floor(role, found, self.data, env, prof, claude=self.claude))
             if parked:
                 # The parked session sits idle; the copy takes its place.
                 self._stop(card_id, role, parked.get("short_id"), by, parked.get("session_id"))
@@ -1415,7 +1444,8 @@ class Workers:
         process): the copy that continues takes its place, as in `start()`. `by` (the check's caller) is the name
         on the card's audit."""
         settings = self.run_dir(rec["card"]) / f"settings-{rec['role']}.json"
-        write_json(settings, floor(rec["role"], found, self.data, plan["env"], plan["profile"]))
+        write_json(settings, floor(rec["role"], found, self.data, plan["env"], plan["profile"],
+                                   claude=self.claude))
         argv = self._argv(rec["role"], rec["session_name"], settings, plan["prompt"], plan["profile"],
                           rec["session_id"] or rec["short_id"])
         # Whatever its state (parked, failed with its process alive, or gone: a stop of a gone session is harmless),
