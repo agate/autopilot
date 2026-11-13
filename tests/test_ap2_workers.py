@@ -3822,6 +3822,46 @@ class PrReviewDonePathTest(PrReviewCase):
         self.assertEqual(out[0]["error"], "KeyError")
         self.assertEqual(self.get(cid)["ask"]["role"], "pr-review")
 
+    def assert_kept_as_a_draft(self, cid, out):
+        """The worker is parked and on record; its report was neither applied nor turned into an ask."""
+        self.assertEqual([(e["card"], e["state"]) for e in out], [(cid, "parked")])
+        self.assertEqual([r["card"] for r in resources.Registry(self.data).read()], [cid])
+        c = self.get(cid)
+        self.assertNotIn("verdict", c)
+        self.assertIsNone(c.get("ask"))
+        self.assertEqual(self.gh.log, [])
+
+    def test_a_parked_worker_with_a_newer_report_is_parked_and_not_applied(self):
+        cid = self.started()
+        w = self.workers()
+        # A first draft, then the usage window reaches the park line: it parks itself and its turn ends.
+        self.the_worker_reviews(cid, report={"card": cid}, end_turn=False)
+        w.park(cid, "pr-review", "at the park line", usage_file=usage_file(self.tmp / "u.json", 95))
+        rec = resources.Registry(self.data).read()[0]
+        self.set_agent(rec["short_id"], state="done", status="idle")
+        self.assertEqual(w.classify(rec, v1_sessions.list_all(FAKE)), "parked")
+        with mock.patch.object(prreview, "apply") as apply:
+            out = w.check()
+        apply.assert_not_called()
+        self.assert_kept_as_a_draft(cid, out)
+        self.assertEqual(out[0]["did"], "nothing")
+
+    def test_a_turn_that_ended_on_a_usage_limit_parks_and_is_not_applied(self):
+        cid = self.started()
+        w = self.workers()
+        w.check()  # fills in its session id
+        rec = resources.Registry(self.data).read()[0]
+        self.the_worker_reviews(cid, report={"card": cid})  # a draft, then its turn ends on the limit
+        self.clock.advance(1)
+        say(self.fake_home, rec["session_id"], limit_line(iso(self.clock())))
+        self.assertEqual(w.list()[0]["api_stop"], "limit")
+        with mock.patch.object(prreview, "apply") as apply:
+            out = w.check()
+        apply.assert_not_called()
+        self.assert_kept_as_a_draft(cid, out)
+        self.assertEqual(out[0]["did"], "parked")
+        self.assertEqual(resources.Registry(self.data).read()[0]["parked"]["reason"], "limit")
+
     # criterion 7
     def test_new_commits_start_a_delta_on_the_next_check(self):
         cid = self.started()

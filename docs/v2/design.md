@@ -720,7 +720,8 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   the gate, because the gate starts no process (`gate.py`).
 - **[decided by the builder]** The done path. A `pr-review` worker is done when `prreview.json` is newer than its
   start and its turn has ended (idle, done, failed or gone; 8.2 rule 1): while it still works or waits at a prompt
-  the report is a draft the role is still checking, so `check` leaves it. When `check` closes it as done, it
+  the report is a draft the role is still checking, so `check` leaves it. A turn that ended on a park or an API
+  stop leaves a draft too: the worker is parked (or paused), not done. When `check` closes it as done, it
   runs `apply` and then `sync` on the card, by `check`'s `by`, once the worker list's lock is free (sync reads
   GitHub); the line gets `verdict` and `sync` (sync's `state`). Neither fails the pass. A failed `apply` is a note,
   and the card's `ask` (`type: fix`, `reason: review_apply_failed`) with the error and "run `ap2 review check
@@ -932,7 +933,10 @@ Rules:
    `prloop.json`; the `pr-review` role's is `prreview.json`, and its done path applies and syncs the review, 6.2).
    A `prreview.json` counts only once the worker's turn has ended (the listing shows it idle, done or failed, or
    the session is gone): the role checks its report after writing it and fixes it until the check passes, so while
-   the session still works or waits at a prompt the file is a draft and the worker stays running (or blocked). The gate sees the file (newer than the worker's start) and runs `worker end`: stop the process,
+   the session still works or waits at a prompt the file is a draft and the worker stays running (or blocked). A
+   turn that ended because the worker parked itself, or on a usage limit or a gateway's refusal, did not
+   end on a checked report either: the worker is parked (or paused) as any other role, and the draft
+   is not applied. The gate sees the file (newer than the worker's start) and runs `worker end`: stop the process,
    save the session id on the card. Session state can be lost; the card cannot.
 2. **[decided, from v1]** Dead (no session, or its process is gone, with no result file): resume once with
    "you were interrupted; check your worktree and run files first". Dead twice: stop and ask the user. A resume

@@ -1050,11 +1050,14 @@ class Workers:
         """done | question | parked | unknown | dead | blocked | idle | running. `listing` is
         `claude agents --json --all` (None when it failed: unknown, not empty). A pr-review report is done only once
         the session's turn has ended (idle, done, failed or gone): its process checks the report after writing it
-        and fixes it until the check passes, so while the session works (or waits at a prompt) it is a draft."""
+        and fixes it until the check passes, so while the session works (or waits at a prompt) it is a draft. A
+        parked pr-review worker stopped itself before that check could pass, so its report is a draft too: parked."""
         run = self.run_dir(rec["card"])
         if self._newer(run / RESULT_FILES[rec["role"]], rec):
             if rec["role"] != REVIEW_ROLE:
                 return "done"
+            if rec.get("parked"):
+                return "parked"  # its turn ended on a usage limit, not on a report that passed its check
             if listing is None:
                 return "unknown"
             seen = self._listed_state(rec, listing)
@@ -1116,10 +1119,12 @@ class Workers:
                      if s.get("sessionId") == session_id and s.get("id") and s.get("state") != "stopped"), None)
 
     def _api_tail(self, rec: dict, state: str, listing) -> Optional[tuple]:
-        """(the transcript's tail, `_since`) for a worker whose turn stopped (idle, blocked or dead), or None: a
-        parked or closing worker, a session the listing shows working or busy, and a transcript that is missing or
-        cannot be read are not read."""
-        if state not in ("idle", "blocked", "dead") or rec.get("parked") or rec.get("closing"):
+        """(the transcript's tail, `_since`) for a worker whose turn stopped (idle, blocked or dead, or a pr-review
+        worker's done: its report may be a draft its turn never got to check), or None: a parked or closing worker,
+        a session the listing shows working or busy, and a transcript that is missing or cannot be read are not
+        read."""
+        stopped = ("idle", "blocked", "dead", "done") if rec["role"] == REVIEW_ROLE else ("idle", "blocked", "dead")
+        if state not in stopped or rec.get("parked") or rec.get("closing"):
             return None
         s = v1_sessions.find_by_id(rec.get("short_id"), listing) or v1_sessions.find(rec["session_name"], listing)
         if s is not None and (s.get("state") == "working" or s.get("status") == "busy"):
