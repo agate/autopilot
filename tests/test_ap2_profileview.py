@@ -158,8 +158,17 @@ class SummaryTest(ViewCase):
                                                                     + "0" * 400)
         self.assertIn("0" * 400, big)
         (self.data / profiles.FOLDER / "big.json").write_text(big)
-        (self.data / profiles.FOLDER / "deep.json").write_text("[" * 100_000 + "]" * 100_000)
-        a = self.summary()["access"]
+        (self.data / profiles.FOLDER / "deep.json").write_text(json.dumps(gateway("deep")))
+        load = profiles.load
+        deep = RecursionError("maximum recursion depth exceeded")  # json.loads on a deep nest, on some Pythons only
+
+        def too_deep(data, name):
+            if name == "deep":
+                raise deep
+            return load(data, name)
+
+        with mock.patch.object(profiles, "load", side_effect=too_deep):
+            a = self.summary()["access"]
         self.assertEqual(a["profile"]["name"], "subscription")
         self.assertIsNone(a["profile_error"])
         broken = {b["name"]: b["error"] for b in a["broken_profiles"]}
@@ -178,11 +187,12 @@ class SummaryTest(ViewCase):
         self.assertIsNone(a["profile"])
         self.assertTrue(a["profile_error"].startswith("big: OverflowError: "), a["profile_error"])
         self.assertIn(profiles.FIX, a["profile_error"])
-        (self.data / profiles.ACTIVE).write_text('{"name": ' + "[" * 100_000 + "]" * 100_000 + "}")
-        a = self.summary()["access"]
+        with mock.patch.object(profiles, "active", side_effect=deep), \
+                mock.patch.object(profiles, "active_name", side_effect=deep):
+            a = self.summary()["access"]
+            status, raw = self.state_over_http()
         self.assertTrue(a["profile_error"].startswith("the active profile: RecursionError: "), a["profile_error"])
         self.assertIn(profiles.FIX, a["profile_error"])
-        status, raw = self.state_over_http()
         self.assertEqual(status, 200, raw)
 
     def test_an_unreadable_profiles_folder_is_an_error_field(self):
