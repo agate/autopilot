@@ -1275,6 +1275,10 @@ class CapAnswerRouteTest(ServerCase):
 LISTED = '["big", "small", "claude-opus-5-5"]'
 
 
+# What json.loads raises on a price override nested too deeply, in the words CPython uses.
+DEEP_PRICES = RecursionError("maximum recursion depth exceeded while decoding a JSON array from a unicode string")
+
+
 class ProfileRouteCase(ServerCase):
     """A gateway profile whose models command counts its runs in a temp file (outside the data folder) and prints
     the list held in `self.listing`, so a test can change the list between two requests."""
@@ -1395,13 +1399,14 @@ class ProfileUseRouteTest(ProfileRouteCase):
 
     def test_a_price_override_nested_too_deeply_is_500_and_writes_nothing(self):
         # A profile with no models command takes its list from the prices: json.loads' RecursionError on the
-        # override is a JSON 500 naming it, never a dropped connection.
+        # override is a JSON 500 naming it, never a dropped connection. The error is raised by a stub: how deep a
+        # file must be to make json.loads raise depends on the Python version (3.14 measures the stack instead).
         p = gateway_profile("n")
         p.update(model=None, effort=None, chosen_at=None)
         profiles.save(self.data, p)
-        (self.data / "prices.json").write_text('{"x":' + "[" * 100000 + "]" * 100000 + "}", encoding="utf-8")
         before, active = tree(self.data), self.active_bytes()
-        status, _, body = self.use("n")
+        with mock.patch("assistant.spend.prices", side_effect=DEEP_PRICES):
+            status, _, body = self.use("n")
         self.assertEqual(status, 500, body)
         self.assertTrue(body["error"].startswith(f"the price override {self.data / 'prices.json'}: RecursionError: "),
                         body)
@@ -1574,9 +1579,9 @@ class ProfileChooseRouteTest(ProfileRouteCase):
         self.assertEqual(self.runs(), 0)
 
     def test_a_price_override_nested_too_deeply_is_500_and_saves_nothing(self):
-        (self.data / "prices.json").write_text('{"x":' + "[" * 100000 + "]" * 100000 + "}", encoding="utf-8")
         before = self.unchanged()
-        status, _, body = self.choose("subscription", "default", "high")
+        with mock.patch("assistant.spend.prices", side_effect=DEEP_PRICES):  # see the switch route's test
+            status, _, body = self.choose("subscription", "default", "high")
         self.assertEqual(status, 500, body)
         self.assertTrue(body["error"].startswith(f"the price override {self.data / 'prices.json'}: RecursionError: "),
                         body)
