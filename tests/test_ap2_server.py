@@ -21,7 +21,7 @@ from unittest import mock
 from tests.helpers import ROOT
 from tests.test_ap2_store import BLANK_SLOTS, NOT_BLANK_SLOTS
 
-from assistant import cap, cards, datadir, gate, profiles, server, templates
+from assistant import cap, cards, datadir, gate, profiles, profileview, server, templates
 from assistant.config import Config, ConfigError
 from assistant.engine import Engine
 from assistant.resources import WorkerError
@@ -1393,6 +1393,35 @@ class ProfileUseRouteTest(ProfileRouteCase):
                                 "choices": profiles.choices(self.data, h, profiles.fetch_models(self.data, h)[0])})
         self.assertEqual(tree(self.data), before)
 
+    def test_a_price_override_nested_too_deeply_is_500_and_writes_nothing(self):
+        # A profile with no models command takes its list from the prices: json.loads' RecursionError on the
+        # override is a JSON 500 naming it, never a dropped connection.
+        p = gateway_profile("n")
+        p.update(model=None, effort=None, chosen_at=None)
+        profiles.save(self.data, p)
+        (self.data / "prices.json").write_text('{"x":' + "[" * 100000 + "]" * 100000 + "}", encoding="utf-8")
+        before, active = tree(self.data), self.active_bytes()
+        status, _, body = self.use("n")
+        self.assertEqual(status, 500, body)
+        self.assertTrue(body["error"].startswith(f"the price override {self.data / 'prices.json'}: RecursionError: "),
+                        body)
+        self.assertEqual(tree(self.data), before)
+        self.assertEqual(self.active_bytes(), active)
+
+    def test_an_odd_error_no_handler_names_is_a_json_500(self):
+        # The routes' last guard: an ArithmeticError or RecursionError raised where no inner handler turns it into
+        # its own status still gets a JSON reply.
+        self.listed("g")
+        before, active = tree(self.data), self.active_bytes()
+        for route in ("use", "choose"):
+            with self.subTest(route), mock.patch.object(profiles, "load", side_effect=ZeroDivisionError("odd")), \
+                    mock.patch.object(profileview, "_odd", side_effect=OverflowError("odder")):
+                status, _, body = self.use("g") if route == "use" else self.choose("g", "big", "high")
+                self.assertEqual(status, 500, body)
+                self.assertEqual(body["error"], "OverflowError: odder")
+                self.assertEqual(tree(self.data), before)
+                self.assertEqual(self.active_bytes(), active)
+
     def test_an_unchosen_profile_replies_with_its_choices_fetched_once(self):
         self.listed("g")
         profiles.use(self.data, "g")
@@ -1543,6 +1572,31 @@ class ProfileChooseRouteTest(ProfileRouteCase):
         self.assertTrue(body["error"].startswith("deep: RecursionError: "), body)
         self.assertEqual(self.unchanged(), before)
         self.assertEqual(self.runs(), 0)
+
+    def test_a_price_override_nested_too_deeply_is_500_and_saves_nothing(self):
+        (self.data / "prices.json").write_text('{"x":' + "[" * 100000 + "]" * 100000 + "}", encoding="utf-8")
+        before = self.unchanged()
+        status, _, body = self.choose("subscription", "default", "high")
+        self.assertEqual(status, 500, body)
+        self.assertTrue(body["error"].startswith(f"the price override {self.data / 'prices.json'}: RecursionError: "),
+                        body)
+        self.assertEqual(self.unchanged(), before)
+        self.assertEqual(profiles.active_name(self.data), "g")
+
+    def test_settings_nested_too_deeply_to_save_is_500_and_writes_nothing(self):
+        # json.loads reads a 1500-level `settings`, but the save's json.dump(indent=2) recurses too deeply: a JSON
+        # 500, never a dropped connection; the profile file is left byte for byte and nothing is switched.
+        f = profiles.path(self.data, "h")
+        raw = json.loads(f.read_text(encoding="utf-8"))
+        f.write_text(json.dumps(raw)[:-1] + ', "settings": {"x": ' + "[" * 1500 + "]" * 1500 + "}}",
+                     encoding="utf-8")
+        self.assertTrue(profiles.needs_choice(self.data, profiles.load(self.data, "h")))
+        before = self.unchanged()
+        status, _, body = self.choose("h", "big", "high")
+        self.assertEqual(status, 500, body)
+        self.assertIn("recursion", body["error"])
+        self.assertEqual(self.unchanged(), before)
+        self.assertEqual(profiles.active_name(self.data), "g")
 
     def test_a_save_that_cannot_be_written_is_500_and_writes_nothing(self):
         # A label holding the JSON escape of a lone surrogate loads, but cannot be written back as UTF-8: the save
@@ -2095,10 +2149,11 @@ console.log(JSON.stringify(runs));
 
     @unittest.skipUnless(shutil.which("node"), "needs node")
     def test_the_settings_access_box_follows_the_state(self):
-        # Settings left open: each tick redraws its Access box from the new state, so it never disagrees with the
-        # top bar; other screens, and a tick whose route changed while it ran, leave the box alone.
+        # Settings left open: a tick whose state changes what the Access box shows redraws it, so it never disagrees
+        # with the top bar; a state that shows the same, other screens, and a tick whose route changed while it ran
+        # leave the box alone. Focus in the box does not hold the redraw back (redrawAccess keeps it, see below).
         # An open choice box is not redrawn under the user (its state stays in S.choice, see the choice box tests).
-        out = self.run_access(page_functions("capKey", "redrawAccess", "refocus", "tick") + """
+        out = self.run_access(page_functions("capKey", "redrawAccess", "accessKey", "refocus", "tick") + """
 let states = [], onPoll = null;
 const poll = async () => { S.state = states.shift(); if (onPoll) onPoll(); };
 const loadList = async () => {}, loadCard = async () => {};
@@ -2108,26 +2163,74 @@ const document = {body: {tag: 'body'}, activeElement: null};
 const box = {replaceWith: n => replaced.push(n), contains: n => n === button};
 const $ = id => (id === 'access-set' ? box : null);
 const accessSet = () => 'today ' + S.state.usage.gateway.today;
-const st = today => ({access: {cap: {}}, usage: {gateway: {today}}});
+const st = today => ({access: {cap: {}}, usage: {mode: 'gateway', windows: [], gateway: {today}}});
 (async () => {
   const runs = {};
-  for (const [name, route, act, choice, focused] of [['settings', {name: 'settings', arg: null}],
+  for (const [name, route, act, choice, focused, later] of [['settings', {name: 'settings', arg: null}],
                                     ['lane', {name: 'lane', arg: 'needs'}],
                                     ['left', {name: 'settings', arg: null}, () => { S.route = {name: 'lane', arg: 'needs'}; }],
                                     ['choosing', {name: 'settings', arg: null}, null, {name: 'h', model: 'big'}],
-                                    // Keyboard focus on a switch button: a redraw would drop it to the page.
                                     ['focused', {name: 'settings', arg: null}, null, null, button],
-                                    ['focus elsewhere', {name: 'settings', arg: null}, null, null, elsewhere]]) {
-    S.route = route; S.state = st(8); states = [st(42)]; replaced.length = 0; onPoll = act || null;
+                                    ['focus elsewhere', {name: 'settings', arg: null}, null, null, elsewhere],
+                                    ['same', {name: 'settings', arg: null}, null, null, null, 8],
+                                    ['same focused', {name: 'settings', arg: null}, null, null, button, 8]]) {
+    S.route = route; S.state = st(8); S.accessDrawn = accessKey(S.state); states = [st(later || 42)];
+    replaced.length = 0; onPoll = act || null;
     S.choice = choice || null; document.activeElement = focused || document.body;
     await tick();
     runs[name] = replaced.slice();
+    if (name === 'settings') { runs.drawn = S.accessDrawn === accessKey(st(42)); states = [st(42)]; await tick(); runs.again = replaced.slice(); }
   }
   console.log(JSON.stringify(runs));
 })();
 """)
-        self.assertEqual(out, {"settings": ["today 42"], "lane": [], "left": [], "choosing": [], "focused": [],
-                               "focus elsewhere": ["today 42"]})
+        self.assertEqual(out, {"settings": ["today 42"], "drawn": True, "again": ["today 42"], "lane": [], "left": [],
+                               "choosing": [], "focused": ["today 42"], "focus elsewhere": ["today 42"], "same": [],
+                               "same focused": []})
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_a_tick_redraw_keeps_focus_in_the_access_box(self):
+        # The real Access box on screen, focus on one of its controls: a tick whose state shows something new
+        # redraws it and puts focus back on the same control (the heading a switch focused, or a switch button);
+        # a tick whose state shows the same draws nothing, so focus stays where it is.
+        out = self.run_access(page_functions("capKey", "errBox", "redrawAccess", "accessKey", "refocus", "choiceBox",
+                                             "accessSet", "tick") + self.DOM_STUBS + """
+let shown = null, states = [];
+const poll = async () => { S.state = states.shift(); };
+const loadList = async () => {}, loadCard = async () => {};
+const $ = id => (id === 'access-set' ? {replaceWith: n => {
+  if (shown.contains(document.activeElement)) document.activeElement = document.body;  // as a browser does
+  shown = n;
+}, contains: n => shown.contains(n)} : null);
+const at = (active, today) => ({access: {profile: {name: active, mode: 'gateway', label: active}, cap: {}, profiles: [
+  {name: 'g', label: 'g', mode: 'gateway', needs_choice: false},
+  {name: 'k', label: 'k', mode: 'gateway', needs_choice: false}], broken_profiles: []},
+  usage: {mode: 'gateway', windows: [], gateway: {today}}});
+const focusOf = el => (el && el.attrs && el.attrs['data-focus']) || (el === document.body ? 'body' : null);
+const key = k => all(shown).find(n => n.attrs && n.attrs['data-focus'] === k);
+(async () => {
+  const runs = {};
+  S.route = {name: 'settings', arg: null}; S.choice = null; S.switchError = null; S.switching = false;
+  for (const [name, focus, next] of [['heading, changed', 'access:title', at('k', 9)],
+                                     ['button, unchanged', 'switch:k', at('g', 8)],
+                                     ['button, changed', 'switch:k', at('g', 9)]]) {
+    S.state = at('g', 8); shown = accessSet(); S.accessDrawn = accessKey(S.state); S.focusKey = null;
+    const before = shown, el = key(focus);
+    el.focus();
+    states = [next];
+    await tick();
+    runs[name] = {redrawn: shown !== before, focus: focusOf(document.activeElement),
+                  same: document.activeElement === el, inBox: shown.contains(document.activeElement)};
+  }
+  console.log(JSON.stringify(runs));
+})();
+""")
+        self.assertEqual(out["heading, changed"], {"redrawn": True, "focus": "access:title", "same": False,
+                                                   "inBox": True})
+        self.assertEqual(out["button, unchanged"], {"redrawn": False, "focus": "switch:k", "same": True,
+                                                    "inBox": True})
+        self.assertEqual(out["button, changed"], {"redrawn": True, "focus": "switch:k", "same": False,
+                                                  "inBox": True})
 
     # The Settings screen's profile switch and its choice box, drawn by accessSet from S.state and S.choice. `$`
     # hands out one 'access-set' holder whose replaceWith keeps the redrawn box in `shown`.
@@ -2157,7 +2260,7 @@ S.state = {access: {profile: {name: 'g', mode: 'gateway', label: 'Team'}, cap: {
   {name: 'subscription', label: 'subscription', mode: 'subscription', needs_choice: false}],
   broken_profiles: [{name: 'x', error: 'BROKEN-E'}]}, usage: {mode: 'gateway', windows: [], gateway: {}}};
 """
-    SWITCH_FUNCS = ("errBox", "redrawAccess", "refocus", "onSettings", "afterSwitch", "switchProfile", "choiceBox",
+    SWITCH_FUNCS = ("errBox", "redrawAccess", "accessKey", "refocus", "onSettings", "afterSwitch", "switchProfile", "choiceBox",
                     "accessSet")
 
     @unittest.skipUnless(shutil.which("node"), "needs node")

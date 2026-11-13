@@ -764,13 +764,26 @@ class Handler(BaseHTTPRequestHandler):
             raise HTTPError(409 if known else 404, str(e)) from e
 
     def _fetch_models(self, p: dict) -> tuple:
-        """`profiles.fetch_models`, fetched now: 502 when the models command fails, 500 for a broken price file."""
+        """`profiles.fetch_models`, fetched now: 502 when the models command fails, 500 for a broken price file (one
+        nested too deeply for `json.loads` too)."""
         try:
             return profiles.fetch_models(self.server.data, p)
         except profiles.ModelsUnavailable as e:
             raise HTTPError(502, str(e)) from e
         except ConfigError as e:  # SpendError: the price override cannot be read
             raise HTTPError(500, str(e)) from e
+        except profileview.ODD as e:  # spend.prices lets json.loads' RecursionError through
+            raise HTTPError(500, profileview._odd(f"the price override {self.server.data / 'prices.json'}", e)) from e
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _no_odd_escape():
+        """A route body's last guard: an ArithmeticError or RecursionError (`profileview.ODD`) that no handler
+        inside turned into its own status is a JSON 500, never a dropped connection."""
+        try:
+            yield
+        except profileview.ODD as e:
+            raise HTTPError(500, f"{type(e).__name__}: {e}") from e
 
     @staticmethod
     def _some_models(models: list) -> None:
@@ -794,7 +807,7 @@ class Handler(BaseHTTPRequestHandler):
         switch takes effect at once: the next start or resume uses it, and running workers keep their own."""
         name = self._profile_body("a profile switch", '{"name": "..."}', ())["name"]
         data = self.server.data
-        with self.server.write_lock:
+        with self.server.write_lock, self._no_odd_escape():
             p = self._profile_load(name)
             try:
                 current = profiles.active_name(data)
@@ -814,7 +827,7 @@ class Handler(BaseHTTPRequestHandler):
                                   ("model", "effort"))
         name, model, effort = body["name"], body["model"], body["effort"]
         data = self.server.data
-        with self.server.write_lock:
+        with self.server.write_lock, self._no_odd_escape():
             p = self._profile_load(name)
             models, known = self._fetch_models(p)
             self._some_models(models)
@@ -822,7 +835,9 @@ class Handler(BaseHTTPRequestHandler):
                 saved = profiles.choose(data, name, model, effort, models, known)
             except profiles.ProfileError as e:  # not offered, or a save that failed
                 raise HTTPError(500 if isinstance(e.__cause__, OSError) else 409, str(e)) from e
-            except ValueError as e:  # a save that failed: e.g. a label holding a lone surrogate cannot be written
+            except (ValueError, *profileview.ODD) as e:
+                # A save that failed: a label holding a lone surrogate, or `settings` nested too deeply for
+                # json.dump (it loads, but cannot be written back).
                 raise HTTPError(500, str(e)) from e
             out = self._profile_switch(name)
             return 200, {"chosen": {"name": name, "model": model, "effort": saved["effort"]}, **out}

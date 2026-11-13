@@ -3304,17 +3304,20 @@ Calls the author made without asking (check them):
        (`profiles.fetch_models`) and replies 200 `{"needs_choice": true, "choices": profiles.choices(...)}`. A models
        command that fails (`ModelsUnavailable`) is 502 with its text; one that lists no model to choose is 502
        "gateway.models_command: listed no models, so there is nothing to choose" (the CLI's refusal), so no empty
-       box opens; a broken price override is 500. A hand-edited file nested too deeply for `json.loads` (a
+       box opens; a broken price override is 500 (one nested too deeply for `json.loads` too, as `the price override
+       <path>: <error>`). A hand-edited file nested too deeply for `json.loads` (a
        `RecursionError`, or an `ArithmeticError`, as `profileview.ODD`) still gets a JSON reply: the profile's own
        file is 409 `<name>: <error>`, and an `active-profile.json` that deep reads as no current profile for the
        needs-choice check, while the switch itself (which `profiles.use` makes only after reading the old name) is
-       409 with that text, nothing written.
+       409 with that text, nothing written. Both routes end with one last guard: a `profileview.ODD` that no
+       handler inside turned into its own status is 500 `<type>: <error>`, never a dropped connection.
      - The choice loads the profile (400, 404, 409 as above), fetches the list fresh (never a list the page sent),
        then `profiles.choose(data, name, model, effort, models, known)` and `profiles.use`: 200 `{"chosen": {"name",
        "model", "effort"}, "active", "was"}`. A `model` or `effort` that is not text is 400; one not in the fresh
        list is 409 with `check_model` / `check_effort`'s text, nothing saved or switched; `ModelsUnavailable` and an
        empty list are 502. A save that cannot be written for a `ValueError` (a label holding a lone surrogate
-       loads, but cannot be written back as UTF-8) is 500 with its text, nothing written or switched.
+       loads, but cannot be written back as UTF-8) or a `profileview.ODD` (a `settings` nested deep enough that
+       `json.loads` reads it but `json.dump` recurses too deeply) is 500 with its text, nothing written or switched.
        It works for any profile that loads, chosen before or not, as `ap2 profile choose` does.
      - The page: a "Switch profile" row, one button per entry of `access.profiles` (label, then the name when it
        differs; "in use" or "model not chosen yet" after it), the active one pressed (`aria-pressed="true"`) and
@@ -3332,8 +3335,10 @@ Calls the author made without asking (check them):
        another screen is open. A switch to another profile closes an open box first, so its error never shows
        under another profile's box. The error box has an id (`access-error`, or `choice-error` in the choice box)
        that the switch buttons, or "Choose and switch", name in `aria-describedby` while it is shown. The
-       10-second tick does not redraw the Access box while the box is open (a redraw would close a drop-down list
-       under the pointer) or while keyboard focus is inside the Access box. One
+       10-second tick redraws the Access box only when what it shows from the state changed (the page's language,
+       `access`, and the usage rows as drawn), whatever has keyboard focus: the redraw puts focus back on the same
+       control (below), and a state that shows the same draws nothing. It does not redraw it while the choice box
+       is open (a redraw would close a drop-down list under the pointer). One
        post at a time: while a switch posts, the box's buttons are disabled, and while a choice posts, every switch
        button is. Focus: each control in the Access box has a `data-focus` key, and a redraw puts focus back on the
        control with the same key (once it is enabled again); an opened box focuses its model select, Cancel focuses
