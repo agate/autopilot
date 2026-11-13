@@ -1728,6 +1728,13 @@ console.log(JSON.stringify([
         self.assertEqual([(r["label"], r["value"]) for r in out[14]],
                          [("opus_week", "3%"), ("[usage.credits]", "$2,300.00 / $5,000.00"), ("", "[usage.stale]")])
         self.assertEqual(out[15], [{"label": "[usage.windows]", "value": "[usage.no_windows]", "warn": True}])
+        # A real count: "Counted" says how long ago, from the page's clock (five minutes here).
+        counted = self.run_access("""
+Date.now = () => Date.parse('2026-11-11T20:05:00Z');
+const rows = usageRows({mode: 'gateway', windows: [], gateway: {today: 1, limit: 2, counted_at: '2026-11-11T15:00:00-05:00'}});
+console.log(JSON.stringify(rows.filter(r => r.label === '[usage.counted]').map(r => r.value)));
+""")
+        self.assertEqual(counted, ["ago:300"])
         labels = self.labels()
         self.assertEqual(labels["en"]["usage.today_short"], "{spent} / {limit} today")
         css = re.search(r"<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"), re.S).group(1)

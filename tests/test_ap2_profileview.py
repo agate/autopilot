@@ -372,7 +372,7 @@ class UsageTest(ViewCase):
         sunday = datetime(2026, 11, 29, 20, 0, tzinfo=TZ)  # the last day of a week, and of November's last week
         spend.remember(self.data, totals(40.0, week=380.0, month=2300.0, unknown=True), sunday)
         for now, week, month, unknown in ((sunday + timedelta(hours=13), None, 2300.0, True),  # Monday 11-30
-                                          (sunday + timedelta(days=2, hours=13), None, None, None),  # Tuesday 12-01
+                                          (sunday + timedelta(days=1, hours=13), None, None, None),  # Tuesday 12-01
                                           (sunday + timedelta(hours=2), 380.0, 2300.0, True)):  # still Sunday
             with self.subTest(now):
                 g = self.summary(now=now)["usage"]["gateway"]
@@ -380,7 +380,7 @@ class UsageTest(ViewCase):
                 self.assertEqual((g["week"], g["month"], g["unknown"]), (week, month, unknown))
         # December's first days, all in the week that began on Monday 11-30: the week stays, the month does not.
         spend.remember(self.data, totals(5.0, week=60.0, month=2360.0, unknown=True), sunday + timedelta(days=1))
-        g = self.summary(now=sunday + timedelta(days=2, hours=13))["usage"]["gateway"]
+        g = self.summary(now=sunday + timedelta(days=1, hours=13))["usage"]["gateway"]
         self.assertEqual((g["today"], g["week"], g["month"], g["unknown"]), (None, 60.0, None, None))
         # A day that is not one, or a later day than today, gives no totals at all.
         for day in ("x", "2026-12-30"):
