@@ -556,7 +556,7 @@ class ImportV1Test(unittest.TestCase):
     def test_an_invisible_title_in_one_language_falls_back_like_a_blank_one(self):
         # cards.blank: an en slot of only U+FEFF (and white space) has no words, so the zh words are used, as for
         # an en slot of spaces; the store would refuse the card with plain.what.en is empty otherwise.
-        for en in ("﻿", "﻿ \x1c"):
+        for en in ("\ufeff", "\ufeff \x1c"):
             with self.subTest(en=en):
                 self.setUp()
                 self.set_config("secondary_language: zh\n")
@@ -568,7 +568,7 @@ class ImportV1Test(unittest.TestCase):
                 cards.check_title(c, ("en", "zh"))
 
     def test_an_invisible_title_falls_back_to_the_task_id(self):
-        for title in ("﻿", {"en": "﻿"}, " ﻿\x1c"):
+        for title in ("\ufeff", {"en": "\ufeff"}, " \ufeff\x1c"):
             with self.subTest(title=title):
                 self.setUp()
                 self.set_config("secondary_language: zh\n")
@@ -581,7 +581,7 @@ class ImportV1Test(unittest.TestCase):
                 cards.check_plain(c, ("en", "zh"))
 
     def test_an_open_question_with_an_invisible_title_has_the_decision_id_as_its_words(self):
-        for title in ("﻿", {"en": "﻿", "zh": "﻿"}):
+        for title in ("\ufeff", {"en": "\ufeff", "zh": "\ufeff"}):
             with self.subTest(title=title):
                 self.setUp()
                 self.set_config("secondary_language: zh\n")
@@ -594,7 +594,8 @@ class ImportV1Test(unittest.TestCase):
                 cards.check_title(c, ("en", "zh"))
 
     def test_words_next_to_an_invisible_character_are_kept_and_spaces_are_still_stripped(self):
-        for title, want in (("﻿Add to cart", "﻿Add to cart"), ({"en": "﻿Add to cart"}, "﻿Add to cart"),
+        for title, want in (("\ufeffAdd to cart", "\ufeffAdd to cart"),
+                            ({"en": "\ufeffAdd to cart"}, "\ufeffAdd to cart"),
                             ("  Add to cart ", "Add to cart"), ({"en": "  Add to cart "}, "Add to cart")):
             with self.subTest(title=title):
                 self.setUp()
@@ -606,15 +607,15 @@ class ImportV1Test(unittest.TestCase):
 
     def test_text_for_skips_an_invisible_slot_like_a_slot_of_spaces(self):
         labels = importv1.Labels(self.v1)
-        for blank in ("", "  ", "﻿", "﻿ \x1c", None, 3):
+        for blank in ("", "  ", "\ufeff", "\ufeff \x1c", None, 3):
             with self.subTest(blank=blank):
                 self.assertEqual(importv1.text_for({"en": blank, "zh": "加购物车"}, "en", labels), "加购物车")
                 self.assertEqual(importv1.text_for({"zh": blank, "en": "Cart"}, "zh", labels), "Cart")
                 self.assertEqual(importv1.text_for({"de": blank, "fr": "Panier"}, "en", labels), "Panier")
                 self.assertEqual(importv1.text_for({"en": blank}, "en", labels), "")
         # A plain string is itself, blank or not; words next to U+FEFF are words.
-        self.assertEqual(importv1.text_for("﻿", "en", labels), "﻿")
-        self.assertEqual(importv1.text_for({"en": "﻿Cart", "zh": "加"}, "en", labels), "﻿Cart")
+        self.assertEqual(importv1.text_for("\ufeff", "en", labels), "\ufeff")
+        self.assertEqual(importv1.text_for({"en": "\ufeffCart", "zh": "加"}, "en", labels), "\ufeffCart")
 
     def test_each_title_is_its_own_copy_of_the_plain_words(self):
         entries, _ = importv1.plan("shop", self.v1 / "projects" / "shop", ("en", "zh"),
@@ -700,7 +701,7 @@ class ImportV1Test(unittest.TestCase):
         # cards.blank: a configured-language plain.where slot of only U+FEFF (and white space) has no words, so the
         # fresh question_where phrase is written, as for a missing one; the store would refuse it as is empty.
         fresh = {lang: importv1.PHRASES[lang]["question_where"].format(project="shop", about="") for lang in ("en", "zh")}
-        for lang, text, want in (("en", "﻿", fresh["en"]), ("zh", "﻿ \x1c", fresh["zh"]),
+        for lang, text, want in (("en", "\ufeff", fresh["en"]), ("zh", "\ufeff \x1c", fresh["zh"]),
                                  ("zh", "这里有字", "这里有字")):
             with self.subTest(lang=lang, text=text):
                 self.setUp()  # a fresh temp v1 and data folder: D1 must still be in state.json
