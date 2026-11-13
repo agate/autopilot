@@ -6,13 +6,14 @@ import io
 import json
 import os
 import plistlib
+import shlex
 from datetime import timedelta
 from unittest import mock
 import unittest
 
 from tests.helpers import ROOT  # noqa: F401  (puts lib/ on sys.path)
 from tests.test_ap2_config import TempHome
-from assistant import cards, cli, datadir, doctor, install
+from assistant import cards, cli, config, datadir, doctor, install
 
 NOW = cards.parse_stamp("2026-11-13T12:00:00Z")
 
@@ -31,8 +32,9 @@ class DoctorTest(unittest.TestCase):
         home = TempHome()
         self.home = home.__enter__()
         self.addCleanup(home.__exit__)
-        self.agents = self.home / "Library" / "LaunchAgents"
-        self.data = datadir.ensure(self.home / "Documents" / "Assistant")
+        # Not the defaults, so a check that drops one of these arguments reads somewhere else and a test sees it.
+        self.agents = self.home / "agents"
+        self.data = datadir.ensure(self.home / "data")
         self.tools = self.home / "tools"
         self.tools.mkdir()
         for t in install.TOOLS:
@@ -40,17 +42,20 @@ class DoctorTest(unittest.TestCase):
             stub.write_text("#!/bin/sh\nexit 0\n")
             stub.chmod(0o755)
 
-    def write_plist(self, label=install.LABEL, data=None, path=None):
+    def write_plist(self, label=install.LABEL, data=None, path=None, err_log=None):
         self.agents.mkdir(parents=True, exist_ok=True)
-        pl = plistlib.loads(install.render_plist(["/x/assistant-gate"], data or self.data, []))
+        pl = plistlib.loads(install.render_plist(["/x/assistant-gate"], data or self.data, [],
+                                                 err_log or install.err_log_path()))
         pl["Label"] = label
         pl["EnvironmentVariables"]["PATH"] = path if path is not None else str(self.tools)
         (self.agents / f"{install.LABEL}.plist").write_bytes(plistlib.dumps(pl))
 
-    def write_gate(self, minutes_ago):
-        (self.data / "gate.json").write_text(json.dumps({"last_run_at": cards.stamp(NOW - timedelta(minutes=minutes_ago))}))
+    def write_gate(self, minutes_ago=0, seconds=0):
+        at = NOW - timedelta(minutes=minutes_ago, seconds=seconds)
+        (self.data / "gate.json").write_text(json.dumps({"last_run_at": cards.stamp(at)}))
 
-    def checks(self, rc=0, data_flag=None):
+    def checks(self, rc=0, data_flag="self"):
+        data_flag = str(self.data) if data_flag == "self" else data_flag
         self.fake = FakeLaunchctl(rc)
         res = doctor.checks(data_flag, agents_dir=self.agents, launchctl=self.fake, now=NOW)
         for c in res:
@@ -105,7 +110,19 @@ class DoctorTest(unittest.TestCase):
         c = self.checks(data_flag=str(self.data))["launchd job"]
         self.assertFalse(c["ok"])
         self.assertIn(str(self.home / "other"), c["detail"])
-        self.assertIn(f"ap2 install --data {self.data}", c["fix"])
+        self.assertIn(f"ap2 install --data {shlex.quote(str(self.data))}", c["fix"])
+
+    def test_job_passes_when_the_plist_names_the_same_folder_another_way(self):
+        link = self.home / "link"
+        link.symlink_to(self.data, target_is_directory=True)
+        self.write_plist(data=link)
+        c = self.checks()["launchd job"]
+        self.assertTrue(c["ok"], c)
+
+    def test_job_reads_the_plist_from_the_agents_folder_given(self):
+        self.write_plist()
+        self.assertTrue(self.checks()["launchd job"]["ok"])
+        self.assertFalse((self.home / "Library").exists())
 
     # -- gate ran recently
 
@@ -115,12 +132,31 @@ class DoctorTest(unittest.TestCase):
         self.assertTrue(c["ok"], c)
         self.assertIn("60 s ago", c["detail"])
 
+    def test_gate_two_and_a_half_minutes_ago_passes_and_three_fails(self):
+        self.write_gate(seconds=150)
+        c = self.checks()["gate ran recently"]
+        self.assertTrue(c["ok"], c)
+        self.assertIn("150 s ago", c["detail"])
+        self.write_gate(seconds=180)
+        c = self.checks()["gate ran recently"]
+        self.assertFalse(c["ok"], c)
+        self.assertIn("180 s ago", c["detail"])
+
     def test_gate_ten_minutes_ago_fails_and_points_at_the_logs(self):
         self.write_gate(10)
         c = self.checks()["gate ran recently"]
         self.assertFalse(c["ok"])
         self.assertIn(str(self.data / "gate.log"), c["fix"])
-        self.assertIn(str(self.data / "gate.err.log"), c["fix"])
+        self.assertIn(str(install.err_log_path()), c["fix"])  # no plist: where install puts it
+        self.assertNotIn(str(self.data / "gate.err.log"), c["fix"])
+
+    def test_gate_fix_names_the_err_log_the_plist_gives(self):
+        err_log = self.home / "logs" / "mine.err.log"
+        self.write_plist(err_log=err_log)
+        self.write_gate(10)
+        c = self.checks()["gate ran recently"]
+        self.assertFalse(c["ok"])
+        self.assertIn(f"look at {self.data / 'gate.log'} and {err_log}", c["fix"])
 
     def test_gate_never_ran_fails(self):
         c = self.checks()["gate ran recently"]
@@ -168,6 +204,33 @@ class DoctorTest(unittest.TestCase):
         self.assertFalse(c["ok"])
         self.assertIn("not writable", c["detail"])
 
+    def assert_privacy_fix(self, res):
+        for name in ("data folder", "mode"):
+            self.assertFalse(res[name]["ok"], res[name])
+            fix = res[name]["fix"]
+            self.assertIn("System Settings > Privacy & Security > Files and Folders", fix)
+            self.assertIn("Full Disk Access", fix)
+            self.assertIn("assistant-gate", fix)
+            self.assertIn("terminal", fix)
+            self.assertNotIn("fix ", fix)
+
+    def test_config_yaml_macos_will_not_let_us_read_gives_the_privacy_fix(self):
+        def blocked(data_dir):
+            path = data_dir / config.FILE
+            try:
+                raise PermissionError(1, "Operation not permitted", str(path))
+            except PermissionError as e:
+                raise config.ConfigError(f"{path}: cannot read: {e}") from e
+        with mock.patch.object(doctor.config, "load", side_effect=blocked):
+            self.assert_privacy_fix(self.checks())
+
+    @unittest.skipIf(os.geteuid() == 0, "root can read anywhere")
+    def test_an_unreadable_config_yaml_gives_the_privacy_fix(self):
+        f = self.data / "config.yaml"
+        f.chmod(0o000)
+        self.addCleanup(f.chmod, 0o644)
+        self.assert_privacy_fix(self.checks())
+
     def test_bad_config_yaml_fails_data_folder_and_mode(self):
         (self.data / "config.yaml").write_text("mode: loud\n")
         res = self.checks()
@@ -175,6 +238,7 @@ class DoctorTest(unittest.TestCase):
         self.assertIn("config.yaml", res["data folder"]["fix"])
         self.assertFalse(res["mode"]["ok"])
         self.assertIn("config.yaml", res["mode"]["fix"])
+        self.assertNotIn("Privacy", res["data folder"]["fix"] + res["mode"]["fix"])
 
     # -- tools
 
@@ -191,7 +255,7 @@ class DoctorTest(unittest.TestCase):
         self.write_plist()
         res = self.checks()
         self.assertFalse(res["tool gh"]["ok"])
-        self.assertIn("ap2 install", res["tool gh"]["fix"])
+        self.assertIn(f"then run `ap2 install --data {shlex.quote(str(self.data))}` again", res["tool gh"]["fix"])
         self.assertIn("PATH", res["tool gh"]["fix"])
         self.assertTrue(res["tool claude"]["ok"])
 

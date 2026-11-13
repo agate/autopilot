@@ -17,6 +17,8 @@ from assistant import cards, config, datadir, install, profiles
 
 FRESH = timedelta(minutes=3)  # the heartbeat turns red after 3 minutes without a run (design 7.4)
 AHEAD = timedelta(minutes=5)  # a last run this far ahead of now means the clock went back
+PRIVACY_FIX = ("allow access to {folder} in System Settings > Privacy & Security > Files and Folders (or Full Disk "
+               "Access) for assistant-gate and for the terminal running `ap2 doctor`")
 
 
 def _c(name, ok, detail="", fix="") -> dict:
@@ -25,6 +27,26 @@ def _c(name, ok, detail="", fix="") -> dict:
 
 def _install_cmd(data_flag) -> str:
     return "`ap2 install" + (f" --data {shlex.quote(str(data_flag))}" if data_flag else "") + "`"
+
+
+def _blocked(e) -> bool:
+    """Did reading config.yaml fail because macOS (or the file's mode) refused access, not because of its text?
+    `config.load` raises its ConfigError from the OSError."""
+    return isinstance(e.__cause__, PermissionError)
+
+
+def _config_fix(e, data, other) -> str:
+    return PRIVACY_FIX.format(folder=data) if _blocked(e) else other
+
+
+def _same_folder(job_data, data) -> bool:
+    """The same text, or two spellings of one folder (another case on a case-blind disk, a symlink)."""
+    if job_data == str(data):
+        return True
+    try:
+        return bool(job_data) and os.path.samefile(job_data, data)
+    except (OSError, TypeError, ValueError):
+        return False
 
 
 def _read_plist(path: Path):
@@ -58,17 +80,20 @@ def _job(pl, why, data, data_flag, run, plist) -> dict:
         return _c("launchd job", False, f"{plist} is not loaded (launchctl print exit {rc}"
                   + (f": {first[0]}" if first else "") + ")", fix)
     job_data = _env(pl).get(datadir.ENV)
-    if data is None or job_data != str(data):
+    if data is None or not _same_folder(job_data, data):
         return _c("launchd job", False, f"the job uses the data folder {job_data or 'none'}, not "
                   f"{data or 'this one'}", fix)
     return _c("launchd job", True, f"{install.LABEL} loaded, {plist}")
 
 
-def _gate(data, now) -> dict:
+def _gate(data, now, pl=None) -> dict:
     name = "gate ran recently"
     if data is None:
         return _c(name, False, "no usable data folder", "fix the data folder first (see its line)")
-    fix = f"look at {data / 'gate.log'} and {data / install.ERR_LOG}"
+    err_log = pl.get("StandardErrorPath") if isinstance(pl, dict) else None
+    if not isinstance(err_log, str) or not err_log:
+        err_log = install.err_log_path()
+    fix = f"look at {data / 'gate.log'} and {err_log}"
     try:
         last = json.loads((data / "gate.json").read_text(encoding="utf-8")).get("last_run_at")
     except FileNotFoundError:
@@ -104,12 +129,12 @@ def _folder(data_flag):
     try:
         cfg = config.load(data)
     except config.ConfigError as e:
-        return data, _c(name, False, str(e), f"fix {data / config.FILE} (or move it away and run "
-                                             f"{_install_cmd(data_flag)} for a new one)"), None
+        return data, _c(name, False, str(e), _config_fix(e, data, f"fix {data / config.FILE} (or move it away and run "
+                                                                  f"{_install_cmd(data_flag)} for a new one)")), None
     return data, _c(name, True, str(data)), cfg
 
 
-def _tools(pl) -> list:
+def _tools(pl, data_flag=None) -> list:
     env = _env(pl)
     if pl is not None and isinstance(env.get("PATH"), str):
         path, where = env["PATH"], "the job's PATH"
@@ -119,7 +144,7 @@ def _tools(pl) -> list:
     for t in install.TOOLS:
         found = shutil.which(t, path=path)
         out.append(_c(f"tool {t}", found, f"{found} on {where}" if found else f"not found on {where}",
-                      f"install {t} or put its folder on PATH, then run `ap2 install` again"))
+                      f"install {t} or put its folder on PATH, then run {_install_cmd(data_flag)} again"))
     return out
 
 
@@ -141,7 +166,7 @@ def _mode(data, cfg) -> dict:
     try:
         return _c("mode", True, config.load(data).mode)  # a missing folder or file reads as the default
     except config.ConfigError as e:
-        return _c("mode", False, str(e), f"fix {data / config.FILE}")
+        return _c("mode", False, str(e), _config_fix(e, data, f"fix {data / config.FILE}"))
 
 
 def _guard(name, fn, *args):
@@ -169,9 +194,9 @@ def checks(data_flag=None, agents_dir=None, launchctl=None, now=None) -> list:
         why = f"cannot read {plist}: {e}"
     out = []
     out += _guard("launchd job", _job, pl, why, data, data_flag, run, plist)
-    out += _guard("gate ran recently", _gate, data, now)
+    out += _guard("gate ran recently", _gate, data, now, pl)
     out.append(folder)
-    out += _guard("tools", _tools, pl)
+    out += _guard("tools", _tools, pl, data_flag)
     out += _guard("active profile", _profile, data)
     out += _guard("mode", _mode, data, cfg)
     return out

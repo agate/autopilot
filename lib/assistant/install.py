@@ -22,6 +22,9 @@ ERR_LOG = "gate.err.log"  # launchd's own stderr for the job: Python errors and 
 LAUNCHCTL_TIMEOUT = 30  # seconds
 NO_COMPILER = ("no C compiler, so the gate runs bin/ap2 directly: macOS refuses that when the package is in a "
                "cloud-synced folder (install Xcode command line tools, then run `ap2 install` again)")
+PRIVACY = ("macOS will ask to let assistant-gate into {folder}, and the gate cannot run until it is allowed "
+           "(System Settings > Privacy & Security > Files and Folders)")
+PROTECTED = (("Documents",), ("Desktop",), ("Library", "Mobile Documents"))  # macOS asks before a program reads these
 
 
 class InstallError(ConfigError):
@@ -39,6 +42,20 @@ def launcher_path(home=None) -> Path:
     cloud-synced folder, and the package often does (v1 found this; its launcher lives in the same place)."""
     base = Path(home) if home is not None else Path.home()
     return base / "Library" / "Application Support" / "assistant" / "assistant-gate"
+
+
+def err_log_path(home=None) -> Path:
+    """launchd's stderr for the job, outside the data folder: launchd opens it before the program runs, and the
+    default data folder is one macOS guards (Documents), so a log there could stop the job from starting."""
+    base = Path(home) if home is not None else Path.home()
+    return base / "Library" / "Logs" / "assistant" / ERR_LOG
+
+
+def _protected(folder: Path) -> bool:
+    """Is the folder inside one macOS asks about before a program may read it (Documents, Desktop, iCloud Drive)?"""
+    home = Path.home().resolve()
+    folder = Path(folder).resolve()
+    return any(folder.is_relative_to(home.joinpath(*parts)) for parts in PROTECTED)
 
 
 def ap2_program() -> Path:
@@ -64,7 +81,7 @@ def path_value(path_dirs) -> str:
     return ":".join(out)
 
 
-def render_plist(argv, data, path_dirs) -> bytes:
+def render_plist(argv, data, path_dirs, err_log) -> bytes:
     data = Path(data)
     return plistlib.dumps({
         "Label": LABEL,
@@ -73,7 +90,7 @@ def render_plist(argv, data, path_dirs) -> bytes:
         "RunAtLoad": True,
         # Each run is already in gate.json and gate.log; the run's JSON on stdout would add lines without a time.
         "StandardOutPath": os.devnull,
-        "StandardErrorPath": str(data / ERR_LOG),
+        "StandardErrorPath": str(err_log),
         "EnvironmentVariables": {"PATH": path_value(path_dirs), datadir.ENV: str(data)},
     })
 
@@ -131,19 +148,30 @@ def install(data=None, agents_dir=None, home=None, launchctl=None, which=None, b
         raise InstallError(f"cannot build the launcher at {launcher_path(home)}: {_one_line(e)}") from e
     argv = [str(launcher)] if launcher else [str(ap2), "gate"]
     plist = plist_path(agents_dir)
-    _write_atomic(plist, render_plist(argv, folder, dirs))
+    err_log = err_log_path(home)
+    try:
+        err_log.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise InstallError(f"cannot create {err_log.parent}: {_one_line(e)}") from e
+    _write_atomic(plist, render_plist(argv, folder, dirs, err_log))
     run("bootout", target())  # not loaded yet is fine
     rc, msg = run("bootstrap", domain(), str(plist))
     if rc != 0:
         raise InstallError(f"launchctl bootstrap failed: {_one_line(msg)}")
+    notes = [] if launcher else [NO_COMPILER]
+    if _protected(folder):
+        notes.append(PRIVACY.format(folder=folder))
     return {"label": LABEL, "plist": str(plist), "program": argv, "interval": INTERVAL, "data_dir": str(folder),
-            "mode": mode, "tools": tools, "note": "" if launcher else NO_COMPILER}
+            "mode": mode, "tools": tools, "note": "; ".join(notes)}
 
 
 def uninstall(agents_dir=None, home=None, launchctl=None) -> dict:
-    """Unload v2's job and remove its plist and launcher. The data folder is not touched."""
+    """Unload v2's job and remove its plist and launcher. The data folder and the err log are not touched."""
     run = launchctl or _launchctl
-    run("bootout", target())  # not loaded is fine
+    _, out = run("bootout", target())  # not loaded is fine; `print` below says whether it is gone
+    rc, _ = run("print", target())
+    if rc == 0:
+        raise InstallError(f"launchctl bootout failed: {_one_line(out)}")
     removed = []
     for f in (plist_path(agents_dir), launcher_path(home)):
         try:

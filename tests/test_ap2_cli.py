@@ -412,7 +412,8 @@ class HelpAndUsageInProcessTest(unittest.TestCase):
     def test_serve_help_names_every_write_and_what_it_may_run(self):
         out = io.StringIO()
         # A wide fixed width: argparse wraps at the terminal's width and may break "Read-only" at its hyphen.
-        with mock.patch.dict(os.environ, {"COLUMNS": "1000"}), contextlib.redirect_stdout(out):
+        with mock.patch.dict(os.environ, {"COLUMNS": "1000", "PYTHON_COLORS": "0"}), \
+                    contextlib.redirect_stdout(out):
             self.assert_exits(["serve", "--help"], 0)
         words = " ".join(out.getvalue().split())
         for want in ("Read-only, but for saving a question on a card, answering today's cap card and switching the "
@@ -425,7 +426,8 @@ class HelpAndUsageInProcessTest(unittest.TestCase):
     def test_install_help_names_v2s_own_job_and_who_runs_it(self):
         def words(argv):
             out = io.StringIO()
-            with mock.patch.dict(os.environ, {"COLUMNS": "1000"}), contextlib.redirect_stdout(out):
+            with mock.patch.dict(os.environ, {"COLUMNS": "1000", "PYTHON_COLORS": "0"}), \
+                    contextlib.redirect_stdout(out):
                 self.assert_exits(argv, 0)
             return " ".join(out.getvalue().split())
 

@@ -1563,7 +1563,7 @@ Calls the author made without asking (check them):
   - A fatal error. When a run stops with a config error (config.yaml cannot be read, the lock cannot be opened, the
     data folder fails) and the data folder exists, `gate.run` appends `<UTC time> fatal: <error>` to gate.log, best
     effort, then raises the same error; `ap2 gate` still prints one `ap2: ...` line and exits 1. launchd's own
-    stderr goes to `<data>/gate.err.log` (section 12, "Install").
+    stderr goes to `~/Library/Logs/assistant/gate.err.log` (section 12, "Install").
   - `ap2 gate [--data PATH] [--now ISO]` runs once and prints the run as JSON. `--now` needs a zone (`Z` or an
     offset); a time without one is an argument error (exit 2). `--now` may not be later than the real time plus
     the 5-minute grace, also an argument error: a run writes `last_slot`, makes cards and prunes restore points,
@@ -3472,13 +3472,16 @@ Calls the author made without asking (check them):
     up first). It finds `claude`, `gh`, `git` and `python3` on the current PATH, builds v1's C launcher
     (`autopilot.install.build_launcher`, unchanged) for `bin/ap2` (a launcher that cannot be built, such as a file
     where its folder goes, is one `ap2: cannot build the launcher at ...` line and exit 1, with no plist written and
-    no launchctl call), writes the plist through a temp file, then runs `launchctl bootout gui/<uid>/com.assistant.gate`
-    (its result ignored) and `launchctl bootstrap gui/<uid> <plist>`. A failed bootstrap is one
-    `ap2: launchctl bootstrap failed: ...` line and exit 1. It prints `{label, plist, program, interval, data_dir,
-    mode, tools, note}` as JSON. Install writes only on this Mac, never Jira, Slack or GitHub, so it does not call
-    `require_live`. A second install gives the same plist and the same calls.
-  - `ap2 uninstall` runs `launchctl bootout gui/<uid>/com.assistant.gate` only, removes the plist and the launcher (a
-    missing one is fine) and prints `{label, removed}`. The data folder is kept.
+    no launchctl call), creates the err log's folder `~/Library/Logs/assistant` (a folder that cannot be made is one
+    `ap2: cannot create ...` line and exit 1, with no plist written), writes the plist through a temp file, then runs
+    `launchctl bootout gui/<uid>/com.assistant.gate` (its result ignored) and `launchctl bootstrap gui/<uid> <plist>`.
+    A failed bootstrap is one `ap2: launchctl bootstrap failed: ...` line and exit 1. It prints `{label, plist,
+    program, interval, data_dir, mode, tools, note}` as JSON. Install writes only on this Mac, never Jira, Slack or
+    GitHub, so it does not call `require_live`. A second install gives the same plist and the same calls.
+  - `ap2 uninstall` runs `launchctl bootout gui/<uid>/com.assistant.gate`, then `launchctl print` on the same target
+    to confirm it is gone; a job still loaded is one `ap2: launchctl bootout failed: ...` line and exit 1, with no file
+    removed. Then it removes the plist and the launcher (a missing one is fine) and prints `{label, removed}`. The
+    data folder and the err log are kept.
   - The label is `com.assistant.gate`, never v1's `com.autopilot.gate` or secretary's `com.secretary.gate`: it
     matches the package (`lib/assistant/`) and the data folder (`~/Documents/Assistant`). The plist is
     `~/Library/LaunchAgents/com.assistant.gate.plist`; the launcher is
@@ -3488,23 +3491,39 @@ Calls the author made without asking (check them):
     `note` then says why that can fail in a cloud-synced folder), `StartInterval: 60`, `RunAtLoad: true`,
     `EnvironmentVariables` (`PATH`: the found tools' folders, then v1's system folders, each once; `AP2_DATA`: the
     resolved data folder; no `AUTOPILOT_DATA`), `StandardOutPath: /dev/null` and `StandardErrorPath:
-    <data>/gate.err.log`. stdout is dropped because each run is already in `gate.json` and `gate.log`, and the run's
-    JSON in `gate.log` would add lines without a time (7.4); stderr keeps Python errors and the `ap2: ...` line.
+    ~/Library/Logs/assistant/gate.err.log` (outside the data folder; see "macOS privacy" below). stdout is dropped
+    because each run is already in `gate.json` and `gate.log`, and the run's JSON in `gate.log` would add lines
+    without a time (7.4); stderr keeps Python errors and the `ap2: ...` line.
     Reverse: point stdout at a file.
+  - **[decided by the builder]** macOS privacy. The default data folder sits in `~/Documents`, which macOS guards:
+    a program reads it only after the user allows it in System Settings > Privacy & Security > Files and Folders (or
+    Full Disk Access). The job's program, `assistant-gate`, starts with no such grant, and launchd opens
+    `StandardErrorPath` itself before the program runs, so an err log inside the data folder could stop the job from
+    starting and would be unreadable where doctor points. So the err log is `~/Library/Logs/assistant/gate.err.log`,
+    outside the data folder; install creates its folder and uninstall keeps the log, like the data folder. When the
+    data folder is inside `~/Documents`, `~/Desktop` or `~/Library/Mobile Documents`, install's `note` adds that macOS
+    will ask to let `assistant-gate` into it and the gate cannot run until it is allowed (after the no-compiler note,
+    joined with `; `, when both apply). Reverse: point `StandardErrorPath` back at `<data>/gate.err.log` and drop the
+    note.
   - The plist is v2's only install setting: no `install.json` and no `config.yaml` key (the interval is fixed at 60,
     7.1). Doctor reads the plist back.
   - `ap2 doctor [--data PATH]` is read-only (`datadir.resolve`, never `ensure`: a missing data folder stays missing).
     It prints v1's lines, `ok   <name>: <detail>` or `FAIL <name>: <detail>` then `     fix: ...`, and exits 1 when a
     check fails, 0 otherwise. A check that breaks is a failed line, never a traceback. The checks: `launchd job` (the
     plist reads, its `Label` is v2's, `launchctl print gui/<uid>/com.assistant.gate` exits 0, its `AP2_DATA` is this
-    data folder; fix: `ap2 install` with the same `--data`; `launchctl print` runs only when the plist reads and names
-    v2's label), `gate ran recently` (`gate.json` `last_run_at` under 3 minutes old, 7.4; fix: look at `gate.log` and
-    `gate.err.log`), `data folder` (accepted by the lookup, there, a folder, writable, `config.yaml` reads),
+    data folder, the same text or the same folder by `os.path.samefile`; fix: `ap2 install` with the same `--data`;
+    `launchctl print` runs only when the plist reads and names v2's label), `gate ran recently` (`gate.json`
+    `last_run_at` under 3 minutes old, 7.4; fix: look at `<data>/gate.log` and the err log the plist's
+    `StandardErrorPath` names, else `~/Library/Logs/assistant/gate.err.log`), `data folder` (accepted by the lookup,
+    there, a folder, writable, `config.yaml` reads; when macOS or the file's mode refuses to let doctor read
+    `config.yaml`, the fix says to allow access in System Settings > Privacy & Security > Files and Folders, or Full
+    Disk Access, for `assistant-gate` and for the terminal running doctor, not to fix the file),
     `tool claude`, `tool gh`, `tool git`, `tool python3` (found on the PATH written in the plist, the one launchd
     gives the job; on the current PATH, said so, when there is no plist; `clang` is not checked, since only install
     needs it and it has a fallback), `active profile` (`profiles.active` loads; no key or models command runs; fix:
     `profiles.FIX`) and `mode` (`shadow` or `live`, reported, not judged: it fails only when `config.yaml` cannot be
-    read).
+    read, with the same privacy fix when access is refused). A fix that says to run `ap2 install` again (the launchd
+    job, the data folder, the tools) carries the same `--data`.
 - How the local server pushes updates to an open page (polling is fine).
   - **[decided by the builder]** Polling: the page asks `/api/state` every 10 seconds and redraws the top bar,
     the rail and the open list, so the heartbeat and new cards show without a reload.
