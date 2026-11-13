@@ -828,10 +828,12 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   after a profile's env so a profile cannot undo it), so the user's git aliases (`ps = push` would get past the
   `git push` rule) and credential helper are not loaded; the user's own gh aliases are denied by name too
   (`Bash(gh <alias>:*)`), since `gh pm 103` with `pm: pr merge` would merge a PR: the floor reads gh's config file
-  (`$GH_CONFIG_DIR/config.yml`, else `$XDG_CONFIG_HOME/gh/config.yml`, else `~/.config/gh/config.yml`; a regular
-  file only, at most 1 MiB) and never runs gh, takes each key of its top-level `aliases:` map, quotes stripped,
-  that matches `[A-Za-z0-9][A-Za-z0-9_-]*`, but a gh command a review reads with (gh ignores an alias that shadows
-  one), and a read that fails adds nothing; a review's git reads (`git show`, `git log`, `git cat-file`,
+  (`$GH_CONFIG_DIR/config.yml`, else `$XDG_CONFIG_HOME/gh/config.yml`, else `~/.config/gh/config.yml`; links
+  followed; a regular file only, at most 1 MiB) and never runs gh, both the one the daemon's env points at and the
+  one the session's env points at after a profile's env is merged in, takes each key of its top-level `aliases:`
+  map, in block style or in the flow style gh writes once every alias was deleted (`aliases: {pm: pr merge}`),
+  quotes stripped, that matches `[A-Za-z0-9][A-Za-z0-9_-]*`, but a gh command a review reads with (gh ignores an
+  alias that shadows one), and a read that fails adds nothing; a review's git reads (`git show`, `git log`, `git cat-file`,
   `git rev-parse`, `git ls-tree`, and `ap2 review plan --checkout`) need neither, and a third PreToolUse
   hook,
   `{"matcher": "Write", ...: "\"<package>/bin/ap2\" hook-write"}` (`workers.write_guard`). The hook is an

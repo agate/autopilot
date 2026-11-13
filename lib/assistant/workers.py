@@ -324,7 +324,8 @@ def _ap_commands(path: Optional[str]) -> list:
     migrates a v1 data folder it has not migrated yet): `path`'s links are followed, the folder above its `bin` is
     the package, and each `*.py` file directly in its `lib/autopilot/` (in name order, at most AP_MODULES_MAX of
     them) is read and parsed, never imported (`_declared`). Only plain lowercase names with dashes count. No path or
-    no such folder gives an empty list; a file that cannot be read or parsed is skipped."""
+    no such folder gives an empty list; a file that cannot be read or parsed, or fails in any other way, is
+    skipped."""
     if not path:
         return []
     pkg = Path(os.path.realpath(path)).parent.parent / "lib" / "autopilot"
@@ -334,8 +335,11 @@ def _ap_commands(path: Optional[str]) -> list:
         return []
     found = []
     for name in names:
-        found += _declared(pkg / name)
-    return list(dict.fromkeys(n for n in found if _AP_COMMAND.fullmatch(n)))
+        try:
+            found += [n for n in _declared(pkg / name) if _AP_COMMAND.fullmatch(n)]
+        except Exception:  # noqa: BLE001 - one odd module must never stop the floor's build
+            continue
+    return list(dict.fromkeys(found))
 
 
 def _is_command(func) -> bool:
@@ -381,14 +385,14 @@ GH_CONFIG_MAX = 1 << 20
 _GH_ALIAS = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 
 
-def _gh_config() -> Path:
-    """gh's config file, where gh looks for it: `$GH_CONFIG_DIR/config.yml`, else `$XDG_CONFIG_HOME/gh/config.yml`,
-    else `~/.config/gh/config.yml`."""
-    if os.environ.get("GH_CONFIG_DIR"):
-        return Path(os.environ["GH_CONFIG_DIR"]) / "config.yml"
-    if os.environ.get("XDG_CONFIG_HOME"):
-        return Path(os.environ["XDG_CONFIG_HOME"]) / "gh" / "config.yml"
-    return Path(os.path.expanduser("~")) / ".config" / "gh" / "config.yml"
+def _gh_config(environ) -> Path:
+    """gh's config file, where gh run with the env `environ` looks for it: `$GH_CONFIG_DIR/config.yml`, else
+    `$XDG_CONFIG_HOME/gh/config.yml`, else `$HOME/.config/gh/config.yml` (an empty value counts as unset)."""
+    if environ.get("GH_CONFIG_DIR"):
+        return Path(environ["GH_CONFIG_DIR"]) / "config.yml"
+    if environ.get("XDG_CONFIG_HOME"):
+        return Path(environ["XDG_CONFIG_HOME"]) / "gh" / "config.yml"
+    return Path(environ.get("HOME") or os.path.expanduser("~")) / ".config" / "gh" / "config.yml"
 
 
 def _unquote(text: str) -> str:
@@ -398,21 +402,95 @@ def _unquote(text: str) -> str:
     return text
 
 
-def _gh_aliases() -> list:
-    """The names of the user's own gh aliases (`gh alias set pm 'pr merge'`), read from gh's config file
-    (`_gh_config`; a regular file only, at most GH_CONFIG_MAX bytes) and never by running gh: the keys of its
-    top-level `aliases:` map, that is the lines indented one level under an `aliases:` line at column 0, up to the
-    next column-0 key, quotes stripped. Only names gh's own pattern allows count. Any failure (no file, too large,
-    not text) gives an empty list."""
+def _flow_entries(text: str) -> tuple:
+    """The top-level entries of the YAML flow map `text` starts with (`{pm: pr merge, "rv": "pr review"}`, which may
+    span lines), as raw text, and how many characters of `text` it took: commas inside quotes or a nested `{}` or
+    `[]` do not split, and a `#` after a space outside quotes starts a comment. No closing brace: the entries up to
+    the end of `text` (which the file's cap bounds)."""
+    entries, entry, depth, quote, fresh, i = [], [], 0, None, True, 0
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            entry.append(ch)
+            if quote == '"' and ch == "\\":
+                entry.append(text[i + 1:i + 2])
+                i += 2
+                continue
+            if ch == quote:
+                if quote == "'" and text[i + 1:i + 2] == "'":
+                    entry.append("'")
+                    i += 2
+                    continue
+                quote = None
+        elif ch == "#" and (i == 0 or text[i - 1].isspace()):
+            j = text.find("\n", i)
+            i = len(text) if j < 0 else j
+            continue
+        elif ch in "{[":
+            depth += 1
+            if depth > 1:
+                entry.append(ch)
+            fresh = True
+        elif ch in "}]":
+            depth -= 1
+            if depth <= 0:
+                entries.append("".join(entry))
+                return entries, i + 1
+            entry.append(ch)
+        elif ch == "," and depth == 1:
+            entries.append("".join(entry))
+            entry, fresh = [], True
+        else:
+            if ch in "\"'" and fresh:  # a quote opens a quoted scalar only where a scalar starts
+                quote = ch
+            entry.append(ch)
+            if ch == ":" or ch == ",":
+                fresh = True
+            elif not ch.isspace():
+                fresh = False
+        i += 1
+    entries.append("".join(entry))
+    return entries, len(text)
+
+
+def _flow_key(entry: str) -> str:
+    """One flow map entry's key: the quoted text when it starts with a quote, else the text before its first `:`."""
+    entry = entry.strip()
+    if entry[:1] in ("\"", "'"):
+        end = entry.find(entry[0], 1)
+        return entry[1:end] if end > 0 else ""
+    return entry.split(":", 1)[0].strip()
+
+
+def _gh_aliases(path: Path) -> list:
+    """The names of the user's own gh aliases (`gh alias set pm 'pr merge'`), read from gh's config file at `path`
+    (`_gh_config`; links followed, as gh follows them, then a regular file only, at most GH_CONFIG_MAX bytes) and
+    never by running gh: the keys of its top-level `aliases:` map, quotes stripped. In block style these are the
+    lines indented one level under an `aliases:` line at column 0, up to the next column-0 key; in flow style, which
+    gh writes once every alias was deleted (`aliases: {}`, then `aliases: {pm: pr merge}`), the keys of the `{...}`
+    map on that line, over more lines when it runs on (`_flow_entries`). Only names gh's own pattern allows count.
+    Any failure (no file, too large, not text) gives an empty list."""
     try:
-        text = sources.read_regular_capped(_gh_config(), GH_CONFIG_MAX, "too large").decode("utf-8")
+        text = sources.read_regular_capped(os.path.realpath(path), GH_CONFIG_MAX, "too large").decode("utf-8")
     except (OSError, sources.SourceError, UnicodeDecodeError, ValueError):
         return []
     found, inside, indent = [], False, None
-    for line in text.splitlines():
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        i += 1
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         if not line[0].isspace():
+            head, colon, rest = line.partition(":")
+            if colon and _unquote(head) == "aliases" and rest.lstrip().startswith("{"):
+                flow = "\n".join([rest.lstrip()] + lines[i:])
+                entries, used = _flow_entries(flow)
+                found += [k for k in (_unquote(_flow_key(e)) for e in entries) if _GH_ALIAS.fullmatch(k)]
+                i += flow[:used].count("\n")
+                inside, indent = False, None
+                continue
             key = line.split("#", 1)[0].rstrip()
             inside, indent = key.endswith(":") and _unquote(key[:-1]) == "aliases", None
             continue
@@ -481,10 +559,6 @@ def floor(role: str, project: dict, data: Path, env: dict, profile: Optional[dic
         v1_ap = _spellings("ap", str(package_root() / "bin" / "ap"), ap_on_path)
         verbs = dict.fromkeys(roles.V1_AP_COMMANDS + roles.V1_AP_EXTRA + tuple(_ap_commands(ap_on_path)))
         nested += [f"Bash({cmd} {verb}:*)" for verb in verbs for cmd in v1_ap]
-        # The user's own gh aliases (`pm: pr merge` in gh's config file, `_gh_aliases`) run a gh command these rules
-        # deny under a name they do not, so each alias name is denied too; a review uses none. But a name a review's
-        # own reads start with (READ_ONLY_GH_KEPT): gh ignores an alias that shadows its own command. Best effort.
-        nested += [f"Bash(gh {a}:*)" for a in _gh_aliases() if a not in roles.READ_ONLY_GH_KEPT]
         deny += [r for r in dict.fromkeys(nested) if r not in deny]
         # No tool its role does not list, MCP or built-in, but the tool search and `Task` (READ_ONLY_KEPT): v1's
         # outward-verb list leaves an MCP server's delete, update, submit or merge tool open, the session loads
@@ -510,6 +584,16 @@ def floor(role: str, project: dict, data: Path, env: dict, profile: Optional[dic
         # Set after the profile's env, so a profile cannot undo it: no global or system git config (the user's
         # aliases, such as `ps = push`, and the credential helper that pushes with their login), and no prompt.
         out["env"].update(roles.READ_ONLY_GIT_ENV)
+        # The user's own gh aliases (`pm: pr merge` in gh's config file, `_gh_aliases`) run a gh command these rules
+        # deny under a name they do not, so each alias name is denied too; a review uses none. Both the config the
+        # daemon's env points at and the one the session's merged env does (a profile can set GH_CONFIG_DIR,
+        # XDG_CONFIG_HOME or HOME), so this comes after the merge. But a name a review's own reads start with
+        # (READ_ONLY_GH_KEPT): gh ignores an alias that shadows its own command. Best effort.
+        configs = dict.fromkeys([_gh_config(os.environ), _gh_config({**os.environ, **out["env"]})])
+        aliases = [a for c in configs for a in _gh_aliases(c) if a not in roles.READ_ONLY_GH_KEPT]
+        deny = out["permissions"]["deny"]
+        out["permissions"]["deny"] = deny + [r for r in dict.fromkeys(f"Bash(gh {a}:*)" for a in aliases)
+                                             if r not in deny]
     return out
 
 

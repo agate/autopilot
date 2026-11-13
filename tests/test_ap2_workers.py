@@ -4060,8 +4060,8 @@ class PrReviewRoleTest(PrReviewCase):
     def test_the_read_only_floor_takes_only_literal_command_decorators(self):
         # Only the first argument of a `command(...)` or `<x>.command(...)` decorator call, when it is a string
         # literal, names a command: a computed argument, another decorator, a bare `@command`, a call that is not a
-        # decorator, a module that does not parse or is too large, a link, and a file outside `lib/autopilot/`
-        # add nothing.
+        # decorator, a literal that is not a string (`@cli.command(5)`), a module that does not parse or is too
+        # large, a link, and a file outside `lib/autopilot/` add nothing, and none of them stops the floor's build.
         cid = "c-20260105-090000-abcdef"
         env = {"AP2_ROLE": "pr-review", "AP2_CARD": cid, "AP2_RUN_DIR": str(transcripts.run_dir(self.data, cid))}
         modules = {
@@ -4074,7 +4074,10 @@ class PrReviewRoleTest(PrReviewCase):
                         '@cli.command\ndef c(argv):\n    return 0\n\n\n'
                         '@cli.command()\ndef d(argv):\n    return 0\n\n\n'
                         '@cli.command(name="made-up-five")\ndef e(argv):\n    return 0\n\n\n'
-                        'cli.command("made-up-six")(print)\n',
+                        'cli.command("made-up-six")(print)\n\n\n'
+                        '@cli.command(5)\ndef f(argv):\n    return 0\n\n\n'
+                        '@cli.command(None)\ndef g(argv):\n    return 0\n\n\n'
+                        '@cli.command("made-up-also-kept")\ndef h(argv):\n    return 0\n',
             "broken.py": '@cli.command("made-up-seven")\ndef a(argv:\n',
             "huge.py": '@cli.command("made-up-eight")\ndef a(argv):\n    return 0\n'
                        + "#" * (workers_mod.AP_CLI_MAX + 1) + "\n",
@@ -4093,9 +4096,21 @@ class PrReviewRoleTest(PrReviewCase):
             ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
         self.assertIn("Bash(ap made-up-kept:*)", ro)
         found = {r[len("Bash(ap "):-len(":*)")] for r in ro if r.startswith("Bash(ap made-up-")}
-        self.assertEqual(found, {"made-up-kept"})
+        self.assertEqual(found, {"made-up-kept", "made-up-also-kept"})
         for verb in roles.V1_AP_COMMANDS + roles.V1_AP_EXTRA:
             self.assertIn(f"Bash(ap {verb}:*)", ro)
+
+    def test_the_read_only_floor_reads_at_most_ap_modules_max_v1_modules(self):
+        # The floor reads at most AP_MODULES_MAX of the installed v1's modules, in name order.
+        cid = "c-20260105-090000-abcdef"
+        env = {"AP2_ROLE": "pr-review", "AP2_CARD": cid, "AP2_RUN_DIR": str(transcripts.run_dir(self.data, cid))}
+        bin_dir = self._fake_v1(None, None, {
+            "a.py": '@cli.command("made-up-a")\ndef a(argv):\n    return 0\n',
+            "b.py": '@cli.command("made-up-b")\ndef b(argv):\n    return 0\n'})
+        with mock.patch.object(workers_mod, "AP_MODULES_MAX", 1), mock.patch.dict(os.environ, {"PATH": str(bin_dir)}):
+            ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+        self.assertIn("Bash(ap made-up-a:*)", ro)
+        self.assertNotIn("Bash(ap made-up-b:*)", ro)
 
     def _gh_config(self, text, where="dir") -> dict:
         """Writes a made-up gh config.yml (bytes or text; None: none at all) where gh looks for it: `dir` under
@@ -4115,6 +4130,7 @@ class PrReviewRoleTest(PrReviewCase):
         cid = "c-20260105-090000-abcdef"
         env = {"AP2_ROLE": "pr-review", "AP2_CARD": cid, "AP2_RUN_DIR": str(transcripts.run_dir(self.data, cid))}
         text = ("git_protocol: https\naliases:\n    pm: pr merge\n    co: pr checkout\n"
+                "    pr: pr merge\n    api: api -X DELETE x\n"
                 "    \"made-up-quoted\": pr close\n    x/y: pr close\n    deep: |\n        nested: pr merge\n"
                 "hosts:\n    made-up-host:\n        user: made-up\n")
         for where in ("dir", "xdg", "home"):
@@ -4127,9 +4143,71 @@ class PrReviewRoleTest(PrReviewCase):
                 self.assertNotIn("Bash(gh pm:*)", base)
                 for not_alias in ("x/y", "nested", "made-up-host", "user", "git_protocol", "hosts", "aliases"):
                     self.assertNotIn(f"Bash(gh {not_alias}:*)", ro)
+                # An alias named as a gh command a review reads with (`pr`, `api`) is never run by gh, and a rule for
+                # it would shut the review's own reads.
+                for kept in ("pr", "api"):
+                    self.assertNotIn(f"Bash(gh {kept}:*)", ro)
+                prefixes = [r[len("Bash("):-len(":*)")] for r in ro if r.startswith("Bash(") and r.endswith(":*)")]
+                for read in ("gh pr view 42", "gh pr diff 42", "gh api repos/o/r/pulls/42"):
+                    self.assertEqual([p for p in prefixes if (read + " ").startswith(p + " ")], [])
                 self.assertEqual(len(ro), len(set(ro)))
             if where == "home":
                 (self.home / ".config" / "gh" / "config.yml").unlink()
+
+    def test_the_read_only_floor_reads_gh_aliases_written_in_flow_style(self):
+        # Once every alias is deleted gh writes the map on one line (`aliases: {}`) and keeps that style when one is
+        # set again (`aliases: {pm: pr merge}`), so the floor reads a flow map too: each entry's key, quotes
+        # stripped, over more than one line, never a key of a nested map or a value.
+        cid = "c-20260105-090000-abcdef"
+        env = {"AP2_ROLE": "pr-review", "AP2_CARD": cid, "AP2_RUN_DIR": str(transcripts.run_dir(self.data, cid))}
+        cases = (("one entry", "aliases: {pm: pr merge}\n", {"pm"}),
+                 ("quoted", 'git_protocol: https\naliases: {pm: pr merge, "rv": "pr review --approve"}\n'
+                            "hosts:\n    made-up-host:\n        user: made-up\n", {"pm", "rv"}),
+                 ("two lines", "aliases: {pm: pr merge,\n    'mq': 'pr merge, then: x'}\nhosts: {}\n", {"pm", "mq"}),
+                 ("empty", "aliases: {}\nhosts:\n    made-up-host:\n        user: made-up\n", set()),
+                 ("nested", "aliases: {pm: {deep: pr merge}, x/y: z, made-up-co: pr checkout}  # made-up note\n",
+                  {"pm", "made-up-co"}))
+        for name, text, want in cases:
+            with self.subTest(config=name), mock.patch.dict(os.environ, self._gh_config(text)):
+                ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+                found = {r[len("Bash(gh "):-len(":*)")] for r in ro if r.startswith("Bash(gh ")
+                         and r[len("Bash(gh "):-len(":*)")] not in roles.GH_COMMANDS
+                         and " " not in r[len("Bash(gh "):-len(":*)")]}
+                self.assertEqual(found, want)
+                self.assertEqual(len(ro), len(set(ro)))
+
+    def test_the_read_only_floor_follows_a_linked_gh_config(self):
+        # A gh config.yml kept as a link into a dotfiles folder is normal, and gh follows it, so the floor does too;
+        # a link to a FIFO adds nothing and does not hang.
+        cid = "c-20260105-090000-abcdef"
+        env = {"AP2_ROLE": "pr-review", "AP2_CARD": cid, "AP2_RUN_DIR": str(transcripts.run_dir(self.data, cid))}
+        dotfiles = Path(tempfile.mkdtemp(prefix="made-up-dotfiles-", dir=self.tmp))
+        (dotfiles / "config.yml").write_text("aliases:\n    pm: pr merge\n")
+        os.mkfifo(dotfiles / "fifo.yml")
+        for target, want in (("config.yml", True), ("fifo.yml", False)):
+            patch = self._gh_config(None)
+            (Path(patch["GH_CONFIG_DIR"]) / "config.yml").symlink_to(dotfiles / target)
+            with self.subTest(target=target), mock.patch.dict(os.environ, patch):
+                ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+                self.assertEqual("Bash(gh pm:*)" in ro, want)
+
+    def test_the_read_only_floor_denies_the_gh_aliases_of_the_config_a_profile_points_at(self):
+        # A profile's env that sets GH_CONFIG_DIR makes the worker's gh read another config file, so its aliases are
+        # denied too, with those of the config the daemon's own env points at.
+        cid = "c-20260105-090000-abcdef"
+        env = {"AP2_ROLE": "pr-review", "AP2_CARD": cid, "AP2_RUN_DIR": str(transcripts.run_dir(self.data, cid))}
+        own = self._gh_config("aliases:\n    co: pr checkout\n")
+        other = self._gh_config("aliases:\n    pm: pr merge\n")
+        prof = dict(profiles.builtin(), env=dict(other))
+        with mock.patch.dict(os.environ, own):
+            ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env, prof)
+            plain = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env, profiles.builtin())
+        self.assertEqual(ro["env"]["GH_CONFIG_DIR"], other["GH_CONFIG_DIR"])
+        for alias in ("pm", "co"):
+            self.assertIn(f"Bash(gh {alias}:*)", ro["permissions"]["deny"])
+        self.assertIn("Bash(gh co:*)", plain["permissions"]["deny"])
+        self.assertNotIn("Bash(gh pm:*)", plain["permissions"]["deny"])
+        self.assertEqual(len(ro["permissions"]["deny"]), len(set(ro["permissions"]["deny"])))
 
     def test_the_read_only_floor_builds_when_the_gh_config_cannot_be_read(self):
         cid = "c-20260105-090000-abcdef"
