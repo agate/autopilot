@@ -51,6 +51,48 @@ def steps(block):
     return out
 
 
+def step_keys(step):
+    """Keys set directly on one step: the one on its `- ` line and those at that key's indent, comments skipped.
+
+    Keys nested deeper (under `with:` or `env:`) are not the step's own and are left out."""
+    m = re.match(r"^( *- *)([A-Za-z][\w-]*):(.*)$", step[0])
+    if not m:
+        return []
+    keys = [(m.group(2), m.group(3).split("#", 1)[0].strip())]
+    pad = " " * len(m.group(1))
+    for line in step[1:]:
+        m = re.match(rf"^{pad}([A-Za-z][\w-]*):(.*)$", line)
+        if m:
+            keys.append((m.group(1), m.group(2).split("#", 1)[0].strip()))
+    return keys
+
+
+# Either key turns a red run into a green check: `continue-on-error` lets the job or step fail quietly,
+# and `if:` can skip it.
+SWITCHES = ("if", "continue-on-error")
+JOB = "unittest"
+SETUP_PYTHON = "actions/setup-python@"
+
+
+def job_switch_problems(text):
+    """Problems with the job's own `if:` / `continue-on-error:` keys in the workflow `text`; [] when clean."""
+    block = job_block(text, JOB)
+    if block is None:
+        return [f"no `{JOB}:` job"]
+    return [f"the `{JOB}` job sets `{k}: {v}`" for k, v in job_keys(block) if k in SWITCHES]
+
+
+def step_switch_problems(text, marker):
+    """Problems with the `if:` / `continue-on-error:` keys of the one step containing `marker`; [] when clean."""
+    block = job_block(text, JOB)
+    if block is None:
+        return [f"no `{JOB}:` job"]
+    found = [s for s in steps(block) if any(marker in l for l in s)]
+    if len(found) != 1:
+        return [f"want one step containing `{marker}`, got {len(found)}"]
+    return [f"the `{marker}` step sets `{k}: {v}`" for k, v in step_keys(found[0]) if k in SWITCHES]
+
+
 class CiWorkflowTest(unittest.TestCase):
     def setUp(self):
         self.block = job_block(WORKFLOW.read_text(), "unittest")
@@ -122,6 +164,94 @@ class CiWorkflowTest(unittest.TestCase):
         self.assertEqual(len(runs), 1)
         self.assertLess(setups[0], names[0], "setup-python must run before the version print")
         self.assertLess(names[0], runs[0], "the version print must run before the tests")
+
+    # A red run must never show as a green check: `continue-on-error` lets a job or step fail quietly, and an
+    # `if:` can skip the step that sets up or runs the suite.
+
+    def test_job_has_no_skip_or_allow_failure_switch(self):
+        self.assertEqual(job_switch_problems(WORKFLOW.read_text()), [])
+
+    def test_setup_python_step_has_no_skip_or_allow_failure_switch(self):
+        self.assertEqual(step_switch_problems(WORKFLOW.read_text(), SETUP_PYTHON), [])
+
+    def test_run_step_has_no_skip_or_allow_failure_switch(self):
+        self.assertEqual(step_switch_problems(WORKFLOW.read_text(), RUN_COMMAND), [])
+
+
+def insert_after(text, needle, new_line):
+    """A copy of `text` with `new_line` added after the first line that contains `needle`."""
+    lines = text.splitlines()
+    at = next((i for i, l in enumerate(lines) if needle in l), None)
+    if at is None:
+        raise AssertionError(f"no line contains {needle!r}")
+    return "\n".join(lines[:at + 1] + [new_line] + lines[at + 1:]) + "\n"
+
+
+class SwitchCheckTest(unittest.TestCase):
+    """The switch checks above, fed modified copies of the real workflow text (never the file on disk)."""
+
+    def setUp(self):
+        self.text = WORKFLOW.read_text()
+
+    def test_job_level_continue_on_error_true_is_a_problem(self):
+        copy = insert_after(self.text, "  unittest:", "    continue-on-error: true")
+        self.assertEqual(len(job_switch_problems(copy)), 1)
+
+    def test_job_level_continue_on_error_for_one_version_is_a_problem(self):
+        copy = insert_after(self.text, "  unittest:",
+                            "    continue-on-error: ${{ matrix.python-version == '3.14' }}")
+        self.assertEqual(len(job_switch_problems(copy)), 1)
+
+    def test_job_level_if_is_a_problem(self):
+        copy = insert_after(self.text, "  unittest:", "    if: false")
+        self.assertEqual(len(job_switch_problems(copy)), 1)
+
+    def test_if_false_on_the_setup_python_step_is_a_problem(self):
+        copy = insert_after(self.text, SETUP_PYTHON, "        if: false")
+        self.assertEqual(len(step_switch_problems(copy, SETUP_PYTHON)), 1)
+
+    def test_if_as_the_first_key_of_the_setup_python_step_is_a_problem(self):
+        copy = re.sub(r"(?m)^      - (uses: actions/setup-python@)", r"      - if: false\n        \1", self.text)
+        self.assertNotEqual(copy, self.text)
+        self.assertEqual(len(step_switch_problems(copy, SETUP_PYTHON)), 1)
+
+    def test_continue_on_error_on_the_setup_python_step_is_a_problem(self):
+        copy = insert_after(self.text, SETUP_PYTHON, "        continue-on-error: true")
+        self.assertEqual(len(step_switch_problems(copy, SETUP_PYTHON)), 1)
+
+    def test_continue_on_error_true_on_the_run_step_is_a_problem(self):
+        copy = insert_after(self.text, RUN_COMMAND, "        continue-on-error: true")
+        self.assertEqual(len(step_switch_problems(copy, RUN_COMMAND)), 1)
+
+    def test_if_on_the_run_step_is_a_problem(self):
+        copy = insert_after(self.text, RUN_COMMAND, "        if: matrix.python-version == '3.12'")
+        self.assertEqual(len(step_switch_problems(copy, RUN_COMMAND)), 1)
+
+    def test_a_switch_on_another_step_is_not_blamed_on_the_run_step(self):
+        copy = insert_after(self.text, "run: python --version", "        continue-on-error: true")
+        self.assertEqual(step_switch_problems(copy, RUN_COMMAND), [])
+        self.assertEqual(step_switch_problems(copy, SETUP_PYTHON), [])
+
+    def test_a_commented_out_switch_is_not_a_problem(self):
+        copy = insert_after(self.text, "  unittest:", "    # continue-on-error: true")
+        copy = insert_after(copy, SETUP_PYTHON, "        # if: false")
+        copy = insert_after(copy, RUN_COMMAND, "        # continue-on-error: true")
+        self.assertEqual(job_switch_problems(copy), [])
+        self.assertEqual(step_switch_problems(copy, SETUP_PYTHON), [])
+        self.assertEqual(step_switch_problems(copy, RUN_COMMAND), [])
+
+    def test_a_switch_nested_under_with_or_env_is_not_a_problem(self):
+        copy = insert_after(self.text, "python-version: ${{ matrix.python-version }}",
+                            "          continue-on-error: true")
+        copy = insert_after(copy, 'USER: ""', '          GATE: "if: false"')
+        copy = insert_after(copy, 'USER: ""', "          if: false")
+        self.assertEqual(step_switch_problems(copy, SETUP_PYTHON), [])
+        self.assertEqual(step_switch_problems(copy, RUN_COMMAND), [])
+
+    def test_a_missing_job_or_step_is_a_problem(self):
+        # A renamed job or step must not make the check pass with nothing to look at.
+        self.assertEqual(len(job_switch_problems(self.text.replace("  unittest:", "  tests:"))), 1)
+        self.assertEqual(len(step_switch_problems(self.text, "no-such-step")), 1)
 
 
 if __name__ == "__main__":
