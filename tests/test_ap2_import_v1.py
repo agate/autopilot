@@ -379,7 +379,7 @@ class ImportV1Test(unittest.TestCase):
             return lambda s: s[field][1].pop("id")
 
         for field in ("tasks", "decisions"):
-            cases = [(repr(v), set_id(field, v)) for v in ("\ufeff", "\ufeff \x1c", "   ", 3, None)]
+            cases = [(repr(v), set_id(field, v)) for v in ("\ufeff", "\ufeff \x1c", " \ufeff", "\ufeff \ufeff \ufeff", "   ", 3, None)]
             for name, breakit in cases + [("missing", drop_id(field))]:
                 with self.subTest(field=field, id=name):
                     shutil.rmtree(self.v1)
