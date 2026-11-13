@@ -330,13 +330,13 @@ def close_card(data, now, store: Optional[Store] = None) -> None:
 
 def allowance(data, projects, now, p: dict, listing=None, store: Optional[Store] = None) -> dict:
     """May a worker start or resume now on profile `p`? `{"allow": 0 | None, "reason": REASONS, "cause"?, "limit"?,
-    "spent"?, "error"?, "profile"?}`. Paused (any mode): `allow 0`, `reason paused`. A subscription profile: `allow None`, `reason
-    ok`, with no spend parsed, and an unanswered card is taken back. A gateway profile whose key command fails
-    (`keys.check`, cached): `allow 0`, `reason key`, with its `error` and the profile's name, before any spend is read and with no card
-    opened; nothing falls back to the subscription. Otherwise for a gateway profile: today's gateway spend (every
-    gateway profile together) at or over today's limit, or today's cost that cannot be priced (unless accepted),
-    opens the card and is `allow 0`, `reason cap`; otherwise an unanswered card is taken back and it is `allow
-    None`, `reason ok`. A card that cannot be written never lets work start: the refusal stands, with
+    "spent"?, "error"?, "profile"?}`. Paused (any mode): `allow 0`, `reason paused`. A subscription profile: `allow
+    None`, `reason ok`, with no spend parsed, and an unanswered card is taken back. A gateway profile whose key command
+    fails (`keys.check`, cached): `allow 0`, `reason key`, with its `error` and the profile's name, before any spend is
+    read and with no card opened; nothing falls back to the subscription. Otherwise for a gateway profile: today's
+    gateway spend (every gateway profile together) at or over today's limit, or today's cost that cannot be priced
+    (unless accepted), opens the card and is `allow 0`, `reason cap`; otherwise an unanswered card is taken back and it
+    is `allow None`, `reason ok`. A card that cannot be written never lets work start: the refusal stands, with
     `card_error`."""
     pz = paused(data)
     if pz is not None:
