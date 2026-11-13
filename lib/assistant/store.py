@@ -120,7 +120,8 @@ def check_writable(value, what: str = "card is", *, shared: bool = True) -> None
                 raise too_deep()
             depth = len(path) + 1
             # an empty one holds nothing deeper: counted above, never walked into; one already walked from as
-            # deep or deeper holds nothing new (so each is walked at most MAX_DEPTH times, not once per path)
+            # deep or deeper holds nothing new (with the memo, i.e. until the first cycle, each is walked at most
+            # MAX_DEPTH times, not once per path; after it, the budget bounds the work)
             if child and (walked is None or walked.get(id(child), 0) < depth):
                 if walked is not None:
                     walked[id(child)] = depth

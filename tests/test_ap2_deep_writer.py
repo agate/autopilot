@@ -362,6 +362,12 @@ class CycleTest(WriterCase):
         with mock.patch.object(store, "CYCLE_WALK_BUDGET", 8):
             with self.assertRaisesRegex(cards.TooDeepError, r"\Acard is nested too deeply to copy or write\Z"):
                 check_writable(cut_short(2))
+        # after the cycle at d, both the key "b" and the value 1 count: two items
+        with mock.patch.object(store, "CYCLE_WALK_BUDGET", 2):
+            self.assertIsNone(check_writable({"a": d, "b": 1}))
+        with mock.patch.object(store, "CYCLE_WALK_BUDGET", 1):
+            with self.assertRaises(cards.TooDeepError):
+                check_writable({"a": d, "b": 1})
 
     def test_the_budget_is_a_fixed_constant(self):
         self.assertEqual(store.CYCLE_WALK_BUDGET, 100_000)
