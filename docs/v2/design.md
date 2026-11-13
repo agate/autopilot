@@ -807,8 +807,10 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   (`roles.V1_AP_COMMANDS`, a snapshot of v1's own list, reads included: `ap oneoff` runs `claude -p` with a tool
   allowed; `roles.V1_AP_EXTRA`, `profile` and `reply-kind`, which an installed v1 has and the snapshot lacks:
   its `profile add --models-command` makes v1 run a command and its `profile use` rewrites every v1 session's
-  settings; and each command the `ap` on PATH lists in its `commands:` usage line when the floor runs it with no arguments,
-  with no shell, stdin closed and a 5 second limit, only for a read-only role, a run that fails or times out adding
+  settings; and each command the `ap` on PATH declares: the floor follows its links, takes the folder above its
+  `bin` as the package, reads that package's `lib/autopilot/cli.py` as text (a regular file only, at most 1 MiB),
+  parses it, and takes the literal value of its module-level `COMMANDS = (...)` or `[...]`; it never runs or
+  imports that v1, because a run migrates a v1 data folder it has not migrated yet, and a read that fails adds
   nothing) as `Bash(ap <command>:*)`, `Bash(<package>/bin/ap <command>:*)` and the same for the `ap` on PATH, never a
   bare `ap` rule or a whole-path one, which would prefix every `ap2` command, every `ap2` command the review
   does not run (`roles.READ_ONLY_AP2_DENIED`) as Bash deny rules in the same shape, every MCP tool the session
@@ -822,7 +824,12 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   `ToolSearch` and `Task` (the Agent tool's older name) stay open (`roles.READ_ONLY_KEPT`), the git env
   `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1` and `GIT_TERMINAL_PROMPT=0` (`roles.READ_ONLY_GIT_ENV`, set
   after a profile's env so a profile cannot undo it), so the user's git aliases (`ps = push` would get past the
-  `git push` rule) and credential helper are not loaded; a review's git reads (`git show`, `git log`, `git cat-file`,
+  `git push` rule) and credential helper are not loaded; the user's own gh aliases are denied by name too
+  (`Bash(gh <alias>:*)`), since `gh pm 103` with `pm: pr merge` would merge a PR: the floor reads gh's config file
+  (`$GH_CONFIG_DIR/config.yml`, else `$XDG_CONFIG_HOME/gh/config.yml`, else `~/.config/gh/config.yml`; a regular
+  file only, at most 1 MiB) and never runs gh, takes each key of its top-level `aliases:` map, quotes stripped,
+  that matches `[A-Za-z0-9][A-Za-z0-9_-]*`, but a gh command a review reads with (gh ignores an alias that shadows
+  one), and a read that fails adds nothing; a review's git reads (`git show`, `git log`, `git cat-file`,
   `git rev-parse`, `git ls-tree`, and `ap2 review plan --checkout`) need neither, and a third PreToolUse
   hook,
   `{"matcher": "Write", ...: "\"<package>/bin/ap2\" hook-write"}` (`workers.write_guard`). The hook is an

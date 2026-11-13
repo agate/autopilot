@@ -85,6 +85,15 @@ class WorkerCase(unittest.TestCase):
                                              "HOME": str(self.home)})
         patch.start()
         self.addCleanup(patch.stop)
+        # No test reads the developer's own gh config or installed v1: gh's config is looked up under the temp HOME,
+        # and the `ap` on PATH is a made-up one with no v1 package next to it.
+        for name in ("GH_CONFIG_DIR", "XDG_CONFIG_HOME"):
+            os.environ.pop(name, None)
+        no_v1 = self.tmp / "no-v1-bin"
+        no_v1.mkdir()
+        (no_v1 / "ap").write_text("#!/bin/sh\nexit 1\n")
+        (no_v1 / "ap").chmod(0o755)
+        os.environ["PATH"] = f"{no_v1}{os.pathsep}{os.environ.get('PATH', '')}"
         self.clock = Clock()
         self.wt = self.tmp / "worktree"
         self.wt.mkdir()
@@ -3955,29 +3964,37 @@ class PrReviewRoleTest(PrReviewCase):
             with self.subTest(read=read):
                 self.assertEqual([p for p in prefixes if read.startswith(p)], [])
 
-    def _fake_ap(self, body: str) -> Path:
-        """A made-up `ap` script in its own temp bin folder; returns the folder."""
-        bin_dir = Path(tempfile.mkdtemp(prefix="made-up-ap-bin-", dir=self.tmp))
-        ap = bin_dir / "ap"
-        ap.write_text("#!/bin/sh\n" + body)
+    def _fake_v1(self, cli_text, ran=None) -> Path:
+        """A made-up installed v1 in its own temp folder: `<root>/bin/ap`, a script that would touch `ran` if it were
+        ever run, and `<root>/lib/autopilot/cli.py` holding `cli_text` (bytes or text; None: no cli.py). Returns the
+        `bin` folder."""
+        root = Path(tempfile.mkdtemp(prefix="made-up-v1-", dir=self.tmp))
+        (root / "bin").mkdir()
+        ap = root / "bin" / "ap"
+        ap.write_text("#!/bin/sh\n" + (f"/usr/bin/touch '{ran}'\n" if ran else "")
+                      + "echo 'commands: run-was-read' >&2\nexit 2\n")
         ap.chmod(0o755)
-        return bin_dir
+        if cli_text is not None:
+            (root / "lib" / "autopilot").mkdir(parents=True)
+            cli = root / "lib" / "autopilot" / "cli.py"
+            cli.write_bytes(cli_text) if isinstance(cli_text, bytes) else cli.write_text(cli_text)
+        return root / "bin"
 
-    def test_the_read_only_floor_denies_every_command_the_ap_on_path_lists(self):
+    def test_the_read_only_floor_denies_every_command_the_installed_v1_declares(self):
         # The `ap` on PATH can be an installed v1 with more commands than the in-repo snapshot (`ap profile add
         # --models-command ...` runs a command; `ap profile use` rewrites every v1 session's settings). The floor
-        # runs it with no arguments and denies each plain command its `commands:` line lists, in every spelling,
-        # plus the fixed extra list; never a word that is not a plain lowercase command name.
+        # reads that v1's `lib/autopilot/cli.py` (never runs it: a run migrates v1's data folder) and denies each
+        # plain command name its literal COMMANDS holds, in every spelling, plus the fixed extra list; never a word
+        # that is not a plain lowercase command name.
         cid = "c-20260105-090000-abcdef"
         env = {"AP2_ROLE": "pr-review", "AP2_CARD": cid, "AP2_RUN_DIR": str(transcripts.run_dir(self.data, cid))}
         ran = self.tmp / "made-up-ap-ran"
-        bin_dir = self._fake_ap(f"/usr/bin/touch '{ran}'\necho 'usage: ap <command> [args]' >&2\n"
-                                "echo 'commands: access, made-up-verb, Bad, rm -rf, x/y, ' >&2\nexit 2\n")
+        bin_dir = self._fake_v1('COMMANDS = ("made-up-verb", "access", "Bad", "x/y")\n', ran)
         with mock.patch.dict(os.environ, {"PATH": str(bin_dir)}):
             base = workers_mod.floor("implement", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
-            self.assertFalse(ran.exists())  # a worker role never runs it
             ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
-        self.assertTrue(ran.exists())
+        self.assertFalse(ran.exists())  # read, never run
+        self.assertNotIn("Bash(ap run-was-read:*)", ro)
         spellings = list(dict.fromkeys(["ap", str(ROOT / "bin" / "ap"), str(bin_dir / "ap"),
                                         os.path.realpath(bin_dir / "ap")]))
         for verb in ("made-up-verb", "access") + roles.V1_AP_EXTRA:
@@ -3985,27 +4002,94 @@ class PrReviewRoleTest(PrReviewCase):
                 with self.subTest(verb=verb, ap=ap):
                     self.assertIn(f"Bash({ap} {verb}:*)", ro)
                     self.assertNotIn(f"Bash({ap} {verb}:*)", base)
-        for bad in ("Bad", "rm", "rm -rf", "x/y", ""):
+        for bad in ("Bad", "x/y", ""):
             with self.subTest(bad=bad):
                 self.assertNotIn(f"Bash(ap {bad}:*)", ro)
         self.assertNotIn("Bash(ap:*)", ro)
         self.assertEqual(len(ro), len(set(ro)))
 
-    def test_the_read_only_floor_builds_when_the_ap_on_path_hangs_or_fails(self):
-        # A run that times out or prints no `commands:` line adds nothing: the in-repo list and the fixed extra
-        # list are still denied.
+    def test_the_read_only_floor_never_runs_the_ap_on_path(self):
+        # Running v1's `ap` (even with no arguments) loads every v1 module and migrates a v1 data folder it has not
+        # migrated yet, so the floor only reads files: the made-up `ap` would leave a marker if it ran.
         cid = "c-20260105-090000-abcdef"
         env = {"AP2_ROLE": "pr-review", "AP2_CARD": cid, "AP2_RUN_DIR": str(transcripts.run_dir(self.data, cid))}
-        for name, body in (("hangs", "/bin/sleep 30\n"), ("fails", "echo 'no list here' >&2\nexit 1\n")):
-            bin_dir = self._fake_ap(body)
-            with self.subTest(ap=name), mock.patch.dict(os.environ, {"PATH": str(bin_dir)}), \
-                    mock.patch.object(workers_mod, "AP_LIST_TIMEOUT", 0.5):
-                began = time.monotonic()
+        for name, cli_text in (("a literal list", 'COMMANDS = ["made-up-verb"]\n'), ("no cli.py", None)):
+            ran = self.tmp / f"made-up-ap-ran-{len(name)}"
+            bin_dir = self._fake_v1(cli_text, ran)
+            with self.subTest(cli=name), mock.patch.dict(os.environ, {"PATH": str(bin_dir)}):
+                workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env)
+                self.assertFalse(ran.exists())
+
+    def test_the_read_only_floor_builds_when_the_installed_v1_cannot_be_read(self):
+        # A cli.py that does not parse, holds no COMMANDS, is too large, is not a regular file, or whose COMMANDS is
+        # not a literal adds nothing: the in-repo list and the fixed extra list are still denied.
+        cid = "c-20260105-090000-abcdef"
+        env = {"AP2_ROLE": "pr-review", "AP2_CARD": cid, "AP2_RUN_DIR": str(transcripts.run_dir(self.data, cid))}
+        huge = 'COMMANDS = ("made-up-verb",)\n' + "#" * (workers_mod.AP_CLI_MAX + 1) + "\n"
+        cases = (("a syntax error", 'COMMANDS = ("made-up-verb",\n'), ("no COMMANDS", "OTHER = ('made-up-verb',)\n"),
+                 ("a huge file", huge), ("not a literal", 'COMMANDS = tuple(["made-up-verb"]) + X\n'),
+                 ("not text", b"\xff\xfe COMMANDS = ('made-up-verb',)\n"), ("no cli.py", None),
+                 ("a folder", "folder"))
+        for name, cli_text in cases:
+            bin_dir = self._fake_v1(None if cli_text == "folder" else cli_text)
+            if cli_text == "folder":
+                (bin_dir.parent / "lib" / "autopilot" / "cli.py").mkdir(parents=True)
+            with self.subTest(cli=name), mock.patch.dict(os.environ, {"PATH": str(bin_dir)}):
                 ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
-                self.assertLess(time.monotonic() - began, 10)
                 for verb in roles.V1_AP_COMMANDS + roles.V1_AP_EXTRA:
                     for ap in ("ap", str(ROOT / "bin" / "ap"), str(bin_dir / "ap")):
                         self.assertIn(f"Bash({ap} {verb}:*)", ro)
+                # The fixed extra list, pinned: an installed v1 has these and the in-repo snapshot lacks them.
+                for verb in ("profile", "reply-kind"):
+                    self.assertIn(f"Bash(ap {verb}:*)", ro)
+                self.assertNotIn("Bash(ap made-up-verb:*)", ro)
+                self.assertNotIn("Bash(ap run-was-read:*)", ro)
+
+    def _gh_config(self, text, where="dir") -> dict:
+        """Writes a made-up gh config.yml (bytes or text; None: none at all) where gh looks for it: `dir` under
+        GH_CONFIG_DIR, `xdg` under XDG_CONFIG_HOME, `home` under the temp HOME. Returns the env to patch in."""
+        folder = Path(tempfile.mkdtemp(prefix="made-up-gh-", dir=self.tmp))
+        target = {"dir": folder, "xdg": folder / "gh", "home": self.home / ".config" / "gh"}[where]
+        target.mkdir(parents=True, exist_ok=True)
+        if text is not None:
+            f = target / "config.yml"
+            f.write_bytes(text) if isinstance(text, bytes) else f.write_text(text)
+        return {"dir": {"GH_CONFIG_DIR": str(folder)}, "xdg": {"XDG_CONFIG_HOME": str(folder)}, "home": {}}[where]
+
+    def test_the_read_only_floor_denies_the_users_gh_aliases(self):
+        # gh's own aliases (`gh alias set pm 'pr merge'`) run a gh command the snapshot rules deny under a name they
+        # do not: `gh pm 103 --squash` merges a PR as the user. The floor reads gh's config file (never runs gh) and
+        # denies each alias name; a worker role gets no such rule.
+        cid = "c-20260105-090000-abcdef"
+        env = {"AP2_ROLE": "pr-review", "AP2_CARD": cid, "AP2_RUN_DIR": str(transcripts.run_dir(self.data, cid))}
+        text = ("git_protocol: https\naliases:\n    pm: pr merge\n    co: pr checkout\n"
+                "    \"made-up-quoted\": pr close\n    x/y: pr close\n    deep: |\n        nested: pr merge\n"
+                "hosts:\n    made-up-host:\n        user: made-up\n")
+        for where in ("dir", "xdg", "home"):
+            patch = self._gh_config(text, where)
+            with self.subTest(where=where), mock.patch.dict(os.environ, patch):
+                base = workers_mod.floor("implement", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+                ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+                for alias in ("pm", "co", "made-up-quoted", "deep"):
+                    self.assertIn(f"Bash(gh {alias}:*)", ro)
+                self.assertNotIn("Bash(gh pm:*)", base)
+                for not_alias in ("x/y", "nested", "made-up-host", "user", "git_protocol", "hosts", "aliases"):
+                    self.assertNotIn(f"Bash(gh {not_alias}:*)", ro)
+                self.assertEqual(len(ro), len(set(ro)))
+            if where == "home":
+                (self.home / ".config" / "gh" / "config.yml").unlink()
+
+    def test_the_read_only_floor_builds_when_the_gh_config_cannot_be_read(self):
+        cid = "c-20260105-090000-abcdef"
+        env = {"AP2_ROLE": "pr-review", "AP2_CARD": cid, "AP2_RUN_DIR": str(transcripts.run_dir(self.data, cid))}
+        clean = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+        for name, text in (("missing", None), ("empty", ""), ("garbled", b"\xff\xfe\x00aliases:\n  pm: pr merge\n"),
+                           ("no aliases", "hosts:\n    pm: x\n"), ("too large", "aliases:\n    pm: pr merge\n"
+                                                                   + "#" * (workers_mod.GH_CONFIG_MAX + 1))):
+            with self.subTest(config=name), mock.patch.dict(os.environ, self._gh_config(text)):
+                ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+                self.assertEqual(ro, clean)
+                self.assertNotIn("Bash(gh pm:*)", ro)
 
     def test_the_read_only_floor_denies_every_claude_version_next_to_the_one_it_links_to(self):
         # The folder the claude link leads into keeps older full claude binaries; `<folder>/<old version> -p ...`

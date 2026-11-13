@@ -35,6 +35,9 @@ class WorkerCommandTest(unittest.TestCase):
         bindir = self.tmp / "bin"
         bindir.mkdir()
         (bindir / "claude").symlink_to(FAKE)
+        # A made-up `ap` with no v1 package next to it, so no test reads the developer's installed v1.
+        (bindir / "ap").write_text("#!/bin/sh\nexit 1\n")
+        (bindir / "ap").chmod(0o755)
         self.fake_home = self.tmp / "fake-claude"
         self.fake_home.mkdir()
         self.log = self.tmp / "claude.log"
@@ -42,7 +45,8 @@ class WorkerCommandTest(unittest.TestCase):
         self.wt.mkdir()
         # A user at a terminal: no AP2_* (a worker's own session carries AP2_ROLE and AP2_CARD).
         self.env = {k: v for k, v in os.environ.items()
-                    if k != "LC_ALL" and not k.startswith(("AUTOPILOT_", "FAKE_", "AP2_"))}
+                    if k not in ("LC_ALL", "GH_CONFIG_DIR", "XDG_CONFIG_HOME")
+                    and not k.startswith(("AUTOPILOT_", "FAKE_", "AP2_"))}
         self.env.update(HOME=str(self.home), AP2_DATA=str(self.data), PYTHON_COLORS="0", PYTHONIOENCODING="utf-8",
                         PATH=f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}",
                         FAKE_CLAUDE_HOME=str(self.fake_home), FAKE_CLAUDE_LOG=str(self.log))

@@ -30,10 +30,13 @@ FLOORS = MappingProxyType({
                  "`claude` itself, which would start a session under the user's own settings, not this floor "
                  "(READ_ONLY_BASH_DENIED, the claude path the worker runs, and the other claude versions in "
                  "the folder its link leads into), every v1 `ap` command "
-                 "(V1_AP_COMMANDS, V1_AP_EXTRA, and each one the `ap` on PATH lists when run with no arguments), "
+                 "(V1_AP_COMMANDS, V1_AP_EXTRA, and each one the `ap` on PATH declares in its cli.py, which is "
+                 "read and never run), "
                  "and the ap2 commands a review does not run (READ_ONLY_AP2_DENIED) are denied by rule. The "
                  "session reads no global or system git config, so the user's git aliases and credential helper "
-                 "are not loaded (READ_ONLY_GIT_ENV). These rules are best effort: they match "
+                 "are not loaded (READ_ONLY_GIT_ENV). Each of the user's own gh aliases (the `aliases:` map "
+                 "in gh's config file, read and never run) is denied by rule as well, since `gh pm` with "
+                 "`pm: pr merge` would merge a PR. These rules are best effort: they match "
                  "the command's text, so a program that runs `claude` or `git` for the worker (`python3 -c`, say) "
                  "gets past them, and so does a spelling that puts an option before the gh or git subcommand "
                  "(`gh -R o/r pr merge`, `gh pr -R o/r merge`, `git -C . push`); closing that needs an "
@@ -107,8 +110,9 @@ V1_AP_COMMANDS = ("access", "archive", "bind", "budget", "check-package", "confi
                   "status", "stop", "task", "tasks", "tick", "unbind", "uninstall", "worker")
 # Commands an installed v1 has that this snapshot lacks, denied as well: `ap profile add ... --models-command`
 # makes v1 run a command (a nested `claude -p`, say), and `ap profile use` rewrites every v1 session's settings.
-# The installed `ap` on PATH can be a separate copy, so `workers.floor` also runs it with no arguments and denies
-# each command its usage line lists (`workers._ap_commands`); this list holds when that run fails.
+# The installed `ap` on PATH can be a separate copy, so `workers.floor` also reads its `lib/autopilot/cli.py` (never
+# runs it: a run migrates v1's data folder) and denies each command its literal COMMANDS holds
+# (`workers._ap_commands`); this list holds when that read finds none.
 V1_AP_EXTRA = ("profile", "reply-kind")
 # Built-in tools a read-only role is denied even when the tool discovery does not list them, less the role's own
 # tools (`workers.floor` drops those): v1's `replies.DISALLOWED` without `Task`, plus the claude.ai page tools and the

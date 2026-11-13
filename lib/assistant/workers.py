@@ -72,8 +72,9 @@ another ask is open then, the line's note says so, and a later `check` raises th
 (`paused`, `closed: idle`). Its floor is read-only: no Edit or NotebookEdit, no gh command group the review does not
 need, no git command that pushes, commits or sets an alias, a config value or a remote, and no `claude`, which would
 start a session outside the floor (`roles.READ_ONLY_BASH_DENIED`, and the worker's own claude path), no v1 `ap`
-command (`roles.V1_AP_COMMANDS`, `roles.V1_AP_EXTRA`, and each one the `ap` on PATH lists), no `ap2` command the
-review does not run (`roles.READ_ONLY_AP2_DENIED`), all best effort, no global or system git config in its env
+command (`roles.V1_AP_COMMANDS`, `roles.V1_AP_EXTRA`, and each one the `ap` on PATH declares in its cli.py, read and
+never run), no gh alias of the user's (read from gh's config file), no `ap2` command the review does not run
+(`roles.READ_ONLY_AP2_DENIED`), all best effort, no global or system git config in its env
 (`roles.READ_ONLY_GIT_ENV`), and a Write hook (`ap2 hook-write`, `write_guard`) allows a Write only to its report or
 `question.json` in the card's run directory; a path it cannot resolve, and any error in the hook, is denied.
 
@@ -83,6 +84,7 @@ and archiving work in shadow mode. v1 is reused by import (`lib/autopilot/worker
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -309,37 +311,92 @@ def _versions(*paths: Optional[str]) -> list:
     return list(dict.fromkeys(out))
 
 
-# How long the read-only floor waits for the `ap` on PATH to print its command list (`_ap_commands`).
-AP_LIST_TIMEOUT = 5
+# The most bytes of an installed v1's `lib/autopilot/cli.py` the read-only floor reads (`_ap_commands`).
+AP_CLI_MAX = 1 << 20
 # A plain v1 command name: lowercase words joined by dashes.
 _AP_COMMAND = re.compile(r"[a-z]+(?:-[a-z]+)*")
 
 
 def _ap_commands(path: Optional[str]) -> list:
-    """The commands the `ap` at `path` lists: it is run with no arguments (no shell, stdin closed, at most
-    AP_LIST_TIMEOUT seconds, its whole process group killed after that) and each `commands:` line it prints, on
-    stdout or stderr, is read as a comma-separated list. Only plain lowercase names with dashes count. Any failure
-    (no path, cannot start, timeout, nothing to read) gives an empty list; the exit code is ignored, since v1 exits
-    2 when it prints its usage."""
+    """The commands the installed v1 `ap` at `path` declares, read and never run (a run loads every v1 module and
+    migrates a v1 data folder it has not migrated yet): `path`'s links are followed, the folder above its `bin` is
+    the package, and its `lib/autopilot/cli.py` is read as text (a regular file only, at most AP_CLI_MAX bytes) and
+    parsed, never imported. The module-level `COMMANDS = (...)` or `[...]` assignment's literal value is the list;
+    only plain lowercase names with dashes count. Any failure (no path, no such file, too large, not a regular file,
+    a syntax error, no COMMANDS, a value that is not a literal list) gives an empty list."""
     if not path:
         return []
     try:
-        proc = subprocess.Popen([path], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                start_new_session=True)
-    except (OSError, ValueError):
+        cli = Path(os.path.realpath(path)).parent.parent / "lib" / "autopilot" / "cli.py"
+        tree = ast.parse(sources.read_regular_capped(cli, AP_CLI_MAX, "too large").decode("utf-8"))
+    except (OSError, sources.SourceError, UnicodeDecodeError, SyntaxError, ValueError, RecursionError,
+            MemoryError):
+        return []
+    value = None
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "COMMANDS" for t in node.targets):
+            value = node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == "COMMANDS":
+            value = node.value
+    if not isinstance(value, (ast.Tuple, ast.List)):
         return []
     try:
-        out, _ = proc.communicate(timeout=AP_LIST_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        _kill_group(proc)  # and any child it started, so none holds the pipe open
-        proc.kill()
-        proc.communicate()
+        names = ast.literal_eval(value)
+    except (ValueError, TypeError, SyntaxError, RecursionError, MemoryError):
         return []
-    found = []
-    for line in out.decode("utf-8", "replace").splitlines():
-        if line.startswith("commands:"):
-            words = [w.strip() for w in line[len("commands:"):].split(",")]
-            found += [w for w in words if _AP_COMMAND.fullmatch(w)]
+    return list(dict.fromkeys(n for n in names if isinstance(n, str) and _AP_COMMAND.fullmatch(n)))
+
+
+# The most bytes of gh's config file the read-only floor reads (`_gh_aliases`).
+GH_CONFIG_MAX = 1 << 20
+# A gh alias name the floor writes a rule for.
+_GH_ALIAS = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
+
+
+def _gh_config() -> Path:
+    """gh's config file, where gh looks for it: `$GH_CONFIG_DIR/config.yml`, else `$XDG_CONFIG_HOME/gh/config.yml`,
+    else `~/.config/gh/config.yml`."""
+    if os.environ.get("GH_CONFIG_DIR"):
+        return Path(os.environ["GH_CONFIG_DIR"]) / "config.yml"
+    if os.environ.get("XDG_CONFIG_HOME"):
+        return Path(os.environ["XDG_CONFIG_HOME"]) / "gh" / "config.yml"
+    return Path(os.path.expanduser("~")) / ".config" / "gh" / "config.yml"
+
+
+def _unquote(text: str) -> str:
+    text = text.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        return text[1:-1]
+    return text
+
+
+def _gh_aliases() -> list:
+    """The names of the user's own gh aliases (`gh alias set pm 'pr merge'`), read from gh's config file
+    (`_gh_config`; a regular file only, at most GH_CONFIG_MAX bytes) and never by running gh: the keys of its
+    top-level `aliases:` map, that is the lines indented one level under an `aliases:` line at column 0, up to the
+    next column-0 key, quotes stripped. Only names gh's own pattern allows count. Any failure (no file, too large,
+    not text) gives an empty list."""
+    try:
+        text = sources.read_regular_capped(_gh_config(), GH_CONFIG_MAX, "too large").decode("utf-8")
+    except (OSError, sources.SourceError, UnicodeDecodeError, ValueError):
+        return []
+    found, inside, indent = [], False, None
+    for line in text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line[0].isspace():
+            key = line.split("#", 1)[0].rstrip()
+            inside, indent = key.endswith(":") and _unquote(key[:-1]) == "aliases", None
+            continue
+        if not inside:
+            continue
+        depth = len(line) - len(line.lstrip())
+        indent = depth if indent is None else indent
+        if depth != indent or ":" not in line:
+            continue
+        name = _unquote(line.strip().split(":", 1)[0])
+        if _GH_ALIAS.fullmatch(name):
+            found.append(name)
     return list(dict.fromkeys(found))
 
 
@@ -387,8 +444,8 @@ def floor(role: str, project: dict, data: Path, env: dict, profile: Optional[dic
         # denied as typed, as the worker's own path and the one on PATH, where each link leads, and every other
         # version in the folder a link leads into (`_versions`). No v1 command either (`ap oneoff` runs
         # `claude -p`): bare, at `<package>/bin/ap`, and the `ap` on PATH. The commands are the in-repo list, the
-        # fixed extra list (V1_AP_EXTRA), and each one the `ap` on PATH lists (`_ap_commands`: it can be an
-        # installed v1 with commands the in-repo one lacks; run only here, for a read-only role). Best effort.
+        # fixed extra list (V1_AP_EXTRA), and each one the `ap` on PATH declares (`_ap_commands`: it can be an
+        # installed v1 with commands the in-repo one lacks; its cli.py is read, never run). Best effort.
         found = shutil.which("claude")
         nested = [f"Bash({c}:*)" for c in _spellings("claude", claude or found or "claude", found)]
         nested += [f"Bash({c}:*)" for c in _versions(claude, found)]
@@ -396,6 +453,10 @@ def floor(role: str, project: dict, data: Path, env: dict, profile: Optional[dic
         v1_ap = _spellings("ap", str(package_root() / "bin" / "ap"), ap_on_path)
         verbs = dict.fromkeys(roles.V1_AP_COMMANDS + roles.V1_AP_EXTRA + tuple(_ap_commands(ap_on_path)))
         nested += [f"Bash({cmd} {verb}:*)" for verb in verbs for cmd in v1_ap]
+        # The user's own gh aliases (`pm: pr merge` in gh's config file, `_gh_aliases`) run a gh command these rules
+        # deny under a name they do not, so each alias name is denied too; a review uses none. But a name a review's
+        # own reads start with (READ_ONLY_GH_KEPT): gh ignores an alias that shadows its own command. Best effort.
+        nested += [f"Bash(gh {a}:*)" for a in _gh_aliases() if a not in roles.READ_ONLY_GH_KEPT]
         deny += [r for r in dict.fromkeys(nested) if r not in deny]
         # No tool its role does not list, MCP or built-in, but the tool search and `Task` (READ_ONLY_KEPT): v1's
         # outward-verb list leaves an MCP server's delete, update, submit or merge tool open, the session loads
