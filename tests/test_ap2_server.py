@@ -1489,6 +1489,19 @@ class ProfileChooseRouteTest(ProfileRouteCase):
         live.assert_not_called()
         self.assertEqual(profiles.active_name(self.data), "h")
 
+    def test_default_is_stored_as_no_model_and_echoed_back_as_default(self):
+        # A profile with no models command offers `default` (Claude Code's own model); choosing it saves a null
+        # model, while the reply names what the user chose.
+        self.assertIn(profiles.DEFAULT_MODEL, profiles.model_choices(self.data, profiles.load(self.data, "subscription")))
+        status, _, body = self.choose("subscription", profiles.DEFAULT_MODEL, "low")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["chosen"], {"name": "subscription", "model": "default", "effort": "low"})
+        self.assertEqual(body["active"], "subscription")
+        saved = profiles.load(self.data, "subscription")
+        self.assertIsNone(saved["model"])
+        self.assertEqual(saved["effort"], "low")
+        self.assertEqual(self.runs(), 0)  # the subscription has no models command to run
+
     def test_a_switch_and_a_choice_wait_for_each_other(self):
         self.start()
         order, ready = [], threading.Barrier(2)
@@ -2037,7 +2050,7 @@ S.state = {access: {profile: {name: 'g', mode: 'gateway', label: 'Team'}, cap: {
   {name: 'subscription', label: 'subscription', mode: 'subscription', needs_choice: false}],
   broken_profiles: [{name: 'x', error: 'BROKEN-E'}]}, usage: {mode: 'gateway', windows: [], gateway: {}}};
 """
-    SWITCH_FUNCS = ("errBox", "redrawAccess", "afterSwitch", "switchProfile", "choiceBox", "accessSet")
+    SWITCH_FUNCS = ("errBox", "redrawAccess", "onSettings", "afterSwitch", "switchProfile", "choiceBox", "accessSet")
 
     @unittest.skipUnless(shutil.which("node"), "needs node")
     def test_settings_has_one_switch_button_per_loading_profile_and_the_active_one_is_pressed(self):
@@ -2154,6 +2167,75 @@ const box = n => find(n, 'div').filter(d => d.attrs.id === 'choice-box');
         self.assertIsNone(out["after"])
         self.assertEqual(out["cancel"], [None, 0, []])
         self.assertEqual(out["gone"], [0, None])
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_a_reply_that_lands_after_settings_was_left_opens_no_box_and_shows_no_error(self):
+        # The user clicks, then leaves Settings before the post answers: show() has dropped the box and the error,
+        # so the late reply must not bring them back (they would reappear on the next visit to Settings).
+        out = self.run_access(page_functions(*self.SWITCH_FUNCS) + self.DOM_STUBS + self.SWITCH_STUBS + """
+const later = reply => async (path, body) => {
+  calls.push(['post', path, body]);
+  S.route = {name: 'lane', arg: 'needs'};  // left Settings while the post ran
+  if (reply instanceof Error) throw reply;
+  return reply;
+};
+const err = Object.assign(new Error('REASON'), {status: 409});
+(async () => {
+  const runs = {};
+  S.choice = null; S.switchError = null; S.switching = false;
+  post = later({needs_choice: true, choices: CHOICES});
+  await switchProfile('h');
+  runs.choice = [S.choice, S.switchError, S.switching];
+  S.route = {name: 'settings', arg: null};
+  post = later(err);
+  await switchProfile('h');
+  runs.refused = [S.choice, S.switchError, S.switching];
+  // A switch that went through still reads the new state, but draws no Settings on another screen.
+  S.route = {name: 'settings', arg: null}; calls.length = 0;
+  post = later({active: 'subscription', was: 'g'});
+  await switchProfile('subscription');
+  runs.switched = calls.slice();
+  // The choice box's own post, refused after Settings was left: no error is put back on the box.
+  S.route = {name: 'settings', arg: null};
+  post = async () => ({needs_choice: true, choices: CHOICES});
+  await switchProfile('h');
+  const c = S.choice;
+  post = later(err);
+  await find(find(accessSet(), 'div').filter(d => d.attrs.id === 'choice-box')[0], 'button')[0].attrs.onclick();
+  runs.box = [c.error, c.busy];
+  console.log(JSON.stringify(runs));
+})();
+""")
+        self.assertEqual(out["choice"], [None, None, False])
+        self.assertEqual(out["refused"], [None, None, False])
+        self.assertEqual(out["switched"], [["post", "/api/profile/use", {"name": "subscription"}], ["poll"]])
+        self.assertEqual(out["box"], [None, False])
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_leaving_settings_drops_the_choice_box_and_the_switch_error(self):
+        out = self.run_access(page_functions("parseRoute", "show") + """
+const LANES = ['needs', 'running', 'planned', 'done'];
+const location = {hash: ''};
+const noop = () => {}, later = async () => {};
+const drawRail = noop, panes = noop, drawCard = noop;
+const loadList = later, loadCard = later, drawSources = later, drawTemplates = later, drawSettings = later;
+const $ = () => ({value: ''});
+(async () => {
+  const runs = {};
+  for (const hash of ['#/settings', '#/lane/running', '#/card/X', '#/sources', '#/templates']) {
+    location.hash = hash;
+    S.capNote = null;
+    S.choice = {name: 'h'}; S.switchError = {key: 'access.switch_refused', text: 'REASON'};
+    await show();
+    runs[hash] = [S.choice, S.switchError];
+  }
+  console.log(JSON.stringify(runs));
+})();
+""")
+        self.assertEqual(out.pop("#/settings"), [{"name": "h"}, {"key": "access.switch_refused", "text": "REASON"}])
+        for hash, kept in out.items():
+            with self.subTest(hash):
+                self.assertEqual(kept, [None, None])
 
     def test_every_new_access_label_has_an_en_and_a_zh_text(self):
         labels = self.labels()

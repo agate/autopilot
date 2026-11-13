@@ -982,11 +982,12 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     const old = $('access-set'), box = accessSet();
     if (old && box) old.replaceWith(box);
   }
+  function onSettings() { return !!(S.route && S.route.name === 'settings'); }
   async function afterSwitch() {
     S.choice = null;
     S.switchError = null;
     await poll();
-    if (S.route && S.route.name === 'settings') await drawSettings();
+    if (onSettings()) await drawSettings();
   }
   async function switchProfile(name) {
     // The server's `profiles.use`, as `ap2 profile use`. A profile never chosen switches nothing: the reply lists
@@ -999,12 +1000,14 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
       reply = await post('/api/profile/use', {name});
     } catch (e) {
       S.switching = false;
-      S.switchError = switchError(e);
+      // Settings was left while the post ran: show() has dropped the box and the error, so draw neither again.
+      if (onSettings()) S.switchError = switchError(e);
       redrawAccess();
       return;
     }
     S.switching = false;
     if (reply && reply.needs_choice === true && reply.choices && typeof reply.choices === 'object') {
+      if (!onSettings()) return;  // Settings was left while the post ran: open no box on another screen
       const c = reply.choices;
       S.switchError = null;
       S.choice = {name, choices: c, model: pick(c.models, c.recommended_model), effort: pick(c.efforts, c.recommended_effort),
@@ -1031,6 +1034,7 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
         await post('/api/profile/choose', {name: c.name, model: c.model, effort: c.effort});
       } catch (e) {
         c.busy = false;
+        if (!onSettings()) return;  // Settings was left while the post ran: the box is gone
         c.error = switchError(e);
         redrawAccess();
         return;
