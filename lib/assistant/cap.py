@@ -330,13 +330,13 @@ def close_card(data, now, store: Optional[Store] = None) -> None:
 
 def allowance(data, projects, now, p: dict, listing=None, store: Optional[Store] = None) -> dict:
     """May a worker start or resume now on profile `p`? `{"allow": 0 | None, "reason": REASONS, "cause"?, "limit"?,
-    "spent"?, "error"?}`. Paused (any mode): `allow 0`, `reason paused`. A subscription profile: `allow None`, `reason
-    ok`, with no spend parsed, and an unanswered card is taken back. A gateway profile whose key command fails
-    (`keys.check`, cached): `allow 0`, `reason key`, with its `error`, before any spend is read and with no card
-    opened; nothing falls back to the subscription. Otherwise for a gateway profile: today's gateway spend (every
-    gateway profile together) at or over today's limit, or today's cost that cannot be priced (unless accepted),
-    opens the card and is `allow 0`, `reason cap`; otherwise an unanswered card is taken back and it is `allow
-    None`, `reason ok`. A card that cannot be written never lets work start: the refusal stands, with
+    "spent"?, "error"?, "profile"?}`. Paused (any mode): `allow 0`, `reason paused`. A subscription profile: `allow
+    None`, `reason ok`, with no spend parsed, and an unanswered card is taken back. A gateway profile whose key command
+    fails (`keys.check`, cached): `allow 0`, `reason key`, with its `error` and the profile's name, before any spend is
+    read and with no card opened; nothing falls back to the subscription. Otherwise for a gateway profile: today's
+    gateway spend (every gateway profile together) at or over today's limit, or today's cost that cannot be priced
+    (unless accepted), opens the card and is `allow 0`, `reason cap`; otherwise an unanswered card is taken back and it
+    is `allow None`, `reason ok`. A card that cannot be written never lets work start: the refusal stands, with
     `card_error`."""
     pz = paused(data)
     if pz is not None:
@@ -350,7 +350,7 @@ def allowance(data, projects, now, p: dict, listing=None, store: Optional[Store]
         return out
     err = keys.check(data, p, now)
     if err:
-        return {"allow": 0, "reason": "key", "error": err}
+        return {"allow": 0, "reason": "key", "error": err, "profile": p.get("name")}
     limit = today_limit(data, p, now)
     try:
         t = spend.totals(data, projects, now, "gateway", listing)
@@ -375,9 +375,16 @@ def allowance(data, projects, now, p: dict, listing=None, store: Optional[Store]
 
 
 def refusal(a: dict) -> str:
-    """The one line a refused start or resume says: the reason, today's spend, the limit and the fix."""
+    """The one line a refused start or resume says: the reason, today's spend, the limit and the fix. During the hold
+    after a second rejected key (`error` is `keys.AUTH_AGAIN`) the fix is `keys.KEY_HOLD_FIX`, with NAME replaced by
+    the profile's name when `a` has one; any other key error gets `keys.KEY_FIX`."""
     if a.get("reason") == "key":
-        return f"the gateway key does not work: {a.get('error') or 'the key command failed'}. {keys.KEY_FIX}"
+        err = a.get("error") or "the key command failed"
+        fix = keys.KEY_FIX
+        if err == keys.AUTH_AGAIN:
+            name = a.get("profile")
+            fix = keys.KEY_HOLD_FIX.replace("NAME", name) if isinstance(name, str) and name else keys.KEY_HOLD_FIX
+        return f"the gateway key does not work: {err}. {fix}"
     if a.get("reason") == "paused":
         pz = a.get("paused") or {}
         why = f"work is paused at the daily cap since {pz['at']}" if pz.get("reason") == "cap" and pz.get("at") \

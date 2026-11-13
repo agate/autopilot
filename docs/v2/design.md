@@ -2922,19 +2922,18 @@ Calls the author made without asking (check them):
      `cap-state.json` reads as blank for today; a `paused.json` that exists but cannot be read, or is a symlink
      (never followed), counts as paused (fail closed: never start work by accident). `datadir.FOLDERS` is unchanged.
   3. The allowance. `allowance(data, projects, now, p, listing=None, store=None)` returns `{"allow": 0 | None,
-     "reason": "ok" | "cap" | "paused" | "key", "cause"?: "spent" | "unknown", "limit"?, "spent"?, "error"?}`
-     (`cap.REASONS`, a small closed set; the key health slice added `key`, see its entry below: after the pause and
-     before any spend, a gateway key that fails is `allow 0`, `reason key`). Paused, in any mode: `allow 0`, `reason
-     paused`. A subscription
-     profile: `allow None`, `reason ok`, with no spend parsed (its usage windows stay the park hook's); an
-     unanswered card a gateway profile opened is taken back (`close_card`, which reads no spend), so switching to the
-     subscription never leaves a P0 card saying no worker starts. A gateway profile: `spend.totals(..., "gateway",
-     ...)`; over = `today >= today_limit`; unknown = `unknown_today` and not
-     accepted; either opens the card and is `allow 0`, `reason cap`; neither takes back an unanswered card (it may
-     open again later today) and is `allow None`, `reason ok`. "Spent today" sums every gateway profile used today
-     (switching keys does not reset it); subscription spend is not counted. A card that cannot be written never lets
-     work start: the refusal stands, with `card_error`. A ledger that cannot be read refuses the start too (its
-     SpendError, or a CapError for an OSError).
+     "reason": "ok" | "cap" | "paused" | "key", "cause"?: "spent" | "unknown", "limit"?, "spent"?, "error"?,
+     "profile"?}` (`cap.REASONS`, a small closed set; the key health slice added `key`, see its entry below: after the
+     pause and before any spend, a gateway key that fails is `allow 0`, `reason key`). Paused, in any mode: `allow 0`,
+     `reason paused`. A subscription profile: `allow None`, `reason ok`, with no spend parsed (its usage windows stay
+     the park hook's); an unanswered card a gateway profile opened is taken back (`close_card`, which reads no spend),
+     so switching to the subscription never leaves a P0 card saying no worker starts. A gateway profile:
+     `spend.totals(..., "gateway", ...)`; over = `today >= today_limit`; unknown = `unknown_today` and not accepted;
+     either opens the card and is `allow 0`, `reason cap`; neither takes back an unanswered card (it may open again
+     later today) and is `allow None`, `reason ok`. "Spent today" sums every gateway profile used today (switching
+     keys does not reset it); subscription spend is not counted. A card that cannot be written never lets work start:
+     the refusal stands, with `card_error`. A ledger that cannot be read refuses the start too (its SpendError, or a
+     CapError for an OSError).
   4. One card per day, opened again only for a new limit or cause. The card is a v2 card made through the store:
      kind and feed `cap`, `key: cap:<day>`, lane `needs`, `pri: P0`, `origin: found`, a title and the plain lines in
      every configured language (Chinese words for `zh`, English for any other language) naming today's spend, the
@@ -3092,10 +3091,11 @@ Calls the author made without asking (check them):
   are separate. A key value never appears anywhere: the key, refresh and rotate commands run with stdin, stdout and
   stderr all `DEVNULL`, and only "exit N" or the exception's class name is kept or printed.
   1. Own module. `keys.py` has `STATE = "profile-key.json"`, `REFRESH = "profile-refresh.json"`, `KEY_TTL` (10
-     minutes), `KEY_FAIL_TTL` (60 s), `KEY_FIX`, `check(data, p, now)`, `cached_error(data, p)`, `rotate(data, name,
-     now)`, `auth_failed(errors, after)` and `note_session_end(data, projects, session_id, profile_name, now)`. Every
-     function takes the data folder and the time; there is no module clock. It imports `profiles`, `store` and
-     `apistop` (which imports only `transcripts`), never `spend`, `workers` or `cap` (`cap` imports it).
+     minutes), `KEY_FAIL_TTL` (60 s), `KEY_FIX`, `KEY_HOLD_FIX`, `check(data, p, now)`, `cached_error(data, p)`,
+     `rotate(data, name, now)`, `auth_failed(errors, after)` and `note_session_end(data, projects, session_id,
+     profile_name, now)`. Every function takes the data folder and the time; there is no module clock. It imports
+     `profiles`, `store` and `apistop` (which imports only `transcripts`), never `spend`, `workers` or `cap` (`cap`
+     imports it).
   2. The check is cached. `check` runs `gateway.key_command` (60 s) for a gateway profile and returns its error
      text, or None when it works; the subscription runs nothing and is None. The answer is kept as the profile's
      record `{"at", "ok", "error", "profile", "auth"?}` in `<data>/profile-key.json`: a working key is checked again
@@ -3121,19 +3121,23 @@ Calls the author made without asking (check them):
      malformed record reads as never checked (the command runs again: fail towards checking, never towards a stale
      "ok").
   3. The allowance refuses on a key error. In `cap.allowance`, after the pause and for a gateway profile only:
-     `keys.check(...)`; an error returns `{"allow": 0, "reason": "key", "error": ...}` before any spend is read, and
-     opens no cap card. Nothing switches to the subscription. `cap.refusal` says "the gateway key does not work:
-     <error>. <KEY_FIX>", with `KEY_FIX` = "Run the profile's key command in a terminal (sign in again if it asks);
-     the next start or check tries it again." Every start, `--resume`, `answer` and in-place resume already goes
-     through `cap.allowance`, so they are all refused with a CapError and nothing is planned, discovered or
-     launched; a dead worker keeps its one resume and a parked one stays parked, as at the cap. Running workers are
-     not stopped. `Workers.check` runs the active profile's `keys.check` once before it locks the worker list (only
-     when not paused, with a worker listed, and in live mode or with a parked worker listed, as only then can a
-     resume ask for the allowance: a parked worker's due check asks for it before the live-mode check, a dead
-     worker's resume checks live mode first; best-effort, an error is left for the allowance to report), so an
-     in-place resume's allowance under the lock, at the same time, reads that cached answer and a key command that
-     hangs does not hold the lock. The refresh (choice 4) still runs inside `_close`, which `check` calls under the
-     lock, for up to 60 s.
+     `keys.check(...)`; an error returns `{"allow": 0, "reason": "key", "error": ..., "profile": <its name>}` before
+     any spend is read, and opens no cap card. Nothing switches to the subscription. `cap.refusal` says "the gateway
+     key does not work: <error>. <KEY_FIX>", with `KEY_FIX` = "Run the profile's key command in a terminal (sign in
+     again if it asks); the next start or check tries it again." **[decided by the builder]** During the hold after a
+     second rejection (the error is `AUTH_AGAIN`, the only error written with `auth: true`) running the key command
+     changes nothing, so the line ends with `KEY_HOLD_FIX` instead = "Wait up to 10 minutes: the hold ends and the
+     next start or check runs the key command again. Or run `ap2 profile rotate NAME` to get a new key now (it needs
+     the profile's rotate_command).", NAME replaced by the profile's name from the allowance (kept as NAME when the
+     dict has none; `refusal` reads no file). Every start, `--resume`, `answer` and in-place resume already goes
+     through `cap.allowance`, so they are all refused with a CapError and nothing is planned, discovered or launched;
+     a dead worker keeps its one resume and a parked one stays parked, as at the cap. Running workers are not stopped.
+     `Workers.check` runs the active profile's `keys.check` once before it locks the worker list (only when not
+     paused, with a worker listed, and in live mode or with a parked worker listed, as only then can a resume ask for
+     the allowance: a parked worker's due check asks for it before the live-mode check, a dead worker's resume checks
+     live mode first; best-effort, an error is left for the allowance to report), so an in-place resume's allowance
+     under the lock, at the same time, reads that cached answer and a key command that hangs does not hold the lock.
+     The refresh (choice 4) still runs inside `_close`, which `check` calls under the lock, for up to 60 s.
   4. One refresh on a rejected key. When `Workers._close` has stopped a worker (every close path: done, question,
      died, idle, blocked, refused, end, parked_failed), `keys.note_session_end` reads that session's API errors
      (`apistop.tail`, choice 5) for the worker's own `profile` (its record's; none is the subscription: nothing to

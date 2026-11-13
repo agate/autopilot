@@ -49,6 +49,9 @@ KEY_TIMEOUT = 60  # seconds the key and refresh commands may take
 ROTATE_TIMEOUT = 120  # seconds the rotate command may take
 KEY_FIX = ("Run the profile's key command in a terminal (sign in again if it asks); the next start or check tries "
            "it again.")
+# The fix during the hold after a second rejection (`auth: true`): the key command is not asked again until it ends.
+KEY_HOLD_FIX = ("Wait up to 10 minutes: the hold ends and the next start or check runs the key command again. Or run "
+                "`ap2 profile rotate NAME` to get a new key now (it needs the profile's rotate_command).")
 AUTH_AGAIN = "the gateway rejected the key again right after a refresh"
 AUTH_STATUS = (401, 403)
 # v1's `_AUTH_TEXT`: an API error whose text names an authentication failure, read only when it has no status.

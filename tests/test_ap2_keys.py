@@ -206,6 +206,45 @@ class AllowanceKeyTest(capt.CapWorkerCase):
         self.assertFalse((self.data / cap.STATE).exists())
         self.assertEqual(self.totals_calls, 0)
 
+    def test_key_hold_fix_text(self):
+        self.assertIsInstance(keys.KEY_HOLD_FIX, str)
+        self.assertEqual(keys.KEY_HOLD_FIX, "Wait up to 10 minutes: the hold ends and the next start or check runs "
+                                            "the key command again. Or run `ap2 profile rotate NAME` to get a new key "
+                                            "now (it needs the profile's rotate_command).")  # the spec's fixed text
+
+    def test_a_start_during_the_hold_names_the_hold_fix(self):
+        ran = self.tmp / "ran"
+        self.use_key(counter(ran))  # the key command works: during the hold it is not asked
+        (self.data / keys.STATE).write_text(json.dumps({"at": self.clock().isoformat(), "ok": False, "auth": True,
+                                                         "profile": "g", "error": keys.AUTH_AGAIN}))
+        cid = self.add_card()
+        with self.assertRaises(cap.CapError) as e:
+            self.workers().start(cid, "implement", cwd=self.wt, prompt="Do the work.")
+        msg = str(e.exception)
+        self.assertIn(keys.KEY_HOLD_FIX.replace("NAME", "g"), msg)
+        self.assertIn("ap2 profile rotate g", msg)
+        self.assertIn(keys.AUTH_AGAIN, msg)
+        self.assertNotIn(keys.KEY_FIX, msg)
+        self.assertEqual(self.bg_calls(), [])  # nothing launched
+        self.assertEqual(self.records(), [])
+        self.assertEqual(runs(ran), 0)
+        self.assertEqual(self.totals_calls, 0)
+
+    def test_other_key_errors_keep_key_fix(self):
+        line = cap.refusal({"reason": "key", "error": "the key command failed (exit 1)"})
+        self.assertIn(keys.KEY_FIX, line)
+        self.assertNotIn("rotate", line)
+        self.assertNotIn(keys.KEY_HOLD_FIX, line)
+
+    def test_a_hold_refusal_with_no_profile_keeps_name(self):
+        line = cap.refusal({"reason": "key", "error": keys.AUTH_AGAIN})
+        self.assertEqual(line, f"the gateway key does not work: {keys.AUTH_AGAIN}. {keys.KEY_HOLD_FIX}")
+        self.assertIn("ap2 profile rotate NAME", line)
+        self.assertNotIn(keys.KEY_FIX, line)
+        # A profile that is not a string (a dict built by hand) keeps NAME too, never "None".
+        self.assertIn("ap2 profile rotate NAME", cap.refusal({"reason": "key", "error": keys.AUTH_AGAIN,
+                                                              "profile": None}))
+
     def test_paused_wins_over_the_key(self):
         p = self.use_key("exit 1")
         cap.pause(self.data, self.clock())
@@ -614,6 +653,14 @@ class RefreshTest(KeyCase):
         self.assertEqual(runs(key), 0)
         a = cap.allowance(self.data, self.projects, later + timedelta(minutes=5), p)
         self.assertEqual((a["allow"], a["reason"], a["error"]), (0, "key", keys.AUTH_AGAIN))
+        self.assertEqual(a["profile"], "g")
+        self.assertEqual(set(a), {"allow", "reason", "error", "profile"})  # nothing else in the dict changes
+        line = cap.refusal(a)
+        self.assertEqual(line, f"the gateway key does not work: {keys.AUTH_AGAIN}. "
+                               f"{keys.KEY_HOLD_FIX.replace('NAME', 'g')}")
+        self.assertIn("ap2 profile rotate g", line)
+        self.assertIn("10 minutes", line)
+        self.assertNotIn(keys.KEY_FIX, line)
         # More than 10 minutes after the refresh, a new rejection refreshes again.
         self.assertTrue(self.end(self.transcript(auth_401(NOW + timedelta(minutes=14))), now=NOW + timedelta(minutes=15)))
         self.assertEqual(runs(ref), 2)
