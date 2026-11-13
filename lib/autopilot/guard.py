@@ -82,11 +82,11 @@ def _denies(text: str, marks: list) -> bool:
 
 def decide(payload: dict, env) -> dict:
     """Deny shell writes into the data folder or the package from dispatcher, worker and one-off sessions.
-    Each segment is read as written, and again with its quotes and backslashes taken out (`_STRIP`, after its
-    line continuations are joined; an `open(..., 'w')` mode is still matched as written), so a guarded path or a
-    write verb split or escaped by them (`"$AUTOPILOT_"DATA`, `~/.claude/autopilot\\-data`, `c""p`, `'rm'`) is
-    still found. A command longer than `MAX_COMMAND` is not split: it is denied when it names a guarded path
-    anywhere.
+    Each segment is read as written, and again with its quotes and backslashes taken out (`_STRIP`, on the lines
+    both as split and with line continuations joined; an `open(..., 'w')` mode is still matched as written), so a
+    guarded path or a write verb split or escaped by them (`"$AUTOPILOT_"DATA`, `~/.claude/autopilot\\-data`,
+    `c""p`, `'rm'`) is still found. A command longer than `MAX_COMMAND` is not split: it is denied when it names
+    a guarded path anywhere.
     Best effort: it reads the command text, so a path built at run time (`$(...)`, a variable set earlier in the
     command, a script given to an interpreter) can get past it; the Edit/Write deny rules are the main guard."""
     if not env.get("AUTOPILOT_ROLE") or payload.get("tool_name") != "Bash":
@@ -101,7 +101,8 @@ def decide(payload: dict, env) -> dict:
     for seg in _SPLIT.split(cmd):  # as written: v1's reading before quotes were taken out
         if seg.strip() and not _is_ap(seg) and _denies(seg, marks):
             return _deny()
-    for seg in _SPLIT.split(_join(cmd)):  # bash joins a `\` + newline into one line
+    # bash may or may not join a `\` + newline (not after a `#`), so the lines are read both split and joined
+    for seg in _SPLIT.split(cmd) + _SPLIT.split(_join(cmd)):
         if not seg.strip() or _is_ap(seg):
             continue
         stripped = _STRIP.sub("", seg)

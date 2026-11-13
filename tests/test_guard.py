@@ -97,9 +97,10 @@ class GuardTest(unittest.TestCase):
 
     def test_guard_answers_a_256_kib_command_in_linear_time(self):
         size = 256 << 10
+        mark = " ~/.claude/autopilot-data/x "
         for unit in ("dd ", "open(", "sed -x "):
-            self._assert_fast((unit * (size // len(unit) + 1))[:size])
-        self._assert_fast("1" * size + ">")
+            self._assert_fast(mark + (unit * (size // len(unit) + 1))[:size])
+        self._assert_fast(mark + "1" * size + ">")
 
     def test_guard_finds_dd_and_open_writes_in_linear_time(self):
         size = 256 << 10
@@ -167,6 +168,13 @@ class GuardTest(unittest.TestCase):
         cmd = "python3 -c \"open('$HOME/.claude/\"autopilot-data\"/x', 'w')\""
         self.assertIsNotNone(guard.decide(bash(cmd), self.W))
         self.assertIsNone(guard.decide(bash("python3 -c \"open('$HOME/.claude/\"autopilot-data\"/x')\""), self.W))
+
+    def test_guard_reads_a_line_after_a_comment_ending_in_a_backslash_on_its_own(self):
+        # bash does not join a `\` + newline inside a comment, so the next line runs as its own command
+        for cmd in ('ap task list v2 # see \\\necho x > ~/.claude/"autopilot-data"/x',
+                    'ap task list v2 # \\\nc""p a ~/.claude/autopilot-data/x'):
+            self.assertIsNotNone(guard.decide(bash(cmd), self.W), cmd)
+        self.assertIsNone(guard.decide(bash("ap decision add v2 \\\n~/.claude/autopilot-data/x.json"), self.W))
 
 
 if __name__ == "__main__":
