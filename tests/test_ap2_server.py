@@ -1734,7 +1734,10 @@ const loadList = async () => { if (onList) onList(); }, loadCard = async id => {
        {access: {cap: {card: 'open', card_id: 'Z', raise_pct: 0}}}],
       // The user clicks a lane while the list loads: the tick must not bring the cap card back.
       ['left during the list', {name: 'card', arg: 'X'}, cap('answered', 50), cap('open', 50),
-       () => { S.route = {name: 'lane', arg: 'planned'}; }]]) {
+       () => { S.route = {name: 'lane', arg: 'planned'}; }],
+      // ...or clicks another card in the list: that card stays, the cap card is not pulled back over it.
+      ['left for another card', {name: 'card', arg: 'X'}, cap('answered', 50), cap('open', 50),
+       () => { S.route = {name: 'card', arg: 'Y'}; }]]) {
     S.route = route; S.state = before; states = [after]; loads.length = 0; onList = act || null;
     await tick();
     runs[name] = loads.slice();
@@ -1743,7 +1746,8 @@ const loadList = async () => { if (onList) onList(); }, loadCard = async id => {
 })();
 """)
         self.assertEqual(out, {"reopened": ["X"], "same": [], "lane": [], "other card": [], "day over": ["X"],
-                               "new card": ["Z"], "left during the list": []})
+                               "new card": ["Z"], "left during the list": [],
+                               "left for another card": []})
 
     @unittest.skipUnless(shutil.which("node"), "needs node")
     def test_a_cap_state_that_cannot_be_read_is_a_red_line_and_a_settings_error(self):
