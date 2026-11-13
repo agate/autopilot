@@ -74,6 +74,19 @@ def snapshot(folder: Path) -> dict:
     return {str(p.relative_to(folder)): p.read_bytes() for p in sorted(folder.rglob("*")) if p.is_file()}
 
 
+def book(*recs) -> str:
+    """A key health file's text in its shape: one record per profile, `{"profiles": {name: record}}`, each record
+    under its own `profile`."""
+    return json.dumps({"profiles": {r["profile"]: r for r in recs}})
+
+
+def entry(path: Path, name: str = "g"):
+    """Profile `name`'s record in a key health file, or None when the file or that entry is missing."""
+    if not path.exists():
+        return None
+    return json.loads(path.read_text())["profiles"].get(name)
+
+
 class KeyCase(unittest.TestCase):
     """A temp data folder and a temp folder of transcripts; profile `g` is a gateway profile."""
 
@@ -102,13 +115,13 @@ class KeyCase(unittest.TestCase):
         (folder / f"{sid}.jsonl").write_text(text, encoding="utf-8")
         return sid
 
-    def state(self):
-        f = self.data / keys.STATE
-        return json.loads(f.read_text()) if f.exists() else None
+    def state(self, name="g"):
+        """Profile `name`'s key check record, or None."""
+        return entry(self.data / keys.STATE, name)
 
-    def refresh_record(self):
-        f = self.data / keys.REFRESH
-        return json.loads(f.read_text()) if f.exists() else None
+    def refresh_record(self, name="g"):
+        """Profile `name`'s last refresh record, or None."""
+        return entry(self.data / keys.REFRESH, name)
 
     def end(self, sid, name="g", now=NOW) -> bool:
         return keys.note_session_end(self.data, self.projects, sid, name, now)
@@ -129,7 +142,7 @@ class AllowanceKeyTest(capt.CapWorkerCase):
         return profiles.active(self.data)
 
     def state_ok(self) -> bool:
-        return json.loads((self.data / keys.STATE).read_text())["ok"] is True
+        return entry(self.data / keys.STATE)["ok"] is True
 
     def allow(self, p, now=None):
         return cap.allowance(self.data, self.fake_home / "projects", now or self.clock(), p,
@@ -161,7 +174,7 @@ class AllowanceKeyTest(capt.CapWorkerCase):
         # A key check that cannot answer (here a symlinked key record) refuses: it never fails open to a start.
         p = self.use_key("exit 1")
         elsewhere = self.tmp / "elsewhere.json"
-        elsewhere.write_text(json.dumps({"at": self.clock().isoformat(), "ok": True, "profile": "g"}))
+        elsewhere.write_text(book({"at": self.clock().isoformat(), "ok": True, "profile": "g"}))
         (self.data / keys.STATE).symlink_to(elsewhere)
         with self.assertRaisesRegex(profiles.ProfileError, "symlink"):
             self.allow(p)
@@ -362,8 +375,8 @@ class CheckTest(KeyCase):
     def test_auth_failure_holds_ten_minutes(self):
         ran = self.tmp / "ran"
         p = self.save(key=counter(ran))
-        (self.data / keys.STATE).write_text(json.dumps({"at": NOW.isoformat(), "ok": False, "auth": True,
-                                                         "profile": "g", "error": keys.AUTH_AGAIN}))
+        (self.data / keys.STATE).write_text(book({"at": NOW.isoformat(), "ok": False, "auth": True,
+                                                  "profile": "g", "error": keys.AUTH_AGAIN}))
         self.assertEqual(keys.check(self.data, p, NOW + timedelta(minutes=5)), keys.AUTH_AGAIN)
         self.assertEqual(runs(ran), 0)  # the key command works: it is not asked again for 10 minutes
         self.assertIsNone(keys.check(self.data, p, NOW + timedelta(minutes=11)))
@@ -372,28 +385,96 @@ class CheckTest(KeyCase):
     def test_record_for_another_profile_is_not_used(self):
         ran = self.tmp / "ran"
         p = self.save(key=counter(ran, 1))
-        (self.data / keys.STATE).write_text(json.dumps({"at": NOW.isoformat(), "ok": True, "error": None,
-                                                         "profile": "h"}))
+        h = {"at": NOW.isoformat(), "ok": True, "error": None, "profile": "h"}
+        (self.data / keys.STATE).write_text(book(h))
         self.assertIn("exit 1", keys.check(self.data, p, NOW))
         self.assertEqual(runs(ran), 1)
         self.assertEqual(self.state()["profile"], "g")
+        self.assertEqual(self.state("h"), h)  # h's record is kept beside g's
+        # An entry under g's name whose own `profile` names another is not g's: the command runs again.
+        (self.data / keys.STATE).write_text(json.dumps({"profiles": {"g": h}}))
+        self.assertIn("exit 1", keys.check(self.data, p, NOW))
+        self.assertEqual(runs(ran), 2)
+
+    def test_a_check_keeps_another_profiles_hold(self):
+        # g is held (a second rejection right after a refresh); h's check runs h's key command and writes h's
+        # record, and g's hold is still there: g's next check answers from it and runs no command.
+        g_ran, h_ran = self.tmp / "g-ran", self.tmp / "h-ran"
+        g = self.save(key=counter(g_ran))
+        h = self.save("h", key=counter(h_ran))
+        (self.data / keys.STATE).write_text(book({"at": NOW.isoformat(), "ok": False, "auth": True, "profile": "g",
+                                                  "error": keys.AUTH_AGAIN}))
+        self.assertIsNone(keys.check(self.data, h, NOW + timedelta(minutes=1)))
+        self.assertEqual(runs(h_ran), 1)
+        self.assertEqual(keys.check(self.data, g, NOW + timedelta(minutes=2)), keys.AUTH_AGAIN)
+        self.assertEqual(runs(g_ran), 0)
+        self.assertEqual(keys.cached_error(self.data, g), keys.AUTH_AGAIN)
+        self.assertIsNone(keys.cached_error(self.data, h))
+        self.assertEqual((self.state()["auth"], self.state("h")["ok"]), (True, True))
+        # And g's own check, once the hold is over, keeps h's record.
+        self.assertIsNone(keys.check(self.data, g, NOW + timedelta(minutes=11)))
+        self.assertEqual(runs(g_ran), 1)
+        self.assertEqual(self.state("h")["ok"], True)
+        self.assertIsNone(keys.check(self.data, h, NOW + timedelta(minutes=9)))
+        self.assertEqual(runs(h_ran), 1)  # h's cached answer is still used
+
+    def test_an_old_one_record_file_is_read_as_its_profiles(self):
+        # The shape before one record per profile: the file was one record with a top-level `profile`. It is read
+        # as that profile's record, so a hold in effect at the upgrade is kept; the next write is in the new shape.
+        g_ran, h_ran = self.tmp / "g-ran", self.tmp / "h-ran"
+        g = self.save(key=counter(g_ran))
+        h = self.save("h", key=counter(h_ran))
+        old = {"at": NOW.isoformat(), "ok": False, "auth": True, "profile": "g", "error": keys.AUTH_AGAIN}
+        (self.data / keys.STATE).write_text(json.dumps(old))
+        self.assertEqual(keys.check(self.data, g, NOW + timedelta(minutes=5)), keys.AUTH_AGAIN)
+        self.assertEqual(keys.cached_error(self.data, g), keys.AUTH_AGAIN)
+        self.assertIsNone(keys.cached_error(self.data, h))
+        self.assertEqual(runs(g_ran), 0)
+        self.assertEqual(json.loads((self.data / keys.STATE).read_text()), old)  # a cached answer writes nothing
+        self.assertIsNone(keys.check(self.data, h, NOW + timedelta(minutes=5)))
+        self.assertEqual(runs(h_ran), 1)
+        self.assertEqual(set(json.loads((self.data / keys.STATE).read_text())), {"profiles"})  # rewritten
+        self.assertEqual(self.state(), old)  # g's hold kept, in the new shape
+        self.assertEqual(keys.check(self.data, g, NOW + timedelta(minutes=6)), keys.AUTH_AGAIN)
+        self.assertEqual(runs(g_ran), 0)
+        # An old refresh record is g's last refresh too: a second rejection right after it holds, not refreshes.
+        ref = self.tmp / "refreshed"
+        self.save(key=counter(g_ran), refresh_command=counter(ref))
+        (self.data / keys.STATE).unlink()
+        (self.data / keys.REFRESH).write_text(json.dumps({"at": NOW.isoformat(), "profile": "g"}))
+        self.assertTrue(self.end(self.transcript(auth_401(NOW + timedelta(minutes=1))), now=NOW + timedelta(minutes=2)))
+        self.assertEqual(runs(ref), 0)
+        self.assertEqual(self.state()["error"], keys.AUTH_AGAIN)
 
     def test_malformed_record_runs_the_command_again(self):
         ran = self.tmp / "ran"
         p = self.save(key=counter(ran))
         f = self.data / keys.STATE
-        bad = ("not json", "[]", "\xff\xfe", json.dumps({"ok": True, "profile": "g"}),
-               json.dumps({"at": "yesterday", "ok": True, "profile": "g"}),
-               json.dumps({"at": (NOW + timedelta(hours=1)).isoformat(), "ok": True, "profile": "g"}))
+        bad = ("not json", "[]", "\xff\xfe", '"text"', json.dumps({"profiles": []}),
+               json.dumps({"profiles": "g"}), json.dumps({"profiles": {"g": []}}),
+               json.dumps({"profiles": {"g": "ok"}}), json.dumps({"profiles": {"g": None}}),
+               json.dumps({"profiles": [{"at": NOW.isoformat(), "ok": True, "profile": "g"}]}),
+               json.dumps({"profiles": None, "at": NOW.isoformat(), "ok": True, "profile": "g"}),
+               book({"ok": True, "profile": "g"}),
+               book({"at": "yesterday", "ok": True, "profile": "g"}),
+               book({"at": (NOW + timedelta(hours=1)).isoformat(), "ok": True, "profile": "g"}),
+               json.dumps({"profiles": {"g": {"at": NOW.isoformat(), "ok": True}}}),  # an entry with no profile
+               json.dumps({"ok": True, "profile": "g"}),  # the old shape is held to the same rules
+               json.dumps({"at": NOW.isoformat(), "ok": True, "profile": None}),
+               json.dumps({"at": NOW.isoformat(), "ok": True, "profile": ["g"]}))
         for i, text in enumerate(bad, 1):
             f.write_bytes(text.encode("utf-8", "surrogateescape") if text != "\xff\xfe" else b"\xff\xfe")
             self.assertIsNone(keys.check(self.data, p, NOW), text)
             self.assertEqual(runs(ran), i, text)
-        f.write_text(json.dumps({"at": NOW.isoformat(), "ok": "yes", "profile": "g"}))  # ok must be true itself
+        # A malformed entry beside g's good one is not read, and g's is still used.
+        f.write_text(json.dumps({"profiles": {"h": [], "g": {"at": NOW.isoformat(), "ok": True, "profile": "g"}}}))
+        self.assertIsNone(keys.check(self.data, p, NOW))
+        self.assertEqual(runs(ran), len(bad))
+        f.write_text(book({"at": NOW.isoformat(), "ok": "yes", "profile": "g"}))  # ok must be true itself
         self.assertIsNone(keys.check(self.data, p, NOW))
         self.assertEqual(runs(ran), len(bad) + 1)
         # A fresh failing record with no error text is still a failure: it never reads as a working key.
-        f.write_text(json.dumps({"at": NOW.isoformat(), "ok": False, "profile": "g"}))
+        f.write_text(book({"at": NOW.isoformat(), "ok": False, "profile": "g"}))
         self.assertEqual(keys.check(self.data, p, NOW), "the key command failed")
         self.assertEqual(keys.cached_error(self.data, p), "the key command failed")
         self.assertEqual(runs(ran), len(bad) + 1)  # the cached failure is used: the command does not run
@@ -406,8 +487,8 @@ class CheckTest(KeyCase):
         ran = self.tmp / "ran"
         p = self.save(key=counter(ran))
         f = self.data / keys.STATE
-        f.write_text(json.dumps({"at": NOW.isoformat(), "ok": False, "error": "the key command failed (exit 1)",
-                                 "profile": "g"}))
+        f.write_text(book({"at": NOW.isoformat(), "ok": False, "error": "the key command failed (exit 1)",
+                           "profile": "g"}))
         os.chmod(f, 0)
         self.addCleanup(lambda: f.exists() and os.chmod(f, 0o600))
         self.assertIsNone(keys.check(self.data, p, NOW))
@@ -418,7 +499,7 @@ class CheckTest(KeyCase):
     def test_symlinked_state_is_refused(self):
         p = self.save()
         elsewhere = self.tmp / "elsewhere.json"
-        elsewhere.write_text(json.dumps({"at": NOW.isoformat(), "ok": True, "profile": "g"}))
+        elsewhere.write_text(book({"at": NOW.isoformat(), "ok": True, "profile": "g"}))
         for name in (keys.STATE, keys.REFRESH):
             link = self.data / name
             link.symlink_to(elsewhere)
@@ -435,7 +516,7 @@ class CheckTest(KeyCase):
             keys.check(self.data, p, NOW)
         self.assertIn("symlink", keys.cached_error(self.data, p))  # `list` shows it and reads nothing through it
         self.assertFalse((self.tmp / "missing.json").exists())
-        self.assertEqual(json.loads(elsewhere.read_text())["ok"], True)
+        self.assertEqual(entry(elsewhere)["ok"], True)  # the file the link points to is untouched
 
     def test_a_symlinked_state_is_never_written_or_removed(self):
         # The hold writes the key record and the refresh removes it: a symlink there is refused on both paths, the
@@ -445,7 +526,7 @@ class CheckTest(KeyCase):
         elsewhere.write_text("keep me")
         link = self.data / keys.STATE
         link.symlink_to(elsewhere)
-        (self.data / keys.REFRESH).write_text(json.dumps({"at": NOW.isoformat(), "profile": "g"}))
+        (self.data / keys.REFRESH).write_text(book({"at": NOW.isoformat(), "profile": "g"}))
         with self.assertRaisesRegex(profiles.ProfileError, "symlink"):  # a second rejection: the hold
             self.end(self.transcript(auth_401(NOW + timedelta(minutes=2))), now=NOW + timedelta(minutes=3))
         self.assertTrue(link.is_symlink())
@@ -495,7 +576,7 @@ class RefreshTest(KeyCase):
     def test_auth_failure_refreshes_once(self):
         ref, key = self.tmp / "refreshed", self.tmp / "keyed"
         self.save(key=counter(key), refresh_command=counter(ref))
-        (self.data / keys.STATE).write_text(json.dumps({"at": NOW.isoformat(), "ok": True, "profile": "g"}))
+        (self.data / keys.STATE).write_text(book({"at": NOW.isoformat(), "ok": True, "profile": "g"}))
         sid = self.transcript({"type": "user", "prompt": "go"}, reply(NOW - timedelta(minutes=3)),
                               auth_401(NOW - timedelta(minutes=1)))
         self.assertTrue(self.end(sid))
@@ -595,13 +676,13 @@ class RefreshTest(KeyCase):
         line = auth_401(NOW)
         del line["timestamp"]
         sid = self.transcript(line)
-        (self.data / keys.REFRESH).write_text(json.dumps({"at": NOW.isoformat(), "profile": "g"}))
+        (self.data / keys.REFRESH).write_text(book({"at": NOW.isoformat(), "profile": "g"}))
         self.assertTrue(self.end(sid, now=NOW + timedelta(minutes=3)))  # closed within 10 minutes: held
         rec = self.state()
         self.assertEqual((rec["auth"], rec["error"]), (True, keys.AUTH_AGAIN))
         self.assertEqual(runs(ref), 0)
         (self.data / keys.STATE).unlink()
-        (self.data / keys.REFRESH).write_text(json.dumps({"at": NOW.isoformat(), "profile": "g"}))
+        (self.data / keys.REFRESH).write_text(book({"at": NOW.isoformat(), "profile": "g"}))
         self.assertTrue(self.end(sid, now=NOW + timedelta(minutes=11)))  # closed later: refreshed again
         self.assertEqual(runs(ref), 1)
         self.assertIsNone(self.state())
@@ -609,7 +690,7 @@ class RefreshTest(KeyCase):
     def test_old_error_before_the_refresh_is_ignored(self):
         ref = self.tmp / "refreshed"
         self.save(refresh_command=counter(ref))
-        (self.data / keys.REFRESH).write_text(json.dumps({"at": NOW.isoformat(), "profile": "g"}))
+        (self.data / keys.REFRESH).write_text(book({"at": NOW.isoformat(), "profile": "g"}))
         before = snapshot(self.data)
         self.assertFalse(self.end(self.transcript(auth_401(NOW - timedelta(minutes=1))), now=NOW + timedelta(minutes=2)))
         self.assertEqual(runs(ref), 0)
@@ -618,10 +699,55 @@ class RefreshTest(KeyCase):
     def test_refresh_of_another_profile_does_not_count(self):
         ref = self.tmp / "refreshed"
         self.save(refresh_command=counter(ref))
-        (self.data / keys.REFRESH).write_text(json.dumps({"at": NOW.isoformat(), "profile": "h"}))
+        (self.data / keys.REFRESH).write_text(book({"at": NOW.isoformat(), "profile": "h"}))
         self.assertTrue(self.end(self.transcript(auth_401(NOW + timedelta(minutes=1))), now=NOW + timedelta(minutes=2)))
         self.assertEqual(runs(ref), 1)
         self.assertNotIn("auth", self.state() or {})
+        self.assertEqual(self.refresh_record("h"), {"at": NOW.isoformat(), "profile": "h"})  # h's refresh kept
+        self.assertEqual(datetime.fromisoformat(self.refresh_record()["at"]), NOW + timedelta(minutes=2))
+
+    def test_a_refresh_keeps_another_profiles_refresh_and_key_record(self):
+        # g refreshed at NOW; h's rejected key then refreshes h. g's refresh time stays, so g's second rejection
+        # within 10 minutes of its own refresh still holds g (no second refresh), and h's refresh dropped only h's
+        # key record: g's cached answer stays.
+        g_ref, h_ref = self.tmp / "g-refreshed", self.tmp / "h-refreshed"
+        g = self.save(refresh_command=counter(g_ref))
+        self.save("h", refresh_command=counter(h_ref))
+        self.assertTrue(self.end(self.transcript(auth_401(NOW))))  # g's refresh, at NOW
+        self.assertEqual(runs(g_ref), 1)
+        g_ok = {"at": (NOW + timedelta(minutes=1)).isoformat(), "ok": True, "error": None, "profile": "g"}
+        h_ok = {"at": (NOW + timedelta(minutes=1)).isoformat(), "ok": True, "error": None, "profile": "h"}
+        (self.data / keys.STATE).write_text(book(g_ok, h_ok))
+        self.assertTrue(self.end(self.transcript(auth_401(NOW + timedelta(minutes=2))), name="h",
+                                 now=NOW + timedelta(minutes=2)))
+        self.assertEqual((runs(g_ref), runs(h_ref)), (1, 1))  # h refreshed once
+        self.assertEqual(datetime.fromisoformat(self.refresh_record()["at"]), NOW)  # g's refresh time kept
+        self.assertEqual(datetime.fromisoformat(self.refresh_record("h")["at"]), NOW + timedelta(minutes=2))
+        self.assertIsNone(self.state("h"))  # h's next check runs h's key command
+        self.assertEqual(self.state(), g_ok)  # g's cached answer stays
+        self.assertIsNone(keys.check(self.data, g, NOW + timedelta(minutes=3)))
+        self.assertEqual(runs(g_ref), 1)
+        # g's second rejection, within 10 minutes of g's own refresh: g is held, not refreshed again.
+        self.assertTrue(self.end(self.transcript(auth_401(NOW + timedelta(minutes=4))), now=NOW + timedelta(minutes=5)))
+        self.assertEqual((runs(g_ref), runs(h_ref)), (1, 1))
+        rec = self.state()
+        self.assertEqual((rec["ok"], rec["auth"], rec["error"]), (False, True, keys.AUTH_AGAIN))
+        self.assertEqual(keys.check(self.data, g, NOW + timedelta(minutes=6)), keys.AUTH_AGAIN)
+        self.assertEqual(datetime.fromisoformat(self.refresh_record("h")["at"]), NOW + timedelta(minutes=2))
+
+    def test_a_hold_keeps_another_profiles_key_record(self):
+        # g's hold writes only g's key record: h's cached answer stays.
+        ref = self.tmp / "refreshed"
+        self.save(refresh_command=counter(ref))
+        h_ok = {"at": NOW.isoformat(), "ok": True, "error": None, "profile": "h"}
+        (self.data / keys.STATE).write_text(book(h_ok))
+        (self.data / keys.REFRESH).write_text(book({"at": NOW.isoformat(), "profile": "g"},
+                                                   {"at": NOW.isoformat(), "profile": "h"}))
+        self.assertTrue(self.end(self.transcript(auth_401(NOW + timedelta(minutes=1))), now=NOW + timedelta(minutes=2)))
+        self.assertEqual(runs(ref), 0)
+        self.assertEqual(self.state()["error"], keys.AUTH_AGAIN)
+        self.assertEqual(self.state("h"), h_ok)
+        self.assertEqual(self.refresh_record("h"), {"at": NOW.isoformat(), "profile": "h"})
 
     def test_recovered_session_is_not_a_failure(self):
         ref = self.tmp / "refreshed"
@@ -665,7 +791,7 @@ class CloseTest(capt.CapWorkerCase):
         out = self.workers().check()[0]
         self.assertEqual((out["state"], out["did"]), ("done", "ended"))
         self.assertEqual(runs(ref), 1)
-        self.assertEqual(json.loads((self.data / keys.REFRESH).read_text())["profile"], "g")
+        self.assertEqual(entry(self.data / keys.REFRESH)["profile"], "g")
         # A close whose key bookkeeping raises still finishes, with one stderr line.
         b = self.start()
         self.write_result(b["card"])
@@ -719,8 +845,8 @@ class CloseTest(capt.CapWorkerCase):
         profiles.use(self.data, "g")
         a, b = self.start(), self.start()
         self.assertEqual([r["card"] for r in self.records()], [a["card"], b["card"]])  # A is listed first
-        (self.data / keys.REFRESH).write_text(json.dumps({"at": (self.clock() - timedelta(minutes=5)).isoformat(),
-                                                          "profile": "g"}))
+        (self.data / keys.REFRESH).write_text(book({"at": (self.clock() - timedelta(minutes=5)).isoformat(),
+                                                    "profile": "g"}))
         self.drop_agent(a["short_id"])
         f = transcripts.find(self.fake_home / "projects", b["session_id"])
         with f.open("a", encoding="utf-8") as h:
@@ -733,7 +859,7 @@ class CloseTest(capt.CapWorkerCase):
         self.assertIn(f"the gateway key does not work ({keys.AUTH_AGAIN})", out[a["card"]]["note"])
         self.assertNotIn("record changed", out[a["card"]]["note"])
         self.assertEqual((out[b["card"]]["state"], out[b["card"]]["did"]), ("done", "ended"))
-        rec = json.loads((self.data / keys.STATE).read_text())
+        rec = entry(self.data / keys.STATE)
         self.assertEqual((rec["ok"], rec["auth"], rec["error"]), (False, True, keys.AUTH_AGAIN))
         self.assertEqual(runs(ref), 0)  # held instead of refreshed
         self.assertEqual(len(self.bg_calls()), launched)  # nothing launched for A
@@ -880,10 +1006,12 @@ class CliCase(KeyCase):
         self.assertIn(text, r.stderr)
         return r.stderr
 
-    def caches(self, profile="g"):
-        (self.data / keys.STATE).write_text(json.dumps({"at": NOW.isoformat(), "ok": False, "auth": True,
-                                                         "profile": profile, "error": keys.AUTH_AGAIN}))
-        (self.data / keys.REFRESH).write_text(json.dumps({"at": NOW.isoformat(), "profile": profile}))
+    def caches(self, *names):
+        """A hold and a refresh for each of `names` (default g)."""
+        names = names or ("g",)
+        (self.data / keys.STATE).write_text(book(*({"at": NOW.isoformat(), "ok": False, "auth": True, "profile": n,
+                                                    "error": keys.AUTH_AGAIN} for n in names)))
+        (self.data / keys.REFRESH).write_text(book(*({"at": NOW.isoformat(), "profile": n} for n in names)))
 
 
 class RotateCliTest(CliCase):
@@ -900,10 +1028,33 @@ class RotateCliTest(CliCase):
 
     def test_rotate_keeps_another_profiles_refresh(self):
         self.save(rotate_command="true")
-        self.caches(profile="h")
+        self.caches("g", "h")
         self.assertEqual(self.ap2("rotate", "g").returncode, 0)
-        self.assertFalse((self.data / keys.STATE).exists())  # the next check runs the key command again
-        self.assertEqual(self.refresh_record()["profile"], "h")
+        self.assertIsNone(self.state())  # the next check runs the key command again
+        self.assertIsNone(self.refresh_record())
+        self.assertEqual(self.refresh_record("h")["profile"], "h")
+
+    def test_rotate_keeps_another_profiles_key_record(self):
+        # Rotating h forgets only h's key check and refresh: g's hold and g's refresh stay, so g is still held.
+        g = self.save(key="true")
+        self.save("h", rotate_command="true")
+        self.caches("g", "h")
+        r = self.ap2("rotate", "h")
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        self.assertIsNone(self.state("h"))
+        self.assertIsNone(self.refresh_record("h"))
+        self.assertEqual((self.state()["auth"], self.state()["error"]), (True, keys.AUTH_AGAIN))
+        self.assertEqual(self.refresh_record()["profile"], "g")
+        self.assertEqual(keys.check(self.data, g, NOW + timedelta(minutes=1)), keys.AUTH_AGAIN)
+        # With only h's records there, rotating h leaves no file behind.
+        self.caches("h")
+        self.assertEqual(self.ap2("rotate", "h").returncode, 0)
+        self.assertFalse((self.data / keys.STATE).exists())
+        self.assertFalse((self.data / keys.REFRESH).exists())
+        # A malformed file holds no record for h, so rotating h leaves it as it is.
+        (self.data / keys.STATE).write_text("[]")
+        self.assertEqual(self.ap2("rotate", "h").returncode, 0)
+        self.assertEqual((self.data / keys.STATE).read_bytes(), b"[]")
 
     def test_rotate_runs_with_every_stream_closed(self):
         self.save(rotate_command="true")
@@ -965,7 +1116,20 @@ class ListCliTest(CliCase):
         self.assertEqual(runs(ran), 1)  # list runs no command
         keys.check(self.data, profiles.load(self.data, "ok"), NOW)
         rows = {row["name"]: row for row in json.loads(self.ap2("list").stdout)["profiles"]}
-        self.assertEqual((rows["g"]["key_error"], rows["ok"]["key_error"]), (None, None))
+        self.assertEqual(rows["g"]["key_error"], "the key command failed (exit 1)")  # kept beside ok's record
+        self.assertIsNone(rows["ok"]["key_error"])
+
+    def test_list_shows_each_profiles_own_key_error(self):
+        # g fails and h works, both checked: each row shows its own profile's record.
+        g = self.save(key="exit 1")
+        h = self.save("h", key="true")
+        self.assertIn("exit 1", keys.check(self.data, g, NOW))
+        self.assertIsNone(keys.check(self.data, h, NOW))
+        r = self.ap2("list")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rows = {row["name"]: row for row in json.loads(r.stdout)["profiles"]}
+        self.assertEqual(rows["g"]["key_error"], "the key command failed (exit 1)")
+        self.assertIsNone(rows["h"]["key_error"])
 
 
 if __name__ == "__main__":

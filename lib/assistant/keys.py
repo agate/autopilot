@@ -17,6 +17,11 @@ read, kept, logged or printed. Only "exit N" or the exception's class name is ke
   gateway's safety guard, a 429 limit) never refreshes anything.
 - `rotate` (`ap2 profile rotate NAME`) runs the rotate command; nothing else ever does.
 
+Both files keep one record per profile, `{"profiles": {name: record}}`: each function reads and writes only its
+own profile's record, so one gateway profile's check, refresh or rotation never lifts or overwrites another's
+answer or hold. A file in the older shape (one record with a top-level `profile`) is read as that profile's record,
+and the next write rewrites it in this shape.
+
 Every function takes the data folder and the time; there is no module clock. Everything is kept inside the data
 folder, so it all works in shadow mode. A symlink at either file is refused, never followed.
 """
@@ -35,8 +40,9 @@ from assistant import apistop, profiles
 from assistant.profiles import ProfileError
 from assistant.store import write_json
 
-STATE = "profile-key.json"  # {"at", "ok", "error", "profile", "auth"?}: the last key check
-REFRESH = "profile-refresh.json"  # {"at", "profile"}: the last refresh after a rejected key
+# Both files are {"profiles": {name: record}}, one record per profile, each with its own "profile".
+STATE = "profile-key.json"  # record {"at", "ok", "error", "profile", "auth"?}: the profile's last key check
+REFRESH = "profile-refresh.json"  # record {"at", "profile"}: the profile's last refresh after a rejected key
 KEY_TTL = timedelta(minutes=10)  # a working key is checked again after this; a second rejection holds this long
 KEY_FAIL_TTL = timedelta(seconds=60)  # a failing key is checked again sooner: the user may just have fixed it
 KEY_TIMEOUT = 60  # seconds the key and refresh commands may take
@@ -68,7 +74,7 @@ def _no_link(path: Path) -> Path:
 
 
 def _read(path: Path) -> dict:
-    """The record, or {} when it is missing, unreadable or not an object (read as never checked). A symlink
+    """The file's object, or {} when it is missing, unreadable or not an object (read as never checked). A symlink
     raises."""
     f = _no_link(path)
     try:
@@ -76,6 +82,42 @@ def _read(path: Path) -> dict:
     except (OSError, ValueError):  # UnicodeDecodeError is a ValueError
         return {}
     return raw if isinstance(raw, dict) else {}
+
+
+def _records(path: Path) -> dict:
+    """Every profile's record in a key health file, by name. `{"profiles": {...}}` keeps the entries that are
+    objects; a `profiles` that is not an object is no record at all; a file in the older shape (one record, its
+    `profile` a name) is that profile's one record. Anything else reads as never checked. A symlink raises."""
+    raw = _read(path)
+    if "profiles" in raw:
+        book = raw["profiles"]
+        if not isinstance(book, dict):
+            return {}
+        return {k: v for k, v in book.items() if isinstance(k, str) and isinstance(v, dict)}
+    name = raw.get("profile")
+    return {name: raw} if isinstance(name, str) and name else {}
+
+
+def _record(path: Path, name) -> dict:
+    """Profile `name`'s record, or {} when it has none. A record whose own `profile` is not `name` is not its."""
+    rec = _records(path).get(name) if isinstance(name, str) else None
+    return rec if rec is not None and rec.get("profile") == name else {}
+
+
+def _put(path: Path, name: str, rec: Optional[dict]) -> None:
+    """Set profile `name`'s record to `rec`, or drop it (None); every other profile's record is kept. The file is
+    removed when no profile is left; a drop for a profile with no record writes nothing. A symlink raises."""
+    book = _records(path)
+    if rec is None:
+        if name not in book:
+            return
+        book.pop(name, None)
+        if not book:
+            _remove(path)
+            return
+    else:
+        book[name] = rec
+    _write(path, {"profiles": book})
 
 
 def _write(path: Path, rec: dict) -> None:
@@ -133,37 +175,37 @@ def _is_gateway(p: dict) -> bool:
 
 def check(data, p: dict, now: datetime) -> Optional[str]:
     """The key command's error text for profile `p`, or None when it works. The subscription runs nothing and is
-    None. The answer is kept in `<data>/profile-key.json`: a working key for KEY_TTL, a failing one for
-    KEY_FAIL_TTL, a failure set by a second rejection (`auth`) for KEY_TTL. A record for another profile, an
-    unreadable or malformed one, or one whose `at` is too far off is not used: the command runs again. Raises
-    ProfileError when the record is a symlink or cannot be written."""
+    None. The answer is kept as `p`'s record in `<data>/profile-key.json`: a working key for KEY_TTL, a failing one
+    for KEY_FAIL_TTL, a failure set by a second rejection (`auth`) for KEY_TTL. Only `p`'s own record is read and
+    written; an unreadable or malformed one, or one whose `at` is too far off, is not used: the command runs
+    again. Raises ProfileError when the file is a symlink or cannot be written."""
     if not _is_gateway(p):
         return None
     f = Path(data) / STATE
-    rec = _read(f)
+    rec = _record(f, p.get("name"))
     ok = rec.get("ok") is True
     ttl = KEY_TTL if ok or rec.get("auth") is True else KEY_FAIL_TTL
-    if isinstance(rec.get("ok"), bool) and rec.get("profile") == p.get("name") and _fresh(rec, now, ttl):
+    if isinstance(rec.get("ok"), bool) and _fresh(rec, now, ttl):
         if ok:
             return None
         err = rec.get("error")
         return err if isinstance(err, str) and err else "the key command failed"
     why = _run_silent(p["gateway"].get("key_command") or "", KEY_TIMEOUT)
     err = f"the key command failed ({why})" if why else None
-    _write(f, {"at": _aware(now).isoformat(), "ok": err is None, "error": err, "profile": p.get("name")})
+    _put(f, p.get("name"), {"at": _aware(now).isoformat(), "ok": err is None, "error": err, "profile": p.get("name")})
     return err
 
 
 def cached_error(data, p: dict) -> Optional[str]:
-    """The last key check's error for `p`, from its record only (no command runs): None when it worked, was for
-    another profile or never ran (or for the subscription). A symlinked record is that error itself."""
+    """The last key check's error for `p`, from `p`'s own record only (no command runs): None when it worked or
+    never ran for `p` (or for the subscription). A symlinked record is that error itself."""
     if not _is_gateway(p):
         return None
     try:
-        rec = _read(Path(data) / STATE)
+        rec = _record(Path(data) / STATE, p.get("name"))
     except ProfileError as e:
         return str(e)
-    if rec.get("profile") != p.get("name") or rec.get("ok") is not False:
+    if rec.get("ok") is not False:
         return None
     err = rec.get("error")
     return err if isinstance(err, str) and err else "the key command failed"
@@ -196,12 +238,13 @@ def auth_failed(errors: list, after: Optional[datetime]) -> bool:
 
 def note_session_end(data, projects, session_id: str, profile_name: Optional[str], now: datetime) -> bool:
     """A worker's session ended on profile `profile_name` (its own; None is the subscription). When it is a gateway
-    profile and the session's transcript ends on an authentication failure newer than the last refresh: run the
-    refresh command (else the key command) once, write `profile-refresh.json` and forget the key check, so the
-    next check runs the key command. A second failure within KEY_TTL of that refresh writes the key error
-    (`auth: true`) instead, which holds new work for KEY_TTL. The failure's own time is what counts (an error with
-    no time: the close time `now`): a session the gateway rejected ends its turn and is closed as idle up to an
-    hour later. True when a failure was found."""
+    profile and the session's transcript ends on an authentication failure newer than the profile's last refresh:
+    run the refresh command (else the key command) once, write the profile's record in `profile-refresh.json` and
+    forget the profile's key check, so its next check runs the key command. A second failure within KEY_TTL of that
+    refresh writes the profile's key error (`auth: true`) instead, which holds new work for KEY_TTL. Another
+    profile's records are never touched. The failure's own time is what counts (an error with no time: the close
+    time `now`): a session the gateway rejected ends its turn and is closed as idle up to an hour later. True when
+    a failure was found."""
     if not session_id or not profile_name:
         return False
     try:
@@ -211,9 +254,7 @@ def note_session_end(data, projects, session_id: str, profile_name: Optional[str
     if not _is_gateway(p):
         return False
     rf = Path(data) / REFRESH
-    last = _read(rf)
-    if last.get("profile") != p["name"]:
-        last = {}
+    last = _record(rf, p["name"])
     errors = (apistop.tail(projects, session_id) or {}).get("errors") or []
     after = _when(last.get("at"))
     if not auth_failed(errors, after):
@@ -226,23 +267,23 @@ def note_session_end(data, projects, session_id: str, profile_name: Optional[str
             return _aware(t) - after < KEY_TTL
         return _fresh(last, now, KEY_TTL)
     if last and after is not None and auth_failed([e for e in errors if soon(e)], after):
-        _write(Path(data) / STATE, {"at": _aware(now).isoformat(), "ok": False, "auth": True, "profile": p["name"],
-                                    "error": AUTH_AGAIN})
+        _put(Path(data) / STATE, p["name"], {"at": _aware(now).isoformat(), "ok": False, "auth": True,
+                                             "profile": p["name"], "error": AUTH_AGAIN})
         return True
     gw = p["gateway"]
     _run_silent(gw.get("refresh_command") or gw.get("key_command") or "", KEY_TIMEOUT)
-    _write(rf, {"at": _aware(now).isoformat(), "profile": p["name"]})
-    _remove(Path(data) / STATE)
+    _put(rf, p["name"], {"at": _aware(now).isoformat(), "profile": p["name"]})
+    _put(Path(data) / STATE, p["name"], None)
     return True
 
 
 # -- rotation ---------------------------------------------------------------------------------------------------------
 
 def rotate(data, name: str, now: datetime) -> dict:
-    """`ap2 profile rotate NAME`: run the profile's rotate command (120 s, every stream closed), then forget the key
-    check and, when it is NAME's, the last refresh. Raises ProfileError for the subscription, an unknown name, a
-    profile with no rotate_command, and a failed command (its exit code only, never its output). `now` is not
-    used: a rotation keeps no time of its own (the signature matches the module's other functions)."""
+    """`ap2 profile rotate NAME`: run the profile's rotate command (120 s, every stream closed), then forget NAME's
+    key check and NAME's last refresh (another profile's records stay). Raises ProfileError for the subscription, an
+    unknown name, a profile with no rotate_command, and a failed command (its exit code only, never its output).
+    `now` is not used: a rotation keeps no time of its own (the signature matches the module's other functions)."""
     p = profiles.load(data, name)
     if not _is_gateway(p):
         raise ProfileError(f"{name} is a subscription profile: it has no key to rotate")
@@ -252,8 +293,6 @@ def rotate(data, name: str, now: datetime) -> dict:
     why = _run_silent(cmd, ROTATE_TIMEOUT)
     if why:
         raise ProfileError(f"rotate_command failed ({why})")
-    _remove(Path(data) / STATE)
-    rf = Path(data) / REFRESH
-    if _read(rf).get("profile") == name:
-        _remove(rf)
+    _put(Path(data) / STATE, name, None)
+    _put(Path(data) / REFRESH, name, None)
     return {"rotated": name}
