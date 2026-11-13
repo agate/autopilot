@@ -205,6 +205,21 @@ class BoundTest(WriterCase):
         self.assertEqual(back["x"], json.loads(AT_BOUND))
         self.assertEqual(self.store.get(card_id), back)
 
+    def test_a_scalar_or_a_back_edge_in_the_deepest_list_at_the_bound_passes(self):
+        # A scalar in the deepest list is not one more level.
+        self.assertIsNone(check_writable(json.loads("[" * MAX_DEPTH + "1" + "]" * MAX_DEPTH)))
+        # A back edge from the deepest list is a cycle, left to the card checks, not a level past the bound.
+        top = cur = []
+        for _ in range(MAX_DEPTH - 1):
+            n = []
+            cur.append(n)
+            cur = n
+        cur.append(top)
+        self.assertIsNone(check_writable(top))
+        x = json.loads("[" * (MAX_DEPTH - 1) + '"a"' + "]" * (MAX_DEPTH - 1))  # the card is depth 1
+        new = self.store.add(card(x=x), by="w")
+        self.assertEqual(self.store.get(new["id"])["x"], x)
+
     def test_one_level_past_the_bound_is_refused_and_writes_nothing(self):
         card_id, point, path = self.card_with_point()
         with self.subTest("add"):
