@@ -132,10 +132,11 @@ def flow_end(line, i):
     """Where the flow collection opening at `line[i]` (`[` or `{`) ends; None when not on this line.
 
     Quoted parts are skipped, and a ` #` outside them starts a comment, so the rest of the line does not count.
-    A quote opens a string only where libyaml starts one: right after `[`, `{` or `,` (blanks between are fine);
-    after a `:` with a blank before the quote, or with the `:` right after a closing quote or bracket (`{"a":"b"}`);
-    after a `?` that starts its own token (`{? "x": 1}`). Anywhere else (`it's`, `5"`, `label:"bug`, `why?"x`) the
-    quote sits inside a plain scalar, which this reader does not follow, so the end cannot be read: None."""
+    A quote opens a string only where libyaml starts one: right after `[`, `{` or `,` (blanks between are fine), or
+    after a `:` with a blank before the quote, or with the `:` right after a closing quote or bracket (`{"a":"b"}`).
+    Anywhere else (`it's`, `5"`, `label:"bug`) the quote sits inside a plain scalar, which this reader does not
+    follow, so the end cannot be read: None. A quote after a `?` is read the same way, blank or not (`why?"x`,
+    `why ?"x` and `{? "x": 1}`): libyaml reads `why ?"x` as one plain scalar."""
     depth = 0
     while i < len(line):
         c = line[i]
@@ -143,8 +144,7 @@ def flow_end(line, i):
             before = line[:i].rstrip(" \t")
             p, prev, gap = before[-1:], before[-2:-1], len(before) < i
             if not (p in ("[", "{", ",")
-                    or p == ":" and (gap or prev in ('"', "'", "]", "}"))
-                    or p == "?" and prev in (" ", "\t", "[", "{", ",")):
+                    or p == ":" and (gap or prev in ('"', "'", "]", "}"))):
                 return None
             i = quoted_end(line, i)
             if i is None:
@@ -222,31 +222,41 @@ JOB = "unittest"
 SETUP_PYTHON = "actions/setup-python@"
 
 
+def stray_bom(text):
+    """[a problem] when a byte order mark (U+FEFF) sits anywhere but at the very start of `text`, else [].
+
+    libyaml skips one at the start of any line, but `job_block` reads it as text at indent 0 and ends the job there,
+    so the lines after it (a switch among them) would go unchecked."""
+    return ["the workflow has a byte order mark (U+FEFF) after its first character"] if "\ufeff" in text[1:] else []
+
+
 def job_switch_problems(text):
     """Problems with the job's own `if:` / `continue-on-error:` keys in the workflow `text`; [] when clean."""
+    bom = stray_bom(text)
     block = job_block(text, JOB)
     if block is None:
-        return [f"no `{JOB}:` job"]
+        return bom + [f"no `{JOB}:` job"]
     # A key line the check cannot read must fail it, not pass it.
-    return ([f"the `{JOB}` job sets `{k}: {v}`" for k, v in job_keys(block) if k in SWITCHES]
+    return (bom + [f"the `{JOB}` job sets `{k}: {v}`" for k, v in job_keys(block) if k in SWITCHES]
             + [f"cannot read the job-level line '{l}'" for l in unreadable_lines(block, 4)]
             + [f"cannot read where the value on the line '{l}' ends" for l in open_values(block)])
 
 
 def step_switch_problems(text, marker):
     """Problems with the `if:` / `continue-on-error:` keys of the one step containing `marker`; [] when clean."""
+    bom = stray_bom(text)
     block = job_block(text, JOB)
     if block is None:
-        return [f"no `{JOB}:` job"]
+        return bom + [f"no `{JOB}:` job"]
     found = [s for s in steps(block) if any(marker in l for l in s)]
     if len(found) != 1:
-        return [f"want one step containing `{marker}`, got {len(found)}"]
+        return bom + [f"want one step containing `{marker}`, got {len(found)}"]
     keys = step_keys(found[0])
     if keys is None:
         # Keys the check cannot read must fail it, not pass it.
-        return [f"cannot read the keys of the `{marker}` step"]
+        return bom + [f"cannot read the keys of the `{marker}` step"]
     pad = len(re.match(r"^ *- *", found[0][0])[0])
-    return ([f"the `{marker}` step sets `{k}: {v}`" for k, v in keys if k in SWITCHES]
+    return (bom + [f"the `{marker}` step sets `{k}: {v}`" for k, v in keys if k in SWITCHES]
             + [f"cannot read the step-level line '{l}' of the `{marker}` step"
                for l in unreadable_lines(found[0][1:], pad)]
             + [f"cannot read where the value on the line '{l}' of the `{marker}` step ends"
@@ -564,7 +574,7 @@ class SwitchCheckTest(unittest.TestCase):
                      '        with: {a: "]", b: 1}', "        name: [a, '[', {b: c}] # [", '          "a b": "c"',
                      "        run: echo \"it's", '        name: "a" # "', "        working-directory: 'C:\\'",
                      '        with: {title: "Fix #42", labels: bug}', '        with: {"a": 1}', '        with: {"a":"b"}',
-                     '        with: {? "x": 1}', '        with: {a:  "x"}'):
+                     "        with: {'a':'b'}", '        with: {a:  "x"}'):
             with self.subTest(line=line):
                 copy = insert_after(self.text, "python-version: ${{ matrix.python-version }}", line)
                 self.assertEqual(job_switch_problems(copy), [])
@@ -580,18 +590,18 @@ class SwitchCheckTest(unittest.TestCase):
                 copy = self.text.rstrip("\n") + "\n" + first + "\n  }\n    continue-on-error: true\n"
                 self.assertEqual(job_switch_problems(copy), [open_job_value(first.strip())])
         # The same quote in a value that does close on its line fails too (known spurious reds: libyaml reads
-        # `a :"b"` as one plain key).
-        for value in ("with: {msg: it's}", 'with: {a :"b"}'):
+        # `a :"b"` as one plain key, and `{? "x": 1}` as the key "x", but a quote after `?` is not followed).
+        for value in ("with: {msg: it's}", 'with: {a :"b"}', 'with: {? "x": 1}'):
             with self.subTest(value=value):
                 copy = insert_after(self.text, "python-version: ${{ matrix.python-version }}", "        " + value)
                 self.assertEqual(job_switch_problems(copy), [open_job_value(value)])
                 self.assertEqual(step_switch_problems(copy, SETUP_PYTHON), [open_step_value(value, SETUP_PYTHON)])
 
     def test_a_quote_glued_to_a_colon_or_question_mark_in_a_flow_value_is_a_problem(self):
-        # In `label:"bug` and `why?"bug` the `:` and `?` are part of a plain scalar, so the quote does not open a
-        # string; read as one, it pairs with a later quote and hides the real end of the value, and the switch after
-        # it would be dropped.
-        for word in ('label:"bug', 'why?"bug'):
+        # In `label:"bug`, `why?"bug` and `why ?"bug` the `:` and `?` are part of a plain scalar, so the quote does
+        # not open a string; read as one, it pairs with a later quote and hides the real end of the value, and the
+        # switch after it would be dropped.
+        for word in ('label:"bug', 'why?"bug', 'why ?"bug'):
             with self.subTest(word=word):
                 first = f'    env: {{QUERY: {word}, NOTE: "}}'
                 copy = self.text.rstrip("\n") + "\n" + first + '\n  "}\n    continue-on-error: true\n'
@@ -605,6 +615,23 @@ class SwitchCheckTest(unittest.TestCase):
                 copy = insert_after(self.text, after, "\n".join(lines))
                 self.assertEqual(step_switch_problems(copy, marker), [open_step_value(lines[0].strip(), marker)])
                 self.assertEqual(job_switch_problems(copy), [open_job_value(lines[0].strip())])
+
+    def test_a_byte_order_mark_after_the_first_character_is_a_problem(self):
+        # libyaml skips a byte order mark at the start of any line; read as text it ends the job early, so the
+        # switch after it would be dropped.
+        bom = "the workflow has a byte order mark (U+FEFF) after its first character"
+        for lines in (["\ufeff   if: false"], ["\ufeff       continue-on-error: true"],
+                      ["\ufeff# note", "    continue-on-error: true"]):
+            with self.subTest(lines=lines):
+                copy = self.text.rstrip("\n") + "\n" + "\n".join(lines) + "\n"
+                for problems in (job_switch_problems(copy), step_switch_problems(copy, SETUP_PYTHON),
+                                 step_switch_problems(copy, RUN_COMMAND)):
+                    self.assertNotEqual(problems, [])
+                    self.assertIn(bom, problems)
+        # One at the very start of the file is fine.
+        self.assertEqual(job_switch_problems("\ufeff" + self.text), [])
+        self.assertEqual(step_switch_problems("\ufeff" + self.text, SETUP_PYTHON), [])
+        self.assertEqual(step_switch_problems("\ufeff" + self.text, RUN_COMMAND), [])
 
     def test_a_quoted_key_with_a_value_running_on_is_a_problem(self):
         copy = insert_after(self.text, "python-version: ${{ matrix.python-version }}",
