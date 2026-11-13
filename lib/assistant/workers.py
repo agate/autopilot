@@ -31,6 +31,16 @@ until `ap2 cap resume`; `cap_stop` stops and parks every running worker, and eve
 failed stop again. A parked worker resumes by the active profile's rules: the subscription's usage windows (needs
 `--usage`), or the gateway's cap (no usage file). A gateway worker is never parked by the subscription's windows.
 
+A worker whose turn stopped (idle, blocked or dead) may have stopped on an API error: `check` reads the end of its
+transcript (`apistop.py`) before it acts. A usage or spend limit parks it (`reason: limit`; only `workers.json` is
+written, and the card's attach ask is closed when the worker was at a prompt, so this works in shadow mode) until the
+reset the message names plus the resume delay, else for a back-off of 30 minutes doubling to 4 hours (`limit_parks`
+counts the limit parks in a row); the parked resume continues it.
+A gateway's safety-guard refusal stops it at once (`refused`, paused) and the card asks the user to resume that one
+worker on the subscription. Only an error of the current run counts (from 2 minutes before its start). `list` says
+which (`api_stop`) without writing anything. A `--resume` start stops the saved session it replaces when the listing
+still shows it.
+
 Starting (or resuming) a session can make branches and PRs, so it needs live mode; listing, classifying, ending
 and archiving work in shadow mode. v1 is reused by import (`lib/autopilot/workers.py`, `sessions.py`,
 `budget.py`, `park.py`, `perms.py`) and never changed.
@@ -45,7 +55,7 @@ import signal
 import subprocess
 import sys
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -56,7 +66,7 @@ from autopilot import perms as v1_perms
 from autopilot import sessions as v1_sessions
 from autopilot import workers as v1_workers
 
-from assistant import cap, cards, config, profiles, projects, spend, transcripts
+from assistant import apistop, cap, cards, config, profiles, projects, spend, transcripts
 from assistant.cards import CardError
 from assistant.resources import MAX_WORKERS, PORT_BASE, Registry, WorkerError, check_start, next_ports
 from assistant.store import Store, write_json
@@ -93,19 +103,23 @@ DISCOVER_TIMEOUT = 180
 DISCOVER_PROMPT = "Reply with the single word OK."
 ATTACH = "permission_prompt"  # the `reason` of the ask a worker at a permission prompt raises
 DIED = "died_twice"  # the `reason` of the ask a worker that died twice raises; only the user closes it
+REFUSED = "gateway_refused"  # the `reason` of the ask a worker stopped by a gateway's safety guard raises
+RUN_SKEW_MIN = 2  # an API error this many minutes before a run's start may still be the run's own
 # The worker asks a role can have on its card, by kind (see `_worker_ask_kind`):
 #   attach   - waiting at a permission prompt: `claude attach` it. Closed by every stop, every start and finish.
 #   paused   - stopped after BLOCKED_MIN minutes at that prompt: resume it. Closed by every start and finish.
 #   question - the worker's question (type answer). Closed by every start and finish; never by a stop, since the
 #              question path stops the session first and then raises it.
-WORKER_ASKS = ("attach", "paused", "question")
+#   refused  - stopped because a gateway's safety guard refuses its conversation: resume it on the subscription.
+#              Closed by every start and finish, like the paused hint.
+WORKER_ASKS = ("attach", "paused", "question", "refused")
 # Every way a worker is closed (`Workers._finish_close`): path -> (the state saved on the card, the line's `did`,
 # drop_on_error). drop_on_error drops the record when a step after the stop fails, where a kept record would be
 # misread as dead and resumed (end and both pauses); the other paths keep it, so the next check closes it again.
 CLOSES = {"end": ("ended", "ended", True), "done": ("ended", "ended", False),
           "question": ("asked", "asked", False), "died": ("stopped", "stopped", False),
           "idle": ("paused", "paused", True), "blocked": ("paused", "paused", True),
-          "parked_failed": ("stopped", "stopped", False)}
+          "refused": ("paused", "paused", True), "parked_failed": ("stopped", "stopped", False)}
 # Files a worker may not edit in the data folder. Every card's run directory stays writable except its settings
 # files: a deny rule cannot keep one worker out of another card's result files. The user's templates and sources
 # are here as well (the worker floor in roles.py), the access profiles with the active one's name, and the spend
@@ -629,6 +643,8 @@ class Workers:
             return "question"
         if ask.get("type") == "fix" and ask.get("reason") == ATTACH:
             return "paused" if ask.get("stage") == "paused" else "attach"
+        if ask.get("type") == "fix" and ask.get("reason") == REFUSED:
+            return "refused"
         return None
 
     def _close_worker_asks(self, card_id: str, role: str, by: str, kinds=WORKER_ASKS) -> None:
@@ -729,11 +745,19 @@ class Workers:
             if parked:
                 # The parked session sits idle; the copy takes its place.
                 self._stop(card_id, role, parked.get("short_id"), by, parked.get("session_id"))
+            elif resume:
+                # The card's saved session (after a pause or an answer) may still be listed, idle: the copy takes
+                # its place, so it is stopped first (its spend settled) rather than left running next to it.
+                replaced = self._listed_session(sid)
+                if replaced is not None:
+                    self._stop(card_id, role, replaced["id"], by, sid)
             short = self._launch(argv, cwd, env)
             rec = {"card": card_id, "role": role, "project": project.get("name"), "session_name": name,
                    "session_id": "", "short_id": short, "ports": port_range, "needs": needs, "cwd": cwd,
                    "branch": branch, "profile": prof["name"], "started_at": cards.stamp(now), "resumes": 0,
                    "parked": None, "idle_since": None, "blocked_since": None}
+            if parked and parked.get("limit_parks"):
+                rec["limit_parks"] = parked["limit_parks"]  # the limit parks in a row go on through the resume
             # On record before the listing is asked for its id: a Ctrl-C or an error there still leaves a record
             # that points at the running session (the next check fills the id in, `_fill_session_id`).
             records[:] = [r for r in records if r is not old] + [rec]
@@ -788,9 +812,9 @@ class Workers:
         """Close the worker for `mark` (`_mark`) and do that close's follow-up; return the fields for its line.
         Each close lives here only: its first try and the retry of a close that was started (the record's
         `closing`) both run it. Follow-ups: the question's `answer` ask, the `fix` ask of a worker that died twice
-        or cannot resume after parking, and the blocked pause's resume hint."""
+        or cannot resume after parking, the blocked pause's resume hint and the gateway refusal's resume hint."""
         card_id, role, path = rec["card"], rec["role"], mark["path"]
-        if path == "blocked":
+        if path in ("blocked", "refused"):
             try:
                 closed = self._close(rec, records, mark, by)
             finally:
@@ -798,11 +822,8 @@ class Workers:
                 # to is gone: say how to go on instead, also when saving it failed. A stop that raised keeps the
                 # record, its mark and the attach ask: the next check finishes this pause.
                 if not any(r is rec for r in records):
-                    self._set_ask(card_id, {"type": "fix", "role": role, "reason": ATTACH, "stage": "paused",
-                                            "text": f"Stopped after {BLOCKED_MIN} minutes at a permission prompt. "
-                                                    f"Resume it with `ap2 worker start {card_id} {role} --resume`."},
-                                  by)
-            return dict(closed, did=CLOSES[path][1])
+                    self._set_ask(card_id, self._pause_ask(rec, path), by)
+            return dict(closed, did=CLOSES[path][1], **({"note": mark["note"]} if mark.get("note") else {}))
         closed = self._close(rec, records, mark, by)
         if path == "question":
             text = (mark.get("extra") or {}).get("question")
@@ -817,6 +838,27 @@ class Workers:
         if mark.get("note"):
             out["note"] = mark["note"]
         return out
+
+    @staticmethod
+    def _pause_ask(rec: dict, path: str) -> dict:
+        """The `fix` ask a pause leaves on the card: how to go on once the worker was stopped (`blocked`: after
+        BLOCKED_MIN minutes at a permission prompt; `refused`: a gateway's safety guard refuses its conversation)."""
+        card_id, role = rec["card"], rec["role"]
+        resume = f"ap2 worker start {card_id} {role} --resume"
+        if path == "blocked":
+            return {"type": "fix", "role": role, "reason": ATTACH, "stage": "paused",
+                    "text": f"Stopped after {BLOCKED_MIN} minutes at a permission prompt. Resume it with `{resume}`."}
+        back = rec.get("profile") or profiles.SUBSCRIPTION
+        text = ("Stopped: a gateway's safety guard refused this worker's conversation. The gateway refuses this "
+                "conversation every time, so resuming it there will not help. ")
+        if back == profiles.SUBSCRIPTION:
+            # Already the subscription: a switch there and back again is no step at all.
+            text += (f"This worker already ran on the subscription: resume it with `{resume}` while the "
+                     "subscription is the active profile.")
+        else:
+            text += (f"Resume this one worker on the subscription: run `ap2 profile use {profiles.SUBSCRIPTION}`, "
+                     f"then `{resume}`, then `ap2 profile use {back}` to switch back.")
+        return {"type": "fix", "role": role, "reason": REFUSED, "text": text}
 
     def end(self, card_id: str, role: str, by: str = BY) -> dict:
         """Stop a worker and keep its session on the card, so a later round can resume it. Works in shadow mode."""
@@ -897,9 +939,88 @@ class Workers:
         return "running"
 
     def list(self) -> list:
-        """Every worker on record with its state. Works in shadow mode."""
+        """Every worker on record with its state. A worker whose turn stopped on an API error ap2 acts on also says
+        which (`api_stop`: `limit` or `gateway_refused`); nothing is parked or written. Works in shadow mode."""
         listing = v1_sessions.list_all(self.claude)
-        return [dict(r, state=self.classify(r, listing)) for r in self.registry.read()]
+        out = []
+        for r in self.registry.read():
+            row = dict(r, state=self.classify(r, listing))
+            seen = self._api_tail(r, row["state"], listing)
+            stop = apistop.stop(*seen) if seen is not None else None
+            if stop is not None:
+                row["api_stop"] = stop["kind"]
+            out.append(row)
+        return out
+
+    # -- API stops (apistop.py): a turn that ended on a usage limit or a gateway's refusal ---------------------------
+
+    @staticmethod
+    def _since(rec: dict) -> datetime:
+        """The time from which an API error in the worker's transcript is its current run's own: its start, less
+        RUN_SKEW_MIN minutes. A resumed copy repeats the old conversation with the old times. With no start time
+        nothing can be told apart from history."""
+        try:
+            return cards.parse_stamp(rec.get("started_at")) - timedelta(minutes=RUN_SKEW_MIN)
+        except (TypeError, ValueError):
+            return datetime.max.replace(tzinfo=timezone.utc)
+
+    def _listed_session(self, session_id: str) -> Optional[dict]:
+        """The listing's session with this id (`sessionId`), unless it is marked `state: stopped`; None when it is not
+        listed or the listing failed."""
+        if not session_id:
+            return None
+        return next((s for s in v1_sessions.list_all(self.claude) or []
+                     if s.get("sessionId") == session_id and s.get("id") and s.get("state") != "stopped"), None)
+
+    def _api_tail(self, rec: dict, state: str, listing) -> Optional[tuple]:
+        """(the transcript's tail, `_since`) for a worker whose turn stopped (idle, blocked or dead), or None: a
+        parked or closing worker, a session the listing shows working or busy, and a transcript that is missing or
+        cannot be read are not read."""
+        if state not in ("idle", "blocked", "dead") or rec.get("parked") or rec.get("closing"):
+            return None
+        s = v1_sessions.find_by_id(rec.get("short_id"), listing) or v1_sessions.find(rec["session_name"], listing)
+        if s is not None and (s.get("state") == "working" or s.get("status") == "busy"):
+            return None
+        t = apistop.tail(self.transcripts_dir, rec.get("session_id") or (s or {}).get("sessionId"))
+        return (t, self._since(rec)) if t is not None else None
+
+    def _api_act(self, rec: dict, state: str, listing, records: list, entry: dict, by: str, now: datetime) -> bool:
+        """`check`'s step 1 for a worker whose turn stopped on an API error: a limit parks it (`reason: limit`), a
+        gateway's refusal closes it (`refused`). True when it did either, and `_act` is not run for it this pass. A
+        normal reply in the current run with no error after it ends the run of limit parks (`limit_parks`)."""
+        seen = self._api_tail(rec, state, listing)
+        if seen is None:
+            return False
+        t, since = seen
+        replied = t["reply_at"] is not None and t["reply_at"] >= since
+        if replied and not t["errors"]:
+            rec.pop("limit_parks", None)
+            return False
+        stop = apistop.stop(t, since)
+        if stop is None:
+            return False
+        if stop["kind"] == "gateway_refused":
+            why = "a gateway's safety guard refused this conversation; paused, resume it on the subscription"
+            entry.update(self._finish_close(rec, records, self._mark("refused", why, note=stop["text"]), by))
+            return True
+        try:
+            before = 0 if replied else max(int(rec.get("limit_parks") or 0), 0)  # a reply in this run: count again
+        except (TypeError, ValueError):
+            before = 0
+        n = before + 1
+        reset = apistop.reset_time(stop["text"], stop["at"])
+        if reset is not None:
+            resume_at = reset + timedelta(minutes=PARK_RULES["resume_after_min"])
+        else:
+            resume_at = now + apistop.backoff(n)
+        if rec.get("blocked_since"):
+            self._close_worker_asks(rec["card"], rec["role"], by, kinds=("attach",))  # parked: no prompt to answer
+        rec.update(parked={"reason": "limit", "note": stop["text"], "resets_at": reset.isoformat() if reset else None,
+                           "resume_at": resume_at.isoformat(), "parked_at": cards.stamp(now), "kind": None,
+                           "model": None, "percent": None},
+                   limit_parks=n, idle_since=None, blocked_since=None)
+        entry.update(state="parked", did="parked")
+        return True
 
     def _minutes_since(self, stamp: Optional[str]) -> float:
         try:
@@ -1080,7 +1201,9 @@ class Workers:
                         state = "unknown"  # its mark says what to do: `_act` finishes that close
                     if not rec.get("session_id"):
                         self._fill_session_id(rec, listing, by)
-                    plan = self._act(rec, state, records, entry, by, b, now, allow)
+                    # A turn that stopped on an API error: parked or closed here, and not acted on again this pass.
+                    done = self._api_act(rec, state, listing, records, entry, by, now)
+                    plan = None if done else self._act(rec, state, records, entry, by, b, now, allow)
                     if plan is not None:
                         planned.append(dict(plan, entry=entry))
                 except Exception as e:  # noqa: BLE001 - one worker's error must not cost the others their changes

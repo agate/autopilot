@@ -902,7 +902,9 @@ Rules:
    resumable (`sessions.<role>.state: paused`). Not yet verified: whether the prompt appears again on resume.
 5. **[decided, open question 2]** Fallback: any worker idle for 60 minutes (its turn ended: state blocked or done
    with a live process, or status idle) with no result file is stopped and marked "paused, can resume". The clock
-   starts when a gate check first sees it idle; seeing it work again resets it.
+   starts when a gate check first sees it idle; seeing it work again resets it. A worker whose turn ended on an API
+   error (a usage limit, or a gateway's safety-guard refusal) is not idle: it is parked or stopped at once (see the
+   "Workers stopped by an API error" entry in section 12).
    A worker's own ask never outlives its cause: any start of that role (fresh, `--resume`, or an in-place resume)
    and `finish` close the attach ask, the pause's resume hint and the worker's open question, and every stop also
    closes the attach ask; the user's own asks and the "died twice" ask are never closed this way. A worker's ask
@@ -1084,7 +1086,8 @@ Calls the author made without asking (check them):
   save-raw hook and the take); review angles: `angles.py` (the three layers, kinds, globs and the picker,
   design 6.1) with the built-in table in `review/angles.yaml` at the plugin root; how the PR loop ends:
   `prloop.py` (the loop's record, the decision, the one check of the fix and the card's fields, design 6.3);
-  for workers, `workers.py`, `resources.py`, `transcripts.py` and `projects.py` (see the workers entry below);
+  for workers, `workers.py`, `resources.py`, `transcripts.py` and `projects.py` (see the workers entry below), and
+  `apistop.py` (what the end of a worker's transcript means; see the "Workers stopped by an API error" entry below);
   access profiles: `profiles.py` (the store, the overlay and merge, `ap2 profile`; see the access profiles entry
   below); the spend ledger: `spend.py` with the shipped `prices.json` next to it (`ap2 spend`; see the spend
   ledger entry below); the daily cap: `cap.py` (`ap2 cap`; see the daily cap entry below); the local page:
@@ -2380,8 +2383,9 @@ Calls the author made without asking (check them):
      `CAP_RESUME` (the pause was lifted), `LIMIT_RESUME` (below).
   9. A limit park resumes like a quota park. A record with `reason: "limit"` (written by the slice that detects API
      limit errors) resumes by 8 once its `resume_at` has passed, with `LIMIT_RESUME`: "You were parked at a usage
-     limit. Continue from where you stopped; check your worktree and run files first." This slice does not detect
-     limit errors.
+     limit. Continue from where you stopped; check your worktree and run files first." The records are written by
+     `check` when a worker's transcript ends on a limit error (see the "Workers stopped by an API error" entry
+     below).
   10. Parking split by mode. `parkhook.decide` has no opinion for a worker whose own profile (`AP2_PROFILE` in
       `AP2_DATA`, both in the worker env) loads as a gateway profile; `profiles` is imported only at the park line,
       so the hook's common path stays light, and it never imports `spend`, `workers` or `cap`. A profile that cannot
@@ -2400,6 +2404,56 @@ Calls the author made without asking (check them):
       `answer pause` stops workers only in live mode.
   12. Workers cannot edit the cap: `cap-state.json`, `paused.json` and `.cap-stop.lock` are in `PROTECTED`, so
       every worker floor Edit-denies them.
+- **[decided by the builder]** Workers stopped by an API error (8.2), in `apistop.py` and `workers.py`. Ported
+  from v1 (`usage.transcript_tail`, `sessions.api_stop`, `workers._limit_park`), plus a stop of the replaced session.
+  1. What is read. `apistop.tail(projects, session_id)` finds the session's jsonl (`transcripts.find`) and reads its
+     last 65536 bytes only (the first, cut line is dropped). It returns the API error lines after the last normal
+     assistant reply, oldest first (`{at, text, error, status}`), and that reply's time (`reply_at`); None when there
+     is no transcript or it cannot be read, which is "no API error seen". An API error line is an `assistant` or
+     `system` line with `isApiErrorMessage: true`, or the model `<synthetic>`, or a non-empty string `error`; a
+     line that does not parse is skipped. `apistop.stop(tail, since)` reads the last error only, and only when it
+     is dated at or after `since` (the run's `started_at` less 2 minutes: a resumed copy repeats the old
+     conversation with the old times). It is `limit` for a 429, `error: rate_limit` or a text that names a limit,
+     and `gateway_refused` for a 400 (status or text) whose text says `safety guard`; anything else is none.
+     `gateway_refused` is never a key failure: key health can test for it with this same function.
+  2. When it is read. In `check`'s step 1, after the session id is filled in, for a record that is not parked and
+     not closing, whose state is idle, blocked or dead, and whose session the listing does not show working or busy.
+     A result file or a question wins (those states come first); a missing or unreadable transcript, an error from
+     before the run, a recovered transcript (a reply after the error) and any other error leave today's idle,
+     blocked and dead handling.
+  3. A limit parks. `parked` is `{reason: "limit", note: <the error text>, resets_at, resume_at, parked_at, kind:
+     null, model: null, percent: null}`: `resume_at` is the reset the message names ("resets 8:40pm
+     (America/Los_Angeles)", "resets Nov 14, 9am (UTC)": the first such wall time in that zone after the error)
+     plus `resume_after_min` (5 minutes), else now plus `backoff(n)`: 30 minutes doubling to at most 4 hours, `n`
+     being the record's `limit_parks` plus one, saved back. The line says `did: parked`, `state: parked`, and
+     nothing else is done for it that pass; nothing is stopped (the session sits idle). Only `workers.json` is
+     written (and the attach ask closed when the worker was at a prompt), so it works in shadow mode; the resume
+     (item 9 above) needs live mode and stops the old session first. `limit_parks` stays through an in-place
+     resume and through `start --resume` of the parked record; a normal reply in the current run with no error
+     after it removes it, and a reply before a new limit starts the count again; it goes with the record.
+  4. A gateway refusal stops the worker. The guard refuses the conversation itself, so it refuses every later call
+     of it, on a resume too: waiting never helps. The worker is closed at once by the `refused` close (`paused`,
+     can resume), and the card's ask is `{type: fix, reason: gateway_refused, role, text}`. The text says the
+     gateway refuses this conversation every time, so resuming it there will not help, and gives three commands:
+     `ap2 profile use subscription`, `ap2 worker start <card> <role> --resume`, then `ap2 profile use <the worker's
+     profile>` to switch back. When the worker's own profile is already the subscription, it gives only the resume
+     command and says the worker already ran on the subscription. It is a worker ask (kind `refused`): any start of
+     that role and `finish` close it, as the paused hint. No profile or key is touched.
+  5. A replaced session is stopped. `start --resume` with no parked record (the card's saved session, after a
+     pause or an answer) stops that saved session first, through the stop that settles its spend, when the listing
+     still shows it (matched by `sessionId`) and does not mark it `state: stopped`. A parked record's resume and the
+     in-place resumes already stopped the old session.
+  6. `ap2 worker list` stays read-only: a row whose state is idle, blocked or dead gains `api_stop: limit |
+     gateway_refused` when its transcript says so (item 1's rules); nothing is parked.
+  7. **[decided by the builder]** The choices: the check runs inside `check`'s step 1 under the worker list's
+     lock, on the record it is about to act on, not in a separate pre-pass as v1's `note_api_stops` (one lock, one
+     listing, and the park is seen by the same pass). A refusal stops the worker at once (paused, can resume)
+     instead of keeping it blocked on its slot as v1 does, since no process waits for a human (8.2 rule 3) and the
+     slot is free meanwhile. `list` reports `api_stop` without parking (v1 parks from its listing too). The refusal
+     is detected whatever the worker's profile, and the ask names the worker's own profile for the switch back. The
+     resume delay after a parsed reset is v1's `resume_after_min`, not a new setting. A listed session that is
+     working or busy is never read, even when its status says idle. The reset is read after the error's own time.
+     Not here: the park hook's extra credits (left open), a task flag that pins work to the subscription.
 - **[decided by the builder]** v1 import (10, 11 question 5), read-only, in `importv1.py`.
   - Command: `ap2 import-v1 [--data PATH] [--from DIR] [--project NAME ...] [--dry-run]`. `--from` defaults to
     v1's own data root (`AUTOPILOT_DATA`, else `~/.claude/autopilot-data`, v1's `paths.data_root()`). A project is
