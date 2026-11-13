@@ -1491,6 +1491,39 @@ class CommandWatchTest(LoopCase):
         self.assertEqual(out["reads"][0]["made"], 0)
         self.assertEqual(self.store().list(), [])
 
+    def test_once_the_read_budget_is_spent_a_due_watch_is_not_read_and_waits_for_its_next_time(self):
+        self.command_source("a1", items=[item(1)])
+        self.command_source("b2", items=[item(2)])
+        marker = self.tmp / "b2-ran"
+        (self.tmp / "b2.py").write_text(f"open({str(marker)!r}, 'w').close(); print('[]')\n")
+        clock = iter([0.0, 0.0])  # the start, then before a1; before b2 the budget is spent
+        with mock.patch("assistant.gate.monotonic", lambda: next(clock, gate.READ_BUDGET + 1.0)):
+            out = self.gate(self.T)
+        self.assertEqual(out["watches_due"], ["a1", "b2"])
+        self.assertEqual([r["watch"] for r in out["reads"]], ["a1"])
+        self.assertEqual(out["errors"], [{"watch": "b2", "error": "not read: this run's 120 seconds for command "
+                                                                  "reads were spent; it is read at its next due "
+                                                                  "time"}])
+        self.assertFalse(marker.exists())
+        self.assertIn("watch b2: error: not read", self.gate_log())
+        self.assertIn("b2", json.loads((self.data / "watches.json").read_text()))  # its time stays written
+        self.assertEqual(self.gate(self.T + timedelta(minutes=4))["watches_due"], [])
+
+    def test_each_read_is_given_what_is_left_of_the_budget(self):
+        self.command_source("a1")
+        given = []
+        real = engine.Engine.read
+
+        def read(eng, name, dry_run=False, max_timeout=None):
+            given.append(max_timeout)
+            return real(eng, name, dry_run=dry_run, max_timeout=max_timeout)
+
+        clock = iter([0.0, 30.0])
+        with mock.patch("assistant.gate.monotonic", lambda: next(clock)), \
+                mock.patch.object(engine.Engine, "read", read):
+            self.gate(self.T)
+        self.assertEqual(given, [gate.READ_BUDGET - 30.0])
+
 
 class ScanWatchTest(LoopCase):
     def setUp(self):
@@ -1533,6 +1566,57 @@ class ScanWatchTest(LoopCase):
         self.assertEqual(len(self.bg_calls()), 1)
         self.assertEqual(out["watches_due"], [])
         self.assertEqual((self.data / "watches.json").read_text(), times)
+
+    def test_the_record_is_on_file_before_the_listing_is_asked_for_the_session_id(self):
+        from autopilot import sessions
+        real, seen = sessions.list_all, []
+
+        def listing(claude):
+            if self.bg_calls():  # the listing start asks after the launch
+                seen.append(self.scan_record())
+                return None  # the listing fails: the record must still be there
+            return real(claude)
+
+        with mock.patch("autopilot.sessions.list_all", listing):
+            out = self.gate(self.T)
+        self.assertEqual([r["session_id"] for r in seen], [""])
+        self.assertEqual((self.scan_record()["short_id"], self.scan_record()["session_id"]), ("s0001", ""))
+        self.assertEqual([e for e in out["errors"] if e.get("scan")], [])
+        self.assertNotIn(["stop", "s0001"], self.argvs())
+
+    def test_a_record_that_cannot_be_written_stops_the_session(self):
+        real = scan.write_json
+
+        def write(path, obj):
+            if Path(path).name == scan.SESSION:
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real(path, obj)
+
+        with mock.patch("assistant.scan.write_json", write):
+            out = self.gate(self.T)
+        self.assertEqual(len(self.bg_calls()), 1)
+        self.assertIn(["stop", "s0001"], self.argvs())
+        self.assertFalse((self.data / "scan-session.json").exists())
+        [err] = [e for e in out["errors"] if e.get("scan")]
+        self.assertIn("No space left on device", err["error"])
+        self.assertTrue(err["error"].endswith("the session s0001 was stopped"), err["error"])
+
+    def test_a_second_record_write_that_fails_keeps_the_first(self):
+        real, writes = scan.write_json, []
+
+        def write(path, obj):
+            if Path(path).name == scan.SESSION:
+                writes.append(dict(obj))
+                if len(writes) > 1:
+                    raise OSError(errno.ENOSPC, "No space left on device")
+            return real(path, obj)
+
+        with mock.patch("assistant.scan.write_json", write):
+            out = self.gate(self.T)
+        self.assertEqual([bool(w["session_id"]) for w in writes], [False, True])
+        self.assertEqual((self.scan_record()["short_id"], self.scan_record()["session_id"]), ("s0001", ""))
+        self.assertNotIn(["stop", "s0001"], self.argvs())
+        self.assertEqual([e for e in out["errors"] if e.get("scan")], [])
 
     def test_hook_allow_allows_only_the_planned_tools(self):
         self.gate(self.T)

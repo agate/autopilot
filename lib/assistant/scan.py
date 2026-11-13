@@ -13,7 +13,8 @@ scan into cards. The session only reads; it decides nothing about work.
   `<data>/sources/.raw/<source>/`, checks the records word for word and makes the cards.
 
 - `start(data, plan, profile, now)` starts the session (`claude --bg -n "ap2 scan · <scan>" --model <small model>
-  --settings <scan>/settings.json <brief>`, in the scan folder) and records it in `<data>/scan-session.json`. The
+  --settings <scan>/settings.json <brief>`, in the scan folder) and records it in `<data>/scan-session.json` before
+  it asks the listing for the session id (a record that cannot be written stops the session again). The
   settings hold two hooks: `ap2 scan hook-allow` before every tool call (`hook_allow`: only the planned tools, the
   records files and, for a skill, the skill and plain reads; all else is denied) and `ap2 scan save-raw` after.
   `launch_profile` is asked first: the active profile, refused while the cap is paused or at its limit.
@@ -742,7 +743,9 @@ def session_settings(plan_file, profile: dict) -> dict:
 def start(data, p: dict, profile: dict, now: datetime, claude: Optional[str] = None) -> dict:
     """Start the scan session of plan `p` (as `plan` returned it) on `profile`, in its scan folder, and record it in
     `<data>/scan-session.json` `{plan, short_id, session_id, started_at, profile}`, with a spend launch row (kind
-    `scan`). Raises ScanError when it cannot start."""
+    `scan`). The record is written with an empty session id right after the launch, then again with the id once the
+    listing shows it (best effort). Raises ScanError when it cannot start, or when the first record cannot be
+    written (the session is stopped first)."""
     from autopilot import workers as v1_workers
 
     from assistant import spend
@@ -761,10 +764,26 @@ def start(data, p: dict, profile: dict, now: datetime, claude: Optional[str] = N
         short = v1_workers._launch(argv, str(folder), env)
     except (OSError, RuntimeError, subprocess.SubprocessError) as e:
         raise ScanError(f"cannot start the scan session: {e}") from e
-    sid = (v1_sessions.find_by_id(short, v1_sessions.list_all(claude)) or {}).get("sessionId") or ""
-    rec = {"plan": str(p["plan"]), "short_id": short, "session_id": sid, "started_at": cards.stamp(now),
+    # On record before the listing is asked (up to 60 s), so an error or a Ctrl-C there leaves no session running
+    # with no record; `finish` works with an empty session id.
+    rec = {"plan": str(p["plan"]), "short_id": short, "session_id": "", "started_at": cards.stamp(now),
            "profile": profile["name"]}
-    write_json(data / SESSION, rec)
+    try:
+        write_json(data / SESSION, rec)
+    except OSError as e:
+        try:
+            subprocess.run([claude, "stop", short], capture_output=True, timeout=60, stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        raise ScanError(f"cannot record the scan session in {data / SESSION}: {e}; the session {short} was "
+                        f"stopped") from e
+    sid = (v1_sessions.find_by_id(short, v1_sessions.list_all(claude)) or {}).get("sessionId") or ""
+    if sid:
+        try:
+            write_json(data / SESSION, dict(rec, session_id=sid))
+            rec = dict(rec, session_id=sid)
+        except OSError:  # the first record stays; it is enough to stop and take the session
+            pass
     try:
         spend.record_launch(data, short, "scan", None, profile, session_id=sid, at=now)
     except Exception as e:  # noqa: BLE001 - bookkeeping never undoes a started session

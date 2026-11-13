@@ -1477,7 +1477,12 @@ Calls the author made without asking (check them):
     `WebSearch` denied as well; the active profile's overlay merged under them as the worker floor merges it), then
     starts `claude --bg -n "ap2 scan · <scan>" --model <small model> --settings <file> <brief>` in the scan folder
     with the profile's env, and writes `<data>/scan-session.json` `{plan, short_id, session_id, started_at,
-    profile}` and a spend launch row of kind `scan`. `hook-allow` allows a call only for a planned call's tool
+    profile}` and a spend launch row of kind `scan`. The record goes on file right after the launch, with
+    `session_id` empty, before the listing (up to 60 seconds) is asked for the session id; then it is written again
+    with the id. So an error or a Ctrl-C during the listing still leaves a record, and the next run stops and takes
+    that session. If that second write fails, the first record stays (`finish` works with an empty id). If the
+    first write fails, the session is stopped (`claude stop <short>`, errors ignored) and the start raises an error
+    that says so, so no session runs with no record. `hook-allow` allows a call only for a planned call's tool
     (`calls_tool`, the take's own match), a `Write` to a planned records file, or, for a skill call, `Skill` with
     that skill's name and `Read`, `Glob` and `Grep`, or, when the plan has an `mcp` or `connector` call,
     `ToolSearch`. While tool search is on (a gateway profile's overlay sets `ENABLE_TOOL_SEARCH`), MCP tools are
@@ -1558,7 +1563,16 @@ Calls the author made without asking (check them):
     them"; a list a caller passes (`[{name, every, last_check_at?}]`) is only timed, never read, which keeps the
     timing tests as they are. A due `via: command` watch is read by the gate itself (`Engine.read`); `reads` gets
     `{watch, via, made, updated, unchanged, dropped}` per read, a failed read (exit not 0, a timeout, an unset
-    setting) is one error `{"watch", "error"}` and the next watch is still read. The due `mcp`, `connector` and
+    setting) is one error `{"watch", "error"}` and the next watch is still read. **[decided by the builder]** The
+    command reads of one run share one time budget, `READ_BUDGET` (120 seconds), counted from when the reads begin. Each
+    read's timeout is cut to what is left of it: a source's `read.timeout` (up to 600) that is longer is cut under
+    the gate, and a read cut this way fails the usual timeout way, one error that names the seconds it waited. Once
+    the budget is spent, a due watch is not started: one error `{"watch", "error": "not read: this run's 120
+    seconds for command reads were spent; it is read at its next due time"}`. Its time was already written, so it
+    is not rewound; it waits for its next due time. Why: a read runs inside the gate lock, so while it hangs every
+    later run finds the lock held and does nothing, and a routine slot that came due meanwhile is found more than
+    `routines.GRACE` (5 minutes) late and, with `missed_run: skip`, skipped. A read that needs longer belongs to
+    `ap2 source read <name>`, which has no budget. The due `mcp`, `connector` and
     `skill` watches of one run go into one scan plan (`scan.plan`) and, when it has calls, one scan session
     (`scan.start`); a later run takes it into cards when it ends (`scan.finish`, its reads and errors in `reads` and
     `errors`). While `<data>/scan-session.json` exists no second scan starts and the scan watches are not timed, so

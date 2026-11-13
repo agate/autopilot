@@ -214,6 +214,26 @@ class CommandReadTest(EngineCase):
         [raw] = (self.data / "sources" / ".raw" / "slow").glob("*.json")
         self.assertEqual(raw.read_text(), "[1, 2")
 
+    def test_max_timeout_cuts_the_sources_timeout(self):
+        sleeper = self.tmp / "nap.py"
+        sleeper.write_text("import time; time.sleep(5)\n")
+        self.user_source("nap", f"""\
+            source: nap
+            brings: messages
+            read: {{ via: command, run: '{sys.executable} {sleeper}', timeout: 60 }}
+            fill: paths
+            form: {{ id: .id, at: .at, text: .text }}
+            link: none
+            sort: {{ all: alert }}
+            """)
+        began = time.monotonic()
+        with self.assertRaisesRegex(SourceError, r"^nap: read.run took longer than 1 seconds \(its read.timeout of "
+                                                 r"60 was cut to the time this read was given\); stopped$"):
+            self.engine().read("nap", dry_run=True, max_timeout=1)
+        self.assertLess(time.monotonic() - began, 4)
+        with self.assertRaisesRegex(SourceError, r"took longer than 0.5 seconds \("):
+            self.engine().read("nap", dry_run=True, max_timeout=0.5)
+
     @staticmethod
     def full(fd):
         raise OSError(errno.ENOSPC, "No space left on device")
