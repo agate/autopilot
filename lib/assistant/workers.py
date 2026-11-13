@@ -72,10 +72,10 @@ another ask is open then, the line's note says so, and a later `check` raises th
 (`paused`, `closed: idle`). Its floor is read-only: no Edit or NotebookEdit, no gh command group the review does not
 need, no git command that pushes, commits or sets an alias, a config value or a remote, and no `claude`, which would
 start a session outside the floor (`roles.READ_ONLY_BASH_DENIED`, and the worker's own claude path), no v1 `ap`
-command (`roles.V1_AP_COMMANDS`), no `ap2` command the review does not run (`roles.READ_ONLY_AP2_DENIED`), all best
-effort, no global or system git config in its env (`roles.READ_ONLY_GIT_ENV`), and a Write hook (`ap2 hook-write`,
-`write_guard`) allows a Write only to its report or `question.json` in the card's run directory; a path it cannot
-resolve, and any error in the hook, is denied.
+command (`roles.V1_AP_COMMANDS`, `roles.V1_AP_EXTRA`, and each one the `ap` on PATH lists), no `ap2` command the
+review does not run (`roles.READ_ONLY_AP2_DENIED`), all best effort, no global or system git config in its env
+(`roles.READ_ONLY_GIT_ENV`), and a Write hook (`ap2 hook-write`, `write_guard`) allows a Write only to its report or
+`question.json` in the card's run directory; a path it cannot resolve, and any error in the hook, is denied.
 
 Starting (or resuming) a session can make branches and PRs, so it needs live mode; listing, classifying, ending
 and archiving work in shadow mode. v1 is reused by import (`lib/autopilot/workers.py`, `sessions.py`,
@@ -309,6 +309,40 @@ def _versions(*paths: Optional[str]) -> list:
     return list(dict.fromkeys(out))
 
 
+# How long the read-only floor waits for the `ap` on PATH to print its command list (`_ap_commands`).
+AP_LIST_TIMEOUT = 5
+# A plain v1 command name: lowercase words joined by dashes.
+_AP_COMMAND = re.compile(r"[a-z]+(?:-[a-z]+)*")
+
+
+def _ap_commands(path: Optional[str]) -> list:
+    """The commands the `ap` at `path` lists: it is run with no arguments (no shell, stdin closed, at most
+    AP_LIST_TIMEOUT seconds, its whole process group killed after that) and each `commands:` line it prints, on
+    stdout or stderr, is read as a comma-separated list. Only plain lowercase names with dashes count. Any failure
+    (no path, cannot start, timeout, nothing to read) gives an empty list; the exit code is ignored, since v1 exits
+    2 when it prints its usage."""
+    if not path:
+        return []
+    try:
+        proc = subprocess.Popen([path], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                start_new_session=True)
+    except (OSError, ValueError):
+        return []
+    try:
+        out, _ = proc.communicate(timeout=AP_LIST_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        _kill_group(proc)  # and any child it started, so none holds the pipe open
+        proc.kill()
+        proc.communicate()
+        return []
+    found = []
+    for line in out.decode("utf-8", "replace").splitlines():
+        if line.startswith("commands:"):
+            words = [w.strip() for w in line[len("commands:"):].split(",")]
+            found += [w for w in words if _AP_COMMAND.fullmatch(w)]
+    return list(dict.fromkeys(found))
+
+
 def floor(role: str, project: dict, data: Path, env: dict, profile: Optional[dict] = None,
           claude: Optional[str] = None) -> dict:
     """The worker's permission floor (`--settings`): v1's outward-tool denials (`perms.denied_tools`, from the
@@ -352,12 +386,16 @@ def floor(role: str, project: dict, data: Path, env: dict, profile: Optional[dic
         # No nested session: `claude -p ...` would run under the user's own settings, not this floor, so `claude` is
         # denied as typed, as the worker's own path and the one on PATH, where each link leads, and every other
         # version in the folder a link leads into (`_versions`). No v1 command either (`ap oneoff` runs
-        # `claude -p`): bare, at `<package>/bin/ap`, and the `ap` on PATH. Best effort.
+        # `claude -p`): bare, at `<package>/bin/ap`, and the `ap` on PATH. The commands are the in-repo list, the
+        # fixed extra list (V1_AP_EXTRA), and each one the `ap` on PATH lists (`_ap_commands`: it can be an
+        # installed v1 with commands the in-repo one lacks; run only here, for a read-only role). Best effort.
         found = shutil.which("claude")
         nested = [f"Bash({c}:*)" for c in _spellings("claude", claude or found or "claude", found)]
         nested += [f"Bash({c}:*)" for c in _versions(claude, found)]
-        v1_ap = _spellings("ap", str(package_root() / "bin" / "ap"), shutil.which("ap"))
-        nested += [f"Bash({cmd} {verb}:*)" for verb in roles.V1_AP_COMMANDS for cmd in v1_ap]
+        ap_on_path = shutil.which("ap")
+        v1_ap = _spellings("ap", str(package_root() / "bin" / "ap"), ap_on_path)
+        verbs = dict.fromkeys(roles.V1_AP_COMMANDS + roles.V1_AP_EXTRA + tuple(_ap_commands(ap_on_path)))
+        nested += [f"Bash({cmd} {verb}:*)" for verb in verbs for cmd in v1_ap]
         deny += [r for r in dict.fromkeys(nested) if r not in deny]
         # No tool its role does not list, MCP or built-in, but the tool search and `Task` (READ_ONLY_KEPT): v1's
         # outward-verb list leaves an MCP server's delete, update, submit or merge tool open, the session loads

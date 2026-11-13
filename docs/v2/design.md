@@ -805,8 +805,12 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   `gh pr update-branch` would push a merge onto the PR's branch and move its head, so the next check starts
   another review), because the session holds the user's gh and git logins, every v1 `ap` command
   (`roles.V1_AP_COMMANDS`, a snapshot of v1's own list, reads included: `ap oneoff` runs `claude -p` with a tool
-  allowed) as `Bash(ap <command>:*)`, `Bash(<package>/bin/ap <command>:*)` and the same for the `ap` on PATH, never a
-  bare `ap` rule, which would prefix every `ap2` command, every `ap2` command the review
+  allowed; `roles.V1_AP_EXTRA`, `profile` and `reply-kind`, which an installed v1 has and the snapshot lacks:
+  its `profile add --models-command` makes v1 run a command and its `profile use` rewrites every v1 session's
+  settings; and each command the `ap` on PATH lists in its `commands:` usage line when the floor runs it with no arguments,
+  with no shell, stdin closed and a 5 second limit, only for a read-only role, a run that fails or times out adding
+  nothing) as `Bash(ap <command>:*)`, `Bash(<package>/bin/ap <command>:*)` and the same for the `ap` on PATH, never a
+  bare `ap` rule or a whole-path one, which would prefix every `ap2` command, every `ap2` command the review
   does not run (`roles.READ_ONLY_AP2_DENIED`) as Bash deny rules in the same shape, every MCP tool the session
   loads that `Role.tools` does not list (no read-only role lists one) and every MCP server whole (each server those
   tools are on and each one the tool discovery lists, connected or not, so a tool it adds later is covered too),

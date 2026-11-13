@@ -3955,6 +3955,58 @@ class PrReviewRoleTest(PrReviewCase):
             with self.subTest(read=read):
                 self.assertEqual([p for p in prefixes if read.startswith(p)], [])
 
+    def _fake_ap(self, body: str) -> Path:
+        """A made-up `ap` script in its own temp bin folder; returns the folder."""
+        bin_dir = Path(tempfile.mkdtemp(prefix="made-up-ap-bin-", dir=self.tmp))
+        ap = bin_dir / "ap"
+        ap.write_text("#!/bin/sh\n" + body)
+        ap.chmod(0o755)
+        return bin_dir
+
+    def test_the_read_only_floor_denies_every_command_the_ap_on_path_lists(self):
+        # The `ap` on PATH can be an installed v1 with more commands than the in-repo snapshot (`ap profile add
+        # --models-command ...` runs a command; `ap profile use` rewrites every v1 session's settings). The floor
+        # runs it with no arguments and denies each plain command its `commands:` line lists, in every spelling,
+        # plus the fixed extra list; never a word that is not a plain lowercase command name.
+        cid = "c-20260105-090000-abcdef"
+        env = {"AP2_ROLE": "pr-review", "AP2_CARD": cid, "AP2_RUN_DIR": str(transcripts.run_dir(self.data, cid))}
+        ran = self.tmp / "made-up-ap-ran"
+        bin_dir = self._fake_ap(f"/usr/bin/touch '{ran}'\necho 'usage: ap <command> [args]' >&2\n"
+                                "echo 'commands: access, made-up-verb, Bad, rm -rf, x/y, ' >&2\nexit 2\n")
+        with mock.patch.dict(os.environ, {"PATH": str(bin_dir)}):
+            base = workers_mod.floor("implement", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+            self.assertFalse(ran.exists())  # a worker role never runs it
+            ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+        self.assertTrue(ran.exists())
+        spellings = list(dict.fromkeys(["ap", str(ROOT / "bin" / "ap"), str(bin_dir / "ap"),
+                                        os.path.realpath(bin_dir / "ap")]))
+        for verb in ("made-up-verb", "access") + roles.V1_AP_EXTRA:
+            for ap in spellings:
+                with self.subTest(verb=verb, ap=ap):
+                    self.assertIn(f"Bash({ap} {verb}:*)", ro)
+                    self.assertNotIn(f"Bash({ap} {verb}:*)", base)
+        for bad in ("Bad", "rm", "rm -rf", "x/y", ""):
+            with self.subTest(bad=bad):
+                self.assertNotIn(f"Bash(ap {bad}:*)", ro)
+        self.assertNotIn("Bash(ap:*)", ro)
+        self.assertEqual(len(ro), len(set(ro)))
+
+    def test_the_read_only_floor_builds_when_the_ap_on_path_hangs_or_fails(self):
+        # A run that times out or prints no `commands:` line adds nothing: the in-repo list and the fixed extra
+        # list are still denied.
+        cid = "c-20260105-090000-abcdef"
+        env = {"AP2_ROLE": "pr-review", "AP2_CARD": cid, "AP2_RUN_DIR": str(transcripts.run_dir(self.data, cid))}
+        for name, body in (("hangs", "/bin/sleep 30\n"), ("fails", "echo 'no list here' >&2\nexit 1\n")):
+            bin_dir = self._fake_ap(body)
+            with self.subTest(ap=name), mock.patch.dict(os.environ, {"PATH": str(bin_dir)}), \
+                    mock.patch.object(workers_mod, "AP_LIST_TIMEOUT", 0.5):
+                began = time.monotonic()
+                ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+                self.assertLess(time.monotonic() - began, 10)
+                for verb in roles.V1_AP_COMMANDS + roles.V1_AP_EXTRA:
+                    for ap in ("ap", str(ROOT / "bin" / "ap"), str(bin_dir / "ap")):
+                        self.assertIn(f"Bash({ap} {verb}:*)", ro)
+
     def test_the_read_only_floor_denies_every_claude_version_next_to_the_one_it_links_to(self):
         # The folder the claude link leads into keeps older full claude binaries; `<folder>/<old version> -p ...`
         # starts a nested session too. A claude that lives directly in a bin folder does not deny that folder's other
@@ -3973,11 +4025,34 @@ class PrReviewRoleTest(PrReviewCase):
         for name in ("claude", "gh", "git"):
             (plain / name).write_text("")
         on_path = {"claude": str(plain / "claude"), "gh": str(plain / "gh"), "git": str(plain / "git")}
+        # A link into another folder that holds gh and git: that folder is a bin folder, not a folder of versions.
+        linked_bin = self.tmp / "made-up-linked-bin"
+        linked_bin.mkdir()
+        for name in ("claude", "gh", "git"):
+            (linked_bin / name).write_text("")
+        link2 = self.tmp / "made-up-bin2" / "claude"
+        link2.parent.mkdir()
+        link2.symlink_to(linked_bin / "claude")
+        # A plain folder with no gh, git, ap or ap2: its claude is not a link into another folder.
+        plain2 = self.tmp / "made-up-tools2"
+        plain2.mkdir()
+        for name in ("claude", "rg"):
+            (plain2 / name).write_text("")
         with mock.patch.object(workers_mod.shutil, "which", side_effect=lambda name, *a, **k: on_path.get(name)):
             ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env,
                                    claude=str(link))["permissions"]["deny"]
             base = workers_mod.floor("implement", {"tools": ["Read"]}, self.data, env,
                                      claude=str(link))["permissions"]["deny"]
+            ro2 = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env,
+                                    claude=str(link2))["permissions"]["deny"]
+            ro3 = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env,
+                                    claude=str(plain2 / "claude"))["permissions"]["deny"]
+        self.assertIn(f"Bash({os.path.realpath(linked_bin / 'claude')}:*)", ro2)
+        for name in ("gh", "git"):
+            with self.subTest(linked_tool=name):
+                self.assertEqual([r for r in ro2 if str(linked_bin / name) in r], [])
+        self.assertIn(f"Bash({plain2 / 'claude'}:*)", ro3)
+        self.assertEqual([r for r in ro3 if str(plain2 / "rg") in r], [])
         for v in ("1.0.0", "1.0.1"):
             with self.subTest(version=v):
                 self.assertIn(f"Bash({versions / v}:*)", ro)
