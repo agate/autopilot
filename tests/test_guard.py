@@ -80,7 +80,11 @@ class GuardTest(unittest.TestCase):
                     "sed --in-place 's/a/b/' ~/.claude/autopilot-data/x",
                     "sed -I '' 's/a/b/' ~/.claude/autopilot-data/x",
                     "sed -Ei 's/a/b/' ~/.claude/autopilot-data/x",
-                    "sed -nEi p ~/.claude/autopilot-data/x"):
+                    "sed -nEi p ~/.claude/autopilot-data/x",
+                    "cd /tmp && sed -i 's/a/b/' ~/.claude/autopilot-data/x",
+                    "find ~/.claude/autopilot-data/ -name '*.md' -exec sed -i 's/a/b/' {} +",
+                    "cd /tmp && dd if=/dev/zero of=~/.claude/autopilot-data/x",
+                    "find ~/.claude/autopilot-data/ -name x -exec dd if=/dev/zero of={} +"):
             self.assertIsNotNone(guard.decide(bash(cmd), self.W), cmd)
 
     def test_guard_allows_near_misses_of_the_dd_open_and_sed_forms(self):
