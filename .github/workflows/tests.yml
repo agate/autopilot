@@ -13,13 +13,28 @@ permissions:
 
 jobs:
   unittest:
-    # A hung test fails in 15 minutes (about 5x the slowest recent run) instead of GitHub's 6-hour default.
+    # The suite runs once per Python version: some library calls act differently across versions
+    # (on 3.14 `Path.is_file` returns False on a PermissionError, on 3.12 it raises), so a bug only
+    # one version shows still turns CI red.
+    name: unittest (${{ matrix.python-version }})
+    strategy:
+      # Both versions always report: a failure on one never cancels or hides the other.
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.14"]
+    # A hung test fails in 15 minutes (about 4x the slowest recent run) instead of GitHub's 6-hour default.
+    # The limit holds for each version's job on its own.
     timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Show the Python version
+        run: python --version
       - name: Run tests
         # The package check treats $USER as a private name; the CI machine's user is "runner", a word the docs use.
         env:
           USER: ""
-        run: python3 -m unittest discover -s tests -v
+        run: python -m unittest discover -s tests -v

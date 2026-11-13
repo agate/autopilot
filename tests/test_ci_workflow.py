@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import json
 import re
 import unittest
 
 from tests.helpers import ROOT
 
 WORKFLOW = ROOT / ".github" / "workflows" / "tests.yml"
-RUN_COMMAND = "python3 -m unittest discover -s tests -v"
+RUN_COMMAND = "python -m unittest discover -s tests -v"
+VERSIONS = ["3.12", "3.14"]
 
 
 def indent(line):
@@ -75,6 +77,51 @@ class CiWorkflowTest(unittest.TestCase):
                 break
             under_env.append(line.strip())
         self.assertIn('USER: ""', under_env)
+
+    def under(self, key):
+        """The lines nested under one job-level key, for example `strategy:`."""
+        lines = [i for i, l in enumerate(self.block) if re.match(rf"^    {key}:", l)]
+        self.assertEqual(len(lines), 1, f"want one job-level `{key}:`")
+        out = []
+        for line in self.block[lines[0] + 1:]:
+            if line.strip() and indent(line) <= 4:
+                break
+            out.append(line.split("#", 1)[0].strip())
+        return [l for l in out if l]
+
+    def test_job_runs_on_both_python_versions(self):
+        # A bug that only one version shows (Path.is_file swallows PermissionError on 3.14, not on 3.12)
+        # must still turn CI red, so the suite runs once per version.
+        strategy = self.under("strategy")
+        self.assertIn(f"python-version: {json.dumps(VERSIONS)}", strategy)
+
+    def test_both_versions_always_report(self):
+        # With fail-fast on, a failure on one version cancels the other and hides its result.
+        self.assertIn("fail-fast: false", self.under("strategy"))
+
+    def test_job_name_shows_the_version(self):
+        found = [v for k, v in job_keys(self.block) if k == "name"]
+        self.assertEqual(len(found), 1, f"want one job-level name, got {found}")
+        self.assertIn("${{ matrix.python-version }}", found[0])
+
+    def test_job_sets_up_the_matrix_python(self):
+        setup = [s for s in steps(self.block) if any("actions/setup-python@" in l for l in s)]
+        self.assertEqual(len(setup), 1, "want one actions/setup-python step")
+        self.assertTrue(any(l.strip() == "python-version: ${{ matrix.python-version }}" for l in setup[0]),
+                        "the setup-python step does not use the matrix version")
+
+    def test_job_sets_up_python_then_prints_the_version_then_runs_the_tests(self):
+        # The version step runs after setup-python, so the log shows the interpreter that really ran the suite.
+        all_steps = steps(self.block)
+        setups = [i for i, s in enumerate(all_steps) if any("actions/setup-python@" in l for l in s)]
+        names = [i for i, s in enumerate(all_steps)
+                 if any(l.strip() in ("run: python --version", "- run: python --version") for l in s)]
+        runs = [i for i, s in enumerate(all_steps) if any(RUN_COMMAND in l for l in s)]
+        self.assertEqual(len(setups), 1, "want one actions/setup-python step")
+        self.assertEqual(len(names), 1, "want one step running `python --version`")
+        self.assertEqual(len(runs), 1)
+        self.assertLess(setups[0], names[0], "setup-python must run before the version print")
+        self.assertLess(names[0], runs[0], "the version print must run before the tests")
 
 
 if __name__ == "__main__":

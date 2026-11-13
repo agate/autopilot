@@ -960,9 +960,12 @@ class DeepRecordTest(unittest.TestCase):
                     self.assertEqual(outcome(lambda: frames(50, call)), top)
 
     def test_deep_check_results_are_refused(self):
-        # Only a repr walks this value, and some Pythons repr 5000 deep: 100000 is past every one's limit.
+        # Only a repr walks this value, and where it stops depends on the Python and its stack: 3.12 stops and the
+        # refusal says "nested too deep"; 3.14 on a large stack can walk all 100000 levels, and the refusal is the
+        # plain "must be text" one. Either way it is a PrLoopError, never a RecursionError.
         results = {"Correctness": [{"id": "check-1", "bucket": "fix", "text": deep(100000)}], "Test value": []}
-        with self.assertRaisesRegex(PrLoopError, "^record_check: results: nested too deep$"):
+        refusal = r"^record_check: results(: nested too deep$|\['Correctness'\]\[0\]\.text: must be text, not \[\[\[)"
+        with self.assertRaisesRegex(PrLoopError, refusal):
             prloop.record_check(at_limit(), results, "green")
 
 
