@@ -3097,11 +3097,22 @@ Calls the author made without asking (check them):
      function takes the data folder and the time; there is no module clock. It imports `profiles`, `store` and
      `apistop` (which imports only `transcripts`), never `spend`, `workers` or `cap` (`cap` imports it).
   2. The check is cached. `check` runs `gateway.key_command` (60 s) for a gateway profile and returns its error
-     text, or None when it works; the subscription runs nothing and is None. The answer is kept in
-     `<data>/profile-key.json` `{"at", "ok", "error", "profile", "auth"?}`: a working key is checked again after 10
-     minutes, a failing one after 60 s (the user may just have fixed it), and a failure set by a second rejection
-     (`auth: true`) holds 10 minutes, since the key command itself works. A record for another profile, one whose
-     `at` is off by more than its time to live either way, and one whose `ok` is not a boolean are not used. The
+     text, or None when it works; the subscription runs nothing and is None. The answer is kept as the profile's
+     record `{"at", "ok", "error", "profile", "auth"?}` in `<data>/profile-key.json`: a working key is checked again
+     after 10 minutes, a failing one after 60 s (the user may just have fixed it), and a failure set by a second
+     rejection (`auth: true`) holds 10 minutes, since the key command itself works. A record whose own `profile` is
+     not the profile's, one whose `at` is off by more than its time to live either way, and one whose `ok` is not a
+     boolean are not used.
+     **[decided by the builder]** Both files keep one record per profile, `{"profiles": {name: record}}` (each
+     record keeps its `profile` too), so with two gateway profiles one profile's check, refresh or rotation never
+     lifts or overwrites the other's answer, 10-minute hold or refresh time. One file each with a map, not one file
+     per profile, so the file names (and `PROTECTED`, below) stay. Each function reads and writes only its own
+     profile's record; dropping the last record removes the file, and dropping a profile that has none writes
+     nothing. A file in the older shape (one record with a top-level `profile`) is read as that profile's record, so
+     a hold in effect at the upgrade is kept, and the next write rewrites it in the new shape. A file that is not an
+     object, whose `profiles` is not an object, or a profile's entry that is not an object reads as never checked
+     (an entry: that profile only). The read, change and write of a file take no lock, as before: two processes
+     writing at once can still lose one record (the next check or close writes it again). The
      error text is "the key command failed (exit N)" or "(TimeoutExpired)" / "(<OSError class>)", never the
      command's output. Both files are written by `store.write_json`; a symlink at either is refused (lstat, as the
      cap's files), a ProfileError: at `profile-key.json` the start is refused with one line; at
@@ -3126,15 +3137,17 @@ Calls the author made without asking (check them):
   4. One refresh on a rejected key. When `Workers._close` has stopped a worker (every close path: done, question,
      died, idle, blocked, refused, end, parked_failed), `keys.note_session_end` reads that session's API errors
      (`apistop.tail`, choice 5) for the worker's own `profile` (its record's; none is the subscription: nothing to
-     do). On a gateway profile whose session ended on an authentication failure newer than the last refresh, it runs
-     `gateway.refresh_command` (else `key_command`) once (60 s), writes `<data>/profile-refresh.json` `{"at",
-     "profile"}`, and deletes `profile-key.json`, so the next check runs the key command. A second failure within 10
-     minutes of that refresh writes the key record `{"ok": false, "auth": true, "error": "the gateway rejected the
-     key again right after a refresh"}` instead, which holds new work for 10 minutes. A hold written by a close
-     during a `check` pass also refuses that pass's planned in-place resumes on that profile (`_still_due` reads the
-     key record, no command run), whichever worker is listed first. The failure's own time is what counts (an error
-     with no time: the close time), as a session the gateway rejected ends its turn and is closed as idle up to an
-     hour later. v2 needs no `apply()`: every start writes its settings from the profile, and
+     do). On a gateway profile whose session ended on an authentication failure newer than that profile's last
+     refresh, it runs `gateway.refresh_command` (else `key_command`) once (60 s), writes the profile's record
+     `{"at", "profile"}` in `<data>/profile-refresh.json`, and drops the profile's record in `profile-key.json`, so
+     its next check runs the key command. A second failure within 10 minutes of that profile's refresh writes its
+     key record `{"ok": false, "auth": true, "error": "the gateway rejected the key again right after a refresh"}`
+     instead, which holds new work on that profile for 10 minutes. Another profile's records in both files are
+     kept: its refresh time still counts for its own second rejection, and its cached answer or hold stays. A hold
+     written by a close during a `check` pass also refuses that pass's planned in-place resumes on that profile
+     (`_still_due` reads the key record, no command run), whichever worker is listed first. The failure's own time
+     is what counts (an error with no time: the close time), as a session the gateway rejected ends its turn and is
+     closed as idle up to an hour later. v2 needs no `apply()`: every start writes its settings from the profile, and
      Claude Code runs `apiKeyHelper` itself. `note_session_end` never raises out of `_close`: a failure prints one
      `ap2: key health: ...` stderr line (at most `SPEND_LINE` characters) and the close goes on.
   5. What an authentication failure is, and what it is not (lessons 4.3). The errors come from `apistop.tail(projects,
@@ -3152,15 +3165,16 @@ Calls the author made without asking (check them):
      other number (400, 429, 500, ...) is never an authentication failure, whatever its text says, and neither is
      one whose text names the safety guard (any case): the guard refuses a conversation's content, and a new key
      would not help. The limit and safety-guard checks of `Workers.check` read the same `apistop.tail`.
-  6. `ap2 profile rotate NAME` runs `gateway.rotate_command` (120 s), then deletes `profile-key.json` and, when it
-     is NAME's, `profile-refresh.json`; it prints `{"rotated": NAME}`, exit 0. The subscription, a profile with no
+  6. `ap2 profile rotate NAME` runs `gateway.rotate_command` (120 s), then forgets NAME's key check and NAME's
+     last refresh (its records in `profile-key.json` and `profile-refresh.json`; another profile's stay); it prints
+     `{"rotated": NAME}`, exit 0. The subscription, a profile with no
      `rotate_command` and an unknown name are one `ap2: ...` line and exit 1 (a ProfileError); a failing rotate
      command is "rotate_command failed (exit N)", exit 1, never its output, and clears nothing. Nothing rotates on
      its own: only this command runs `rotate_command`. It writes only inside the data folder and runs a command the
      user typed, so it works in shadow mode.
   7. `ap2 profile list` shows the cached key error. Each row of a gateway profile has `key_error`:
-     `keys.cached_error(data, p)`, from the record only (no command runs, so `list` stays read-only); null when the
-     last check worked, was for another profile or never ran. A symlinked record shows as that error. The page's key
+     `keys.cached_error(data, p)`, from the profile's own record only (no command runs, so `list` stays
+     read-only); null when its last check worked or never ran. A symlinked record shows as that error. The page's key
      error is the page slice's.
   8. Workers cannot edit the key state: `profile-key.json` and `profile-refresh.json` are in `PROTECTED`, so every
      worker floor Edit-denies them (a worker must not mark a failing key as working).
