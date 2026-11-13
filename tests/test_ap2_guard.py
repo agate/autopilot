@@ -1845,9 +1845,14 @@ class DecideTest(unittest.TestCase):
                     f"cat <<'EOF' | sh\ngit -C {PKG} log -1 --oneline\nmake test 2>&1 | tee build.log\nEOF",
                     f"cat <<'EOF' | bash -s\ngit -C {PKG} log -1\ntouch .done\nEOF",
                     f"echo 'ls {DATA}/items | wc -l; date > {RUN}/stamp' | sh",
-                    f"printf '%s\\n' 'ls {DATA}/items | wc -l' 'echo ok > {RUN}/ok' | sh",
-                    f"{{ echo 'set -e'; echo 'ls {DATA}/items | wc -l'; echo 'date >> {RUN}/j.md'; }} | bash"],
+                    f"echo 'ls {DATA}/items | wc -l; date > $AP2_RUN_DIR/stamp' | sh",
+                    f"cat <<'EOF' | bash\nset -o pipefail\nls {DATA}/items | wc -l\n"
+                    "make 2>&1 | tee \"${AP2_RUN_DIR}/m.log\"\nEOF"],
                    deny=False)
+        # Accepted false denies: a printer's `%` format, or printers inside a group, are not the exact script.
+        self.check([f"printf '%s\\n' 'ls {DATA}/items | wc -l' 'echo ok > {RUN}/ok' | sh",
+                    f"{{ echo 'set -e'; echo 'ls {DATA}/items | wc -l'; echo 'date >> {RUN}/j.md'; }} | bash"],
+                   deny=True)
         self.check([f"sed 's/^/{rm} /' <<'X' | sh\n{DATA}/config.yaml\nX",
                     f"cat <<'X' | sed 's/^/{rm} /' | sh\n{DATA}/config.yaml\nX",
                     f"printf '%s\\n' {x} | sed 's/^/{rm} /' | sh",
@@ -1878,6 +1883,91 @@ class DecideTest(unittest.TestCase):
         self.check([f"find {DATA}/items -name x | /usr/bin/xargs {rm}",
                     f"truncate -s 0 {DATA}/config.yaml",
                     f"python3 -c \"open('{DATA}/items/new.lock', 'x')\""], deny=True)
+
+    def test_what_a_shell_runs_outside_its_exact_script_is_judged(self):
+        """A shell or interpreter word around a writer's substitution is code, not prose; a printer's words or a
+        `cat` body are a shell's exact script only straight into a POSIX shell and with nothing that makes other text
+        at run time; an `exec` input reaches later shells and `xargs`, from a whole `<(...)` pipeline, and an
+        `exec N<` reaches only a command that moves fd N onto its input; `xargs` feeds a shell code only when that
+        shell reads it as code."""
+        rm, x, d = "r" + "m", f"{DATA}/x", DATA
+        # A shell, `eval` or interpreter word: every word outside the substitutions counts.
+        self.check([f"sh -c \"{rm} -f $(ls -d {x})\"", f"bash -c \"{rm} $(ls {x})\"",
+                    f"bash -lc \"{rm} -rf $(find {d}/items -name a)\"", f"sh -c \"cd /tmp && {rm} -f $(ls -d {x})\"",
+                    f"env -i sh -c \"{rm} -f $(ls -d {x})\"", f"sh -c '{rm} -f \"$@\"' _ $(ls -d {x})",
+                    f"bash -c '{rm} -f \"$1\"' _ \"$(ls -d {x})\"",
+                    f"bash -c 'for f; do {rm} -f \"$f\"; done' _ $(find {d}/items -name a)",
+                    f"python3 -c \"open('$(ls -d {x})', 'w').write('')\"",
+                    f"python3 -c \"import sys; open(sys.argv[1], 'w').write('')\" $(ls -d {x})",
+                    f"perl -e 'open(my $f, \">\", $ARGV[0])' $(ls -d {x})",
+                    f"awk 'BEGIN {{ printf \"\" > ARGV[1] }}' $(ls -d {x})"], deny=True)
+        # Printers and `cat` bodies whose text expands at run time, or that sit in a compound or loop, or feed csh.
+        self.check([f"for f in {d}/items/*; do echo \"{rm} $f\"; done | sh",
+                    f"for f in {d}/items/*; do printf '{rm} %s\\n' \"$f\"; done | bash",
+                    f"( cd {d}/items && for f in *; do echo \"{rm} $PWD/$f\"; done ) | sh",
+                    f"echo 'f={x}; {rm} $f' | sh", f"{{ echo 'f={x}'; echo '{rm} $f'; }} | bash",
+                    f"cat <<'EOF' | sh\nf={x}\n{rm} $f\nEOF", f"echo 'cd {d}/items && {rm} -f x' | sh",
+                    f"cat <<'EOF' | csh\nset f={x}\n{rm} $f\nEOF",
+                    f"{{ printf '{rm} '; echo {x}; }} | sh", f"(printf '{rm} '; echo {x}) | sh",
+                    f"{{ echo -n '{rm} '; echo {x}; }} | sh", f"{{ printf '{rm} -f '; ls -d {x}; }} | sh",
+                    f"(echo -n '{rm} -f '; find {x}) | sh", f"{{ echo -n '{rm} -f '; find {d}/items -name a; }} | bash",
+                    f"(printf '%s ' {rm} -f; ls -d {x}) | sh", f"{{ printf '{rm} -f '; cat <<'EOF'\n{x}\nEOF\n}} | sh",
+                    f"{{ cat <<'EOF'; echo {x}; }} | sh\n{rm} \\\nEOF", f"{{ printf 'chmod 000 '; echo {x}; }} | sh"],
+                   deny=True)
+        self.assertTrue(guard._exact_script("set -Eeuo pipefail\nls $AP2_DATA | wc -l > ${AP2_RUN_DIR}/n"))
+        for text in ("set -- a", "set -k", "read f", "f=a", "cd a", "echo $x", "echo `x`", "printf '%b'", "for f"):
+            with self.subTest(text=text):
+                self.assertFalse(guard._exact_script(text))
+        # An `exec` input: later shells read it too, a `<(a | b)` gives its whole pipeline, any later command counts.
+        self.check([f"exec < <(sed 's/^/{rm} /' <<< {x}); sh",
+                    f"exec < <(printf '%s\\n' a b | sed 's|^|{d}/items/|'); xargs {rm}",
+                    f"exec < <(printf '%s\\n' {x} | sed 's/^/{rm} /'); xargs -I{{}} sh -c {{}}",
+                    f"exec < {d}/list; xargs {rm} 2>&1 | tail -5", f"exec < {d}/list; {{ xargs {rm}; }}",
+                    f"exec < {d}/list; if true; then xargs {rm}; fi",
+                    f"exec < <(ls -d {d}/items/*); xargs {rm} | tee $AP2_RUN_DIR/log",
+                    f"exec < \"$(echo {d}/list)\"; xargs {rm}", f"exec < $(ls -d {d}/list); xargs {rm}",
+                    f"exec 3< <(printf '%s\\n' {x}); xargs {rm} <&3", f"exec 3< {d}/list; xargs {rm} 0<&3",
+                    f"exec 3< {d}/list; exec <&3; xargs {rm}"], deny=True)
+        # An `exec N<` (N not 0) feeds only a command that moves fd N onto its input.
+        self.check([f"bash <<'EOF'\nset -euo pipefail\nexec 3< \"$AP2_DATA/items/C1.yaml\"\nread -r -u 3 head\n"
+                    f"exec 3<&-\nfind \"$AP2_RUN_DIR/tmp\" -name '*.tmp' | xargs {rm} -f\nEOF",
+                    f"exec 3< {d}/items/C1.yaml; read -r -u 3 first; exec 3<&-; find $AP2_RUN_DIR/tmp -name '*.tmp' "
+                    f"-print0 | xargs -0 {rm} -f",
+                    f"exec 4< {PKG}/README.md; git ls-files | xargs touch"], deny=False)
+        self.assertEqual(guard._input_fds("exec 3< a 0<&4 <b <<<c a3<d 12<>e 5<&-"),
+                         [(3, None), (0, 4), (0, None), (0, None), (0, None), (12, None), (5, None)])
+        # `xargs` feeds a shell code only when that shell reads it as code.
+        self.check([f"git -C {PKG} log --oneline | grep -i chmod | xargs -n1 bash -c 'echo \"$0\"'",
+                    f"git -C {PKG} log --format=%s | grep -i '{rm} ' | xargs -0 sh -c 'echo \"$0\"'"], deny=False)
+        self.check([f"printf '%s\\n' {x} | sed 's/^/{rm} /' | xargs sh -c '\"$@\"' _",
+                    f"printf '%s\\n' {x} | sed 's/^/{rm} /' | xargs -n1 bash -c 'echo \"$0\" | sh'",
+                    f"printf '%s\\n' {x} | sed 's/^/{rm} /' | xargs --replace=@@ sh -c @@",
+                    f"printf '%s\\n' {x} | sed 's/^/{rm} /' | xargs -0 -J % sh -c %"], deny=True)
+
+    def test_finding_rows_of_the_nineteenth_round_pin_their_rules(self):
+        """Rows that fail when the write-form, substitution, positional, plain-`cat` or in-place rule they name is
+        taken out, and allowed rows that pin the run-directory and heredoc rules."""
+        rm, x, d = "r" + "m", f"{DATA}/x", DATA
+        # A `dd` or `sed` outside a substitution takes its `of=` or `-i` from the substitution's output.
+        self.check([f"dd if=/dev/zero count=1 $(echo of={d}/config.yaml)",
+                    f"dd if=/dev/zero count=1 $(printf 'of=%s' {d}/config.yaml)",
+                    f"sed $(echo -i) s/a/b/ $(ls -d {d}/config.yaml)"], deny=True)
+        # A `-c` script that is a backtick or a `$(` substitution reads the input.
+        self.check([f"printf '%s\\n' {x} | sed 's/^/{rm} /' | sh -c \"`cat`\"",
+                    f"printf '%s\\n' {x} | sed 's/^/{rm} /' | sh -c 'eval \"$(cat)\"'"], deny=True)
+        # `xargs` into a shell whose `-c` script runs `$0` as a command or through `eval`.
+        self.check([f"printf '%s\\n' {x} | sed 's/.*/\"{rm} &\"/' | xargs bash -c '$0'",
+                    f"printf '%s\\n' {x} | sed 's/.*/\"{rm} &\"/' | xargs sh -c 'eval \"$0\"'"], deny=True)
+        # A `cat` with a file besides its heredoc is no plain `cat`: the file's text is the shell's input too.
+        self.check([f"cat - {d}/list <<'EOF' | sh\nxargs {rm}\nEOF",
+                    f"cat <<'EOF' - {d}/list | bash\nxargs {rm}\nEOF"], deny=True)
+        # A sed in-place flag in a cluster with other sed letters, fed through `xargs`.
+        self.check([f"echo -Ei.bak s/a/b/ {d}/config.yaml | xargs sed"], deny=True)
+        self.check([f"LOG=$AP2_RUN_DIR/journal.md; ls build | xargs {rm} -f; cat >> ${{LOG}} <<'EOF'\n"
+                    f"- checked {d}/config.yaml\nEOF",
+                    f"ls build | xargs {rm} -f; jq -r '.items[]|{{id}}' <<'EOF'\n{d}/items/a\nEOF",
+                    f"ls {d}/items | tee $AP2_RUN_DIR/items.txt | ./scripts/count.sh",
+                    f"find \"$AP2_RUN_DIR/$sub\" -name '*.tmp' | sed 's/^/{rm} -f /' | sh"], deny=False)
 
     def test_each_run_directory_mention_in_a_word_is_judged_on_its_own(self):
         """A quoted journal line can name the run directory twice: each mention that stays inside it is fine, and a
@@ -2168,7 +2258,15 @@ class DecideTest(unittest.TestCase):
                   "$( writer nested": "touch" + " $(" * (size // 6) + "ls $AP2_RUN_DIR" + ")" * (size // 6),
                   "$( writer": fill("touch $(ls $AP2_RUN_DIR) "), "` writer": fill("touch `ls $AP2_RUN_DIR` "),
                   "| sed | sh": fill("ls $AP2_DATA | sed s/a/b/ | ") + " sh",
-                  "(( groups": fill("( ((x) ) "), "xargs words": "ls $AP2_DATA | " + "a xargs " * (size // 9)}
+                  "(( groups": fill("( ((x) ) "), "xargs words": "ls $AP2_DATA | " + "a xargs " * (size // 9),
+                  # `exec` inputs on many fds and moved onto later inputs, a `<(...)` pipeline, printers and bodies
+                  # straight into a shell, an `xargs` into a shell with a replace string, a shell's code word.
+                  "exec fds": fill("exec 3< $AP2_DATA; xargs rm <&3 0<&4; "), "exec <": fill("<", "exec "),
+                  "exec <(|": fill("exec < <(ls $AP2_DATA | sed s/a/b/ ); xargs wc; "),
+                  "echo | sh": fill("echo 'set -e cd x=1 %' | sh; "),
+                  "cat | sh": "cat <<'E' | sh\n" + "set -e; ls $AP2_DATA | wc\n" * ((size - 30) // 27) + "E\n",
+                  "xargs -I sh": fill("ls $AP2_DATA | xargs -n 1 -I {} sh -c 'eval \"$0\"' {}; "),
+                  "sh -c $(": fill('sh -c "rm $(ls $AP2_DATA)" '), "-c $0": fill("$0 ", "ls | xargs sh -c '") + "'"}
         # The slowest shapes (a shell's script read again in both `$$(` readings, about 0.3 s here) get a bound a
         # few times their time (1 s), so a slowdown of that much is seen well before the 2 s deadline; the rest
         # keep 2 s.

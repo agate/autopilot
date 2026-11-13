@@ -56,15 +56,18 @@ well (zsh's `{ ... | sh}`). What one command reads from another can be a write t
 runs `xargs` (any of its words, by name or full path, after any runner) with a write verb outside its redirects (or
 a `dd` or `sed` that may take its `of=` or `-i` from the words it reads) is a write when what it reads (its
 pipeline back to the start, the compound it starts a pipeline in, a heredoc body it holds, the input an earlier
-`exec <...` gives the shell, and on the way each `{ ...; }`, loop, `if`, `case` or `(...)` that ends before a `|`
-and each command substitution's output) names a guarded path outside the own run directory (`ls <data>/items |
+`exec <...` gives the shell (an `exec N<` only to a command that moves fd N onto its input, `<&N`), and on the
+way each `{ ...; }`, loop, `if`, `case` or `(...)` that ends before a `|` and each command substitution's output)
+names a guarded path outside the own run directory (`ls <data>/items |
 xargs touch`, `{ ls <data>; } | xargs rm`; `| xargs wc -l` and `find $AP2_RUN_DIR ... | xargs rm` stay allowed);
 so is a segment that runs such a writer outside its own command substitutions when they read one (`rm $(find
-<data> ...)`; not `wc -l $(ls <data>) > <run>/n`, nor a verb in a printer's quoted prose), and a pipeline into a
-shell that reads its script from its input (or into an `xargs` that runs a shell) where a segment names a guarded
-path and one holds a write verb, counting for the shell only text made at run time, not the words of a printer or
-a heredoc body `cat` passes on, which the shell's own reading judged (`find <data> | sed 's/^/rm /' | sh`). A zsh script
-with a `(` that names a guarded path is a write (a fresh zsh has bare glob
+<data> ...)`; not `wc -l $(ls <data>) > <run>/n`, nor a verb in quoted prose, unless a shell or interpreter word
+there makes that word code: `sh -c "rm $(ls <data>)"`), and a pipeline into a shell that reads its script from its
+input (or from a later `exec <`, or into an `xargs` that runs a shell reading it as code) where a segment names a
+guarded path and one holds a write verb, counting for the shell only text made at run time, not the words of a
+printer or a heredoc body `cat` passes on straight into a POSIX shell with no `$` but the guard's own names, no
+`cd`, assignment, loop, `read` or `%`, which the shell's own reading judged (`find <data> | sed 's/^/rm /' |
+sh`). A zsh script with a `(` that names a guarded path is a write (a fresh zsh has bare glob
 qualifiers on). Heredoc body lines that end in a backslash are joined, as bash joins them (an
 even run of backslashes too, fail-closed); a `$'...'` delimiter is decoded as bash 3.2 and zsh both decode it, and
 a `$"..."` one (zsh keeps its `$`), one with a `$(`, `${`, `$[` or backtick in it, a `(` after it, or one it cannot
@@ -1015,7 +1018,8 @@ def _heredocs(cmd: str, i: int, segs: list, line: int, pending: list, sub: bool,
 class _Chunk(tuple):
     """The body lines of the heredocs of one line (`_heredocs`), shared by every segment that may read them.
     `scripted`: a shell on the line reads them as its script too (a `_Script`), so a plain `cat` that passes them on
-    to that shell carries no text the shell's own reading has not judged (`_fed_writes`)."""
+    straight to that shell carries no text the shell's own reading has not judged, when the lines are exact
+    (`_exact_script`, `_fed_writes`)."""
     scripted = False
 
 
@@ -1753,7 +1757,7 @@ def _command_writes(cmd: str, marks: _Marks, depth: int, budget: _Budget) -> boo
                     fed.add(j)
         # `... | xargs <writer>`, `<writer> $(<lister>)`, `... | sed 's/^/rm /' | sh`: what a command reads becomes
         # its words or its script.
-        if _fed_writes(segs, parsed, marks, pid, sq, budget, [j for j, _ in shells]):
+        if _fed_writes(segs, parsed, marks, pid, sq, budget, dict(shells)):
             return True
         for j, (seg, p) in enumerate(zip(segs, parsed)):
             key = _alike(seg) and (seg, p.body, p.quoted, rebound, trusted, depth, j in fed)
@@ -1798,7 +1802,7 @@ def _fed_verb(seg: str, p, pid: bool, sq: bool) -> bool:
     return _writes(_harmless(" ".join(w for k, w in enumerate(words) if k not in ops) + " "))
 
 
-def _fed_writes(segs: list, parsed: list, marks: _Marks, pid: bool, sq: bool, budget: _Budget, shells: list) -> bool:
+def _fed_writes(segs: list, parsed: list, marks: _Marks, pid: bool, sq: bool, budget: _Budget, shells: dict) -> bool:
     """Whether a command of `segs` (`parsed` their `_Parsed`) writes a guarded path it reads from another one. What a
     segment's output may carry is its own words (a guarded path outside the own run directory, `_Marks.unsafe`, the
     package's `bin/ap2` run as a command aside, as in `_writes_guarded`; an `of=`; a sed in-place flag
@@ -1808,27 +1812,30 @@ def _fed_writes(segs: list, parsed: list, marks: _Marks, pid: bool, sq: bool, bu
     - when a segment that runs `xargs` (any of its words, quotes removed, by name or by its full path, after any
       runner: `timeout 5 xargs`, `${SUDO} xargs`) reads a guarded path (piped into it, or into a compound it starts
       a pipeline in, `_Piped.inherit`: `| if true; then xargs rm; fi`; a heredoc body it holds; or the input an
-      earlier `exec` segment with a `<` redirect gives the shell, when that segment's words or process
-      substitution name one: `exec < <(ls <data>); xargs rm`) and holds a write verb (`_fed_verb`), or a `dd` or a
-      `sed` that may take an `of=` or an in-place flag from what it reads (`echo "of=<data>/x" | xargs dd`); or
-      when such an `xargs` runs a shell (a word after it is one of `_STDIN_SHELL`'s, whatever its `-c`: `xargs
-      -I{} sh -c {}`) and what it reads carries both a guarded path and a write verb, as for a shell below;
+      earlier `exec` segment's input redirect gives the shell (`_input_fds`: fd 0 to every later command, fd N
+      only to one that moves it onto its input with `<&N`), when that segment's words or process substitution,
+      its whole pipeline to the closing `)`, name one: `exec < <(ls <data>); xargs rm`) and holds a write verb
+      (`_fed_verb`), or a `dd` or a `sed` that may take an `of=` or an in-place flag from what it reads (`echo
+      "of=<data>/x" | xargs dd`); or when such an `xargs` runs a shell that reads what it reads as code
+      (`_xargs_code`: `xargs -I{} sh -c {}`, `xargs bash -c '$0'`; not `xargs -n1 bash -c 'echo "$0"'`) and that
+      carries both a guarded path and a write verb, as for a shell below;
     - when a segment's command substitutions read a guarded path and a word the segment runs is such a writer
       (`_runs_writer`: `rm $(find <data> ...)`, `` chmod 600 `ls <data>/x` ``, `sudo rm $(...)`; not `wc -l $(ls
       <data>) > <run>/n`, a plain printer, nor a verb in quoted prose: `echo "next: rm $(ls <data> | head -1)"`);
-    - when what is piped into a shell that reads its script from its input (`shells`, `_stdin_shell`) carries both a
-      guarded path and a write verb (`find <data> | sed 's/^/rm /' | sh`); here only a path that is no run-directory
-      path at all counts (`_Marks.level` 2): a run-directory path with a `$` after it is a script word the shell's
+    - when what is piped into a shell that reads its script from its input (`shells`, `_stdin_shell`; the input
+      an `exec` gives it too) carries both a guarded path and a write verb (`find <data> | sed 's/^/rm /' | sh`);
+      here only a path that is no run-directory path at all counts (`_Marks.level` 2): a run-directory path with a
+      `$` after it is a script word the shell's
       own reading judges (`echo 'make > "$AP2_RUN_DIR/m.log"; echo "exit $?"' | sh`). Nor does text that reading
       already judged as the shell's exact script count (`gen`, kept beside what a segment carries): the words of a
-      plain printer (`_printer`: `echo '...' | sh`, also inside a group, `{ echo a; echo b; } | sh`) and a heredoc
-      body that a plain `cat` passes on to a shell that reads it as its script (`_Chunk.scripted`: `cat <<'EOF' |
-      bash`); only text a command makes at run time does (a `sed`, `awk` or `find` and all it reads, a
+      plain printer (`_printer`: `echo '...' | sh`) and a heredoc body that a plain `cat` passes on to a shell that
+      reads it as its script (`_Chunk.scripted`: `cat <<'EOF' | bash`), each only when the printer or `cat` is the
+      stage piped straight into a POSIX shell (`_SHELL`), outside any compound, and its text is exact
+      (`_exact_script`); only text a command makes at run time does (a `sed`, `awk` or `find` and all it reads, a
       substitution's output).
     One pass in order: a segment comes after what it reads (its substitutions', its pipe's and its compounds'
     segments), and each compound keeps what its segments carry, passed on to the compounds around it until one
     already holds it, so the pass stays linear."""
-    shells = set(shells)
     xargs, xshells = set(), set()
     for j, p in enumerate(parsed):
         if p.body:
@@ -1836,9 +1843,10 @@ def _fed_writes(segs: list, parsed: list, marks: _Marks, pid: bool, sq: bool, bu
         k = next((k for k, w in enumerate(p.words) if w.rsplit("/", 1)[-1] == "xargs"), None)
         if k is not None:
             xargs.add(j)
-            if any(_STDIN_SHELL.search(_unbrace(w)) for w in p.words[k + 1:]):
+            if _xargs_code(p.words, k):
                 xshells.add(j)
-    need = bool(shells or xshells)  # the write-verb bit counts only for a shell's input
+    execs = any(not p.body and _exec_input(seg, p) for seg, p in zip(segs, parsed))
+    need = bool(shells or xshells or execs)  # the write-verb bit counts only for a shell's input
     index = {id(seg): j for j, seg in enumerate(segs)}
     # id of a `_Group`, a segment, a body chunk -> what it carries; `ggroups` and `gout`: what a shell's own
     # reading has not judged of it (`gen`)
@@ -1854,7 +1862,7 @@ def _fed_writes(segs: list, parsed: list, marks: _Marks, pid: bool, sq: bool, bu
         return (verb_of(j) or (state[1] and bool(_DD.search(text)))
                 or (state[2] and bool(_SED.search(text))))
 
-    if not (xargs or shells or any(getattr(seg, "subs", None) is not None and not p.body
+    if not (xargs or shells or execs or any(getattr(seg, "subs", None) is not None and not p.body
                                    and _runs_writer(seg, p, (0, True, True, True), pid, sq)
                                    for seg, p in zip(segs, parsed))):
         return False
@@ -1899,41 +1907,69 @@ def _fed_writes(segs: list, parsed: list, marks: _Marks, pid: bool, sq: bool, bu
             table[id(group)] = new
             group = group.up
 
-    stdin = _NOTHING  # what an `exec` input redirect gives every later command of the shell
+    # fd -> what an `exec` input redirect on it gives every later command of the shell (0: their input), and the
+    # `(` group an `exec` segment opens (`exec < <(a | b)`) -> the fds that group's whole output goes to
+    fds, pending = {}, {}
+
+    def give(seg, state):  # the `exec` segment `seg` redirects its fds' input from what carries `state`
+        targets = []
+        for fd, dup in _input_fds(seg):
+            fds[fd] = _either(_either(fds.get(fd, _NOTHING), state), fds.get(dup, _NOTHING))
+            targets.append(fd)
+        return targets
+
+    def input_of(seg):  # what the segment `seg` reads from the shell's input: fd 0 and each fd it moves onto it
+        state = fds.get(0, _NOTHING)
+        for fd, dup in _input_fds(seg) if fds and "<&" in seg else ():
+            if fd == 0 and dup is not None:
+                state = _either(state, fds.get(dup, _NOTHING))
+        return state
+
+    def shell_reads(j, state):  # the segment j runs a shell that reads `state` as its script
+        return state[0] == 2 and state[3] and (j in shells or _stdin_shell(parsed[j].words) is not None)
+
     for j, (seg, p) in enumerate(zip(segs, parsed)):
         if p.body:
             continue
         lone = not isinstance(seg, _Piped)
         if lone or not (p.words or seg.closed or seg.bodies or seg.prev):
             if p.words and _exec_input(seg, p):
-                stdin = _either(stdin, carried(p.words, p, seg))
-            if j in xargs and stdin[0] and (writer(j, stdin) or (j in xshells and stdin[0] == 2 and stdin[3])):
+                give(seg, carried(p.words, p, seg))
+            stdin = input_of(seg) if fds else _NOTHING
+            if stdin[0] and ((j in xargs and (writer(j, stdin) or (j in xshells and stdin[0] == 2 and stdin[3])))
+                             or (p.words and shell_reads(j, stdin))):
                 return True
             continue  # a blank segment (a newline inside `$(`) carries nothing
         state = carried(p.words, p, seg)
         bodies = gbodies = _NOTHING
-        plain_cat = [w for k, w in enumerate(p.words) if k not in p.ops] in (["cat"], ["cat", "-"])
+        # Only a stage piped straight into a POSIX shell, outside any compound, passes on the shell's exact script.
+        exact = (isinstance(seg, _Pipe) and seg.group is None and not seg.closed and j + 1 < len(segs)
+                 and getattr(segs[j + 1], "prev", None) is seg and bool(_SHELL.search(shells.get(j + 1) or "")))
+        plain_cat = exact and [w for k, w in enumerate(p.words) if k not in p.ops] in (["cat"], ["cat", "-"])
         for chunk in seg.bodies:
             got = read(chunk)
             bodies = _either(bodies, got)
-            if not (plain_cat and getattr(chunk, "scripted", False)):
+            if not (plain_cat and getattr(chunk, "scripted", False) and _exact_script("\n".join(chunk))):
                 gbodies = _either(gbodies, got)
         subs = groups.get(id(seg.subs), _NOTHING) if seg.subs is not None else _NOTHING
         feed = seg.prev if seg.prev is not None else seg.inherit
         piped = source(feed, out) if feed is not None else _NOTHING
         gpiped = source(feed, gout) if feed is not None else _NOTHING
         if _exec_input(seg, p):
-            stdin = _either(stdin, _either(state, subs))
+            targets = give(seg, _either(state, subs))
+            if seg.group is not None and targets:
+                pending.setdefault(id(seg.group), set()).update(targets)
         if subs[0] and _runs_writer(seg, p, subs, pid, sq):
             return True
+        stdin = input_of(seg) if fds else _NOTHING
         fed = _either(_either(piped, bodies), stdin)
         if j in xargs and fed[0] and writer(j, fed):
             return True
         if j in xshells and fed[0] == 2 and fed[3]:
             return True
-        if j in shells and gpiped[0] == 2 and gpiped[3]:
+        if (j in shells and gpiped[0] == 2 and gpiped[3]) or (stdin[0] and shell_reads(j, stdin)):
             return True
-        gen = _either(_either(_NOTHING if _printer(p) else state, gbodies), subs)
+        gen = _either(_either(_NOTHING if exact and _printer(p) and _exact_script(seg) else state, gbodies), subs)
         state = _either(_either(state, bodies), subs)
         if seg.prev is not None:
             state = _either(state, piped)
@@ -1943,16 +1979,108 @@ def _fed_writes(segs: list, parsed: list, marks: _Marks, pid: bool, sq: bool, bu
             state = _either(state, groups.get(id(group), _NOTHING))
             keep(group, gen, ggroups)
             gen = _either(gen, ggroups.get(id(group), _NOTHING))
+            for fd in pending.pop(id(group), ()):  # `exec < <(a | b)`: the whole pipeline's output is the input
+                fds[fd] = _either(fds[fd], state)
         out[id(seg)], gout[id(seg)] = state, gen
         keep(seg.group, state, groups)
         keep(seg.group, gen, ggroups)
     return False
 
 
+def _xargs_code(words: list, k: int) -> bool:
+    """Whether the `xargs` at `words[k]` runs a shell that may read what `xargs` reads as code: a shell
+    (`_STDIN_SHELL`) after it that reads its script from its input or whose `-c` script word is missing
+    (`_stdin_shell`: `xargs -0 sh -c`), one whose words hold the replace string of an `-I`, `-J`, `-i` or `--replace`
+    flag of the `xargs` (`xargs -I{} sh -c {}`), or one whose `-c` script runs a positional parameter (`$0`, `$1`,
+    ..., `$@`, `$*`) as a command of its own or holds one beside an `eval`, a shell, `source`, `.` or an interpreter
+    word (`_POSITIONAL_RUN`, `_RUNS_CODE`: `xargs bash -c '$0'`, `xargs sh -c 'eval "$0"'`, `xargs sh -c '"$@"' _`;
+    not `xargs -n1 bash -c 'echo "$0"'`, whose input is only printed). The flags with a value (`-n 1`, `-L`, `-P`,
+    ...) are skipped; any other word before the shell is read as a flag cluster or passed over."""
+    rest = words[k + 1:]
+    s = next((s for s, w in enumerate(rest) if _STDIN_SHELL.search(_unbrace(w))), None)
+    if s is None:
+        return False
+    if _stdin_shell(rest) is not None:
+        return True
+    replace, n = None, 0
+    while n < s and replace is None:
+        w = rest[n]
+        n += 1
+        if w in ("--replace", "-i") or w.startswith("--replace="):
+            replace = w.partition("=")[2] or "{}"
+        elif w[:1] == "-" and w[1:2] != "-":
+            for c, letter in enumerate(w[1:], 2):
+                if letter in "IJi":
+                    replace = w[c:] or (rest[n] if letter != "i" and n < len(rest) else "{}")
+                    break
+                if letter in "ELnPRSsad":
+                    n += not w[c:]  # this flag's value is the next word
+                    break
+    if replace is not None and (not replace or any(replace in w for w in rest[s:])):
+        return True
+    script = _script_word(rest, s)
+    if script is None or not _POSITIONAL.search(rest[script]):
+        return False
+    text = rest[script]
+    return bool(_POSITIONAL_RUN.search(text)) or any(
+        _RUNS_CODE.fullmatch(t) or t in ("source", ".") for t in _CODE_TOKEN.findall(text))
+
+
+# A positional parameter in a `-c` script (`_xargs_code`): `$0`, `${1}`, `$@`, `$*`; one at the start of a command
+# (the script's start, after `;`, `&`, `|`, `(`, `{`, a newline or a keyword) runs it; so may one in a script that
+# holds a shell, `eval`, `source`, `.` or an interpreter word (`eval "$0"`, `echo "$0" | sh`, `python3 -c "$0"`).
+_POSITIONAL = re.compile(r"\$\{?[0-9@*]")
+_POSITIONAL_RUN = re.compile(r"(?:^|[;&|({\n]|\b(?:then|do|else|exec|command|builtin|env|time|nohup)\s)\s*[\"']?"
+                             r"\$\{?[0-9@*]")
+_CODE_TOKEN = re.compile(r"[\w.+-]+")
+
+
+def _exact_script(text: str) -> bool:
+    """Whether the text `text` (a printer's segment, or the lines of a heredoc body `cat` passes on) is a shell's
+    script as the guard's own reading of it reads it (`_fed_writes`): no `$` but the guard's own names
+    (`_GUARD_NAMES`), no backtick, no `%` (a `printf` format), no `cd` or `pushd` (a relative path then lands
+    elsewhere), no word that binds a name (`f=<data>/x`) and no `for`, `while`, `until`, `read`, `select` or `set`
+    word, `set` with only option flags aside (`set -Eeuo pipefail`, `_SET_FLAGS`): each may make the script's
+    words other text at run time (`f=<data>/x; rm $f`), which that reading does not follow."""
+    text = _GUARD_NAMES.sub("", _SET_FLAGS.sub(" ", text)) if "$" in text or "set" in text else text
+    return not _INDIRECT.search(text)
+
+
+# The names `_exact_script` lets a script expand (the guard reads them itself), the words it does not let one hold,
+# and a `set` that only turns options on or off (`set -e`, `set -o pipefail`; no `--` and no positional words).
+_GUARD_NAMES = re.compile(r"\$(?:\{(?:AP2_RUN_DIR|AP2_DATA|HOME)\}|(?:AP2_RUN_DIR|AP2_DATA|HOME)(?![A-Za-z0-9_]))")
+_INDIRECT = re.compile(r"[$`%]|(?<![\w.\-/])(?:cd|pushd|for|while|until|read|select|set)(?![\w.\-/])"
+                       r"|(?<![\w.\-/=])[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=")
+_SET_FLAGS = re.compile(r"(?<![\w.\-/])set(?:[ \t]+[-+][eEuxv]*(?:o[ \t]+(?:pipefail|errexit|nounset|xtrace|verbose"
+                        r"|errtrace))?(?![\w.\-/]))+(?=[ \t]*(?:$|[\n;&|'\"]))", re.M)
+
+
 def _exec_input(seg: str, p) -> bool:
     """Whether the segment `seg` (`p` its `_Parsed`) runs `exec` with a `<` in its text: an input redirect (or a
-    process substitution) that every later command of the shell reads (`exec < <(ls <data>); xargs rm`)."""
+    process substitution) that later commands of the shell read (`exec < <(ls <data>); xargs rm`)."""
     return "<" in seg and p.lead is not None and p.words[p.lead] == "exec"
+
+
+def _input_fds(seg: str) -> list:
+    """The input redirects in the text of the segment `seg`, as (fd, dup) pairs: each `<` (`<<`, `<<<` and `<>`
+    too) that opens no process substitution, with the fd right before it (`3<`; none, or a `{name}` one, is 0,
+    fail-closed: `exec {fd}< <data>/x` feeds every later input) and the fd a `<&N` moves onto it (`<&3`, `0<&3`),
+    or None. A `<` inside quotes counts as well (fail-closed)."""
+    out, i = [], seg.find("<")
+    while i >= 0:
+        if seg[i + 1:i + 2] != "(" and seg[i - 1:i] not in ("<", ">"):
+            k = i
+            while k and seg[k - 1].isdigit():
+                k -= 1  # back over the fd's digits (a run up to the `<` before, so the scans stay linear)
+            fd = int(seg[k:i]) if k < i and not (k and (seg[k - 1].isalnum() or seg[k - 1] in "_$}")) else 0
+            dup = _FD_AFTER.match(seg, i + 2) if seg[i + 1:i + 2] == "&" else None
+            out.append((fd, int(dup.group(1)) if dup else None))
+        i = seg.find("<", i + 1)
+    return out
+
+
+# The fd a `<&` moves onto the input it redirects (`_input_fds`).
+_FD_AFTER = re.compile(r"[ \t]*(\d+)")
 
 
 def _depths(p) -> list:
@@ -1987,15 +2115,25 @@ def _runs_writer(seg: str, p, state, pid: bool, sq: bool) -> bool:
 def _run_text(p):
     """The words the `_Parsed` segment `p` runs outside its command substitutions, joined by blanks: its command
     words there (`_commands`) and each other word there with no blank in it (so a runner `_commands` does not know
-    still counts: `sudo rm $(...)`; quoted prose such as `"next: rm $(...)"` does not), redirects aside; None for
-    a plain printer there (`_printer` once the substitutions' own words are aside: `echo "rm: $(...)"`)."""
+    still counts: `sudo rm $(...)`; quoted prose such as `"next: rm $(...)"` does not), redirects aside; every word
+    there when one of them is a shell, `eval` or an interpreter that runs a code word (`_RUNS_CODE`: `sh -c "rm
+    $(...)"`, `python3 -c "open('$(...)', 'w')"`, `awk '... > ARGV[1]' $(...)`: that word is code, not prose);
+    None for a plain printer there (`_printer` once the substitutions' own words are aside: `echo "rm: $(...)"`)."""
     depths = _depths(p)
     outer = [k for k in p.commands if not depths[k]]
     if (len(outer) == 1 and outer[0] == p.lead and p.words[p.lead] in _PRINTERS and not p.flags & _LOOSE
             and "always" not in p.words):
         return None
-    return " ".join(w for k, w in enumerate(p.words) if k not in p.ops and not depths[k]
-                    and (k in p.commands_set or not any(c.isspace() for c in w))) + " "
+    words = [k for k in range(len(p.words)) if k not in p.ops and not depths[k]]
+    code = any(_RUNS_CODE.fullmatch(_unbrace(p.words[k]).rsplit("/", 1)[-1]) for k in words)
+    return " ".join(p.words[k] for k in words
+                    if code or k in p.commands_set or not any(c.isspace() for c in p.words[k])) + " "
+
+
+# The commands whose word may be code they run (`_run_text`), by basename: the shells and `eval`, and the
+# interpreters that take a code word (`python3 -c`, `perl -e`, `awk '...'`, `node -e`, `osascript -e`, ...).
+_RUNS_CODE = re.compile(r"sh|bash|zsh|ksh|dash|csh|tcsh|eval|python[0-9.]*|perl[0-9.]*|ruby|node|awk|gawk|nawk"
+                        r"|php|lua|osascript|Rscript|deno|bun")
 
 
 def _alike(seg: str) -> bool:

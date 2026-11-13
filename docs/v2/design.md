@@ -2266,10 +2266,19 @@ Calls the author made without asking (check them):
       command aside). What it reads: an earlier segment of its pipeline (back to its start; a `|` at the end of a
       line goes on to the next one), the input of a piped compound it starts a pipeline in (`| if true; then xargs
       rm; fi`, `| { true; xargs rm; }`; only `xargs` itself reads it there: a `find` inside `| while read f; do
-      ...; done` reads no input), a heredoc body of the `<<` it holds, and the input an earlier `exec` segment with
-      a `<` in it gives every later command of the shell, when that segment's words or its process substitution name
-      a guarded path (`exec < <(printf '%s\n' <data>/x); xargs rm`, `exec 3< <(...); xargs rm <&3` and `exec <
-      <data>/list; xargs rm` are denied; `exec < $AP2_RUN_DIR/list; xargs rm` is allowed). What a segment sends on
+      ...; done` reads no input), a heredoc body of the `<<` it holds, and the input an earlier `exec` segment gives
+      the shell, when that segment's words or its process substitution name a guarded path. Only a redirect of the
+      input itself (`<`, `0<`, `<<`, `<<<`, `<>`, `<&N`, `0<&N`; a `<` with no fd or a `{name}` one counts as one,
+      fail-closed, and so does a `<` inside quotes) feeds every later command; an `exec N<` (N not 0) is kept for
+      fd N and feeds only a later command that moves fd N onto its input (`<&N`, `0<&N`, or a later `exec <&N`),
+      and no `exec N<&-` clears it (fail-closed). A `<(a | b)` in the `exec` gives its whole pipeline, up to the
+      `)` that closes it (`exec < <(printf '%s\n' a b | sed 's|^|<data>/items/|'); xargs rm`). So `exec <
+      <(printf '%s\n' <data>/x); xargs rm`, `exec 3< <(...); xargs rm <&3`, `exec < <data>/list; xargs rm`, the
+      same into a later group, `if` or pipeline (`exec < <data>/list; { xargs rm; }`, `...; xargs rm 2>&1 | tail
+      -5`), `exec < "$(echo <data>/list)"; xargs rm`, and a later shell that reads its input (`exec < <(sed 's/^/rm
+      /' <<< <data>/x); sh`, judged as a shell below) are denied; `exec < $AP2_RUN_DIR/list; xargs rm`, `exec 3<
+      <data>/items/C1.yaml; read -r -u 3 first; exec 3<&-; find $AP2_RUN_DIR/tmp -name '*.tmp' | xargs rm -f` and
+      `exec 4< <pkg>/README.md; git ls-files | xargs touch` are allowed. What a segment sends on
       also holds its
       command substitutions' output and every segment of a compound that ends in it: a `{ ...; }` group, a `for`,
       `while`, `until` or `select` loop to its `done`, an `if` to its `fi`, a `case` to its `esac`, and a `(...)`
@@ -2291,9 +2300,15 @@ Calls the author made without asking (check them):
       A `dd` or `sed` there may take its `of=` or its in-place flag from the words it reads, so an `of=` or a sed
       in-place flag (`-i`, `-ni`, macOS's `-I`, `--in-place`; not `-print0`) among them makes it a write too (`echo
       "x of=<run>'" | xargs dd`, `echo "-i s/a/b/ <data>/c" | xargs sed`). An `xargs` that runs a shell (a word
-      after it is a shell's name, `csh` and `tcsh` too, whatever its `-c`: `xargs -I{} sh -c {}`, `xargs -I{} bash
-      -c '{}'`, `xargs -0 sh -c`) runs what it reads as a script, so it is judged as a shell that reads its input is
-      (below), with all it reads counted: `printf '%s\n' <data>/x | sed 's/^/rm /' | xargs -I{} sh -c {}` and the
+      after it is a shell's name, `csh` and `tcsh` too) that reads what `xargs` reads as code (`_xargs_code`: the
+      shell reads its input or its `-c` script word is missing, `xargs -0 sh -c`; the shell's words hold the replace
+      string of an `-I`, `-J`, `-i` or `--replace` flag, `xargs -I{} sh -c {}`, `xargs -I{} bash -c '{}'`; or its
+      `-c` script runs a positional parameter, `$0`, `$1`, `$@`, `$*`, as a command or in a script with `eval`, a
+      shell, `source`, `.` or an interpreter word: `xargs bash -c '$0'`, `xargs sh -c 'eval "$0"'`, `xargs sh -c
+      '"$@"' _`, `xargs -n1 bash -c 'echo "$0" | sh'`) runs it as a script, so it is judged as a shell that reads
+      its input is (below), with all it reads counted; one that only prints it is not (`git -C <pkg> log --oneline
+      | grep -i chmod | xargs -n1 bash -c 'echo "$0"'` is allowed): `printf '%s\n' <data>/x | sed 's/^/rm /' |
+      xargs -I{} sh -c {}` and the
       `awk '{print "rm " $0}'` and `find <data> ...` forms are denied, `ls <data>/items | xargs -I{} sh -c 'wc -l
       <data>/items/{}'` is allowed.
     - A command substitution feeds the command around it as a pipe feeds `xargs`: its output becomes that command's
@@ -2307,7 +2322,14 @@ Calls the author made without asking (check them):
       $AP2_RUN_DIR/journal.md` are allowed. The verb counts only among the words the segment runs outside its
       substitutions (`_run_text`): its command words, and each other word with no blank in it, so a runner the
       guard does not know still counts (`sudo rm $(...)`, `timeout 5 rm $(...)`), also once its `$NAME`s are taken
-      out (`r$x'm' $(...)`). Quoted prose is no verb, and a plain printer (`echo`, `printf` as the only command
+      out (`r$x'm' $(...)`). When one of those words is a shell, `eval` or an interpreter that runs a code word (by
+      its base name: `sh`, `bash`, `zsh`, `ksh`, `dash`, `csh`, `tcsh`, `eval`, `python`, `python3`, `python3.X`,
+      `perl`, `ruby`, `node`, `awk`, `gawk`, `nawk`, `php`, `lua`, `osascript`, `Rscript`, `deno`, `bun`), every
+      word outside the substitutions counts, quoted or not: that word is code, not prose (`sh -c "rm -f $(ls -d
+      <data>/x)"`, `env -i sh -c "..."`, `sh -c 'rm -f "$@"' _ $(ls -d <data>/x)`, `python3 -c "open('$(ls -d
+      <data>/x)', 'w')"`, `awk 'BEGIN { printf "" > ARGV[1] }' $(ls -d <data>/x)` are denied). Accepted false deny: a
+      quoted verb next to such a word and a substitution that reads a guarded path (`python3 -c "print('rm')"
+      $(ls <data>)`). Otherwise quoted prose is no verb, and a plain printer (`echo`, `printf` as the only command
       outside the substitutions) runs none: `echo "- read $(ls <data>/items | wc -l) cards; next: rm stale branch" >>
       $AP2_RUN_DIR/journal.md`, `echo "rm: $(ls <data>/items | wc -l)" > /tmp/n.txt` and `git commit -m "fix: rm
       dead code" -m "$(git -C <pkg> log -1 --format=%s)"` are allowed.
@@ -2322,12 +2344,25 @@ Calls the author made without asking (check them):
       count there: it is a word of the script, which the shell's own reading judges (`echo 'make >
       "$AP2_RUN_DIR/m.log"; echo "exit $?"' | sh` stays allowed), and so do `ls <data>/items | sed 's/^/wc -l /' | sh`
       and `find $AP2_RUN_DIR -name '*.tmp' | sed 's/^/rm /' | sh`. Text the shell's own reading already judged as its
-      exact script does not count there either: the words of a plain printer (`echo '...' | sh`, also the printers of
-      a group, `{ echo 'set -e'; echo 'ls <data>/items | wc -l'; echo 'date >> <run>/j.md'; } | bash`; a printer with
-      a substitution keeps its words, `echo "rm $(ls -d <data>/items/*)" | sh` is denied) and a heredoc body that a
+      exact script does not count there either: the words of a plain printer (`echo '...' | sh`; a printer with a
+      substitution keeps its words, `echo "rm $(ls -d <data>/items/*)" | sh` is denied) and a heredoc body that a
       plain `cat` (no other words) passes on to a shell that reads it as its script (`cat <<'EOF' | bash` with `cat
-      <data>/config.yaml` on one line and `rm -rf build/` on another is allowed, as `bash <<'EOF'` is); only text a
-      command makes at run time counts (a `sed`, `awk` or `find` and all it reads, a substitution's output), so
+      <data>/config.yaml` on one line and `rm -rf build/` on another is allowed, as `bash <<'EOF'` is). That holds
+      only when all of these do (fail-closed; else the printer's words or the body count as made at run time): the
+      printer or `cat` is itself the stage piped straight into the shell, outside any group, loop or `(...)` (in one
+      its words can join another command's output: `{ printf 'rm '; echo <data>/x; } | sh`, `for f in
+      <data>/items/*; do echo "rm $f"; done | sh`); the shell is `sh`, `bash`, `zsh`, `ksh` or `dash`, not `csh` or
+      `tcsh`, whose script the guard does not read as its own; and its text (`_exact_script`) holds no `$` but
+      `$AP2_RUN_DIR`, `$AP2_DATA`, `$HOME` and their `${...}` forms, no backtick, no `%` (a `printf` format), no `cd`
+      or `pushd`, no word that binds a name (`f=<data>/x`) and no `for`, `while`, `until`, `read`, `select` or `set`
+      word, a `set` with only option flags aside (`set -Eeuo pipefail`, `set -o pipefail`): those make the script's
+      words other text at run time, which the shell's own reading does not follow (`echo 'f=<data>/x; rm $f' | sh`,
+      `cat <<'EOF' | sh` with `f=<data>/x` and `rm $f`, `echo 'cd <data>/items && rm -f x' | sh` are denied).
+      Accepted false denies: printers in a group (`{ echo 'set -e'; echo 'ls <data>/items | wc -l'; echo 'date >>
+      <run>/j.md'; } | bash`), a `printf` format (`printf '%s\n' 'ls <data>/items | wc -l' 'echo ok > <run>/ok' |
+      sh`), and such a script with any other `$` (`$f`, `$?`, `$1`) or a `cd`, when it names the data folder and
+      holds a write verb. Only text a command makes at run time counts otherwise (a `sed`, `awk` or `find` and all
+      it reads, a substitution's output), so
       `sed 's/^/rm /' <<'X' | sh` and `cat <<'X' | sed 's/^/rm /' | sh` with `<data>/config.yaml` in the body stay
       denied. The `xargs` checks count all of it.
     - These are judged in one pass in order (`_fed_writes`): a segment comes after the segments it reads from, and
