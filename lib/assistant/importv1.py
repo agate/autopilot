@@ -261,7 +261,8 @@ def _items(state: dict, field: str) -> list:
     for i, item in enumerate(items):
         if not isinstance(item, dict):
             raise _Refused(f"state.json: {field}[{i}] is not an object")
-        if not (isinstance(item.get("id"), str) and item["id"].strip()):
+        # cards.blank: an id that is not text, or holds only white space and U+FEFF, is no id.
+        if cards.blank(item.get("id")):
             raise _Refused(f"state.json: {field}[{i}] has no id")
     return items
 

@@ -370,6 +370,45 @@ class ImportV1Test(unittest.TestCase):
             self.assertEqual(now[key], before[key], key)
             self.assertEqual(now[key]["lane"], "needs", key)
 
+    def test_an_id_with_no_words_refuses_the_project_and_leaves_its_cards(self):
+        # cards.blank: an id of only U+FEFF (and white space) has no words, so it is refused like an id of spaces.
+        def set_id(field, value):
+            return lambda s: s[field][1].update(id=value)
+
+        def drop_id(field):
+            return lambda s: s[field][1].pop("id")
+
+        for field in ("tasks", "decisions"):
+            cases = [(repr(v), set_id(field, v)) for v in ("\ufeff", "\ufeff \x1c", "   ", 3, None)]
+            for name, breakit in cases + [("missing", drop_id(field))]:
+                with self.subTest(field=field, id=name):
+                    shutil.rmtree(self.v1)
+                    shutil.copytree(FIXTURE, self.v1)
+                    shutil.rmtree(self.data, ignore_errors=True)
+                    self.ok("--project", "shop")
+                    before = self.by_key()
+                    self.edit_state("projects/shop", breakit)
+                    code, out, err = self.run_cli("--project", "shop")
+                    self.assertEqual(code, 1, err)
+                    report = json.loads(out)
+                    self.assertEqual([r["name"] for r in report["refused"]], ["shop"])
+                    self.assertIn(f"state.json: {field}[1] has no id", report["refused"][0]["reason"])
+                    self.assertEqual(self.by_key(), before)
+
+    def test_an_id_with_words_next_to_u_feff_is_used_as_it_is(self):
+        for field, old in (("tasks", "PROJ-2"), ("decisions", "D2")):
+            with self.subTest(field=field):
+                shutil.rmtree(self.v1)
+                shutil.copytree(FIXTURE, self.v1)
+                shutil.rmtree(self.data, ignore_errors=True)
+                self.edit_state("projects/shop", lambda s: s[field][1].update(id="\ufeffT9"))
+                report = self.ok("--project", "shop")
+                self.assertEqual(report["refused"], [])
+                got = self.by_key()
+                self.assertIn("v1:shop:\ufeffT9", got)
+                self.assertNotIn("v1:shop:T9", got)
+                self.assertNotIn(f"v1:shop:{old}", got)
+
     def test_a_task_gone_from_v1_keeps_its_card(self):
         self.ok("--project", "shop")
         before = self.by_key()["v1:shop:PROJ-1"]
