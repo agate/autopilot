@@ -132,13 +132,19 @@ def flow_end(line, i):
     """Where the flow collection opening at `line[i]` (`[` or `{`) ends; None when not on this line.
 
     Quoted parts are skipped, and a ` #` outside them starts a comment, so the rest of the line does not count.
-    A quote opens a string only where one can start (after `[`, `{`, `,`, `:` or `?`); anywhere else (`it's`, `5"`)
-    it sits inside a plain scalar, which this reader does not follow, so the end cannot be read: None."""
+    A quote opens a string only where libyaml starts one: right after `[`, `{` or `,` (blanks between are fine);
+    after a `:` with a blank before the quote, or with the `:` right after a closing quote or bracket (`{"a":"b"}`);
+    after a `?` that starts its own token (`{? "x": 1}`). Anywhere else (`it's`, `5"`, `label:"bug`, `why?"x`) the
+    quote sits inside a plain scalar, which this reader does not follow, so the end cannot be read: None."""
     depth = 0
     while i < len(line):
         c = line[i]
         if c in "\"'":
-            if line[:i].rstrip(" \t")[-1:] not in tuple("[{,:?"):
+            before = line[:i].rstrip(" \t")
+            p, prev, gap = before[-1:], before[-2:-1], len(before) < i
+            if not (p in ("[", "{", ",")
+                    or p == ":" and (gap or prev in ('"', "'", "]", "}"))
+                    or p == "?" and prev in (" ", "\t", "[", "{", ",")):
                 return None
             i = quoted_end(line, i)
             if i is None:
@@ -158,7 +164,8 @@ def flow_end(line, i):
 
 def open_values(lines):
     """The lines (stripped) whose value opens a quoted string or a flow collection (`[` / `{`) that does not close
-    on that line; blank lines, comment lines and the body of a `|` / `>` block scalar are skipped.
+    on that line, or a flow collection whose end this reader cannot find (see `flow_end`); blank lines, comment
+    lines and the body of a `|` / `>` block scalar are skipped.
 
     Such a value may run onto the next lines at any indent, even shallower than its key, and GitHub still reads
     the keys after it as part of the same mapping. A plain-text reader cannot tell where the step or job ends
@@ -556,7 +563,8 @@ class SwitchCheckTest(unittest.TestCase):
         for line in ("        name: 'it''s'", '        name: "a \\" b"', '        name: "a # b"',
                      '        with: {a: "]", b: 1}', "        name: [a, '[', {b: c}] # [", '          "a b": "c"',
                      "        run: echo \"it's", '        name: "a" # "', "        working-directory: 'C:\\'",
-                     '        with: {title: "Fix #42", labels: bug}'):
+                     '        with: {title: "Fix #42", labels: bug}', '        with: {"a": 1}', '        with: {"a":"b"}',
+                     '        with: {? "x": 1}', '        with: {a:  "x"}'):
             with self.subTest(line=line):
                 copy = insert_after(self.text, "python-version: ${{ matrix.python-version }}", line)
                 self.assertEqual(job_switch_problems(copy), [])
@@ -566,15 +574,37 @@ class SwitchCheckTest(unittest.TestCase):
         # A quote in the middle of a plain scalar (`it's`) does not open a string; read as one, it pairs with a
         # later quote and hides the real end of the value, so the check cannot tell where it ends and must fail.
         for first in ("    env: {GREETING: it's me, CLOSE: '}', MODE: ci,",
-                      '    env: {SIZE: 5" disk, Q: "}", MODE: ci,'):
+                      '    env: {SIZE: 5" disk, Q: "}", MODE: ci,',
+                      "    env: {GREETING: say 'hi, CLOSE: '}', MODE: ci,"):
             with self.subTest(first=first):
                 copy = self.text.rstrip("\n") + "\n" + first + "\n  }\n    continue-on-error: true\n"
                 self.assertEqual(job_switch_problems(copy), [open_job_value(first.strip())])
-        # The same quote in a value that does close on its line fails too (a known spurious red).
-        copy = insert_after(self.text, "python-version: ${{ matrix.python-version }}", "        with: {msg: it's}")
-        self.assertEqual(job_switch_problems(copy), [open_job_value("with: {msg: it's}")])
-        self.assertEqual(step_switch_problems(copy, SETUP_PYTHON),
-                         [open_step_value("with: {msg: it's}", SETUP_PYTHON)])
+        # The same quote in a value that does close on its line fails too (known spurious reds: libyaml reads
+        # `a :"b"` as one plain key).
+        for value in ("with: {msg: it's}", 'with: {a :"b"}'):
+            with self.subTest(value=value):
+                copy = insert_after(self.text, "python-version: ${{ matrix.python-version }}", "        " + value)
+                self.assertEqual(job_switch_problems(copy), [open_job_value(value)])
+                self.assertEqual(step_switch_problems(copy, SETUP_PYTHON), [open_step_value(value, SETUP_PYTHON)])
+
+    def test_a_quote_glued_to_a_colon_or_question_mark_in_a_flow_value_is_a_problem(self):
+        # In `label:"bug` and `why?"bug` the `:` and `?` are part of a plain scalar, so the quote does not open a
+        # string; read as one, it pairs with a later quote and hides the real end of the value, and the switch after
+        # it would be dropped.
+        for word in ('label:"bug', 'why?"bug'):
+            with self.subTest(word=word):
+                first = f'    env: {{QUERY: {word}, NOTE: "}}'
+                copy = self.text.rstrip("\n") + "\n" + first + '\n  "}\n    continue-on-error: true\n'
+                self.assertEqual(job_switch_problems(copy), [open_job_value(first.strip())])
+        for marker, after, lines in (
+                (SETUP_PYTHON, "python-version: ${{ matrix.python-version }}",
+                 ['        env: {Q: label:"bug, N: "}', '      - name: x"}', "        if: false"]),
+                (RUN_COMMAND, RUN_COMMAND,
+                 ['        working-directory: {a: b:"c, d: "}', '      - e"}', "        continue-on-error: true"])):
+            with self.subTest(marker=marker):
+                copy = insert_after(self.text, after, "\n".join(lines))
+                self.assertEqual(step_switch_problems(copy, marker), [open_step_value(lines[0].strip(), marker)])
+                self.assertEqual(job_switch_problems(copy), [open_job_value(lines[0].strip())])
 
     def test_a_quoted_key_with_a_value_running_on_is_a_problem(self):
         copy = insert_after(self.text, "python-version: ${{ matrix.python-version }}",
