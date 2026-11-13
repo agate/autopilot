@@ -65,3 +65,61 @@ The plan may change these, within 10 slices. Order by what each needs.
 
 Every slice that lands has tests, keeps all of `tests/` green, and works against a temporary data folder with
 `bin/ap2` in shadow mode.
+
+## Phase 2: switch over
+
+Phase 1 (the slices above) is done. The user's goal now: v2 runs by itself on this Mac, does its own remaining
+work, holds everything v1 and secretary recorded, and then v1's and secretary's launchd jobs are stopped. The hard
+rules above still hold, with one change to rule 3:
+
+- **Rule 3, phase 2.** Code may now install: `ap2 install` may write and load v2's own launchd job and create v2's
+  real data folder, when the user runs it. A worker still never runs it, never loads, unloads or stops any launchd
+  job, and never writes under `~/.claude/autopilot-data`, `~/.claude/secretary-data`, `~/.claude/skills` or
+  `~/Library/LaunchAgents`. Tests use temporary folders and never call `launchctl` for real. The steps under
+  "Switch-over steps" are the user's (or a talk session's, after the user says yes to that step).
+
+### Phase 2 slices
+
+Built by v1, in this order, so that v2 can run its own project:
+
+1. **Gate runs the loop.** Each `ap2 gate` run also does what v1's gate does for workers and passes: it checks
+   every running worker (a result file ends its round; the dead and idle rules of design 8.2), reads each due
+   watch (a source that needs a scan session gets one, design 5.3), and records that a dispatcher pass is due when
+   there is work for one (a ready card, a new result file, an answered `ask`), as v1's gate does.
+2. **Dispatcher pass.** When a pass is due, the gate starts one short `claude --bg` pass per repo group, as v1's
+   `lib/autopilot/dispatch.py` does, driven by a v2 runbook written for cards (design 8.0): start the next role of a
+   ready card from its template, read hand-backs and reviews, open `ask` cards, and in live mode only apply writes
+   (mark a PR ready, merge, move a Jira ticket). Reuse v1's dispatcher code where it fits.
+3. **Install.** `ap2 install`, `ap2 uninstall` and `ap2 doctor`: v2's own launchd label (never v1's
+   `com.autopilot.gate` or secretary's `com.secretary.gate`), `ap2 gate` every 60 seconds, its own settings.
+   `doctor` checks the job, the data folder, the tools on PATH, the active profile and the mode, and prints a fix
+   line for each failure.
+4. **Take over a v1 project.** `ap2 import-v1 --take-over <project>` turns that project's imported cards into live
+   v2 cards that v2 works on: open tasks keep their worktree, branch, PR, sessions and run folder; settled cards and
+   every file the project holds come along as in slice 5. v1's folder is only read. The user pauses the project in
+   v1 (`ap pause <project>`) at the same step, so v1 and v2 never both work on it.
+
+Built by v2 itself, after the user moves the `v2` project onto v2:
+
+5. **Every v1 record.** For every v1 project, read-only and searchable on the page: settled cards with the user's
+   answers, every run folder (briefs, `handback.json`, `evidence.json`, `review.json`, `prloop.json`,
+   `journal.md`, media), specs, reports, events and the archive, and the RULES.md lines (v1's global and each
+   project's). Access profiles carry over as v2 profiles. v1's folder is only read.
+6. **Phone page publishing.** Publish the phone page to claude.ai in live mode (design 9.2, the later work in
+   section 12), and read answers from it as v1 does (design 8.3).
+7. **Secretary import.** Secretary's watches (`watches.json`) become v2 watches on the built-in sources, its open
+   items and PR review cards become cards, its labels and work hours carry over. `~/.claude/secretary-data` is only
+   read. Never-send stays: v2 drafts Slack replies and never posts them.
+
+### Switch-over steps
+
+Each step waits for the user's yes to that step.
+
+1. Back up `~/.claude/autopilot-data` and `~/.claude/secretary-data` (a tar file each; the folders stay).
+2. `ap2 install` in shadow mode. Run it next to v1 and secretary for at least a day and compare the pages.
+3. Move the `v2` project: `ap2 import-v1 --take-over v2`, `ap pause v2` in v1, live mode for that project. Slices 5
+   to 7 are then built on v2.
+4. When slice 7 has run a day in live mode: stop `com.secretary.gate` (`launchctl bootout`; the plist is kept, so
+   it can be loaded again).
+5. When every v1 project is taken over or done and slice 5 is in: stop `com.autopilot.gate` the same way. v1's and
+   secretary's folders stay as they are, as the backup.
