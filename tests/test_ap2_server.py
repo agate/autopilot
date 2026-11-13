@@ -1556,6 +1556,23 @@ const opts = ['raise50', 'raise100', 'pause'];
                 self.assertEqual(len([c for c in calls if c[0] == "post"]), 1)
 
     @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_post_sends_json_the_server_accepts(self):
+        # The cap buttons post through the page's own `post`: a POST with a JSON body and the JSON content type,
+        # which the server needs (text/plain is 415, a non-JSON body is 400).
+        out = self.run_access(page_functions("api", "post") + """
+const sent = [];
+globalThis.fetch = async (path, opts) => { sent.push([path, opts]); return {ok: true, json: async () => ({ok: 1})}; };
+(async () => {
+  const reply = await post('/api/cap/answer', {card_id: 'C1', option: 'raise50'});
+  const [path, opts] = sent[0];
+  console.log(JSON.stringify({reply, path, method: opts.method, type: opts.headers && opts.headers['Content-Type'],
+                              body: JSON.parse(opts.body)}));
+})();
+""")
+        self.assertEqual(out, {"reply": {"ok": 1}, "path": "/api/cap/answer", "method": "POST",
+                               "type": "application/json", "body": {"card_id": "C1", "option": "raise50"}})
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
     def test_a_refused_answer_says_why_and_a_good_one_redraws_the_card_on_screen(self):
         # A 409 or 500 shows a label and the server's reason and turns the buttons back on, so the user can try
         # again; a good answer redraws the card only when that card is the one on screen.
