@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
 import textwrap
@@ -594,6 +595,41 @@ class InvisibleTextTest(SourceCase):
                 src = Loader(self.data, plugin_dir=sources.PLUGIN_DIR).load("slack-mentions")
                 self.assertIsNone(sources.unset_settings(src))
                 self.assertEqual(sources.settings(src)["org"], value.replace("\\ufeff", "\ufeff"))
+
+
+class ReadRegularCappedTest(unittest.TestCase):
+    """`read_regular_capped` reads only a regular file, checked on the open file, and at most `limit` bytes."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def test_a_regular_file_is_read_up_to_the_limit(self):
+        p = self.tmp / "a.json"
+        p.write_bytes(b"x" * 10)
+        self.assertEqual(sources.read_regular_capped(p, 10, "too large"), b"x" * 10)
+        with self.assertRaises(SourceError) as cm:
+            sources.read_regular_capped(p, 9, "too large")
+        self.assertEqual(str(cm.exception), "too large")
+        with self.assertRaises(FileNotFoundError):
+            sources.read_regular_capped(self.tmp / "gone.json", 10, "too large")
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "os.mkfifo is not available")
+    def test_a_fifo_is_refused_without_waiting(self):
+        p = self.tmp / "fifo.json"
+        os.mkfifo(p)  # no writer: a plain open would wait for one
+        with self.assertRaises(OSError) as cm:
+            sources.read_regular_capped(p, 10, "too large")
+        self.assertIn("not a regular file", str(cm.exception))
+
+    def test_a_link_is_refused(self):
+        target = self.tmp / "target.json"
+        target.write_text("{}")
+        p = self.tmp / "link.json"
+        p.symlink_to(target)
+        with self.assertRaises(OSError) as cm:
+            sources.read_regular_capped(p, 10, "too large")
+        self.assertIn("a symbolic link, not a regular file", str(cm.exception))
 
 
 if __name__ == "__main__":

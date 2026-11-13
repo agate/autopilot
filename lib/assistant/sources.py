@@ -19,7 +19,10 @@
 from __future__ import annotations
 
 import copy
+import errno
+import os
 import re
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -68,6 +71,35 @@ def read_capped(path, limit: int, too_large: str) -> bytes:
     if len(data) > limit:
         raise SourceError(too_large)
     return data
+
+
+def read_regular_capped(path, limit: int, too_large: str) -> bytes:
+    """The bytes of `path`, only when it is a regular file: it is opened without following a link and without
+    waiting (a FIFO opens at once), and the open file itself is checked (`fstat`), so a file swapped in after any
+    earlier look is still refused. A link or anything but a regular file raises OSError ("not a regular file").
+    At most `limit` + 1 bytes are read; more than `limit` raises SourceError(`too_large`). A missing file raises
+    FileNotFoundError; any OSError is the caller's to wrap."""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as e:
+        if e.errno in (errno.ELOOP, errno.EMLINK) and os.path.islink(path):  # O_NOFOLLOW refused a link
+            raise OSError(e.errno, "a symbolic link, not a regular file", str(path)) from None
+        raise
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, "not a regular file", str(path))
+        chunks, n = [], 0
+        while n <= limit:
+            chunk = os.read(fd, limit + 1 - n)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            n += len(chunk)
+    finally:
+        os.close(fd)
+    if n > limit:
+        raise SourceError(too_large)
+    return b"".join(chunks)
 
 
 @dataclass

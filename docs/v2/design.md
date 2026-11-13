@@ -712,7 +712,11 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   it has acted on the workers on record, starts one `pr-review` worker for each card of kind `pr-review` that is not
   in lane `done`, has no worker on record and no line in this pass (so a card closed in a pass starts again only on
   the next one), has no open `ask`, whose `sessions["pr-review"].state` is absent, or `ended` by a done close, and is
-  not reviewed at its head (`pr.reviewed_sha` missing, or not `pr.head_sha`). Every close of a `pr-review` worker
+  not reviewed at its head (`pr.reviewed_sha` missing, or not `pr.head_sha`). Each card is read again just before
+  it is judged, since an earlier card's start (its tool discovery, up to 180 seconds) may run meanwhile, and the start
+  reads it once more under the worker list's lock, after its own tool discovery: a card that stopped being due
+  meanwhile (moved to lane `done`, an ask landed, its review applied) is not started; on that second read the line
+  says `did: "nothing"` with a note. Every close of a `pr-review` worker
   saves how it was closed as `sessions["pr-review"].closed`: the close's path (`done`, `idle`, `question` and so on),
   or `end` for `ap2 worker end`. Only `closed: done` lets the next round start on its own. A worker ended by hand
   holds the card, like `paused`, until the user starts the role by hand; its report is not applied. A card saved
@@ -738,10 +742,13 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   runs `apply` on the card right after the close, still under the worker list's lock: an overlapping `check` waits
   for the lock, so it never sees the card closed with no `reviewed_sha` yet and starts a second, paid review. Then,
   once the lock is free, it runs `sync` (sync reads GitHub). Both run by `check`'s `by`; the line gets `verdict` and
-  `sync` (sync's `state`). Neither fails the pass. Before `apply`, `check` looks at `prreview-plan.json` and
-  `prreview.json` in the run directory without following a link (`lstat`): when either is there but is not a regular
-  file (a FIFO, a device or a link), `apply` is not run, since its plain read of a FIFO would wait forever and hang
-  the whole pass; that is a failed `apply` whose error says the file is not a regular file. A failed `apply` is a note,
+  `sync` (sync's `state`). Neither fails the pass. `apply` reads `prreview-plan.json` and `prreview.json` with
+  `sources.read_regular_capped`: each is opened without following a link and without waiting (a FIFO opens at
+  once), and the open file itself is checked (`fstat`), so one that is not a regular file (a FIFO, a device or a
+  link) is never read, also when a process the worker left behind swaps it in after any earlier look (a check made
+  before the open could not stop that, and a plain read of a FIFO waits forever with the worker list's lock held,
+  hanging every later check, start, end and park); that is a failed `apply` whose error says the file is not a
+  regular file (or is a symbolic link). A failed `apply` is a note,
   and the card's `ask` (`type: fix`, `reason: review_apply_failed`) with the error and "run `ap2 review check
   CARD`, then `ap2 review apply CARD`", so the card is not started again in a loop; `sync` runs only after an
   `apply` that worked, and a failed one is a note (the review stays applied). That ask is the role's own worker ask
@@ -752,7 +759,11 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   nothing and end) is closed as idle after 60 minutes (8.2 rule 5) and also sets the card's `ask` (`type: fix`,
   `reason: review_idle`): its turn ended with no report, resume it with `ap2 worker start CARD pr-review
   --resume`. Without it the card would sit `paused`, never started again and never shown to the user. Like the
-  failed-apply ask it holds the next auto-start back, and any start of the role and `finish` close it. A pass
+  failed-apply ask it holds the next auto-start back, and any start of the role and `finish` close it. When the
+  card already has another open ask (the user's own, say), that ask is kept, the idle ask is not set and the line's
+  `note` says so; once the card has no open ask, the next `check` raises the idle ask on a card not in lane `done`
+  whose `sessions["pr-review"]` is `paused` with `closed: idle` (a line `{card, role: "pr-review", state:
+  "paused", did: "asked"}`), so the card is never left paused with nothing shown. A pass
   stopped between the close and the apply (Ctrl-C, a killed process) leaves the report unapplied
   and the session `ended` (`closed: done`) with no `reviewed_sha`, so the next `check` starts a whole new review: a
   worker run is lost, nothing on the card is. The same holds for `question.json`: `check` reads it only when it is a
@@ -975,7 +986,9 @@ Rules:
    is not applied. The gate sees the file (newer than the worker's start) and runs `worker end`: stop the process,
    save the session id on the card. Session state can be lost; the card cannot. For a `pr-review` worker the done
    close is saved as `closed: done` and a hand `ap2 worker end` as `closed: end`: only the done close lets the next
-   round start on its own, and a hand end holds the card until a start by hand (6.2).
+   round start on its own, and a hand end holds the card until a start by hand (6.2). The done close reads the
+   run directory's plan and report only when the open file is a regular file (6.2), so a FIFO swapped in there
+   never hangs the pass.
 2. **[decided, from v1]** Dead (no session, or its process is gone, with no result file): resume once with
    "you were interrupted; check your worktree and run files first". Dead twice: stop and ask the user. A resume
    that cannot start (its worktree is gone) counts as that one resume. A parked worker whose resume cannot start

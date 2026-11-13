@@ -493,7 +493,8 @@ def verdict_of(obj, langs) -> dict:
 def read_plan(data, card_id: str) -> dict:
     path = run_dir(data, card_id) / PLAN_FILE
     try:
-        raw = sources.read_capped(path, sources.MAX_SOURCE, f"{path}: larger than {sources.MAX_SOURCE} bytes")
+        raw = sources.read_regular_capped(path, sources.MAX_SOURCE,
+                                          f"{path}: larger than {sources.MAX_SOURCE} bytes")
         obj = json.loads(raw.decode("utf-8"))
     except FileNotFoundError:
         raise ReviewError(f"card {card_id}: no review plan at {path}; run ap2 review plan first") from None
@@ -512,8 +513,8 @@ def read_report(data, card_id: str):
     """(report, errors): the report as a JSON object, or None and why it cannot be read."""
     path = run_dir(data, card_id) / REPORT_FILE
     try:
-        raw = sources.read_capped(path, sources.MAX_SOURCE,
-                                  f"{REPORT_FILE}: larger than {sources.MAX_SOURCE} bytes")
+        raw = sources.read_regular_capped(path, sources.MAX_SOURCE,
+                                          f"{REPORT_FILE}: larger than {sources.MAX_SOURCE} bytes")
     except FileNotFoundError:
         return None, [f"{REPORT_FILE}: no report at {path}"]
     except sources.SourceError as e:

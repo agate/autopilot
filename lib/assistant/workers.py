@@ -51,7 +51,9 @@ PR review cards review themselves (design 6.2 point 2). After acting on the work
 one `pr-review` worker for each card of kind `pr-review` that is not in lane `done`, has no worker on record and no
 line in this pass, has no open ask, whose `sessions["pr-review"].state` is absent, or `ended` by a done close
 (`closed: done`; an `ap2 worker end`, saved as `closed: end`, or an `ended` with no `closed` waits for a start by
-hand), and is not reviewed at its head (`pr.reviewed_sha` missing or not `pr.head_sha`): in a fresh, empty folder of
+hand), and is not reviewed at its head (`pr.reviewed_sha` missing or not `pr.head_sha`), judged on the card read again
+just before (an earlier card's start may have run meanwhile) and once more under the worker list's lock after the
+start's tool discovery (`start(due=...)`; a card no longer due there is a note): in a fresh, empty folder of
 its own outside the data folder (`tempfile.mkdtemp`, one per start; AP2_RUN_DIR still names the card's run
 directory, where its report goes), with the template's brief, behind `/autopilot:pr-review <card> <stage>` (`delta`
 once the card's `reviews` list holds one, else `review`). A refused start (the cap, the key, a pause, `max_workers`,
@@ -59,11 +61,14 @@ the profile) is a note on that card's line; shadow mode starts none and says so.
 `prreview.json` is newer than the round's first start (`round_started_at`, kept through every resume of the round)
 and its turn has ended (idle, done, failed or gone; while it works or waits at a prompt it is still checking a draft).
 Then, still under the worker list's lock (so an overlapping check cannot see the card closed and not yet reviewed),
-`check` removes the round's folder when it is empty and runs `prreview.apply` on its card, but only when the run
-directory's plan and report are regular files (a FIFO there would hang the pass); with the lock free it then runs
-`prreview.sync`. An apply that fails or is not run sets the card's `ask` (`fix`), which holds the next auto-start
-back, and a sync that fails is a note. `question.json` too is read only when it is a regular file. A turn that ends with no report is closed idle after IDLE_MIN
-minutes with the card's `ask` (`fix`, `review_idle`), which holds the auto-start back as well. Its floor is
+`check` removes the round's folder when it is empty and runs `prreview.apply` on its card, which reads the run
+directory's plan and report only when the open file is a regular file (`sources.read_regular_capped`: no link
+followed, no wait, checked on the open file, so a FIFO swapped in after any earlier look never hangs the pass); with
+the lock free it then runs `prreview.sync`. An apply that fails sets the card's `ask` (`fix`), which holds the next
+auto-start back, and a sync that fails is a note. `question.json` too is read only when it is a regular file. A turn
+that ends with no report is closed idle after IDLE_MIN minutes with the card's `ask` (`fix`, `review_idle`), which
+holds the auto-start back as well; when another ask is open then, the line's note says so, and a later `check`
+raises the idle ask once the card has none (`paused`, `closed: idle`). Its floor is
 read-only: no Edit or NotebookEdit, no GitHub or git write commands (`roles.READ_ONLY_BASH_DENIED`), and a Write
 hook (`ap2 hook-write`, `write_guard`) allows a Write only to its report or `question.json` in the card's run
 directory; a path it cannot resolve, and any error in the hook, is denied.
@@ -861,14 +866,16 @@ class Workers:
                 "branch": branch, "env": self._env(card, role, project, port_range, branch, profile)}
 
     def start(self, card_id: str, role: str, cwd=None, prompt: str = "", needs=None, resume: bool = False,
-              by: str = BY) -> dict:
+              by: str = BY, due: Optional[Callable[[dict], bool]] = None) -> dict:
         """Start a worker on a card, or with `resume` continue its saved session (a parked worker keeps its ports;
         otherwise the card's saved session for the role, e.g. after an answer or a pause). Live mode only.
         Raises ShadowModeError, WorkerError or ConfigError; nothing starts when it raises.
 
         The tool discovery (one `claude -p`, up to DISCOVER_TIMEOUT seconds) runs before the worker list's lock is
         taken, so no other start, end or check waits on it; under the lock every check is made again on the list
-        as it is then, and the floor is written with the ports picked there."""
+        as it is then, and the floor is written with the ports picked there. With `due` (the auto-start's
+        `_review_is_due`), the card is read again under the lock and nothing starts unless `due(card)` still holds.
+        """
         config.require_live(self.cfg, f"start a {role} worker on card {card_id}")
         if role not in ROLES:
             raise WorkerError(f"role must be one of {', '.join(ROLES)}, not {role!r}")
@@ -891,6 +898,9 @@ class Workers:
             if pz is not None:
                 raise cap.CapError(cap.refusal({"reason": "paused", "paused": pz}))
             plan = self._plan_start(records, card, role, project, saved, cwd, needs, resume, prof)
+            if due is not None and not due(self._card(card_id)):
+                # The card changed while the tools were listed (moved to lane done, an ask, a review applied).
+                raise WorkerError(f"card {card_id} is no longer due for a review; nothing started")
             if plan["cwd"] != planned["cwd"]:
                 # The tools were found in another folder (the parked record changed meanwhile): they may not be
                 # the ones this session loads.
@@ -984,6 +994,7 @@ class Workers:
         resume hint of a pr-review worker closed idle with no report (nothing else would start it again)."""
         card_id, role, path = rec["card"], rec["role"], mark["path"]
         if path in ("blocked", "refused") or (path == "idle" and role == REVIEW_ROLE):
+            ask, set_ = self._pause_ask(rec, path), True
             try:
                 closed = self._close(rec, records, mark, by)
             finally:
@@ -991,8 +1002,13 @@ class Workers:
                 # to is gone: say how to go on instead, also when saving it failed. A stop that raised keeps the
                 # record, its mark and the attach ask: the next check finishes this pause.
                 if not any(r is rec for r in records):
-                    self._set_ask(card_id, self._pause_ask(rec, path), by)
-            return dict(closed, did=CLOSES[path][1], **({"note": mark["note"]} if mark.get("note") else {}))
+                    set_ = self._set_ask(card_id, ask, by)
+            out = dict(closed, did=CLOSES[path][1], **({"note": mark["note"]} if mark.get("note") else {}))
+            if not set_:
+                # The user's own ask (or another one) is open: say so on the line. A pr-review card's idle ask is
+                # raised again once the card has none (`_start_reviews`).
+                self._add_note(out, f"the card already has an open ask, so this is not on it: {ask['text']}")
+            return out
         closed = self._close(rec, records, mark, by)
         if path == "question":
             text = (mark.get("extra") or {}).get("question")
@@ -1597,28 +1613,13 @@ class Workers:
     def _add_note(entry: dict, text: str) -> None:
         entry["note"] = f"{entry['note']}; {text}" if entry.get("note") else text
 
-    def _not_regular(self, card_id: str) -> Optional[str]:
-        """The first of the run directory's plan and report files that is there but is not a regular file (a FIFO,
-        a device or a link), or None. `prreview.apply` opens them with a plain blocking read: a FIFO the worker put
-        there would hang the whole check. A missing one is left to `apply`, which says so."""
-        for name in (prreview.PLAN_FILE, prreview.REPORT_FILE):
-            try:
-                mode = os.lstat(prreview.run_dir(self.data, card_id) / name).st_mode
-            except OSError:
-                continue
-            if not stat.S_ISREG(mode):
-                return name
-        return None
-
     def _review_apply(self, entry: dict, by: str) -> bool:
         """`prreview.apply` puts the worker's report on the card; its verdict goes on the worker's line (`verdict`).
-        It never fails the pass: a plan or report file that is not a regular file is not read, and that or a failed
-        apply is a note and the card's `fix` ask (so the card is not started again). True when it was applied."""
+        It never fails the pass: `apply` reads the plan and the report only when the open file is a regular file
+        (`sources.read_regular_capped`: a FIFO the worker put there, even after any earlier look, never hangs the
+        pass), and a failed apply is a note and the card's `fix` ask (so the card is not started again). True when it
+        was applied."""
         cid = entry["card"]
-        bad = self._not_regular(cid)
-        if bad is not None:
-            self._apply_failed(entry, cid, f"{bad} in its run directory is not a regular file", by)
-            return False
         try:
             card = prreview.apply(self.data, cid, by=by, cfg=self.cfg)
         except Exception as e:  # noqa: BLE001 - a broken report never fails the pass
@@ -1668,7 +1669,18 @@ class Workers:
             if card["id"] in busy:
                 continue
             try:
-                if self._close_applied_ask(card, by) or not self._review_is_due(card):
+                # Read again: an earlier card's start (its tool discovery, up to DISCOVER_TIMEOUT seconds) may have
+                # run since the list was read, and this card may have stopped being due meanwhile.
+                card = self.store.get(card["id"])
+                if self._close_applied_ask(card, by):
+                    continue
+                if self._idle_unasked(card):
+                    # Closed idle while another ask was open: the idle ask was not set. Raise it now the card has room.
+                    if self._set_ask(card["id"], self._pause_ask({"card": card["id"], "role": REVIEW_ROLE}, "idle"),
+                                     by):
+                        out.append({"card": card["id"], "role": REVIEW_ROLE, "state": "paused", "did": "asked"})
+                    continue
+                if not self._review_is_due(card):
                     continue
             except Exception as e:  # noqa: BLE001 - one card's error must not cost the others their try
                 entry = {"card": card["id"], "role": REVIEW_ROLE, "state": "unknown", "did": "nothing"}
@@ -1693,7 +1705,7 @@ class Workers:
                 # start removes the folder again (when no record points at it), so a pass at the cap leaves none.
                 home = tempfile.mkdtemp(prefix=REVIEW_DIR)
                 try:
-                    self.start(card["id"], REVIEW_ROLE, cwd=home, prompt=brief, by=by)
+                    self.start(card["id"], REVIEW_ROLE, cwd=home, prompt=brief, by=by, due=self._review_is_due)
                 except Exception:
                     self._drop_review_dir(home)
                     raise
@@ -1722,6 +1734,16 @@ class Workers:
             return False
         pr = card.get("pr") if isinstance(card.get("pr"), dict) else {}
         return not pr.get("reviewed_sha") or pr.get("reviewed_sha") != pr.get("head_sha")
+
+    @staticmethod
+    def _idle_unasked(card: dict) -> bool:
+        """A pr-review card, not in lane done, with no open ask, whose session was closed idle with no report
+        (`paused`, `closed: idle`): its idle ask could not be set then (another ask was open)."""
+        if card.get("lane") == "done" or card.get("ask") is not None:
+            return False
+        sessions = card.get("sessions") if isinstance(card.get("sessions"), dict) else {}
+        saved = sessions.get(REVIEW_ROLE) if isinstance(sessions.get(REVIEW_ROLE), dict) else {}
+        return saved.get("state") == "paused" and saved.get("closed") == "idle"
 
     def _close_applied_ask(self, card: dict, by: str) -> bool:
         """The card's failed-apply ask is open but the card is reviewed at its head now (the user ran `ap2 review
