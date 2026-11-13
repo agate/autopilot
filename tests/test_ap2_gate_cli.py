@@ -43,6 +43,22 @@ class Ap2GateCommandTest(unittest.TestCase):
         (self.data / "routines").mkdir(parents=True, exist_ok=True)
         (self.data / "routines" / f"{name}.json").write_text(json.dumps(r), encoding="utf-8")
 
+    def test_a_run_in_an_empty_folder_prints_the_new_keys(self):
+        r = self.run_ap2("gate", "--now", "2025-11-11T09:01:30-08:00")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = json.loads(r.stdout)
+        self.assertEqual(sorted(out), ["errors", "last_run_at", "pass_due", "pruned", "reads", "routines",
+                                       "watches_due", "workers"])
+        self.assertEqual((out["workers"], out["reads"], out["pass_due"], out["errors"]), ([], [], False, []))
+        self.assertIs(json.loads((self.data / "pass.json").read_text())["due"], False)
+
+    def test_the_help_says_what_a_run_does(self):
+        r = self.run_ap2("gate", "--help")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        text = " ".join(r.stdout.split())
+        for words in ("check every worker", "due watches", "scan session", "pass.json", "starts no dispatcher pass"):
+            self.assertIn(words, text)
+
     def test_gate_prints_the_run_and_writes_the_heartbeat(self):
         self.put_routine()
         r = self.run_ap2("gate", "--now", "2025-11-11T09:01:30-08:00")

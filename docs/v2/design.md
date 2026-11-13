@@ -1471,9 +1471,25 @@ Calls the author made without asking (check them):
     `on_pr: {comment: ...}`). `on_<event>: null` turns a write off, and `<action>: null` turns one action off
     (`on_start: { assign: null }` keeps the built-in `transition`). `Engine.apply_writes` still refuses in shadow
     mode before anything and runs nothing in live mode.
-  - Not yet (later slices): starting the scan session itself (`claude` with a small model, its tool allow-list, the
-    hook settings that call `ap2 scan save-raw`); the gate turning a source's `every:` into due watches and plans;
-    measuring a scan's token cost; running `writes` in live mode; `plan: split_here`; one card for a Slack ask
+  - The session itself (the gate starts and finishes it; see the gate entry below): `scan.start` writes
+    `<scan>/settings.json` (a PreToolUse hook, matcher `*`, `ap2 scan hook-allow --plan <plan>`; a PostToolUse
+    hook, `ap2 scan save-raw --plan <plan>`; `Bash`, `Edit`, `MultiEdit`, `NotebookEdit`, `WebFetch` and
+    `WebSearch` denied as well; the active profile's overlay merged under them as the worker floor merges it), then
+    starts `claude --bg -n "ap2 scan · <scan>" --model <small model> --settings <file> <brief>` in the scan folder
+    with the profile's env, and writes `<data>/scan-session.json` `{plan, short_id, session_id, started_at,
+    profile}` and a spend launch row of kind `scan`. `hook-allow` allows a call only for a planned call's tool
+    (`calls_tool`, the take's own match), a `Write` to a planned records file, or, for a skill call, `Skill` with
+    that skill's name and `Read`, `Glob` and `Grep`; everything else is denied with a reason, and so is any call it
+    cannot decide (a bad plan or payload): it fails closed, never with no opinion. It runs before every tool call,
+    so `ap2` takes it before the argument parser, as it does `hook-park`. `scan.finish` looks the session up in
+    `claude agents --json --all`: its turn ended (`state` done, blocked or failed, or `status` idle), it is gone,
+    or its pid is dead; then it is stopped (`claude stop`, its spend settled first, as a worker's stop is), taken
+    (`scan.take`) and the record removed. Stop first, then take: a stop that fails keeps the record (the next run
+    tries again, so no session is left running with no record), and a session that ran too long logs nothing more
+    while it is taken. One still working after `SCAN_MAX_MIN` (15) minutes is stopped and taken with what it
+    logged, plus one error. A failed listing waits for the next run. A record that cannot be read is one error and
+    is removed, so it cannot hold every later scan back.
+  - Not yet (later slices): measuring a scan's token cost; running `writes` in live mode; `plan: split_here`; one card for a Slack ask
     about a PR and the GitHub request for the same PR; `{setting}` patterns in `read.run`; pruning the scan
     folders under `.scan` (the gate prunes only `.raw`); tying a `fill: ai` source's follow-up reads (such as
     `slack_read_thread`) to the threads its planned read returned. Before the
@@ -1516,29 +1532,79 @@ Calls the author made without asking (check them):
     risk a second card. A routine card whose `key` is not text is passed over in that look. The plain words are
     built in for English and Chinese (`zh`, `zh-*`); any other configured language gets the English lines, since
     the gate has no AI to write them.
-  - Watches: until the source loader (slice 3) is on `v2`, the watch list is a plain argument of `gate.run`
-    (`[{name, every, last_check_at?}]`, `every` is `<N>m` or `<N>h`); `ap2 gate` passes none. A watch is due when
-    `now - last_check_at >= every` (or it was never checked); the gate lists it in `watches_due` and saves
-    `last_check_at` in `<data>/watches.json`, whose time wins when it is later than the one given. The gate does not
-    read the source and makes no card for the look. A watches.json that cannot be read, is not JSON or is not an
+  - Watches: `gate.watch_list(data)` reads them from the user's own source files: every name in `<data>/sources/`
+    that loads and whose `read.every` is `<N>m` or `<N>h` is a watch `{name, every, via}`. **[decided by the
+    builder]** Only the user's files are watched, and a one-line `extends: <built-in>` turns a built-in on; a
+    built-in file alone is never watched. Why: the built-in GitHub sources run `gh` every 5 minutes and the Slack
+    and Jira ones cost tokens, so nothing should run in a fresh data folder (or a test folder) before the user asks.
+    Reverse: watch the built-ins by default later. `every: each pass` is left out with no error (the dispatcher
+    pass reads those); a missing `every` is left out too; any other `every` is one error `{"watch", "error"}`, and a
+    file that does not load one error `{"source", "error"}`; the others still run. A watch is due when `now -
+    last_check_at >= every` (or it was never checked); the gate lists it in `watches_due` and saves `last_check_at`
+    in `<data>/watches.json`, whose time wins when it is later than the one given. **[decided by the builder]**
+    `gate.run(data, now, watches=None)` (what `ap2 gate` passes) means "from the user's source files, and read
+    them"; a list a caller passes (`[{name, every, last_check_at?}]`) is only timed, never read, which keeps the
+    timing tests as they are. A due `via: command` watch is read by the gate itself (`Engine.read`); `reads` gets
+    `{watch, via, made, updated, unchanged, dropped}` per read, a failed read (exit not 0, a timeout, an unset
+    setting) is one error `{"watch", "error"}` and the next watch is still read. The due `mcp`, `connector` and
+    `skill` watches of one run go into one scan plan (`scan.plan`) and, when it has calls, one scan session
+    (`scan.start`); a later run takes it into cards when it ends (`scan.finish`, its reads and errors in `reads` and
+    `errors`). While `<data>/scan-session.json` exists no second scan starts and the scan watches are not timed, so
+    their `last_check_at` is not written. A paused cap, an allowance of 0 or an active profile that does not load
+    starts nothing: one error `{"scan": true, "error"}`, and the watch times stay written. **[decided by the
+    builder]** Scan sessions run in shadow mode too: they only read, and switch-over step 2 compares shadow-mode
+    pages with v1. The PreToolUse guard (`hook-allow`), not the permission mode, keeps the session to its planned
+    tools, so no prompt can make it wait (8.2 rule 3); a connector's server name is known only inside the session,
+    so an allow rule could not name it. The scan model is the active profile's `small_model`, or `haiku` on the
+    subscription (no `small_model`). One scan at a time, at most `SCAN_MAX_MIN` (15) minutes; its launch row is kind
+    `scan` (new in `spend.KINDS`), so a gateway's daily cap counts it. Tests start a scan with `gate.run(...,
+    claude=<tests/bin/fake-claude-v2>)`; no real `claude` runs in any test. The look itself makes no card. A watches.json that cannot be read, is not JSON or is not an
     object is treated like a damaged saved time: the run logs it, adds `{"watches": <path>, "error": ...}` to
     `errors`, starts from no saved times (so each watch is due) and writes the file again when a watch is due. A
     watches.json holding text UTF-8 cannot write (a lone surrogate) is treated the same way; a watch name like that
     is refused as a bad watch, with an error, and the others still run.
+  - Workers: every run checks every worker on record (`Workers.check(by="gate")`, design 8.2): a result file ends
+    it, a `question.json` becomes the card's ask, a dead one is resumed once (live mode) or noted (shadow mode), an
+    idle or blocked one is stopped after its timeout. Only when `workers.json` lists a worker, so a folder with none
+    makes no `claude agents` call. Its entries go in gate.json `workers`; each that did something is one gate.log
+    line; any exception from the check is one error `{"workers": true, "error"}` and the run goes on. **[decided by
+    the builder]** `ap2 gate` passes the usage cache `~/.claude.json` (read only, v1's path) when that file exists,
+    so a parked subscription worker resumes from the gate as v1's gate notices it. No new flag.
+  - Pass due **[decided by the builder]**: every run ends (before the heartbeat) by writing `<data>/pass.json`
+    atomically, `{"due", "since", "why", "seen", "checked_at"}`, and gate.json `pass_due`. It compares what is
+    there now with `seen`, what was there when the last pass started: the ready card ids (a `planned` card with no
+    ask, no worker on record and a `feed` other than `v1-import`; or a `routine` card in Running with no worker and
+    no `sessions`), the result files `<data>/sessions/<card>/<handback|review|prloop>.json` with their whole-second
+    mtime (as v1's `fingerprint` does), and each open ask as `card -> type/from/reason/role`. `why` lists `{"why":
+    "ready" | "result" | "answered", "card", "file"?}` for each ready card or result entry not in `seen`, and each ask
+    in `seen` that is no longer open the same way; `due` is `bool(why)`; `since` is kept from the first run that found
+    it due and reset when it is not due. gate.log gets `pass due: <n> reason(s)` when due. A damaged `pass.json` is
+    one error and the run goes on from an empty `seen`. The gate starts no pass. The choices: a change since the
+    last pass makes a pass due, a standing state does not (as v1's `fingerprint` and `should_dispatch` do), so a
+    pass that could start nothing is not due again every minute; reverse: delete the file, the next run rebuilds it.
+    Only `gate.pass_started(data, now)` updates `seen` (it copies the present state and clears `due`); the pass
+    calls it when it starts, so until there is a pass a due pass stays due. Ready is a cheap wake-up, not the start
+    plan: the gate does not resolve `depends_on` or check `max_workers` or resources (the pass does,
+    `resources.plan`), and an imported v1 copy is never ready. "Answered" means an ask that closed: the store has no
+    answer field on an ask, so an ask that was open at the last pass and is not open now counts; at worst this wakes
+    one extra pass.
   - Heartbeat: every run writes `<data>/gate.json` atomically: `{"last_run_at": <UTC>, "routines": [{routine,
-    slot, key, action (run, late, skip, exists or start), card, late_minutes}], "watches_due": [...], "pruned": [point
-    ids], "errors": [...]}`; text in `errors` that UTF-8 cannot write (a file name that is not UTF-8) is written with
+    slot, key, action (run, late, skip, exists or start), card, late_minutes}], "workers": [the check's entries],
+    "watches_due": [...], "reads": [...], "pruned": [point ids], "pass_due": true | false, "errors": [...]}`; text in `errors` that UTF-8 cannot write (a file name that is not UTF-8) is written with
     backslash escapes. Every line of `<data>/gate.log` starts with the run's UTC time
     (`2026-11-10T14:30:05Z run: ...`), one line per routine action or error and one summary line; past 1 MB it is
     renamed `gate.log.1` (one old file is kept). Each run calls `Store.prune()`, then, on the first run of a UTC
     day, prunes old raw source files (see the source engine above): `pruned <N> raw source file(s) older than 30
-    days` in gate.log when N > 0 (N counts raw files and reports), not in `gate.json`, which keeps its five keys;
+    days` in gate.log when N > 0 (N counts raw files and reports), not in `gate.json` (its eight keys above);
     its errors go in `errors`. A later run the same UTC day does not prune and writes no line for it.
   - One run at a time: `<data>/.gate.lock` is taken with a non-blocking `flock`; a run that finds it held prints
     `{"locked": true, "lock": <path>}`, writes nothing and exits 0. A lock that cannot be taken for any other reason
-    (`ENOLCK` on a network share) is a config error: one `ap2: cannot lock the gate ...` line and exit 1. The gate
-    starts no process, opens no socket and writes only inside the data folder; the time is passed in
-    (`gate.run(data, now)`), never read inside.
+    (`ENOLCK` on a network share) is a config error: one `ap2: cannot lock the gate ...` line and exit 1. The gate's
+    own file writes stay inside the data folder and it opens no socket. The processes it starts are the `claude`
+    CLI (`agents` and `stop` for the worker check and the scan session, and at most one `--bg` scan session per
+    run, never a worker in shadow mode) and each due command watch's `read.run`; with no worker on record and no
+    due watch it starts none. It runs no source `writes`. The time is passed in (`gate.run(data, now)`), never read
+    inside.
   - A clock that went back. A routine whose `last_slot`, read in its `tz`, is more than the 5-minute grace after
     now gets one error, `<file>: last_slot <slot> is later than now (<now>); the clock may have gone back. Set
     last_slot to null or an earlier slot to run it again.`, in `errors` and gate.log; after a `tz` change `<slot>` is
@@ -1564,7 +1630,9 @@ Calls the author made without asking (check them):
     data folder fails) and the data folder exists, `gate.run` appends `<UTC time> fatal: <error>` to gate.log, best
     effort, then raises the same error; `ap2 gate` still prints one `ap2: ...` line and exits 1. launchd's own
     stderr goes to `~/Library/Logs/assistant/gate.err.log` (section 12, "Install").
-  - `ap2 gate [--data PATH] [--now ISO]` runs once and prints the run as JSON. `--now` needs a zone (`Z` or an
+  - `ap2 gate [--data PATH] [--now ISO]` runs once and prints the run as JSON: it starts the due routine slots,
+    checks every worker, reads the due watches from the user's sources, starts or takes one scan session and writes
+    `pass.json`; it starts no dispatcher pass. `--now` needs a zone (`Z` or an
     offset); a time without one is an argument error (exit 2). `--now` may not be later than the real time plus
     the 5-minute grace, also an argument error: a run writes `last_slot`, makes cards and prunes restore points,
     so a run in the future would hold back every real slot until then and prune points and raw files that are only

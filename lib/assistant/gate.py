@@ -1,12 +1,21 @@
-"""One gate run (design 7.1 to 7.4): due routine slots, watches by interval, the heartbeat and restore-point prune.
+"""One gate run (design 7.1 to 7.4, 8.2, 5.3): due routine slots, the worker check, the due watches and their reads,
+whether a dispatcher pass is due, the heartbeat and restore-point prune.
 
-A run is short and uses no AI: it reads files, decides, makes cards through the store, writes `<data>/gate.json`
-and exits. It starts no process, makes no network call and writes only inside the data folder. One global lock,
+A run is short and uses no AI itself: it reads files, decides, makes cards through the store, writes
+`<data>/gate.json` and exits. Its own file writes stay inside the data folder. The processes it starts are the
+`claude` CLI (`agents` and `stop` for the worker check and the scan session, and at most one `--bg` scan session per
+run, through `scan.start`) and each due `via: command` watch's `read.run`. In shadow mode it starts and resumes no
+worker (`Workers` refuses that) and runs no source `writes`. One global lock,
 `<data>/.gate.lock`, keeps a second run from doing anything while one is going.
 
 Per routine (7.3): find the latest slot; when it is newer than `last_slot`, make the run's card first (keyed
 `<routine>@<slot>`), then write `last_slot`. A run that dies in between leaves the card; the next run finds it by
 its key and only writes `last_slot`.
+
+Then (phase 2): every worker on record is checked (`Workers.check`, 8.2); the watches come from the user's own source
+files (`watch_list`); a due `via: command` watch is read here (`Engine.read`); the due `mcp`, `connector` and `skill`
+watches share one scan session (`scan.start`), which a later run takes into cards when it ends (`scan.finish`); and
+`<data>/pass.json` records whether a dispatcher pass is due and why (`pass_due`). The gate starts no pass: the pass calls `pass_started` when it starts.
 """
 from __future__ import annotations
 
@@ -18,9 +27,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-from assistant import cards, engine, routines
+from assistant import cards, engine, routines, scan, sources, transcripts
+from assistant import workers as workers_module
 from assistant.cards import CardError
 from assistant.config import ConfigError
+from assistant.importv1 import FEED as V1_FEED
+from assistant.resources import Registry, WorkerError
 from assistant.store import Store, write_json
 
 try:
@@ -33,6 +45,9 @@ HEARTBEAT = "gate.json"
 LOG = "gate.log"
 LOG_MAX_BYTES = 1_000_000  # then gate.log becomes gate.log.1 (one old file is kept)
 WATCHES = "watches.json"
+PASS = "pass.json"
+EACH_PASS = "each pass"  # `every: each pass`: read by the dispatcher pass, not timed by the gate
+SCAN_VIAS = scan.VIAS  # the watches one scan session reads
 EVERY = re.compile(r"([1-9][0-9]{0,3})(m|h)\Z", re.ASCII)
 BY = "gate"
 # Ends the watch error for a time ahead of now, the one error after which the watch still runs (the routine
@@ -143,6 +158,35 @@ def parse_every(text) -> timedelta:
     return timedelta(minutes=n) if m.group(2) == "m" else timedelta(hours=n)
 
 
+
+def watch_list(data, plugin_dir: Optional[Path] = None) -> tuple:
+    """The watches in the user's own source files, as `(watches, errors)`: each name in `<data>/sources/` that loads
+    and whose `read.every` is `<N>m` or `<N>h` is `{name, every, via}` (a one-line `extends: <built-in>` turns that
+    built-in on; a built-in file alone is never watched). `every: each pass` and no `every` are left out with no
+    error; any other `every` is one `{"watch", "error"}`, and a file that does not load one `{"source", "error"}`."""
+    data = Path(data)
+    try:
+        loader = sources.Loader(data, plugin_dir)
+    except sources.SourceError as e:  # the user's sources folder cannot be listed
+        return [], [{"source": str(data / sources.FOLDER), "error": str(e)}]
+    watches, errors = [], []
+    for name in sorted(loader._names[1]):  # the user's layer
+        try:
+            src = loader.load(name)
+        except sources.SourceError as e:
+            errors.append({"source": name, "error": str(e)})
+            continue
+        every = src.data["read"].get("every")
+        if every is None or every == EACH_PASS:
+            continue
+        try:
+            parse_every(every)
+        except ValueError as e:
+            errors.append({"watch": name, "error": f"{src.file}: read.{e}"})
+            continue
+        watches.append({"name": name, "every": every, "via": src.via})
+    return watches, errors
+
 def _read_watch_state(data: Path):
     """The saved watch times, as `(state, error)`. A damaged or unreadable watches.json is treated like a damaged
     saved time: the run goes on from `{}` (every watch is due) and `error` says why; the file is written again,
@@ -236,10 +280,17 @@ def _raw_prune_due(data: Path, now: datetime) -> bool:
     return then > now or then.date() != now.astimezone(timezone.utc).date()
 
 
-def run(data, now: datetime, watches=(), store: Optional[Store] = None) -> dict:
+def run(data, now: datetime, watches=None, store: Optional[Store] = None, claude: Optional[str] = None,
+        transcripts_dir=None, usage_file=None) -> dict:
     """One gate run at `now` (an aware datetime). Returns what it found, also written to `<data>/gate.json`; a run
     that finds the lock held returns `{"locked": true, ...}` and does nothing. Raises ConfigError when the data
-    folder or config.yaml is not usable; that error is also the last line of `<data>/gate.log`, `fatal: ...`."""
+    folder or config.yaml is not usable; that error is also the last line of `<data>/gate.log`, `fatal: ...`.
+
+    `watches=None` takes the watches from the user's source files (`watch_list`) and reads the due ones; a list
+    given by a caller (`[{name, every, last_check_at?}]`) is only timed, never read. `claude`, `transcripts_dir` and
+    `usage_file` are the worker check's (`Workers`, `Workers.check`): the claude CLI (default: the one on PATH), the
+    folder Claude Code keeps conversations in (default `~/.claude/projects`, read only) and the usage cache a parked
+    worker resumes by (default: none)."""
     data = Path(data)
     if now.tzinfo is None:
         raise ValueError("now must be an aware datetime")
@@ -248,7 +299,7 @@ def run(data, now: datetime, watches=(), store: Optional[Store] = None) -> dict:
             if not held:
                 return {"locked": True, "lock": str(data / LOCK)}
             try:
-                return _run(data, now, watches, store)
+                return _run(data, now, watches, store, claude, transcripts_dir, usage_file)
             except OSError as e:
                 raise ConfigError(f"the gate cannot use the data folder {data}: {e}") from e
     except ConfigError as e:
@@ -266,7 +317,215 @@ def _log_fatal(data: Path, now: datetime, error: ConfigError) -> None:
         pass  # e.g. gate.log is a folder, the disk is full or `now` has no UTC stamp: the error itself still comes out
 
 
-def _run(data: Path, now: datetime, watches, store: Optional[Store]) -> dict:
+# -- the worker check (design 8.2) ------------------------------------------------------------------------------
+
+def _error_text(e: BaseException) -> str:
+    return " ".join(f"{type(e).__name__}: {e}".split())
+
+
+def _check_workers(data: Path, now: datetime, cfg, store: Store, claude, transcripts_dir, usage_file, errors: list,
+                   log) -> list:
+    """`Workers.check` once, only when the worker list names a worker (so an empty folder runs no `claude agents`).
+    Its entries are returned; one that did something is one gate.log line. Any exception is one error."""
+    try:
+        if not Registry(data).read():
+            return []
+        w = workers_module.Workers(data, cfg, claude=claude, transcripts_dir=transcripts_dir, clock=lambda: now,
+                                   store=store)
+        entries = w.check(by=BY, usage_file=usage_file)
+    except Exception as e:  # noqa: BLE001 - the rest of the run goes on
+        errors.append({"workers": True, "error": _error_text(e)})
+        log(f"workers: error: {_error_text(e)}")
+        return []
+    for entry in entries:
+        if entry.get("did") != "nothing":
+            note = f" ({entry['note']})" if entry.get("note") else ""
+            log(f"worker {entry['card']} {entry['role']}: {entry['did']}{note}")
+    return entries
+
+
+# -- reads: command watches here, scan watches in one scan session (design 5.3) ----------------------------------
+
+def _read_entry(name: str, via: str, result: dict) -> dict:
+    """One `reads` entry: what a read made of its items, by the counts of the result `Engine` returns."""
+    actions = [i.get("action") for i in result.get("items") or []]
+    return {"watch": name, "via": via, "made": actions.count("add"), "updated": actions.count("update"),
+            "unchanged": actions.count("unchanged"), "dropped": len(result.get("dropped") or [])}
+
+
+def _log_read(log, entry: dict) -> None:
+    log(f"watch {entry['watch']}: read: {entry['made']} made, {entry['updated']} updated, {entry['unchanged']} "
+        f"unchanged, {entry['dropped']} dropped")
+
+
+def _read_commands(data: Path, now: datetime, cfg, names: list, reads: list, errors: list, log) -> None:
+    """Read each due `via: command` watch (`Engine.read`); a failed read is one error and the next still reads."""
+    if not names:
+        return
+    eng = engine.Engine(data, cfg, clock=lambda: now)
+    for name in names:
+        try:
+            result = eng.read(name)
+        except Exception as e:  # noqa: BLE001 - one watch's failure never stops the run; a SourceError is ours
+            why = str(e) if isinstance(e, (ConfigError, CardError, OSError)) else _error_text(e)
+            errors.append({"watch": name, "error": why})
+            log(f"watch {name}: error: {why}")
+            continue
+        reads.append(_read_entry(name, "command", result))
+        _log_read(log, reads[-1])
+
+
+def _start_scan(data: Path, now: datetime, cfg, store: Store, claude, transcripts_dir, names: list, errors: list,
+                log) -> None:
+    """One scan session for the due scan watches: the profile and the cap first, then the plan, then the start.
+    A refusal starts nothing and is one error; the watch times stay written."""
+    try:
+        prof = scan.launch_profile(data, now, transcripts_dir, claude=claude, store=store)
+        p = scan.plan(data, names, cfg=cfg, clock=lambda: now)
+    except Exception as e:  # noqa: BLE001 - e.g. a ProfileError, a paused cap: nothing started
+        errors.append({"scan": True, "error": str(e) or type(e).__name__})
+        log(f"scan: not started: {e}")
+        return
+    for e in p["errors"]:
+        errors.append(e)
+        log(f"source {e['source']}: refused: {e['error']}")
+    if not p["calls"]:
+        return
+    try:
+        rec = scan.start(data, p, prof, now, claude=claude)
+    except Exception as e:  # noqa: BLE001 - one error, the run goes on
+        errors.append({"scan": True, "error": str(e) or type(e).__name__})
+        log(f"scan: not started: {e}")
+        return
+    log(f"scan: started {rec['short_id']} for {', '.join(c['source'] for c in p['calls'])}")
+
+
+def _finish_scan(data: Path, now: datetime, cfg, claude, transcripts_dir, reads: list, errors: list, log) -> bool:
+    """Take the open scan session into cards when it has ended (`scan.finish`). Returns True while one is open."""
+    try:
+        out = scan.finish(data, now, claude=claude, transcripts_dir=transcripts_dir, cfg=cfg)
+    except Exception as e:  # noqa: BLE001 - one error; the record is kept, so the next run looks again
+        errors.append({"scan": True, "error": _error_text(e)})
+        log(f"scan: error: {_error_text(e)}")
+        return (data / scan.SESSION).exists()
+    if out is None:
+        return False
+    for e in out["errors"]:
+        errors.append(e)
+        log(f"source {e['source']}: error: {e['error']}" if "source" in e else f"scan: error: {e['error']}")
+    for r in out["reads"]:
+        reads.append(_read_entry(r["source"], r["via"], r))
+        _log_read(log, reads[-1])
+    if out["ended"]:
+        log(f"scan: {out['short_id']} ended; {len(out['reads'])} read(s) taken")
+    return out["open"]
+
+
+# -- whether a dispatcher pass is due (design 8.0, 8.5) -------------------------------------------------------------
+
+def _empty_seen() -> dict:
+    return {"ready": [], "results": {}, "asks": {}}
+
+
+def _present(data: Path, store: Store) -> dict:
+    """What a pass would look at now: the ready card ids, the result files with their whole-second mtime, and each
+    open ask as `card -> type/from/reason/role`. Ready is a cheap wake-up, not the start plan: a planned card with
+    no ask and no worker on record, or a routine run card in Running with no worker and no sessions; never an
+    imported v1 copy. Raises CardError, WorkerError or OSError."""
+    on_record = {r.get("card") for r in Registry(data).read()}
+    ready, asks = [], {}
+    for c in store.list():
+        cid, ask = c["id"], c.get("ask")
+        if isinstance(ask, dict):
+            asks[cid] = "/".join(str(ask.get(k) or "") for k in ("type", "from", "reason", "role"))
+        if ask is not None or cid in on_record or c.get("feed") == V1_FEED:
+            continue
+        if c.get("lane") == "planned" or (c.get("kind") == "routine" and c.get("lane") == "running"
+                                          and not c.get("sessions")):
+            ready.append(cid)
+    results = {}
+    base = data / transcripts.SESSIONS  # each card's run directory is <data>/sessions/<card>
+    for name in sorted(set(workers_module.RESULT_FILES.values())):
+        for path in sorted(base.glob(f"*/{name}")):
+            if not cards.CARD_ID.match(path.parent.name):
+                continue
+            try:
+                results[f"{path.parent.name}/{name}"] = int(path.stat().st_mtime)
+            except FileNotFoundError:
+                continue
+    return {"ready": ready, "results": results, "asks": asks}
+
+
+def _read_pass(path: Path):
+    """`(the saved pass.json, error)`: `({}, None)` when there is none; `({}, why)` when it is damaged."""
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}, None
+    except (OSError, ValueError, RecursionError) as e:
+        return {}, f"{path}: cannot read the pass record: {e}"
+    seen = saved.get("seen") if isinstance(saved, dict) else None
+    if not (isinstance(seen, dict) and isinstance(seen.get("ready"), list) and isinstance(seen.get("results"), dict)
+            and isinstance(seen.get("asks"), dict) and all(isinstance(c, str) for c in seen["ready"])):
+        return {}, f"{path}: not a pass record (expected an object with seen: {{ready, results, asks}})"
+    return saved, None
+
+
+def _why(present: dict, seen: dict) -> list:
+    """Each change since `seen`: a ready card that was not ready, a result file that is new or changed, an ask that
+    was open and is not open the same way now."""
+    was_ready = set(seen["ready"])
+    why = [{"why": "ready", "card": c} for c in present["ready"] if c not in was_ready]
+    for key, mtime in present["results"].items():
+        if seen["results"].get(key) != mtime:
+            card, file = key.split("/", 1)
+            why.append({"why": "result", "card": card, "file": file})
+    why += [{"why": "answered", "card": c} for c, sig in sorted(seen["asks"].items()) if present["asks"].get(c) != sig]
+    return why
+
+
+def _pass_due(data: Path, now: datetime, store: Store, errors: list, log) -> bool:
+    """Write `<data>/pass.json` atomically: `{due, since, why, seen, checked_at}`, and return `due`. A change since
+    `seen` (what was there when the last pass started) makes a pass due; a standing state does not. `since` is
+    kept from the first run that found it due. Nothing is started here."""
+    path = data / PASS
+    saved, damaged = _read_pass(path)
+    if damaged:
+        errors.append({"pass": str(path), "error": damaged})
+        log(f"pass: error: {damaged}")
+    try:
+        present = _present(data, store)
+    except (CardError, WorkerError, OSError) as e:
+        errors.append({"pass": True, "error": str(e)})
+        log(f"pass: error: {e}")
+        return False
+    seen = saved.get("seen") or _empty_seen()
+    why = _why(present, seen)
+    since = None
+    if why:
+        since = cards.stamp(now)
+        try:
+            if saved.get("due") is True:
+                since = cards.stamp(cards.parse_stamp(saved["since"]))
+        except (KeyError, TypeError, ValueError):
+            pass
+        log(f"pass due: {len(why)} reason(s)")
+    write_json(path, {"due": bool(why), "since": since, "why": why, "seen": seen, "checked_at": cards.stamp(now)})
+    return bool(why)
+
+
+def pass_started(data, now: datetime, store: Optional[Store] = None) -> dict:
+    """A dispatcher pass starts at `now`: what is there now becomes `seen`, and the pass is no longer due. Returns
+    the pass record written to `<data>/pass.json`. Raises CardError, WorkerError or OSError."""
+    data = Path(data)
+    store = store if store is not None else Store(data, clock=lambda: now)
+    out = {"due": False, "since": None, "why": [], "seen": _present(data, store), "checked_at": cards.stamp(now)}
+    write_json(data / PASS, out)
+    return out
+
+
+def _run(data: Path, now: datetime, watches, store: Optional[Store], claude, transcripts_dir,
+         usage_file) -> dict:
     log = Log(data, now)
     store = store if store is not None else Store(data, clock=lambda: now)
     found, errors = [], []
@@ -316,7 +575,23 @@ def _run(data: Path, now: datetime, watches, store: Optional[Store]) -> dict:
                       "late_minutes": int(d.late_by.total_seconds() // 60)})
         log(f"routine {r.name}: slot {d.slot}: {action} (card {card['id']})")
 
-    due_names, watch_errors = due_watches(data, list(watches), now)
+    cfg = store.cfg
+    checked = _check_workers(data, now, cfg, store, claude, transcripts_dir, usage_file, errors, log)
+    reads = []
+    scan_open = _finish_scan(data, now, cfg, claude, transcripts_dir, reads, errors, log)
+
+    read_them = watches is None
+    if read_them:
+        listed, list_errors = watch_list(data)
+        for e in list_errors:
+            errors.append(e)
+            log(f"source {e['source']}: refused: {e['error']}" if "source" in e else
+                f"watch {e['watch']}: refused: {e['error']}")
+        # While a scan session is open, its kind of watch is not timed: the next run looks again.
+        timed = [w for w in listed if not (scan_open and w["via"] in SCAN_VIAS)]
+    else:
+        timed = list(watches)
+    due_names, watch_errors = due_watches(data, timed, now)
     errors.extend(watch_errors)
     for e in watch_errors:
         if "watches" in e:
@@ -327,6 +602,12 @@ def _run(data: Path, now: datetime, watches, store: Optional[Store]) -> dict:
             log(f"watch {e['watch']}: refused: {e['error']}")
     if due_names:
         log(f"watches due: {', '.join(due_names)}")
+    if read_them and due_names:
+        via = {w["name"]: w["via"] for w in listed}
+        _read_commands(data, now, cfg, [n for n in due_names if via[n] == "command"], reads, errors, log)
+        scans = [n for n in due_names if via[n] in SCAN_VIAS]
+        if scans:
+            _start_scan(data, now, cfg, store, claude, transcripts_dir, scans, errors, log)
 
     try:
         pruned = store.prune(now)
@@ -337,8 +618,8 @@ def _run(data: Path, now: datetime, watches, store: Optional[Store]) -> dict:
     if pruned:
         log(f"pruned {len(pruned)} restore point(s) older than 30 days")
 
-    # Old raw source files and their reports (design 12), on the first run of a UTC day only: logged only;
-    # gate.json keeps its five keys.
+    # Old raw source files and their reports (design 12), on the first run of a UTC day only: logged only, not
+    # in gate.json.
     if _raw_prune_due(data, now):
         raw = engine.prune_raw(data, now, store.list)
         if raw["link"]:
@@ -349,9 +630,10 @@ def _run(data: Path, now: datetime, watches, store: Optional[Store]) -> dict:
         if raw["removed"]:
             log(f"pruned {len(raw['removed'])} raw source file(s) older than {engine.RAW_KEEP.days} days")
 
+    pass_due = _pass_due(data, now, store, errors, log)
     errors = [{k: _safe(v) for k, v in e.items()} for e in errors]  # e.g. a file name that is not UTF-8
-    out = {"last_run_at": cards.stamp(now), "routines": found, "watches_due": due_names, "pruned": pruned,
-           "errors": errors}
+    out = {"last_run_at": cards.stamp(now), "routines": found, "workers": checked, "watches_due": due_names,
+           "reads": reads, "pruned": pruned, "pass_due": pass_due, "errors": errors}
     write_json(data / HEARTBEAT, out)
     log(f"run: {len(found)} routine slot(s), {len(due_names)} watch(es) due, {len(pruned)} pruned, "
         f"{len(errors)} error(s)")

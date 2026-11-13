@@ -39,7 +39,8 @@ SETTLED = "settled.jsonl"
 CACHE = "cache.json"
 LAST = "last.json"  # the totals `cap.allowance` read last, for the pages (`remember`, `last`)
 LAST_KEYS = ("today", "week", "month", "unknown", "unknown_today", "unknown_models", "unknown_launches")
-KINDS = ("worker", "dispatcher", "replies", "refresh", "discover", "oneoff")  # only `worker` is recorded today
+KINDS = ("worker", "dispatcher", "replies", "refresh", "discover", "oneoff", "scan")  # `worker` and `scan` are
+# recorded today (`scan`: the gate's scan sessions, scan.py)
 _PRICE_KEYS = ("input", "output", "cache_read", "cache_write_5m", "cache_write_1h")
 _LONG_PROMPT_TOKENS = 100_000
 GRACE_S = 900  # a launch this young that is not resolved or has no transcript yet is not unknown spend
