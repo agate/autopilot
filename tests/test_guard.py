@@ -80,6 +80,7 @@ class GuardTest(unittest.TestCase):
                     "sed --in-place 's/a/b/' ~/.claude/autopilot-data/x",
                     "sed -I '' 's/a/b/' ~/.claude/autopilot-data/x",
                     "sed -Ei 's/a/b/' ~/.claude/autopilot-data/x",
+                    "sed -ie 's/a/b/' ~/.claude/autopilot-data/x",
                     "sed -nEi p ~/.claude/autopilot-data/x",
                     "cd /tmp && sed -i 's/a/b/' ~/.claude/autopilot-data/x",
                     "find ~/.claude/autopilot-data/ -name '*.md' -exec sed -i 's/a/b/' {} +",
@@ -235,7 +236,9 @@ class GuardTest(unittest.TestCase):
                     "# ; ap \\\ncp a \\\n~/.claude/autopilot-data/x",
                     "ap x # ; ap \\\ncp a \\\n~/.claude/autopilot-data/x",
                     # the comment sits on a later, joined-in line
-                    "ap x \\\n# \\\ncp a \\\n~/.claude/autopilot-data/y"):
+                    "ap x \\\n# \\\ncp a \\\n~/.claude/autopilot-data/y",
+                    # an escaped pair that is not a continuation stays in the joined line
+                    "c\\p a \\\n~/.claude/autopilot-data/x"):
             self.assertIsNotNone(guard.decide(bash(cmd), self.W), cmd)
         for cmd in ('ap task set v2 PROJ-1 note="see #3" \\\nstatus=done',
                     "cat ~/.claude/autopilot-data/x \\\n| head"):

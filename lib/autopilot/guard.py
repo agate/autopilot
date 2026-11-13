@@ -58,8 +58,8 @@ def _opens_to_write(text: str) -> bool:
 
 
 def _writes(text: str) -> bool:
-    """Whether a segment writes a file, in linear time: `_WRITE`, then `sed` with an in-place flag after it, `dd`
-    with an `of=` after it and no `|`, `;` or `&` between, and `_opens_to_write`, each found piece by piece."""
+    """Whether a segment writes a file, in linear time: `_WRITE`, then `sed` with an in-place flag in any word after
+    it, `dd` with an `of=` after it and no `|`, `;` or `&` between (found piece by piece), and `_opens_to_write`."""
     return bool(_WRITE.search(text) or _sed_in_place(text)
                 or any(_after_first(p, _DD, _OF) for p in re.split(r"[|;&]", text))
                 or _opens_to_write(text))
