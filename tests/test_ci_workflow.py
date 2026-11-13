@@ -24,9 +24,10 @@ def job_block(text, name):
         return None
     block = []
     for line in lines[start + 1:]:
-        # Only a readable key at 0 or 2 spaces (the next job, or a top-level key) ends the job. A comment line, or
-        # any other line at 2 spaces or less (such as the rest of a quoted string), does not.
-        if re.match(rf"^(?:  )?{KEY}$", line):
+        # Any line at 2 spaces or less (the next job, a top-level key) ends the job; a comment line, at any indent,
+        # does not. The rest of a quoted string or flow collection may also sit there: `open_values` fails the
+        # check on the line that opened it.
+        if line.strip() and not line.strip().startswith("#") and indent(line) <= 2:
             break
         block.append(line)
     return block
@@ -99,6 +100,108 @@ def unreadable_lines(lines, pad):
     return out
 
 
+# Before a value: a `- ` item, a `? ` explicit key or a `: ` explicit value.
+INDICATOR = re.compile(r"[-?:](?:[ \t]+|$)")
+# Before a value: an anchor (`&name `) or a tag (`!!str `, `!tag `).
+PROPERTY = re.compile(r"[&!]\S*(?:[ \t]+|$)")
+# A block scalar header (`|`, `>-`, `|2 # c`): its body is the deeper lines that follow.
+BLOCK_SCALAR = re.compile(r"[|>][-+0-9]*\s*(?:#.*)?")
+
+
+def quoted_end(line, i):
+    """Where the quoted string opening at `line[i]` ends (just past its closing quote); None when not on this line.
+
+    In a double-quoted string `\\` escapes the next character; in a single-quoted one `''` is a quote."""
+    q = line[i]
+    i += 1
+    while i < len(line):
+        if q == '"' and line[i] == "\\":
+            i += 2
+        elif line[i] == q and q == "'" and line[i + 1:i + 2] == "'":
+            i += 2
+        elif line[i] == q:
+            return i + 1
+        else:
+            i += 1
+    return None
+
+
+def flow_end(line, i):
+    """Where the flow collection opening at `line[i]` (`[` or `{`) ends; None when not on this line.
+
+    Quoted parts are skipped, and a ` #` outside them starts a comment, so the rest of the line does not count."""
+    depth = 0
+    while i < len(line):
+        c = line[i]
+        if c in "\"'":
+            i = quoted_end(line, i)
+            if i is None:
+                return None
+            continue
+        if c in "[{":
+            depth += 1
+        elif c in "]}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        elif c == "#" and line[i - 1] in " \t":
+            return None
+        i += 1
+    return None
+
+
+def open_values(lines):
+    """The lines (stripped) whose value opens a quoted string or a flow collection (`[` / `{`) that does not close
+    on that line; blank lines, comment lines and the body of a `|` / `>` block scalar are skipped.
+
+    Such a value may run onto the next lines at any indent, even shallower than its key, and GitHub still reads
+    the keys after it as part of the same mapping. A plain-text reader cannot tell where the step or job ends
+    then (the rest of the value can look like a job-level key, or the next job), so a switch after it could be
+    dropped: the value itself must fail the check. A plain value cannot run onto a shallower line."""
+    out = []
+    body = None  # Inside a block scalar body: the column its lines must be deeper than.
+    for line in lines:
+        text = line.strip()
+        if body is not None:
+            if not text or indent(line) > body:
+                continue
+            body = None
+        if not text or text.startswith("#"):
+            continue
+        i = parent = indent(line)
+        while True:
+            while (m := INDICATOR.match(line, i)) and m.end() > i:
+                parent, i = i, m.end()
+            start = i
+            while (m := PROPERTY.match(line, i)) and m.end() > i:
+                i = m.end()
+            rest = line[i:].rstrip()
+            if not rest or rest.startswith("#"):
+                break
+            if BLOCK_SCALAR.fullmatch(rest):
+                body = parent
+                break
+            if rest[0] in "\"'[{":
+                end = (quoted_end if rest[0] in "\"'" else flow_end)(line, i)
+                if end is None:
+                    out.append(text)
+                    break
+                key = re.match(r"[ \t]*:(?:[ \t]+|$)", line[end:])
+                if not key:
+                    break
+                i = end + key.end()
+            else:
+                # A plain key ends at the first `: `; a plain value (no `: ` before any ` #`) closes on its line.
+                key = re.compile(r":(?=[ \t]|$)|[ \t]#").search(line, i)
+                if not key or key[0] != ":":
+                    break
+                i = key.end()
+            parent = start
+            while i < len(line) and line[i] in " \t":
+                i += 1
+    return out
+
+
 # Either key turns a red run into a green check: `continue-on-error` lets the job or step fail quietly,
 # and `if:` can skip it.
 SWITCHES = ("if", "continue-on-error")
@@ -113,7 +216,8 @@ def job_switch_problems(text):
         return [f"no `{JOB}:` job"]
     # A key line the check cannot read must fail it, not pass it.
     return ([f"the `{JOB}` job sets `{k}: {v}`" for k, v in job_keys(block) if k in SWITCHES]
-            + [f"cannot read the job-level line '{l}'" for l in unreadable_lines(block, 4)])
+            + [f"cannot read the job-level line '{l}'" for l in unreadable_lines(block, 4)]
+            + [f"cannot read where the value on the line '{l}' ends" for l in open_values(block)])
 
 
 def step_switch_problems(text, marker):
@@ -131,7 +235,9 @@ def step_switch_problems(text, marker):
     pad = len(re.match(r"^ *- *", found[0][0])[0])
     return ([f"the `{marker}` step sets `{k}: {v}`" for k, v in keys if k in SWITCHES]
             + [f"cannot read the step-level line '{l}' of the `{marker}` step"
-               for l in unreadable_lines(found[0][1:], pad)])
+               for l in unreadable_lines(found[0][1:], pad)]
+            + [f"cannot read where the value on the line '{l}' of the `{marker}` step ends"
+               for l in open_values(found[0])])
 
 
 class CiWorkflowTest(unittest.TestCase):
@@ -226,6 +332,14 @@ def insert_after(text, needle, new_line):
     if at is None:
         raise AssertionError(f"no line contains {needle!r}")
     return "\n".join(lines[:at + 1] + [new_line] + lines[at + 1:]) + "\n"
+
+
+def open_job_value(line):
+    return f"cannot read where the value on the line '{line}' ends"
+
+
+def open_step_value(line, marker):
+    return f"cannot read where the value on the line '{line}' of the `{marker}` step ends"
 
 
 class SwitchCheckTest(unittest.TestCase):
@@ -358,12 +472,118 @@ class SwitchCheckTest(unittest.TestCase):
             with self.subTest(marker=marker):
                 copy = insert_after(self.text, after, "\n".join(lines))
                 self.assertEqual(step_switch_problems(copy, marker),
-                                 [f"the `{marker}` step sets `continue-on-error: true`"])
+                                 [f"the `{marker}` step sets `continue-on-error: true`",
+                                  open_step_value(lines[0].strip(), marker)])
+                self.assertEqual(job_switch_problems(copy), [open_job_value(lines[0].strip())])
 
-    def test_a_string_running_onto_a_shallow_line_does_not_end_the_job(self):
-        # The rest of a quoted string may sit at 2 spaces or less; GitHub still reads the keys after it as the job's.
+    def test_a_string_running_onto_a_shallow_line_of_the_job_is_a_problem(self):
+        # The rest of a quoted string may sit at 2 spaces or less; GitHub still reads the keys after it as the job's,
+        # so the check cannot tell where the job ends and must fail.
         copy = insert_after(self.text, "timeout-minutes: 15", '    name2: "x\n  y"\n    continue-on-error: true')
-        self.assertEqual(job_switch_problems(copy), ["the `unittest` job sets `continue-on-error: true`"])
+        self.assertEqual(job_switch_problems(copy), [open_job_value('name2: "x')])
+
+    # A quoted string or a flow collection (`[` / `{`) may run onto the next lines at any indent, even shallower
+    # than its key, and GitHub still reads the keys after it. Such a line looks like where the step or job ends,
+    # so a switch after it would be dropped: the value itself must fail the check.
+
+    def test_a_string_running_onto_a_key_like_line_of_a_step_is_a_problem(self):
+        for marker, after, lines in (
+                (SETUP_PYTHON, "python-version: ${{ matrix.python-version }}",
+                 ['        name: "Set up the matrix Python;', '    note: slow on 3.14"',
+                  "        continue-on-error: true"]),
+                (RUN_COMMAND, RUN_COMMAND,
+                 ['        working-directory: "./', '    tests: here"', "        continue-on-error: true"])):
+            with self.subTest(marker=marker):
+                copy = insert_after(self.text, after, "\n".join(lines))
+                self.assertEqual(step_switch_problems(copy, marker), [open_step_value(lines[0].strip(), marker)])
+                self.assertEqual(job_switch_problems(copy), [open_job_value(lines[0].strip())])
+
+    def test_a_string_running_onto_a_key_like_line_of_the_job_is_a_problem(self):
+        copy = (self.text.rstrip("\n")
+                + '\n    env:\n      NOTE: "slow on 3.14,\n  see: issue 12"\n    continue-on-error: true\n')
+        self.assertEqual(job_switch_problems(copy), [open_job_value('NOTE: "slow on 3.14,')])
+
+    def test_a_string_running_onto_an_odd_indent_is_a_problem(self):
+        copy = insert_after(self.text, "python-version: ${{ matrix.python-version }}",
+                            '        name: "Set up\n   Python: 3"\n        continue-on-error: true')
+        self.assertEqual(step_switch_problems(copy, SETUP_PYTHON),
+                         [f"the `{SETUP_PYTHON}` step sets `continue-on-error: true`",
+                          open_step_value('name: "Set up', SETUP_PYTHON)])
+        self.assertEqual(job_switch_problems(copy), [open_job_value('name: "Set up')])
+        copy = self.text.rstrip("\n") + '\n    env:\n      NOTE: "x,\n y: z"\n    continue-on-error: true\n'
+        self.assertEqual(job_switch_problems(copy), [open_job_value('NOTE: "x,')])
+
+    def test_a_single_quoted_or_flow_value_running_on_is_a_problem(self):
+        for lines, step_problems in (
+                (["        name: 'Set up", "    x: y'", "        continue-on-error: true"], []),
+                (["        env: {A: 1,", "      B: 2}", "        continue-on-error: true"],
+                 [f"the `{SETUP_PYTHON}` step sets `continue-on-error: true`"]),
+                (["        env: [1,", "    x: 2]", "        continue-on-error: true"], [])):
+            with self.subTest(lines=lines):
+                copy = insert_after(self.text, "python-version: ${{ matrix.python-version }}", "\n".join(lines))
+                self.assertEqual(step_switch_problems(copy, SETUP_PYTHON),
+                                 step_problems + [open_step_value(lines[0].strip(), SETUP_PYTHON)])
+                self.assertEqual(job_switch_problems(copy), [open_job_value(lines[0].strip())])
+
+    def test_an_anchored_or_tagged_string_running_on_is_a_problem(self):
+        for first in ('        name: &n "a', '        name: !!str "a', "          - &n 'a"):
+            with self.subTest(first=first):
+                copy = insert_after(self.text, "python-version: ${{ matrix.python-version }}",
+                                    first + '\n    b: c"\n        continue-on-error: true')
+                self.assertEqual(step_switch_problems(copy, SETUP_PYTHON),
+                                 [open_step_value(first.strip(), SETUP_PYTHON)])
+                self.assertEqual(job_switch_problems(copy), [open_job_value(first.strip())])
+
+    def test_a_value_that_closes_on_its_line_is_not_a_problem(self):
+        for line in ("        name: 'it''s'", '        name: "a \\" b"', '        name: "a # b"',
+                     '        with: {a: "]", b: 1}', "        name: [a, '[', {b: c}] # [", '          "a b": "c"',
+                     "        run: echo \"it's", '        name: "a" # "'):
+            with self.subTest(line=line):
+                copy = insert_after(self.text, "python-version: ${{ matrix.python-version }}", line)
+                self.assertEqual(job_switch_problems(copy), [])
+                self.assertEqual(step_switch_problems(copy, SETUP_PYTHON), [])
+
+    def test_a_quoted_key_with_a_value_running_on_is_a_problem(self):
+        copy = insert_after(self.text, "python-version: ${{ matrix.python-version }}",
+                            '          "a b": "c\n    d: e"\n        continue-on-error: true')
+        self.assertEqual(step_switch_problems(copy, SETUP_PYTHON), [open_step_value('"a b": "c', SETUP_PYTHON)])
+        self.assertEqual(job_switch_problems(copy), [open_job_value('"a b": "c')])
+
+    def test_a_quote_inside_a_run_block_is_not_a_problem(self):
+        copy = self.text.replace(f"        run: {RUN_COMMAND}",
+                                 "        run: |\n"
+                                 "          echo \"it's\n"
+                                 "            [ {\n"
+                                 "\n"
+                                 f"          {RUN_COMMAND}")
+        self.assertNotEqual(copy, self.text)
+        self.assertEqual(step_switch_problems(copy, RUN_COMMAND), [])
+        self.assertEqual(job_switch_problems(copy), [])
+
+    def test_a_string_opened_right_after_a_run_block_is_a_problem(self):
+        for header in ("|", ">-", "|2 # keep", "&r |+"):
+            with self.subTest(header=header):
+                copy = self.text.replace(f"        run: {RUN_COMMAND}",
+                                         f"        run: {header}\n"
+                                         "          echo \"it's\n"
+                                         f"          {RUN_COMMAND}\n"
+                                         '        working-directory: "./\n'
+                                         '    tests: here"\n'
+                                         "        continue-on-error: true")
+                self.assertNotEqual(copy, self.text)
+                self.assertEqual(step_switch_problems(copy, RUN_COMMAND),
+                                 [open_step_value('working-directory: "./', RUN_COMMAND)])
+                self.assertEqual(job_switch_problems(copy), [open_job_value('working-directory: "./')])
+
+    def test_a_job_whose_id_starts_with_an_underscore_ends_the_unittest_job(self):
+        copy = (self.text.rstrip("\n")
+                + "\n  _docs:\n    if: github.event_name == 'push'\n    runs-on: x\n    steps:\n      - run: echo\n")
+        self.assertEqual(job_switch_problems(copy), [])
+        self.assertEqual(step_switch_problems(copy, RUN_COMMAND), [])
+
+    def test_a_top_level_key_after_the_jobs_ends_the_job(self):
+        copy = self.text.rstrip("\n") + "\nconcurrency:\n    if: false\n"
+        self.assertEqual(job_switch_problems(copy), [])
 
     def test_a_next_job_is_not_blamed_on_the_unittest_job(self):
         copy = (self.text.rstrip("\n")
