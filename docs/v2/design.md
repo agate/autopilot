@@ -785,13 +785,15 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   file would be read whole into memory under it. The Write hook denies a path it cannot resolve (a NUL
   or a lone surrogate in it), and any error in the hook is a deny for a v2 worker, not silence.
 - **[decided by the builder]** The read-only floor (`roles.FLOORS["read-only"]`). The `pr-review` settings add
-  `Edit` and `NotebookEdit` as deny rules (`roles.READ_ONLY_DENIED`) to the worker floor, the GitHub and git write
-  commands as Bash deny rules in v1's rule shape (`roles.READ_ONLY_BASH_DENIED`: `gh pr merge`, `gh pr close`,
-  `gh pr reopen`, `gh pr ready`, `gh pr edit`, `gh pr create`, `gh pr update-branch`, `gh pr lock`, `gh pr unlock`,
-  `gh pr checkout`, `gh issue`, `gh workflow`, `gh run rerun`, `gh run cancel`, `gh run delete`, `gh repo`,
-  `gh label`, `gh secret`, `gh variable`, `gh gist`, `gh cache`, `gh ruleset`, `gh project`, `gh extension`,
-  `gh alias`, `gh auth`, `gh config set`, `gh release`, `git push`, `git commit`, each as `Bash(<command>:*)`; a
-  review reads with `gh pr view`, `gh pr diff`, `gh pr checks` and `gh api`, which no rule prefixes;
+  `Edit` and `NotebookEdit` as deny rules (`roles.READ_ONLY_DENIED`) to the worker floor, every gh command group a
+  review does not need, reads included, as Bash deny rules in v1's rule shape (`roles.READ_ONLY_BASH_DENIED`, each
+  as `Bash(<command>:*)`): every top-level gh command in `roles.GH_COMMANDS` (a snapshot of gh 2.80.0's command
+  names; a prefix rule cannot say "every gh command but these", so a command a newer gh adds is covered only once
+  added there) but `gh pr`, `gh run`, `gh api`, `gh search`, `gh status`, `gh help` and `gh version`, every `gh pr`
+  subcommand but `view`, `diff`, `checks`, `list` and `status` (`gh pr comment` and `gh pr review` are already the
+  worker floor's), every `gh run` subcommand but `view`, `list` and `watch`, and `git push` and `git commit`; a
+  review reads with `gh pr view`, `gh pr diff`, `gh pr checks` and `gh api`, which no rule prefixes; one plain gh
+  command left open would change GitHub as the user (`gh ssh-key add` gives a key push to every repo the user can;
   `gh pr update-branch` would push a merge onto the PR's branch and move its head, so the next check starts
   another review), because the session holds the user's gh and git logins, every `ap2` command the review
   does not run (`roles.READ_ONLY_AP2_DENIED`) as Bash deny rules in the same shape, every MCP tool the session

@@ -3833,7 +3833,7 @@ class PrReviewRoleTest(PrReviewCase):
         for cmd in ("gh pr update-branch", "gh pr lock", "gh pr unlock", "gh pr checkout", "gh issue", "gh workflow",
                     "gh run rerun", "gh run cancel", "gh run delete", "gh repo", "gh label", "gh secret",
                     "gh variable", "gh gist", "gh cache", "gh ruleset", "gh project", "gh extension", "gh alias",
-                    "gh auth", "gh config set"):
+                    "gh auth", "gh config"):
             rule = f"Bash({cmd}:*)"
             with self.subTest(rule=rule):
                 self.assertIn(rule, roles.READ_ONLY_BASH_DENIED)
@@ -3844,6 +3844,46 @@ class PrReviewRoleTest(PrReviewCase):
         for read in ("gh pr view 42", "gh pr diff 42", "gh pr checks 42", "gh api repos/o/r/pulls/42"):
             with self.subTest(read=read):
                 self.assertEqual([p for p in prefixes if read.startswith(p)], [])
+
+    def test_the_read_only_floor_denies_every_gh_command_group_a_review_does_not_need(self):
+        # One plain gh command left open writes as the user: `gh ssh-key add` gives an attacker push to every repo
+        # the user can, and `gh gpg-key`, `gh agent-task` and `gh codespace` change the account too. So every gh
+        # command group a review does not need is denied whole, reads included, from gh's own command list; only the
+        # reads the review runs stay open.
+        env = {"AP2_RUN_DIR": str(transcripts.run_dir(self.data, "c-20260105-090000-abcdef"))}
+        base = workers_mod.floor("implement", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+        ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+        for cmd in ("gh ssh-key", "gh gpg-key", "gh agent-task", "gh codespace", "gh issue", "gh repo",
+                    "gh pr merge", "gh pr update-branch", "gh run rerun"):
+            with self.subTest(rule=cmd):
+                self.assertIn(f"Bash({cmd}:*)", ro)
+        kept = {"pr", "run", "api", "search", "status", "help", "version"}
+        self.assertIn("ssh-key", roles.GH_COMMANDS)
+        self.assertGreaterEqual(len(roles.GH_COMMANDS), 30)
+        for cmd in roles.GH_COMMANDS:
+            with self.subTest(cmd=cmd):
+                if cmd in kept:
+                    self.assertNotIn(f"Bash(gh {cmd}:*)", ro)
+                else:
+                    self.assertIn(f"Bash(gh {cmd}:*)", ro)
+        for group, subs, keep in (("pr", roles.GH_PR_COMMANDS, {"view", "diff", "checks", "list", "status"}),
+                                  ("run", roles.GH_RUN_COMMANDS, {"view", "list", "watch"})):
+            self.assertLessEqual(keep, set(subs))
+            for sub in subs:
+                with self.subTest(sub=f"gh {group} {sub}"):
+                    if sub in keep:
+                        self.assertNotIn(f"Bash(gh {group} {sub}:*)", ro)
+                    else:
+                        self.assertIn(f"Bash(gh {group} {sub}:*)", ro)
+        self.assertEqual([r for r in roles.READ_ONLY_BASH_DENIED if r in base], [])  # the implement floor holds none
+        self.assertEqual(len(roles.READ_ONLY_BASH_DENIED), len(set(roles.READ_ONLY_BASH_DENIED)))
+        self.assertEqual(len(ro), len(set(ro)))  # each rule once
+        prefixes = [r[len("Bash("):-len(":*)")] for r in ro if r.startswith("Bash(") and r.endswith(":*)")]
+        for read in ("gh pr view 42", "gh pr diff 42", "gh pr checks 42", "gh pr list", "gh pr status",
+                     "gh run view 1", "gh run list", "gh run watch 1", "gh api repos/o/r/pulls/42", "gh search prs x",
+                     "gh status", "gh help", "gh version", "gh --version"):
+            with self.subTest(read=read):
+                self.assertEqual([p for p in prefixes if (read + " ").startswith(p + " ")], [])
 
     def test_the_floor_allows_only_the_workers_own_park(self):
         # Allowed by rule, the park skips the classifier: the rule names the worker's own card and role, so parking

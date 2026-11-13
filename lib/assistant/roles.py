@@ -25,8 +25,10 @@ FLOORS = MappingProxyType({
               "changing a template or a source asks first (design 3.6); the worker sessions (slice 6) add these "
               "as Edit and Write deny rules.",
     "read-only": "the worker floor, and no Edit or NotebookEdit: the role reads and runs commands that change "
-                 "nothing, and the GitHub and git write commands (READ_ONLY_BASH_DENIED) and the ap2 commands a "
-                 "review does not run (READ_ONLY_AP2_DENIED) are denied by rule, best effort. Every MCP tool "
+                 "nothing, and every gh command group a review does not need, reads included, with `git push` "
+                 "and `git commit` (READ_ONLY_BASH_DENIED), and the ap2 commands a review does not run "
+                 "(READ_ONLY_AP2_DENIED) are denied by rule, best effort; the investigate and analyze roles, not "
+                 "startable as workers today, would need their own gh reads when they are. Every MCP tool "
                  "the session loads that the role does not list is denied, and every MCP server whole, so a "
                  "server's write tool (delete, update, submit, merge) that v1's outward list misses stays shut. "
                  "Every built-in tool the role does not list is denied too (the ones the session finds, and "
@@ -38,20 +40,38 @@ FLOORS = MappingProxyType({
 
 # Tools a read-only role never has. Write is not here: it writes the role's result file and nothing else.
 READ_ONLY_DENIED = ("Edit", "NotebookEdit")
+# gh's command names, a snapshot taken from gh 2.80.0 (`gh help`, `gh pr --help`, `gh run --help`): its top-level
+# commands (core, GitHub Actions, additional, and the `co` alias gh ships for `gh pr checkout`; help topics only
+# print text), and the subcommands of `gh pr` and `gh run`. A prefix rule cannot say "every gh command but these",
+# so a top-level command a newer gh adds is covered only once it is added here.
+GH_COMMANDS = ("auth", "browse", "codespace", "gist", "issue", "org", "pr", "project", "release", "repo", "cache",
+               "run", "workflow", "co", "agent-task", "alias", "api", "attestation", "completion", "config",
+               "extension", "gpg-key", "label", "preview", "ruleset", "search", "secret", "ssh-key", "status",
+               "variable")
+GH_PR_COMMANDS = ("create", "list", "status", "checkout", "checks", "close", "comment", "diff", "edit", "lock",
+                  "merge", "ready", "reopen", "review", "unlock", "update-branch", "view")
+GH_RUN_COMMANDS = ("cancel", "delete", "download", "list", "rerun", "view", "watch")
+# The gh commands a review needs (`commands/pr-review.md` runs `gh pr view`, `gh pr diff`, `gh pr checks` and
+# `gh api`; the rest are harmless reads): no rule here prefixes them.
+READ_ONLY_GH_KEPT = ("pr", "run", "api", "search", "status", "help", "version")
+READ_ONLY_GH_PR_KEPT = ("view", "diff", "checks", "list", "status")
+READ_ONLY_GH_RUN_KEPT = ("view", "list", "watch")
 # Bash commands a read-only role never runs (v1's `perms.BASH_DENY` rule shape): its session holds the user's gh and
-# git logins, so the write verbs are denied by rule, not only by its process's prose. These cover the PR's own
-# writes (`gh pr update-branch` pushes a merge onto its branch, moving its head, so the next check starts another
-# review), and the gh command groups that change the repo, its issues, workflows and runs, settings, the user's
-# gists, extensions, aliases, login or gh config. A review reads with `gh pr view`, `gh pr diff`, `gh pr checks` and
-# `gh api`, none of which a rule here prefixes. `gh api` with a field or a method is not here.
-READ_ONLY_BASH_DENIED = ("Bash(gh pr merge:*)", "Bash(gh pr close:*)", "Bash(gh pr reopen:*)", "Bash(gh pr ready:*)",
-                         "Bash(gh pr edit:*)", "Bash(gh pr create:*)", "Bash(gh pr update-branch:*)",
-                         "Bash(gh pr lock:*)", "Bash(gh pr unlock:*)", "Bash(gh pr checkout:*)", "Bash(gh issue:*)",
-                         "Bash(gh workflow:*)", "Bash(gh run rerun:*)", "Bash(gh run cancel:*)",
-                         "Bash(gh run delete:*)", "Bash(gh repo:*)", "Bash(gh label:*)", "Bash(gh secret:*)",
-                         "Bash(gh variable:*)", "Bash(gh gist:*)", "Bash(gh cache:*)", "Bash(gh ruleset:*)",
-                         "Bash(gh project:*)", "Bash(gh extension:*)", "Bash(gh alias:*)", "Bash(gh auth:*)",
-                         "Bash(gh config set:*)", "Bash(gh release:*)", "Bash(git push:*)", "Bash(git commit:*)")
+# git logins, and one plain gh command can change GitHub as the user (`gh ssh-key add` gives a key push to every repo
+# the user can; `gh pr update-branch` pushes a merge onto the PR's branch, moving its head, so the next check starts
+# another review). So every gh command group a review does not need is denied whole, reads included, not only its
+# write verbs: each top-level gh command but READ_ONLY_GH_KEPT, each `gh pr` subcommand but READ_ONLY_GH_PR_KEPT
+# (the worker floor, v1's `perms.BASH_DENY`, already denies `gh pr comment` and `gh pr review`, so they are not
+# repeated here), each `gh run` subcommand but READ_ONLY_GH_RUN_KEPT, and `git push` and `git commit`. `gh api` with
+# a field or a method is not here. The investigate and analyze roles, not startable as workers today, would need
+# their own gh reads (`gh issue view`, say) when they are.
+_WORKER_FLOOR_GH_PR = ("comment", "review")
+READ_ONLY_BASH_DENIED = (tuple(f"Bash(gh {cmd}:*)" for cmd in GH_COMMANDS if cmd not in READ_ONLY_GH_KEPT)
+                         + tuple(f"Bash(gh pr {sub}:*)" for sub in GH_PR_COMMANDS
+                                 if sub not in READ_ONLY_GH_PR_KEPT + _WORKER_FLOOR_GH_PR)
+                         + tuple(f"Bash(gh run {sub}:*)" for sub in GH_RUN_COMMANDS
+                                 if sub not in READ_ONLY_GH_RUN_KEPT)
+                         + ("Bash(git push:*)", "Bash(git commit:*)"))
 # Built-in tools a read-only role is denied even when the tool discovery does not list them, less the role's own
 # tools (`workers.floor` drops those): v1's `replies.DISALLOWED` without `Task`, plus the claude.ai page tools and the
 # task list. Each one acts outside the floor (a scheduled cloud agent, the user's pages, a push, a message) or is not

@@ -69,10 +69,11 @@ swapped in after any earlier look never hangs the pass), then removes the round'
 when it is a regular file, and at most QUESTION_MAX bytes of it. A turn that ends with no report is closed idle
 after IDLE_MIN minutes with the card's `ask` (`fix`, `review_idle`), which holds the auto-start back as well; when
 another ask is open then, the line's note says so, and a later `check` raises the idle ask once the card has none
-(`paused`, `closed: idle`). Its floor is read-only: no Edit or NotebookEdit, no GitHub or git write commands
-(`roles.READ_ONLY_BASH_DENIED`), no `ap2` command the review does not run (`roles.READ_ONLY_AP2_DENIED`, best
-effort), and a Write hook (`ap2 hook-write`, `write_guard`) allows a Write only to its report or `question.json` in
-the card's run directory; a path it cannot resolve, and any error in the hook, is denied.
+(`paused`, `closed: idle`). Its floor is read-only: no Edit or NotebookEdit, no gh command group the review does not
+need and no git write command (`roles.READ_ONLY_BASH_DENIED`), no `ap2` command the review does not run
+(`roles.READ_ONLY_AP2_DENIED`, best effort), and a Write hook (`ap2 hook-write`, `write_guard`) allows a Write
+only to its report or `question.json` in the card's run directory; a path it cannot resolve, and any error in the
+hook, is denied.
 
 Starting (or resuming) a session can make branches and PRs, so it needs live mode; listing, classifying, ending
 and archiving work in shadow mode. v1 is reused by import (`lib/autopilot/workers.py`, `sessions.py`,
@@ -300,10 +301,11 @@ def floor(role: str, project: dict, data: Path, env: dict, profile: Optional[dic
         {"matcher": "*", "hooks": [{"type": "command", "command": f"\"{ap2}\" hook-park", "timeout": 5}]},
         {"matcher": "Bash", "hooks": [{"type": "command", "command": f"\"{ap2}\" hook-guard", "timeout": 5}]}]}
     if role in roles.ROLES and roles.ROLES[role].floor == "read-only":
-        # The read-only floor (roles.FLOORS): no Edit or NotebookEdit at all, no GitHub or git write command, no
-        # `ap2` command a review does not run (in both spellings, best effort), and its one write, the result file
-        # (or its question), in its run directory only. A deny rule cannot leave one file open (deny wins over
-        # allow), so a Write hook (`ap2 hook-write`, `write_guard`) refuses every other Write.
+        # The read-only floor (roles.FLOORS): no Edit or NotebookEdit at all, no gh command group a review does not
+        # need and no git write command, no `ap2` command a review does not run (in both spellings, best effort),
+        # and its one write, the result file (or its question), in its run directory only. A deny rule cannot leave
+        # one file open (deny wins over allow), so a Write hook (`ap2 hook-write`, `write_guard`) refuses every other
+        # Write.
         deny += list(roles.READ_ONLY_DENIED) + list(roles.READ_ONLY_BASH_DENIED)
         deny += [f"Bash({cmd} {verb}:*)" for verb in roles.READ_ONLY_AP2_DENIED for cmd in ("ap2", ap2)]
         # No tool its role does not list, MCP or built-in, but the tool search and `Task` (READ_ONLY_KEPT): v1's
