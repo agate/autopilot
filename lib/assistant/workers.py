@@ -72,8 +72,8 @@ another ask is open then, the line's note says so, and a later `check` raises th
 (`paused`, `closed: idle`). Its floor is read-only: no Edit or NotebookEdit, no gh command group the review does not
 need, no git command that pushes, commits or sets an alias, a config value or a remote, and no `claude`, which would
 start a session outside the floor (`roles.READ_ONLY_BASH_DENIED`, and the worker's own claude path), no v1 `ap`
-command (`roles.V1_AP_COMMANDS`, `roles.V1_AP_EXTRA`, and each one the `ap` on PATH declares in its cli.py, read and
-never run), no gh alias of the user's (read from gh's config file), no `ap2` command the review does not run
+command (`roles.V1_AP_COMMANDS`, `roles.V1_AP_EXTRA`, and each one the `ap` on PATH declares in its modules, read
+and never run), no gh alias of the user's (read from gh's config file), no `ap2` command the review does not run
 (`roles.READ_ONLY_AP2_DENIED`), all best effort, no global or system git config in its env
 (`roles.READ_ONLY_GIT_ENV`), and a Write hook (`ap2 hook-write`, `write_guard`) allows a Write only to its report or
 `question.json` in the card's run directory; a path it cannot resolve, and any error in the hook, is denied.
@@ -311,7 +311,9 @@ def _versions(*paths: Optional[str]) -> list:
     return list(dict.fromkeys(out))
 
 
-# The most bytes of an installed v1's `lib/autopilot/cli.py` the read-only floor reads (`_ap_commands`).
+# The most files of an installed v1's `lib/autopilot/` the read-only floor reads (`_ap_commands`), and the most
+# bytes of each.
+AP_MODULES_MAX = 200
 AP_CLI_MAX = 1 << 20
 # A plain v1 command name: lowercase words joined by dashes.
 _AP_COMMAND = re.compile(r"[a-z]+(?:-[a-z]+)*")
@@ -320,31 +322,57 @@ _AP_COMMAND = re.compile(r"[a-z]+(?:-[a-z]+)*")
 def _ap_commands(path: Optional[str]) -> list:
     """The commands the installed v1 `ap` at `path` declares, read and never run (a run loads every v1 module and
     migrates a v1 data folder it has not migrated yet): `path`'s links are followed, the folder above its `bin` is
-    the package, and its `lib/autopilot/cli.py` is read as text (a regular file only, at most AP_CLI_MAX bytes) and
-    parsed, never imported. The module-level `COMMANDS = (...)` or `[...]` assignment's literal value is the list;
-    only plain lowercase names with dashes count. Any failure (no path, no such file, too large, not a regular file,
-    a syntax error, no COMMANDS, a value that is not a literal list) gives an empty list."""
+    the package, and each `*.py` file directly in its `lib/autopilot/` (in name order, at most AP_MODULES_MAX of
+    them) is read and parsed, never imported (`_declared`). Only plain lowercase names with dashes count. No path or
+    no such folder gives an empty list; a file that cannot be read or parsed is skipped."""
     if not path:
         return []
+    pkg = Path(os.path.realpath(path)).parent.parent / "lib" / "autopilot"
     try:
-        cli = Path(os.path.realpath(path)).parent.parent / "lib" / "autopilot" / "cli.py"
-        tree = ast.parse(sources.read_regular_capped(cli, AP_CLI_MAX, "too large").decode("utf-8"))
+        names = sorted(n for n in os.listdir(pkg) if n.endswith(".py"))[:AP_MODULES_MAX]
+    except OSError:
+        return []
+    found = []
+    for name in names:
+        found += _declared(pkg / name)
+    return list(dict.fromkeys(n for n in found if _AP_COMMAND.fullmatch(n)))
+
+
+def _is_command(func) -> bool:
+    """Whether a decorator call's callee is `command` or `<x>.command` (v1's `@cli.command("name")`)."""
+    return (isinstance(func, ast.Name) and func.id == "command") or (
+        isinstance(func, ast.Attribute) and func.attr == "command")
+
+
+def _declared(path: Path) -> list:
+    """The command names one v1 module declares, read from its text (a regular file only, no link followed, at most
+    AP_CLI_MAX bytes) and parsed, never run: the first argument of each decorator that calls `command` or
+    `<x>.command`, when it is a string literal, and the literal value of a module-level `COMMANDS = (...)` or
+    `[...]`. A file that cannot be read, decoded or parsed gives an empty list."""
+    try:
+        tree = ast.parse(sources.read_regular_capped(path, AP_CLI_MAX, "too large").decode("utf-8"))
     except (OSError, sources.SourceError, UnicodeDecodeError, SyntaxError, ValueError, RecursionError,
             MemoryError):
         return []
+    out = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            for dec in node.decorator_list:
+                if isinstance(dec, ast.Call) and _is_command(dec.func) and dec.args and isinstance(
+                        dec.args[0], ast.Constant) and isinstance(dec.args[0].value, str):
+                    out.append(dec.args[0].value)
     value = None
     for node in tree.body:
         if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "COMMANDS" for t in node.targets):
             value = node.value
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == "COMMANDS":
             value = node.value
-    if not isinstance(value, (ast.Tuple, ast.List)):
-        return []
-    try:
-        names = ast.literal_eval(value)
-    except (ValueError, TypeError, SyntaxError, RecursionError, MemoryError):
-        return []
-    return list(dict.fromkeys(n for n in names if isinstance(n, str) and _AP_COMMAND.fullmatch(n)))
+    if isinstance(value, (ast.Tuple, ast.List)):
+        try:
+            out += [n for n in ast.literal_eval(value) if isinstance(n, str)]
+        except (ValueError, TypeError, SyntaxError, RecursionError, MemoryError):
+            pass
+    return out
 
 
 # The most bytes of gh's config file the read-only floor reads (`_gh_aliases`).
@@ -445,7 +473,7 @@ def floor(role: str, project: dict, data: Path, env: dict, profile: Optional[dic
         # version in the folder a link leads into (`_versions`). No v1 command either (`ap oneoff` runs
         # `claude -p`): bare, at `<package>/bin/ap`, and the `ap` on PATH. The commands are the in-repo list, the
         # fixed extra list (V1_AP_EXTRA), and each one the `ap` on PATH declares (`_ap_commands`: it can be an
-        # installed v1 with commands the in-repo one lacks; its cli.py is read, never run). Best effort.
+        # installed v1 with commands the in-repo one lacks; its modules are read, never run). Best effort.
         found = shutil.which("claude")
         nested = [f"Bash({c}:*)" for c in _spellings("claude", claude or found or "claude", found)]
         nested += [f"Bash({c}:*)" for c in _versions(claude, found)]

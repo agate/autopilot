@@ -3964,10 +3964,10 @@ class PrReviewRoleTest(PrReviewCase):
             with self.subTest(read=read):
                 self.assertEqual([p for p in prefixes if read.startswith(p)], [])
 
-    def _fake_v1(self, cli_text, ran=None) -> Path:
+    def _fake_v1(self, cli_text, ran=None, modules=None) -> Path:
         """A made-up installed v1 in its own temp folder: `<root>/bin/ap`, a script that would touch `ran` if it were
-        ever run, and `<root>/lib/autopilot/cli.py` holding `cli_text` (bytes or text; None: no cli.py). Returns the
-        `bin` folder."""
+        ever run, `<root>/lib/autopilot/cli.py` holding `cli_text` (bytes or text; None: no cli.py), and each of
+        `modules` ({file name: text}) next to it. Returns the `bin` folder."""
         root = Path(tempfile.mkdtemp(prefix="made-up-v1-", dir=self.tmp))
         (root / "bin").mkdir()
         ap = root / "bin" / "ap"
@@ -3978,18 +3978,28 @@ class PrReviewRoleTest(PrReviewCase):
             (root / "lib" / "autopilot").mkdir(parents=True)
             cli = root / "lib" / "autopilot" / "cli.py"
             cli.write_bytes(cli_text) if isinstance(cli_text, bytes) else cli.write_text(cli_text)
+        for name, text in (modules or {}).items():
+            (root / "lib" / "autopilot").mkdir(parents=True, exist_ok=True)
+            f = root / "lib" / "autopilot" / name
+            f.write_bytes(text) if isinstance(text, bytes) else f.write_text(text)
         return root / "bin"
 
     def test_the_read_only_floor_denies_every_command_the_installed_v1_declares(self):
         # The `ap` on PATH can be an installed v1 with more commands than the in-repo snapshot (`ap profile add
         # --models-command ...` runs a command; `ap profile use` rewrites every v1 session's settings). The floor
-        # reads that v1's `lib/autopilot/cli.py` (never runs it: a run migrates v1's data folder) and denies each
-        # plain command name its literal COMMANDS holds, in every spelling, plus the fixed extra list; never a word
-        # that is not a plain lowercase command name.
+        # reads that v1's `lib/autopilot/*.py` (never runs it: a run migrates v1's data folder) and denies each
+        # plain command name its `@cli.command("...")` or `@command("...")` decorators register, and a literal
+        # COMMANDS holds, in every spelling, plus the fixed extra list; never a word that is not a plain lowercase
+        # command name.
         cid = "c-20260105-090000-abcdef"
         env = {"AP2_ROLE": "pr-review", "AP2_CARD": cid, "AP2_RUN_DIR": str(transcripts.run_dir(self.data, cid))}
         ran = self.tmp / "made-up-ap-ran"
-        bin_dir = self._fake_v1('COMMANDS = ("made-up-verb", "access", "Bad", "x/y")\n', ran)
+        foo = "\n".join(["from autopilot import cli", "", "", '@cli.command("made-up-verb")', "def a(argv):",
+                         "    return 0", "", "", '@cli.command("Bad")', "def b(argv):", "    return 0", "", "",
+                         "class K:", '    @cli.command("x/y")', "    def c(self, argv):", "        return 0", ""])
+        bar = "\n".join(["from autopilot.cli import command", "", "", '@command("access")', "def d(argv):",
+                         "    return 0", ""])
+        bin_dir = self._fake_v1('COMMANDS = ("made-up-listed",)\n', ran, {"foo.py": foo, "bar.py": bar})
         with mock.patch.dict(os.environ, {"PATH": str(bin_dir)}):
             base = workers_mod.floor("implement", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
             ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
@@ -3997,7 +4007,7 @@ class PrReviewRoleTest(PrReviewCase):
         self.assertNotIn("Bash(ap run-was-read:*)", ro)
         spellings = list(dict.fromkeys(["ap", str(ROOT / "bin" / "ap"), str(bin_dir / "ap"),
                                         os.path.realpath(bin_dir / "ap")]))
-        for verb in ("made-up-verb", "access") + roles.V1_AP_EXTRA:
+        for verb in ("made-up-verb", "access", "made-up-listed") + roles.V1_AP_EXTRA:
             for ap in spellings:
                 with self.subTest(verb=verb, ap=ap):
                     self.assertIn(f"Bash({ap} {verb}:*)", ro)
@@ -4013,9 +4023,11 @@ class PrReviewRoleTest(PrReviewCase):
         # migrated yet, so the floor only reads files: the made-up `ap` would leave a marker if it ran.
         cid = "c-20260105-090000-abcdef"
         env = {"AP2_ROLE": "pr-review", "AP2_CARD": cid, "AP2_RUN_DIR": str(transcripts.run_dir(self.data, cid))}
-        for name, cli_text in (("a literal list", 'COMMANDS = ["made-up-verb"]\n'), ("no cli.py", None)):
+        decorated = {"foo.py": '@cli.command("made-up-verb")\ndef a(argv):\n    return 0\n'}
+        for name, cli_text, modules in (("a literal list", 'COMMANDS = ["made-up-verb"]\n', None),
+                                        ("no cli.py", None, None), ("a decorated module", None, decorated)):
             ran = self.tmp / f"made-up-ap-ran-{len(name)}"
-            bin_dir = self._fake_v1(cli_text, ran)
+            bin_dir = self._fake_v1(cli_text, ran, modules)
             with self.subTest(cli=name), mock.patch.dict(os.environ, {"PATH": str(bin_dir)}):
                 workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env)
                 self.assertFalse(ran.exists())
@@ -4044,6 +4056,46 @@ class PrReviewRoleTest(PrReviewCase):
                     self.assertIn(f"Bash(ap {verb}:*)", ro)
                 self.assertNotIn("Bash(ap made-up-verb:*)", ro)
                 self.assertNotIn("Bash(ap run-was-read:*)", ro)
+
+    def test_the_read_only_floor_takes_only_literal_command_decorators(self):
+        # Only the first argument of a `command(...)` or `<x>.command(...)` decorator call, when it is a string
+        # literal, names a command: a computed argument, another decorator, a bare `@command`, a call that is not a
+        # decorator, a module that does not parse or is too large, a link, and a file outside `lib/autopilot/`
+        # add nothing.
+        cid = "c-20260105-090000-abcdef"
+        env = {"AP2_ROLE": "pr-review", "AP2_CARD": cid, "AP2_RUN_DIR": str(transcripts.run_dir(self.data, cid))}
+        modules = {
+            "computed.py": "\n".join(['NAME = "made-up-one"', "", "", "@cli.command(NAME)", "def a(argv):",
+                                      "    return 0", "", ""])
+                           + '@cli.command("made-up-" + "two")\ndef b(argv):\n    return 0\n\n\n'
+                           '@cli.command(f"made-up-{NAME}")\ndef c(argv):\n    return 0\n',
+            "other.py": '@cli.register("made-up-three")\ndef a(argv):\n    return 0\n\n\n'
+                        '@commands("made-up-four")\ndef b(argv):\n    return 0\n\n\n'
+                        '@cli.command\ndef c(argv):\n    return 0\n\n\n'
+                        '@cli.command()\ndef d(argv):\n    return 0\n\n\n'
+                        '@cli.command(name="made-up-five")\ndef e(argv):\n    return 0\n\n\n'
+                        'cli.command("made-up-six")(print)\n',
+            "broken.py": '@cli.command("made-up-seven")\ndef a(argv:\n',
+            "huge.py": '@cli.command("made-up-eight")\ndef a(argv):\n    return 0\n'
+                       + "#" * (workers_mod.AP_CLI_MAX + 1) + "\n",
+            "binary.py": b"\xff\xfe " + b'@cli.command("made-up-nine")\n',
+            "notes.txt": '@cli.command("made-up-ten")\ndef a(argv):\n    return 0\n',
+            "good.py": '@cli.command("made-up-kept")\ndef a(argv):\n    return 0\n',
+        }
+        bin_dir = self._fake_v1(None, None, modules)
+        pkg = bin_dir.parent / "lib" / "autopilot"
+        outside = bin_dir.parent / "made-up-outside.py"
+        outside.write_text('@cli.command("made-up-linked")\ndef a(argv):\n    return 0\n')
+        (pkg / "linked.py").symlink_to(outside)
+        (pkg / "sub").mkdir()
+        (pkg / "sub" / "deep.py").write_text('@cli.command("made-up-deep")\ndef a(argv):\n    return 0\n')
+        with mock.patch.dict(os.environ, {"PATH": str(bin_dir)}):
+            ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+        self.assertIn("Bash(ap made-up-kept:*)", ro)
+        found = {r[len("Bash(ap "):-len(":*)")] for r in ro if r.startswith("Bash(ap made-up-")}
+        self.assertEqual(found, {"made-up-kept"})
+        for verb in roles.V1_AP_COMMANDS + roles.V1_AP_EXTRA:
+            self.assertIn(f"Bash(ap {verb}:*)", ro)
 
     def _gh_config(self, text, where="dir") -> dict:
         """Writes a made-up gh config.yml (bytes or text; None: none at all) where gh looks for it: `dir` under

@@ -808,10 +808,12 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   allowed; `roles.V1_AP_EXTRA`, `profile` and `reply-kind`, which an installed v1 has and the snapshot lacks:
   its `profile add --models-command` makes v1 run a command and its `profile use` rewrites every v1 session's
   settings; and each command the `ap` on PATH declares: the floor follows its links, takes the folder above its
-  `bin` as the package, reads that package's `lib/autopilot/cli.py` as text (a regular file only, at most 1 MiB),
-  parses it, and takes the literal value of its module-level `COMMANDS = (...)` or `[...]`; it never runs or
-  imports that v1, because a run migrates a v1 data folder it has not migrated yet, and a read that fails adds
-  nothing) as `Bash(ap <command>:*)`, `Bash(<package>/bin/ap <command>:*)` and the same for the `ap` on PATH, never a
+  `bin` as the package, reads each `*.py` file directly in that package's `lib/autopilot/` as text (regular files
+  only, no link followed, at most 200 files and 1 MiB each), parses it, and takes the first argument of each
+  decorator that calls `command` or `<x>.command` (v1's `@cli.command("access")`) when it is a string literal,
+  and the literal value of a module-level `COMMANDS = (...)` or `[...]`; it never runs or imports that v1,
+  because a run migrates a v1 data folder it has not migrated yet, and a file that cannot be read is skipped) as
+  `Bash(ap <command>:*)`, `Bash(<package>/bin/ap <command>:*)` and the same for the `ap` on PATH, never a
   bare `ap` rule or a whole-path one, which would prefix every `ap2` command, every `ap2` command the review
   does not run (`roles.READ_ONLY_AP2_DENIED`) as Bash deny rules in the same shape, every MCP tool the session
   loads that `Role.tools` does not list (no read-only role lists one) and every MCP server whole (each server those

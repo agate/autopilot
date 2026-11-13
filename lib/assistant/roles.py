@@ -30,8 +30,8 @@ FLOORS = MappingProxyType({
                  "`claude` itself, which would start a session under the user's own settings, not this floor "
                  "(READ_ONLY_BASH_DENIED, the claude path the worker runs, and the other claude versions in "
                  "the folder its link leads into), every v1 `ap` command "
-                 "(V1_AP_COMMANDS, V1_AP_EXTRA, and each one the `ap` on PATH declares in its cli.py, which is "
-                 "read and never run), "
+                 "(V1_AP_COMMANDS, V1_AP_EXTRA, and each one the `ap` on PATH declares in its modules, which "
+                 "are read and never run), "
                  "and the ap2 commands a review does not run (READ_ONLY_AP2_DENIED) are denied by rule. The "
                  "session reads no global or system git config, so the user's git aliases and credential helper "
                  "are not loaded (READ_ONLY_GIT_ENV). Each of the user's own gh aliases (the `aliases:` map "
@@ -110,8 +110,8 @@ V1_AP_COMMANDS = ("access", "archive", "bind", "budget", "check-package", "confi
                   "status", "stop", "task", "tasks", "tick", "unbind", "uninstall", "worker")
 # Commands an installed v1 has that this snapshot lacks, denied as well: `ap profile add ... --models-command`
 # makes v1 run a command (a nested `claude -p`, say), and `ap profile use` rewrites every v1 session's settings.
-# The installed `ap` on PATH can be a separate copy, so `workers.floor` also reads its `lib/autopilot/cli.py` (never
-# runs it: a run migrates v1's data folder) and denies each command its literal COMMANDS holds
+# The installed `ap` on PATH can be a separate copy, so `workers.floor` also reads its `lib/autopilot/*.py` (never
+# runs it: a run migrates v1's data folder) and denies each command its `@cli.command("...")` decorators register
 # (`workers._ap_commands`); this list holds when that read finds none.
 V1_AP_EXTRA = ("profile", "reply-kind")
 # Built-in tools a read-only role is denied even when the tool discovery does not list them, less the role's own
