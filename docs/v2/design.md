@@ -3277,8 +3277,8 @@ Calls the author made without asking (check them):
      those workers under it; when `busy` is true, "Answered; another stop of the running workers is already under
      way."; when `stop_error` is set, "Answered and paused, but the running workers could not be stopped:" with the
      server's text under it, never "Not answered:". The answered card is redrawn without its buttons, so the page
-     keeps that note for the card (`S.capNote`) and the redrawn card shows it in its cap section until another
-     card is drawn; a clean 200 shows nothing, as before.
+     keeps that note for the card (`S.capNote`) and the redrawn card shows it in its cap section until the page
+     leaves that card (another route or another card drops it); a clean 200 shows nothing, as before.
   4. **[decided by the builder]** The one route that may start a process: because of choice 3, `pause` in live mode
      runs `claude stop` for each running worker (`Workers.cap_stop`). The server's docstring, the read-only
      bullet and `ap2 serve --help` ("Read-only, but for saving a question on a card and answering today's cap
