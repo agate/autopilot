@@ -284,6 +284,31 @@ def _spellings(name: str, *paths: Optional[str]) -> list:
     return list(dict.fromkeys(out))
 
 
+# The tools a bin folder holds next to `claude`: a folder that holds one is not a folder of claude versions.
+_BIN_TOOLS = ("gh", "git", "ap", "ap2")
+
+
+def _versions(*paths: Optional[str]) -> list:
+    """Every regular file in the folder each claude path in `paths` leads into (links followed): the claude installer
+    keeps older full versions there, and each one starts a session too. A folder is skipped when the path is not a
+    link into another folder (a claude that lives in a bin folder) or when it holds another tool (`_BIN_TOOLS`), so
+    a bin folder's gh or git is never denied."""
+    out = []
+    for p in paths:
+        if not p or os.sep not in str(p):
+            continue
+        folder = os.path.dirname(os.path.realpath(p))
+        if folder == os.path.dirname(os.path.abspath(p)) or any(
+                os.path.lexists(os.path.join(folder, t)) for t in _BIN_TOOLS):
+            continue
+        try:
+            names = sorted(os.listdir(folder))
+        except OSError:
+            continue
+        out += [os.path.join(folder, n) for n in names if os.path.isfile(os.path.join(folder, n))]
+    return list(dict.fromkeys(out))
+
+
 def floor(role: str, project: dict, data: Path, env: dict, profile: Optional[dict] = None,
           claude: Optional[str] = None) -> dict:
     """The worker's permission floor (`--settings`): v1's outward-tool denials (`perms.denied_tools`, from the
@@ -325,10 +350,12 @@ def floor(role: str, project: dict, data: Path, env: dict, profile: Optional[dic
         deny += list(roles.READ_ONLY_DENIED) + list(roles.READ_ONLY_BASH_DENIED)
         deny += [f"Bash({cmd} {verb}:*)" for verb in roles.READ_ONLY_AP2_DENIED for cmd in ("ap2", ap2)]
         # No nested session: `claude -p ...` would run under the user's own settings, not this floor, so `claude` is
-        # denied as typed, as the worker's own path and the one on PATH, and where each link leads. No v1 command
-        # either (`ap oneoff` runs `claude -p`): bare, at `<package>/bin/ap`, and the `ap` on PATH. Best effort.
+        # denied as typed, as the worker's own path and the one on PATH, where each link leads, and every other
+        # version in the folder a link leads into (`_versions`). No v1 command either (`ap oneoff` runs
+        # `claude -p`): bare, at `<package>/bin/ap`, and the `ap` on PATH. Best effort.
         found = shutil.which("claude")
         nested = [f"Bash({c}:*)" for c in _spellings("claude", claude or found or "claude", found)]
+        nested += [f"Bash({c}:*)" for c in _versions(claude, found)]
         v1_ap = _spellings("ap", str(package_root() / "bin" / "ap"), shutil.which("ap"))
         nested += [f"Bash({cmd} {verb}:*)" for verb in roles.V1_AP_COMMANDS for cmd in v1_ap]
         deny += [r for r in dict.fromkeys(nested) if r not in deny]

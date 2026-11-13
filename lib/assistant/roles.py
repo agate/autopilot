@@ -28,12 +28,16 @@ FLOORS = MappingProxyType({
                  "nothing, and every gh command group a review does not need, reads included, the git commands "
                  "that push, commit or set an alias, a config value or a remote (READ_ONLY_GIT_DENIED), and "
                  "`claude` itself, which would start a session under the user's own settings, not this floor "
-                 "(READ_ONLY_BASH_DENIED, and the claude path the worker runs), every v1 `ap` command "
+                 "(READ_ONLY_BASH_DENIED, the claude path the worker runs, and the other claude versions in "
+                 "the folder its link leads into), every v1 `ap` command "
                  "(V1_AP_COMMANDS), and the ap2 commands a review does not run (READ_ONLY_AP2_DENIED) are denied "
                  "by rule. The session reads no global or system git config, so the user's git aliases and "
                  "credential helper are not loaded (READ_ONLY_GIT_ENV). These rules are best effort: they match "
                  "the command's text, so a program that runs `claude` or `git` for the worker (`python3 -c`, say) "
-                 "gets past them; full enforcement is the deferred sandbox follow-up. The investigate and analyze "
+                 "gets past them, and so does a spelling that puts an option before the gh or git subcommand "
+                 "(`gh -R o/r pr merge`, `gh pr -R o/r merge`, `git -C . push`); closing that needs an "
+                 "allow-list Bash hook that reads the subcommand from the parsed words (guard.py's parser could "
+                 "be reused) or the sandbox, both deferred to the sandbox follow-up. The investigate and analyze "
                  "roles, not startable as workers today, would need their own gh reads when they are. Every MCP tool "
                  "the session loads that the role does not list is denied, and every MCP server whole, so a "
                  "server's write tool (delete, update, submit, merge) that v1's outward list misses stays shut. "
@@ -54,14 +58,16 @@ GH_COMMANDS = ("auth", "browse", "codespace", "gist", "issue", "org", "pr", "pro
                "run", "workflow", "co", "agent-task", "alias", "api", "attestation", "completion", "config",
                "extension", "gpg-key", "label", "preview", "ruleset", "search", "secret", "ssh-key", "status",
                "variable")
+# Each subcommand's aliases (the ALIASES line of `gh pr <sub> --help` and `gh run <sub> --help`) are in the snapshot
+# too: `gh pr new` (create), `gh pr ls` and `gh run ls` (list).
 GH_PR_COMMANDS = ("create", "list", "status", "checkout", "checks", "close", "comment", "diff", "edit", "lock",
-                  "merge", "ready", "reopen", "review", "unlock", "update-branch", "view")
-GH_RUN_COMMANDS = ("cancel", "delete", "download", "list", "rerun", "view", "watch")
+                  "merge", "ready", "reopen", "review", "unlock", "update-branch", "view", "new", "ls")
+GH_RUN_COMMANDS = ("cancel", "delete", "download", "list", "rerun", "view", "watch", "ls")
 # The gh commands a review needs (`commands/pr-review.md` runs `gh pr view`, `gh pr diff`, `gh pr checks` and
 # `gh api`; the rest are harmless reads): no rule here prefixes them.
 READ_ONLY_GH_KEPT = ("pr", "run", "api", "search", "status", "help", "version")
-READ_ONLY_GH_PR_KEPT = ("view", "diff", "checks", "list", "status")
-READ_ONLY_GH_RUN_KEPT = ("view", "list", "watch")
+READ_ONLY_GH_PR_KEPT = ("view", "diff", "checks", "list", "ls", "status")
+READ_ONLY_GH_RUN_KEPT = ("view", "list", "ls", "watch")
 # Bash commands a read-only role never runs (v1's `perms.BASH_DENY` rule shape): its session holds the user's gh and
 # git logins, and one plain gh command can change GitHub as the user (`gh ssh-key add` gives a key push to every repo
 # the user can; `gh pr update-branch` pushes a merge onto the PR's branch, moving its head, so the next check starts

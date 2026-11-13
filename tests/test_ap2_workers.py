@@ -3854,7 +3854,7 @@ class PrReviewRoleTest(PrReviewCase):
         base = workers_mod.floor("implement", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
         ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
         for cmd in ("gh ssh-key", "gh gpg-key", "gh agent-task", "gh codespace", "gh issue", "gh repo",
-                    "gh pr merge", "gh pr update-branch", "gh run rerun"):
+                    "gh pr merge", "gh pr update-branch", "gh run rerun", "gh pr new"):
             with self.subTest(rule=cmd):
                 self.assertIn(f"Bash({cmd}:*)", ro)
         kept = {"pr", "run", "api", "search", "status", "help", "version"}
@@ -3863,19 +3863,20 @@ class PrReviewRoleTest(PrReviewCase):
             "auth", "browse", "codespace", "gist", "issue", "org", "pr", "project", "release", "repo", "cache", "run",
             "workflow", "co", "agent-task", "alias", "api", "attestation", "completion", "config", "extension",
             "gpg-key", "label", "preview", "ruleset", "search", "secret", "ssh-key", "status", "variable"})
+        # Each subcommand's ALIASES (`gh pr create --help` prints `gh pr new`) are in the snapshot too.
         self.assertEqual(set(roles.GH_PR_COMMANDS), {
             "create", "list", "status", "checkout", "checks", "close", "comment", "diff", "edit", "lock", "merge",
-            "ready", "reopen", "review", "unlock", "update-branch", "view"})
+            "ready", "reopen", "review", "unlock", "update-branch", "view", "new", "ls"})
         self.assertEqual(set(roles.GH_RUN_COMMANDS),
-                         {"cancel", "delete", "download", "list", "rerun", "view", "watch"})
+                         {"cancel", "delete", "download", "list", "rerun", "view", "watch", "ls"})
         for cmd in roles.GH_COMMANDS:
             with self.subTest(cmd=cmd):
                 if cmd in kept:
                     self.assertNotIn(f"Bash(gh {cmd}:*)", ro)
                 else:
                     self.assertIn(f"Bash(gh {cmd}:*)", ro)
-        for group, subs, keep in (("pr", roles.GH_PR_COMMANDS, {"view", "diff", "checks", "list", "status"}),
-                                  ("run", roles.GH_RUN_COMMANDS, {"view", "list", "watch"})):
+        for group, subs, keep in (("pr", roles.GH_PR_COMMANDS, {"view", "diff", "checks", "list", "status", "ls"}),
+                                  ("run", roles.GH_RUN_COMMANDS, {"view", "list", "watch", "ls"})):
             self.assertLessEqual(keep, set(subs))
             for sub in subs:
                 with self.subTest(sub=f"gh {group} {sub}"):
@@ -3888,7 +3889,7 @@ class PrReviewRoleTest(PrReviewCase):
         self.assertEqual(len(ro), len(set(ro)))  # each rule once
         prefixes = [r[len("Bash("):-len(":*)")] for r in ro if r.startswith("Bash(") and r.endswith(":*)")]
         for read in ("gh pr view 42", "gh pr diff 42", "gh pr checks 42", "gh pr list", "gh pr status",
-                     "gh run view 1", "gh run list", "gh run watch 1", "gh api repos/o/r/pulls/42", "gh search prs x",
+                     "gh pr ls", "gh run view 1", "gh run list", "gh run ls", "gh run watch 1", "gh api repos/o/r/pulls/42", "gh search prs x",
                      "gh status", "gh help", "gh version", "gh --version"):
             with self.subTest(read=read):
                 self.assertEqual([p for p in prefixes if (read + " ").startswith(p + " ")], [])
@@ -3954,6 +3955,39 @@ class PrReviewRoleTest(PrReviewCase):
             with self.subTest(read=read):
                 self.assertEqual([p for p in prefixes if read.startswith(p)], [])
 
+    def test_the_read_only_floor_denies_every_claude_version_next_to_the_one_it_links_to(self):
+        # The folder the claude link leads into keeps older full claude binaries; `<folder>/<old version> -p ...`
+        # starts a nested session too. A claude that lives directly in a bin folder does not deny that folder's other
+        # tools (gh, git).
+        cid = "c-20260105-090000-abcdef"
+        env = {"AP2_ROLE": "pr-review", "AP2_CARD": cid, "AP2_RUN_DIR": str(transcripts.run_dir(self.data, cid))}
+        versions = self.tmp / "made-up-share" / "versions"
+        versions.mkdir(parents=True)
+        for v in ("1.0.0", "1.0.1"):
+            (versions / v).write_text("")
+        link = self.tmp / "made-up-bin" / "claude"
+        link.parent.mkdir()
+        link.symlink_to(versions / "1.0.1")
+        plain = self.tmp / "made-up-tools"
+        plain.mkdir()
+        for name in ("claude", "gh", "git"):
+            (plain / name).write_text("")
+        on_path = {"claude": str(plain / "claude"), "gh": str(plain / "gh"), "git": str(plain / "git")}
+        with mock.patch.object(workers_mod.shutil, "which", side_effect=lambda name, *a, **k: on_path.get(name)):
+            ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env,
+                                   claude=str(link))["permissions"]["deny"]
+            base = workers_mod.floor("implement", {"tools": ["Read"]}, self.data, env,
+                                     claude=str(link))["permissions"]["deny"]
+        for v in ("1.0.0", "1.0.1"):
+            with self.subTest(version=v):
+                self.assertIn(f"Bash({versions / v}:*)", ro)
+                self.assertNotIn(f"Bash({versions / v}:*)", base)
+        self.assertIn(f"Bash({plain / 'claude'}:*)", ro)
+        for name in ("gh", "git"):
+            with self.subTest(tool=name):
+                self.assertEqual([r for r in ro if str(plain / name) in r], [])
+        self.assertEqual(len(ro), len(set(ro)))  # each rule once
+
     def test_a_started_read_only_worker_denies_the_claude_it_was_started_with(self):
         cid = self.pr_card()
         self.workers().start(cid, "pr-review", cwd=self.wt, prompt="Review it.")
@@ -3961,6 +3995,22 @@ class PrReviewRoleTest(PrReviewCase):
         self.assertIn("Bash(claude:*)", deny)
         self.assertIn(f"Bash({FAKE}:*)", deny)
         settings = json.loads((transcripts.run_dir(self.data, cid) / "settings-pr-review.json").read_text())
+        for k, v in roles.READ_ONLY_GIT_ENV.items():
+            self.assertEqual(settings["env"].get(k), v)
+
+    def test_an_in_place_resume_denies_the_claude_it_was_started_with(self):
+        # The resume rewrites the floor: it must deny the worker's own claude again, not only the one on PATH.
+        cid = self.pr_card()
+        w = self.workers()
+        a = w.start(cid, "pr-review", cwd=self.wt, prompt="Review it.")
+        f = transcripts.run_dir(self.data, cid) / "settings-pr-review.json"
+        f.unlink()  # so the settings checked below are the resume's own
+        self.drop_agent(a["short_id"])
+        self.clock.advance(5)
+        self.assertEqual(w.check()[0]["did"], "resumed")
+        self.assertEqual(self.bg_calls()[-1]["argv"][1:3], ["--resume", a["session_id"]])
+        settings = json.loads(f.read_text())
+        self.assertIn(f"Bash({FAKE}:*)", settings["permissions"]["deny"])
         for k, v in roles.READ_ONLY_GIT_ENV.items():
             self.assertEqual(settings["env"].get(k), v)
 

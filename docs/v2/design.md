@@ -790,12 +790,16 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   as `Bash(<command>:*)`): every top-level gh command in `roles.GH_COMMANDS` (a snapshot of gh 2.80.0's command
   names; a prefix rule cannot say "every gh command but these", so a command a newer gh adds is covered only once
   added there) but `gh pr`, `gh run`, `gh api`, `gh search`, `gh status`, `gh help` and `gh version`, every `gh pr`
-  subcommand but `view`, `diff`, `checks`, `list` and `status` (`gh pr comment` and `gh pr review` are already the
-  worker floor's), every `gh run` subcommand but `view`, `list` and `watch`, the git commands that push, commit or
+  subcommand but `view`, `diff`, `checks`, `list` (and its alias `ls`) and `status` (`gh pr comment` and
+  `gh pr review` are already the worker floor's), every `gh run` subcommand but `view`, `list` (and `ls`) and
+  `watch`, each snapshot holding the subcommands' aliases too (the ALIASES line of `gh pr <sub> --help`:
+  `gh pr new` for `gh pr create`), the git commands that push, commit or
   set an alias, a config value or a remote (`roles.READ_ONLY_GIT_DENIED`: `git push`, `git commit`, `git config`,
   `git -c`, `git --config-env`, `git remote`, `git send-pack`, `git subtree`), and `claude` itself, as typed, as the
-  path the worker runs, as the one on PATH and where each link leads, because `claude -p ...` would start a session
-  under the user's own settings, not this floor; a
+  path the worker runs, as the one on PATH, where each link leads, and every other file in the folder a link leads
+  into (the installer keeps older full versions there; skipped when the link does not lead into another folder or
+  that folder holds `gh`, `git`, `ap` or `ap2`), because `claude -p ...` would start a session under the user's own
+  settings, not this floor; a
   review reads with `gh pr view`, `gh pr diff`, `gh pr checks` and `gh api`, which no rule prefixes; one plain gh
   command left open would change GitHub as the user (`gh ssh-key add` gives a key push to every repo the user can;
   `gh pr update-branch` would push a merge onto the PR's branch and move its head, so the next check starts
@@ -838,7 +842,10 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   and `Bash(<package>/bin/ap2 <command>:*)` (`workers.floor`). These rules, the gh, git, `claude` and `ap` ones too,
   are best effort: they match the command's text, so a spelling such as `"$(echo ap2)" cap`, or a program that runs
   `claude` or `git` for the worker (`python3 -c`, say), gets past them; full enforcement is the deferred sandbox
-  follow-up. Not in the floor yet:
+  follow-up. The gh and git rules match the start of the command's text, so a spelling that puts an option before the
+  subcommand (`gh -R o/r pr merge`, `gh pr -R o/r merge`, `git -C . push`) gets past them too; closing that needs an
+  allow-list Bash hook that reads gh's or git's subcommand from the parsed words (guard.py's parser could be reused)
+  or the sandbox, both deferred to the sandbox follow-up. Not in the floor yet:
   `gh api` with a field or a method (`-f`, `--input`, `-X`), and a sandbox. The hook runs through `cli.main` (not `bin/ap2`'s
   fast path), so it loads more than the Bash guard does; the role writes one file a round.
 - **[decided by the builder]** A session archive's name starts with its role in lowercase letters only
