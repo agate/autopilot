@@ -85,8 +85,9 @@ Anti-goals (failure even if it "works"):
   space is words.
 - **[decided by the builder]** Every check whether a text has words uses `cards.blank`, not only titles: a `by`,
   a question, an answer, a routine title, a source value or setting, a form field, a key part, a watch name, an
-  angle, a brief field and a search `q` of only invisible characters count as empty. Shell parsing (the Bash
-  guard), parsers, HTTP headers and line picking keep `str.strip()`, because there U+FEFF is a character, not space.
+  angle, a brief field and a search `q` of only white space or U+FEFF count as empty (the same rule as titles; a
+  zero-width space is still words). Shell parsing (the Bash guard), parsers, HTTP headers and line picking keep
+  `str.strip()`, because there U+FEFF is a character, not space.
 - **[proposed]** A reply drafted for someone else stays in the language that person wrote in. On the
   other-language page its meaning is shown separately, and Copy leaves the meaning out. A quote shows the
   translation first and the original behind a collapsed "Original" toggle.

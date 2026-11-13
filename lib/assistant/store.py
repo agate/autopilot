@@ -411,6 +411,8 @@ class Store:
         """The cards whose plain words, title, kind or feed hold every word of `text`, oldest first. Read from the
         card files; the index only picks them."""
         cards.check_unicode(text, "search text")
+        if cards.blank(text):
+            return []
         terms = text.casefold().split()
         with self._guard():
             # The index is never the truth: skip a row that is not a card id, and a duplicate row.

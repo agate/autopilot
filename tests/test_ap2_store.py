@@ -1412,6 +1412,18 @@ class InvisibleTextTest(StoreCase):
                 with self.subTest(key=key, value=value):
                     self.assertEqual(self.store.add(card(**{key: value}), by="w")[key], value)
 
+    def test_a_search_text_of_only_invisible_characters_finds_nothing(self):
+        self.store.add(card(title="﻿T1 retry"), by="w")
+        for text in INVISIBLE:
+            with self.subTest(text=text):
+                self.assertEqual(self.store.search(text), [])
+
+    def test_a_search_text_with_words_next_to_an_invisible_character_is_kept(self):
+        added = self.store.add(card(title="﻿T1 retry"), by="w")
+        for text in ("﻿T1", "retry"):
+            with self.subTest(text=text):
+                self.assertEqual([c["id"] for c in self.store.search(text)], [added["id"]])
+
 
 if __name__ == "__main__":
     unittest.main()
