@@ -631,6 +631,35 @@ class ReadRegularCappedTest(unittest.TestCase):
             sources.read_regular_capped(p, 10, "too large")
         self.assertIn("a symbolic link, not a regular file", str(cm.exception))
 
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "os.mkfifo is not available")
+    def test_the_file_is_closed_on_every_way_out(self):
+        p = self.tmp / "a.json"
+        p.write_bytes(b"x" * 10)
+        fifo = self.tmp / "fifo.json"
+        os.mkfifo(fifo)
+        with mock.patch.object(sources.os, "close", wraps=os.close) as close:
+            sources.read_regular_capped(p, 10, "too large")
+            self.assertEqual(close.call_count, 1)
+            with self.assertRaises(SourceError):
+                sources.read_regular_capped(p, 9, "too large")
+            self.assertEqual(close.call_count, 2)
+            with self.assertRaises(OSError):
+                sources.read_regular_capped(fifo, 10, "too large")
+            self.assertEqual(close.call_count, 3)
+
+    def test_a_short_read_is_read_on_until_the_limit(self):
+        p = self.tmp / "a.json"
+        p.write_bytes(b"0123456789")
+        real = os.read
+
+        def short(fd, n):
+            return real(fd, min(n, 3))  # at most 3 bytes a call, as a pipe or a network disk may give
+
+        with mock.patch.object(sources.os, "read", short):
+            self.assertEqual(sources.read_regular_capped(p, 10, "too large"), b"0123456789")
+            with self.assertRaises(SourceError):
+                sources.read_regular_capped(p, 9, "too large")
+
 
 if __name__ == "__main__":
     unittest.main()

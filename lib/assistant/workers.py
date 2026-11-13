@@ -61,17 +61,18 @@ the profile) is a note on that card's line; shadow mode starts none and says so.
 `prreview.json` is newer than the round's first start (`round_started_at`, kept through every resume of the round)
 and its turn has ended (idle, done, failed or gone; while it works or waits at a prompt it is still checking a draft).
 Then, still under the worker list's lock (so an overlapping check cannot see the card closed and not yet reviewed),
-`check` removes the round's folder when it is empty and runs `prreview.apply` on its card, which reads the run
-directory's plan and report only when the open file is a regular file (`sources.read_regular_capped`: no link
-followed, no wait, checked on the open file, so a FIFO swapped in after any earlier look never hangs the pass); with
-the lock free it then runs `prreview.sync`. An apply that fails sets the card's `ask` (`fix`), which holds the next
-auto-start back, and a sync that fails is a note. `question.json` too is read only when it is a regular file. A turn
-that ends with no report is closed idle after IDLE_MIN minutes with the card's `ask` (`fix`, `review_idle`), which
-holds the auto-start back as well; when another ask is open then, the line's note says so, and a later `check`
-raises the idle ask once the card has none (`paused`, `closed: idle`). Its floor is
-read-only: no Edit or NotebookEdit, no GitHub or git write commands (`roles.READ_ONLY_BASH_DENIED`), and a Write
-hook (`ap2 hook-write`, `write_guard`) allows a Write only to its report or `question.json` in the card's run
-directory; a path it cannot resolve, and any error in the hook, is denied.
+`check` runs `prreview.apply` on its card, which reads the run directory's plan and report only when the open file
+is a regular file (`sources.read_regular_capped`: no link followed, no wait, checked on the open file, so a FIFO
+swapped in after any earlier look never hangs the pass), then removes the round's folder when it is an empty folder
+(not a link to one); with the lock free it then runs `prreview.sync`. An apply that fails sets the card's `ask`
+(`fix`), which holds the next auto-start back, and a sync that fails is a note. `question.json` too is read only
+when it is a regular file, and at most QUESTION_MAX bytes of it. A turn that ends with no report is closed idle
+after IDLE_MIN minutes with the card's `ask` (`fix`, `review_idle`), which holds the auto-start back as well; when
+another ask is open then, the line's note says so, and a later `check` raises the idle ask once the card has none
+(`paused`, `closed: idle`). Its floor is read-only: no Edit or NotebookEdit, no GitHub or git write commands
+(`roles.READ_ONLY_BASH_DENIED`), no `ap2` command the review does not run (`roles.READ_ONLY_AP2_DENIED`, best
+effort), and a Write hook (`ap2 hook-write`, `write_guard`) allows a Write only to its report or `question.json` in
+the card's run directory; a path it cannot resolve, and any error in the hook, is denied.
 
 Starting (or resuming) a session can make branches and PRs, so it needs live mode; listing, classifying, ending
 and archiving work in shadow mode. v1 is reused by import (`lib/autopilot/workers.py`, `sessions.py`,
@@ -100,7 +101,7 @@ from autopilot import perms as v1_perms
 from autopilot import sessions as v1_sessions
 from autopilot import workers as v1_workers
 
-from assistant import apistop, cap, cards, config, keys, prreview, profiles, projects, roles, spend, templates
+from assistant import apistop, cap, cards, config, keys, prreview, profiles, projects, roles, sources, spend, templates
 from assistant import transcripts
 from assistant.cards import CardError
 from assistant.resources import MAX_WORKERS, PORT_BASE, Registry, WorkerError, check_start, next_ports
@@ -121,6 +122,7 @@ REVIEW_COMMAND = "/autopilot:pr-review "  # then the card id and the stage, the 
 APPLY_FAILED = "review_apply_failed"  # the `reason` of the ask a pr-review report that could not be applied raises
 REVIEW_IDLE = "review_idle"  # the `reason` of the ask a pr-review worker closed idle with no report raises
 REVIEW_DIR = "ap2-pr-review-"  # the prefix of the empty folder an auto-started pr-review worker runs in
+QUESTION_MAX = 64 * 1024  # the most of question.json `check` reads (under the worker list's lock)
 SHADOW_REVIEW = "shadow mode starts no worker; this card waits for its review in live mode"
 WRITE_DENIED = ("a read-only v2 worker writes only its result file or question.json, at the top of its own run "
                 "directory (AP2_RUN_DIR)")
@@ -276,11 +278,12 @@ def floor(role: str, project: dict, data: Path, env: dict, profile: Optional[dic
         {"matcher": "*", "hooks": [{"type": "command", "command": f"\"{ap2}\" hook-park", "timeout": 5}]},
         {"matcher": "Bash", "hooks": [{"type": "command", "command": f"\"{ap2}\" hook-guard", "timeout": 5}]}]}
     if role in roles.ROLES and roles.ROLES[role].floor == "read-only":
-        # The read-only floor (roles.FLOORS): no Edit or NotebookEdit at all, no GitHub or git write command, and
-        # its one write, the result file (or its question), in its run directory only. A deny rule cannot leave one
-        # file open (deny wins over allow), so a Write hook (`ap2 hook-write`, `write_guard`) refuses every other
-        # Write.
+        # The read-only floor (roles.FLOORS): no Edit or NotebookEdit at all, no GitHub or git write command, no
+        # `ap2` command a review does not run (in both spellings, best effort), and its one write, the result file
+        # (or its question), in its run directory only. A deny rule cannot leave one file open (deny wins over
+        # allow), so a Write hook (`ap2 hook-write`, `write_guard`) refuses every other Write.
         deny += list(roles.READ_ONLY_DENIED) + list(roles.READ_ONLY_BASH_DENIED)
+        deny += [f"Bash({cmd} {verb}:*)" for verb in roles.READ_ONLY_AP2_DENIED for cmd in ("ap2", ap2)]
         hooks["PreToolUse"].append(
             {"matcher": "Write", "hooks": [{"type": "command", "command": f"\"{ap2}\" hook-write", "timeout": 5}]})
     out = {"permissions": {"deny": deny, "allow": allow}, "env": dict(env), "hooks": hooks}
@@ -1241,16 +1244,14 @@ class Workers:
             return 0.0
 
     def _read_question(self, card_id: str):
-        """The question's text. Only a regular file is read: opened without following a link and without waiting
-        (a FIFO the worker put there would hold the worker list's lock forever), so anything else reads as none."""
-        q = None
+        """The question's text. Only a regular file is read (`sources.read_regular_capped`: opened without following
+        a link and without waiting, as a FIFO the worker put there would hold the worker list's lock forever), and
+        at most QUESTION_MAX bytes of it (a huge file would be read whole into memory under that lock), so anything
+        else reads as none."""
         try:
-            fd = os.open(self.run_dir(card_id) / QUESTION,
-                         os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
-            with os.fdopen(fd, "rb") as f:
-                if stat.S_ISREG(os.fstat(f.fileno()).st_mode):
-                    q = json.loads(f.read().decode("utf-8"))
-        except (OSError, ValueError):
+            q = json.loads(sources.read_regular_capped(self.run_dir(card_id) / QUESTION, QUESTION_MAX,
+                                                       "too large").decode("utf-8"))
+        except (OSError, ValueError, sources.SourceError):
             q = None
         text = q.get("text") if isinstance(q, dict) else q
         return text if text else "The worker asked a question but its question.json could not be read."
@@ -1588,25 +1589,33 @@ class Workers:
     def _review_due(self, rec: dict, records: list, mark: dict, entry: dict, reviews: Optional[list],
                     by: str) -> None:
         """A pr-review worker's done close went through (its record left the list). Still under the worker list's
-        lock, so no other check sees the card closed with its review not yet on it (and starts a second one): the
-        empty folder it ran in is removed (`_drop_round_dir`) and its report applied (`_review_apply`). An applied
-        one goes on `reviews`, for `check` to sync once the lock is free."""
+        lock, so no other check sees the card closed with its review not yet on it (and starts a second one): its
+        report is applied (`_review_apply`), then the empty folder it ran in is removed (`_drop_round_dir`, after
+        the apply, so nothing the worker did to its folder keeps the report off the card). An applied one goes on
+        `reviews`, for `check` to sync once the lock is free."""
         if (reviews is None or rec["role"] != REVIEW_ROLE or mark.get("path") != "done"
                 or any(r is rec for r in records)):
             return
-        self._drop_round_dir(rec.get("cwd"))
-        if self._review_apply(entry, by):
-            reviews.append(entry)
+        try:
+            if self._review_apply(entry, by):
+                reviews.append(entry)
+        finally:
+            self._drop_round_dir(rec.get("cwd"))
 
     @staticmethod
     def _drop_round_dir(cwd) -> None:
         """Remove the folder a done pr-review round ran in when `_start_reviews` made it (directly in the temp
-        folder, its name starting with REVIEW_DIR) and it is empty (`os.rmdir` removes only an empty one)."""
+        folder, its name starting with REVIEW_DIR) and it is empty (`os.rmdir` removes only an empty one). No link
+        is followed for the folder itself: it must be a folder (`lstat`), so a link the worker put in its place (to
+        itself, or to another round's folder) is left alone; only its parent is resolved (macOS's /var is a link to
+        /private/var). It never raises."""
         try:
-            home = Path(cwd).resolve()
-            if home.parent == Path(tempfile.gettempdir()).resolve() and home.name.startswith(REVIEW_DIR):
-                os.rmdir(home)
-        except (OSError, TypeError, ValueError):
+            path = os.path.abspath(os.fspath(cwd))
+            if (stat.S_ISDIR(os.lstat(path).st_mode)
+                    and os.path.realpath(os.path.dirname(path)) == os.path.realpath(tempfile.gettempdir())
+                    and os.path.basename(path).startswith(REVIEW_DIR)):
+                os.rmdir(path)
+        except Exception:  # noqa: BLE001 - a folder left behind never fails the pass
             pass
 
     @staticmethod

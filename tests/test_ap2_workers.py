@@ -3,6 +3,7 @@ end / dead / parked, no process waiting for a human, transcripts and shadow mode
 (`tests/bin/fake-claude-v2`) against temp folders and an injected clock; nothing reaches the real ~/.claude."""
 from __future__ import annotations
 
+import argparse
 import contextlib
 import errno
 import gzip
@@ -3451,6 +3452,21 @@ class InvisibleAnswerTest(WorkerCase):
 REVIEW_LIVE = Config(mode="live", secondary_language="zh")
 
 
+def _ap2_commands() -> list:
+    """Every `ap2` command and subcommand, as words ("card", "card show", ...), from the CLI's own parser."""
+    out = []
+
+    def walk(parser, words):
+        for action in parser._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                for name, sub in action.choices.items():
+                    out.append(" ".join(words + [name]))
+                    walk(sub, words + [name])
+
+    walk(cli._parser(), [])
+    return out
+
+
 class PrReviewCase(WorkerCase):
     """A pr-review card made the way a source makes it (the recorded GitHub review request), the recorded gh replies
     of tests/test_ap2_prreview.py, and the fake claude."""
@@ -3602,6 +3618,32 @@ class PrReviewRoleTest(PrReviewCase):
                 self.assertIn(rule, roles.READ_ONLY_BASH_DENIED)
                 self.assertIn(rule, ro["permissions"]["deny"])
                 self.assertNotIn(rule, base["permissions"]["deny"])
+
+    def test_the_floor_denies_the_ap2_commands_a_review_does_not_run(self):
+        env = {"AP2_RUN_DIR": str(transcripts.run_dir(self.data, "c-20260105-090000-abcdef"))}
+        base = workers_mod.floor("implement", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+        ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+        ap2 = ROOT / "bin" / "ap2"
+        for verb in ("cap", "worker start", "worker end", "worker answer", "worker finish", "worker list",
+                     "review apply", "review sync", "card add", "card list", "restore", "profile", "source", "gate",
+                     "config"):
+            for rule in (f"Bash(ap2 {verb}:*)", f"Bash({ap2} {verb}:*)"):
+                with self.subTest(rule=rule):
+                    self.assertIn(rule, ro)
+                    self.assertNotIn(rule, base)
+        # What the review command runs, and the park: never denied (deny wins over the park's allow).
+        for verb in ("card", "card show", "review", "review plan", "review verdict", "review check", "worker",
+                     "worker park", "hook-park", "hook-guard", "hook-write"):
+            for rule in (f"Bash(ap2 {verb}:*)", f"Bash({ap2} {verb}:*)"):
+                with self.subTest(rule=rule):
+                    self.assertNotIn(rule, ro)
+        # Every command `ap2` has is either denied or one the review runs.
+        kept = {"card show", "review plan", "review verdict", "review check", "worker park", "hook-park",
+                "hook-guard", "hook-write"}
+        for verb in _ap2_commands():
+            with self.subTest(verb=verb):
+                covered = any(verb == d or verb.startswith(d + " ") for d in roles.READ_ONLY_AP2_DENIED)
+                self.assertTrue(covered or verb in kept or any(k.startswith(verb + " ") for k in kept), verb)
 
     def test_a_write_outside_the_run_directory_is_denied(self):
         run = transcripts.run_dir(self.data, "c-20260105-090000-abcdef")
@@ -4163,6 +4205,30 @@ class PrReviewDonePathTest(PrReviewCase):
         self.assertEqual(self.get(cid)["ask"]["text"],
                          "The worker asked a question but its question.json could not be read.")
 
+    def assert_too_large_question_not_read(self, size):
+        cid = self.started()
+        q = transcripts.run_dir(self.data, cid) / "question.json"
+        body = json.dumps({"text": "Which base branch?"}).encode()
+        if size <= 1 << 20:
+            q.write_bytes(body + b" " * (size - len(body)))  # valid JSON, only too long
+        else:
+            q.write_bytes(body)
+            os.truncate(q, size)  # sparse: no disk used, but a whole read takes `size` bytes of memory
+        with mock.patch.object(workers_mod.sources, "read_regular_capped",
+                               wraps=workers_mod.sources.read_regular_capped) as read:
+            out = self.check_in_a_thread(q)
+        self.assertEqual([(e["card"], e["did"]) for e in out], [(cid, "asked")])
+        self.assertEqual(self.get(cid)["ask"]["text"],
+                         "The worker asked a question but its question.json could not be read.")
+        self.assertEqual([c.args[1] for c in read.call_args_list], [workers_mod.QUESTION_MAX])
+        self.assertEqual(resources.Registry(self.data).read(), [])  # closed as a question
+
+    def test_a_question_file_one_byte_over_its_cap_is_not_read(self):
+        self.assert_too_large_question_not_read(workers_mod.QUESTION_MAX + 1)
+
+    def test_a_huge_sparse_question_file_is_not_read(self):
+        self.assert_too_large_question_not_read(1 << 30)
+
     def test_an_end_by_hand_holds_the_card_until_a_start_by_hand(self):
         cid = self.started()
         self.the_worker_reviews(cid)
@@ -4229,6 +4295,34 @@ class PrReviewDonePathTest(PrReviewCase):
         self.assertEqual(self.workers().check()[0]["did"], "ended")
         self.assertEqual((home / "notes.md").read_text(), "kept")
 
+    def test_a_done_round_whose_folder_is_a_link_to_itself_is_still_applied(self):
+        cid = self.started()
+        home = Path(resources.Registry(self.data).read()[0]["cwd"])
+        self.the_worker_reviews(cid)
+        self.view("open_head_a")
+        home.rmdir()
+        os.symlink(home.name, home)  # the worker swapped its folder for a link to itself: resolving it loops
+        out = self.workers().check()
+        self.assertEqual([(e["card"], e["did"], e.get("verdict")) for e in out], [(cid, "ended", "changes")])
+        self.assertNotIn("error", out[0])
+        self.assertEqual(self.get(cid)["pr"]["reviewed_sha"], prr.A)
+        self.assertTrue(home.is_symlink())  # left alone
+        self.assertEqual(self.workers().check(), [])  # reviewed at its head: no second, paid review
+        self.assertEqual(len(self.review_starts()), 1)
+
+    def test_a_done_round_whose_folder_is_a_link_keeps_the_folder_it_points_at(self):
+        cid = self.started()
+        home = Path(resources.Registry(self.data).read()[0]["cwd"])
+        other = self.scratch / "ap2-pr-review-other"  # another round's empty folder
+        other.mkdir()
+        self.the_worker_reviews(cid)
+        self.view("open_head_a")
+        home.rmdir()
+        home.symlink_to(other)
+        self.assertEqual(self.workers().check()[0]["did"], "ended")
+        self.assertTrue(other.is_dir())
+        self.assertTrue(home.is_symlink())
+
     def round_by_hand_in(self, home: Path) -> None:
         """A pr-review worker started by hand in `home`, then its done round."""
         cid = self.review_card()
@@ -4293,6 +4387,19 @@ class PrReviewDonePathTest(PrReviewCase):
         self.assertIn(f"ap2 worker start {cid} pr-review --resume", ask["text"])
         self.assertEqual(self.workers().check(), [])  # asked once; nothing starts
         self.assertEqual(len(self.review_starts()), 1)
+
+    def test_an_idle_close_behind_the_users_ask_is_not_asked_once_the_card_is_done(self):
+        cid = self.started()
+        rec = resources.Registry(self.data).read()[0]
+        self.set_agent(rec["short_id"], state="done", status="idle")  # no report
+        self.assertEqual(self.workers().check()[0]["did"], "nothing")
+        store = Store(self.data, self.cfg, self.clock)
+        store.update(cid, {"ask": {"type": "confirm", "text": "Mine"}}, by="test")  # the user's own ask
+        self.clock.advance(workers_mod.IDLE_MIN)
+        self.assertEqual([e["did"] for e in self.workers().check()], ["paused"])
+        store.update(cid, {"lane": "done", "ask": None}, by="test")  # the user closes the card and its ask
+        self.assertEqual(self.workers().check(), [])
+        self.assertIsNone(self.get(cid).get("ask"))
 
     def assert_kept_as_a_draft(self, cid, out):
         """The worker is parked and on record; its report was neither applied nor turned into an ask."""

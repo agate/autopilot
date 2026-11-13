@@ -24,7 +24,8 @@ FLOORS = MappingProxyType({
               "changing a template or a source asks first (design 3.6); the worker sessions (slice 6) add these "
               "as Edit and Write deny rules.",
     "read-only": "the worker floor, and no Edit or NotebookEdit: the role reads and runs commands that change "
-                 "nothing, and the GitHub and git write commands (READ_ONLY_BASH_DENIED) are denied by rule. Its "
+                 "nothing, and the GitHub and git write commands (READ_ONLY_BASH_DENIED) and the ap2 commands a "
+                 "review does not run (READ_ONLY_AP2_DENIED) are denied by rule, best effort. Its "
                  "one write is its result file: Write only there, which the worker sessions (slice 6) "
                  "add as a deny rule for every other path. A role without Write (reviewer-angle) returns its "
                  "findings to the loop that started it.",
@@ -38,6 +39,15 @@ READ_ONLY_DENIED = ("Edit", "NotebookEdit")
 READ_ONLY_BASH_DENIED = ("Bash(gh pr merge:*)", "Bash(gh pr close:*)", "Bash(gh pr reopen:*)", "Bash(gh pr ready:*)",
                          "Bash(gh pr edit:*)", "Bash(gh pr create:*)", "Bash(gh release:*)", "Bash(git push:*)",
                          "Bash(git commit:*)")
+# The `ap2` commands a read-only role never runs: the Bash guard lets `ap2` itself write the data folder, so every
+# command but the ones the pr-review command runs (`card show`, `review plan`, `review verdict`, `review check`) and
+# the park (`worker park`, allowed by rule; deny would win over that allow) is denied, at the finest level a prefix
+# rule allows. The hooks (`hook-*`) are left alone. `workers.floor` writes each in two spellings: `ap2 <command>` and
+# `<package>/bin/ap2 <command>`. Best effort: they match the command's text, as v1's rules do.
+READ_ONLY_AP2_DENIED = ("config", "search", "restore", "source", "scan", "gate", "template", "profile", "spend", "cap",
+                        "serve", "phone", "import-v1", "card add", "card list", "review apply", "review sync",
+                        "worker list", "worker start", "worker end", "worker check", "worker answer",
+                        "worker finish")
 
 
 @dataclass(frozen=True)

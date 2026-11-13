@@ -730,8 +730,12 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   `AP2_RUN_DIR` still names it: the report goes there by its absolute path (`plan` prints it). A resume (`--resume`
   or in place) keeps the folder on record; when it is gone, the resume says the worker's folder is gone. A refused
   start removes its folder again, unless a record points at it (the start failed after the record was written). A
-  done close removes the folder too, when it is still empty and is one of these (directly in the temp folder, its
-  name starting `ap2-pr-review-`); a folder with files in it is kept. Each start is a line `{card, role: "pr-review", state: "due", did: "started"}`; a start the cap, the key,
+  done close removes the folder too, after the report is applied, when it is still empty and is one of these
+  (directly in the temp folder, its name starting `ap2-pr-review-`); a folder with files in it is kept. The path
+  itself must be a folder (`os.lstat`), so a link the worker put in its place (one that points at itself, which
+  `Path.resolve` cannot resolve, or one that points at another round's empty folder) is left alone, and the removal
+  never raises: nothing the worker does to its folder keeps the report off the card (with no `reviewed_sha` the next
+  `check` would start a new, paid review). Each start is a line `{card, role: "pr-review", state: "due", did: "started"}`; a start the cap, the key,
   a pause, `max_workers` or the profile refuses is the same line with `did: "nothing"` and a `note`, and the later
   cards still get their try. Shadow mode starts none: each due card's line says so. The start lives in `check`, not
   the gate, because the gate starts no process (`gate.py`).
@@ -767,22 +771,34 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   stopped between the close and the apply (Ctrl-C, a killed process) leaves the report unapplied
   and the session `ended` (`closed: done`) with no `reviewed_sha`, so the next `check` starts a whole new review: a
   worker run is lost, nothing on the card is. The same holds for `question.json`: `check` reads it only when it is a
-  regular file, opened without following a link and without waiting (else the question reads as "could not be
-  read"), since that read runs under the worker list's lock. The Write hook denies a path it cannot resolve (a NUL
+  regular file, opened without following a link and without waiting, and at most 64 KiB of it
+  (`workers.QUESTION_MAX`, with `sources.read_regular_capped`; else the question reads as "could not be read"),
+  since that read runs under the worker list's lock: a FIFO would hold the lock forever, and a huge (even sparse)
+  file would be read whole into memory under it. The Write hook denies a path it cannot resolve (a NUL
   or a lone surrogate in it), and any error in the hook is a deny for a v2 worker, not silence.
 - **[decided by the builder]** The read-only floor (`roles.FLOORS["read-only"]`). The `pr-review` settings add
   `Edit` and `NotebookEdit` as deny rules (`roles.READ_ONLY_DENIED`) to the worker floor, the GitHub and git write
   commands as Bash deny rules in v1's rule shape (`roles.READ_ONLY_BASH_DENIED`: `gh pr merge`, `gh pr close`,
   `gh pr reopen`, `gh pr ready`, `gh pr edit`, `gh pr create`, `gh release`, `git push`, `git commit`, each as
-  `Bash(<command>:*)`), because the session holds the user's gh and git logins, and a third PreToolUse hook,
+  `Bash(<command>:*)`), because the session holds the user's gh and git logins, every `ap2` command the review
+  does not run (`roles.READ_ONLY_AP2_DENIED`) as Bash deny rules in the same shape, and a third PreToolUse hook,
   `{"matcher": "Write", ...: "\"<package>/bin/ap2\" hook-write"}` (`workers.write_guard`). The hook is an
   allow-list: a Write passes only when its path (links followed) sits directly in the card's run directory
   (`AP2_RUN_DIR`) and its name, in any case, is the role's result file (`prreview.json` for `pr-review`) or
   `question.json`. Every other Write is denied: a settings file in any case (`SETTINGS-pr-review.json` is the same
   file on a case-insensitive disk), `.claude/settings.json`, `.mcp.json`, `CLAUDE.md`, a subfolder. No run
   directory, or a path that is not absolute, is denied too. A deny rule cannot do this: deny wins over allow, so no
-  rule leaves one file open. Not in the floor yet: `gh api` with a field or a method (`-f`, `--input`, `-X`), and a
-  sandbox. The hook runs through `cli.main` (not `bin/ap2`'s
+  rule leaves one file open. The `ap2` rules are there because the Bash guard lets `ap2` itself write the data
+  folder: without them an injected review session could run `ap2 cap resume`, `ap2 worker start <card> implement`,
+  `ap2 card add` or `ap2 restore`. Denied, at the finest level a prefix rule allows, is every command but what the
+  pr-review command runs (`card show`, `review plan`, `review verdict`, `review check`) and the park (`worker park`,
+  which the floor allows by rule; deny wins over allow, so it is not denied); the `hook-*` commands are left alone:
+  `review apply`, `review sync`, every `card` and `worker` command but those two, and every other command
+  (`config`, `search`, `restore`, `source`, `scan`, `gate`, `template`, `profile`, `spend`, `cap`, `serve`, `phone`,
+  `import-v1`). Each is written in two spellings, `Bash(ap2 <command>:*)` and `Bash(<package>/bin/ap2
+  <command>:*)` (`workers.floor`). They are best effort: they match the command's text, so a spelling such as
+  `"$(echo ap2)" cap` gets past them; full enforcement is the deferred sandbox follow-up. Not in the floor yet:
+  `gh api` with a field or a method (`-f`, `--input`, `-X`), and a sandbox. The hook runs through `cli.main` (not `bin/ap2`'s
   fast path), so it loads more than the Bash guard does; the role writes one file a round.
 - **[decided by the builder]** A session archive's name starts with its role in lowercase letters only
   (`transcripts.ROLE`), so a `pr-review` session is archived as `prreview-<session id>.jsonl.gz`.
