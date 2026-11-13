@@ -101,15 +101,36 @@ Built by v1, in this order, so that v2 can run its own project:
 
 Built by v2 itself, after the user moves the `v2` project onto v2:
 
-5. **Every v1 record.** For every v1 project, read-only and searchable on the page: settled cards with the user's
-   answers, every run folder (briefs, `handback.json`, `evidence.json`, `review.json`, `prloop.json`,
-   `journal.md`, media), specs, reports, events and the archive, and the RULES.md lines (v1's global and each
-   project's). Access profiles carry over as v2 profiles. v1's folder is only read.
+5. **Every v1 record, all of it local.** For every v1 project, read-only and searchable on the page: settled cards
+   with the user's answers, every run folder (briefs, `handback.json`, `evidence.json`, `review.json`,
+   `prloop.json`, `journal.md`, media), specs, reports, events and the archive, and the RULES.md lines (v1's global
+   and each project's). Access profiles carry over as v2 profiles. v1's folder is only read. Then fetch, once, what
+   these records only link to, and save it as files under the card (see "Local copies"): each PR, each Jira
+   ticket a task came from, the answers and messages stored on v1's claude.ai page, and the workers' session
+   transcripts. From then on, v2 saves the same local copy when a card's work finishes.
 6. **Phone page publishing.** Publish the phone page to claude.ai in live mode (design 9.2, the later work in
    section 12), and read answers from it as v1 does (design 8.3).
 7. **Secretary import.** Secretary's watches (`watches.json`) become v2 watches on the built-in sources, its open
    items and PR review cards become cards, its labels and work hours carry over. `~/.claude/secretary-data` is only
-   read. Never-send stays: v2 drafts Slack replies and never posts them.
+   read. Each item's Slack thread and PR are saved as local copies too. Never-send stays: v2 drafts Slack replies
+   and never posts them.
+
+### Local copies
+
+Every record v2 holds must open with no network. A link to GitHub, Jira, Slack or claude.ai is kept as a link, but
+it is never the only copy of what it shows:
+
+- A PR: its title, description, commits, diff, every comment, review and review thread, each check's result, the
+  log of every failed job, and every image those texts embed (downloaded, with each link rewritten to the file).
+  GitHub deletes Actions logs after about 90 days, so these are fetched first.
+- A Jira ticket: its fields, description and comments, and its attachments.
+- A Slack thread: every message in it, with names and times.
+- A claude.ai page: the answers and messages stored on it.
+- A worker's session: its transcript (`keep_transcripts`, design 3.5).
+
+Fetching reads only (`gh`, the Jira and Slack readers v2 already has, the page's own read). It runs in shadow mode
+too, since it writes nothing outside the data folder. A record that cannot be fetched (deleted, no access) gets a
+note saying what was missing and why, and is fetched again on the next run.
 
 ### Switch-over steps
 
