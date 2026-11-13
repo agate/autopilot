@@ -995,7 +995,9 @@ archived with the card.
 
 - v1 stays on `main` and keeps running. v2 is built on `v2`.
 - **[proposed, author's call]** v2 can run next to v1 on the same Mac: it has its own plugin name, launchd label,
-  command name and data folder, so nothing is shared by accident.
+  command name and data folder, so nothing is shared by accident. **[decided by the builder]** v2's launchd label
+  is `com.assistant.gate` (v1's is `com.autopilot.gate`, secretary's `com.secretary.gate`); `ap2 install` writes
+  it (section 12, "Install").
 - **Shadow mode first [decided]**: until the user switches it to live, v2 reads every source and makes cards but
   writes nothing outside its data folder (no Jira moves, no branches, no PRs, no published page other than its
   own). v1 and secretary keep doing the real work meanwhile. Shadow mode is a setting (`mode: shadow | live`), and
@@ -1102,7 +1104,9 @@ Calls the author made without asking (check them):
   usage by mode, read only; see the "Access on the pages" entry below); the local page:
   `server.py` (the server, its JSON routes and the request guard, run by `ap2 serve`) and
   `builtin/page/local.html` (the one page, inline CSS and JS, found from `server.py`'s own path); and the
-  phone page's data: `phone.py` (`build`, run by `ap2 phone build`). `ap2 config [--data PATH]` prints the
+  phone page's data: `phone.py` (`build`, run by `ap2 phone build`); the launchd job: `install.py` (the label,
+  the paths, the plist, `ap2 install` and `ap2 uninstall`, the launchctl runner) and `doctor.py` (`ap2 doctor`'s
+  checks and printout; see the "Install" entry below). `ap2 config [--data PATH]` prints the
   effective config and `data_dir` as JSON. With stdout
   closed, `ap2 config` sets up the folder, prints nothing and exits 0; when its reader goes away
   (`ap2 config | true`) it exits 1 with nothing on stderr; when a write fails (a full disk) it prints one line,
@@ -1558,8 +1562,8 @@ Calls the author made without asking (check them):
     daylight saving time runs no slot twice; the clock-went-back check compares that moment too.
   - A fatal error. When a run stops with a config error (config.yaml cannot be read, the lock cannot be opened, the
     data folder fails) and the data folder exists, `gate.run` appends `<UTC time> fatal: <error>` to gate.log, best
-    effort, then raises the same error; `ap2 gate` still prints one `ap2: ...` line and exits 1. Keeping launchd's
-    own stderr belongs to the slice that installs the launchd job.
+    effort, then raises the same error; `ap2 gate` still prints one `ap2: ...` line and exits 1. launchd's own
+    stderr goes to `<data>/gate.err.log` (section 12, "Install").
   - `ap2 gate [--data PATH] [--now ISO]` runs once and prints the run as JSON. `--now` needs a zone (`Z` or an
     offset); a time without one is an argument error (exit 2). `--now` may not be later than the real time plus
     the 5-minute grace, also an argument error: a run writes `last_slot`, makes cards and prunes restore points,
@@ -1567,7 +1571,8 @@ Calls the author made without asking (check them):
     days old. A
     year before 1971 (or a time too far out to turn into UTC) is an argument error too. A bad routine or watch is
     in `errors` and still exits 0 (launchd runs it again in a minute); a bad `config.yaml` or data folder is one
-    `ap2: ...` line and exit 1. Nothing is installed: no launchd job is written in this slice.
+    `ap2: ...` line and exit 1. This slice installs nothing; the launchd job is written by `ap2 install`
+    (section 12, "Install").
 - **[decided by the builder]** Templates and roles (design 4.2, 6).
   - Built-in templates live in `lib/assistant/builtin/templates/<kind>.yaml` (the plugin's folder, found from
     `templates.py`'s own path; not the repo's `templates/`, which holds v1's page labels). v2 ships `question`,
@@ -3458,6 +3463,48 @@ Calls the author made without asking (check them):
     exits 1 after the report.
   - Writes only inside the data folder, so it runs in shadow mode (no `require_live`). Not imported:
     `events.jsonl`, reports, run folders, and `<data>/projects/<name>.yaml` (not written from `config.json`).
+- **[decided by the builder]** Install (phase 2 slice 3), in `install.py` and `doctor.py`. Only the user runs these
+  commands; a worker never does, and no test runs the real `launchctl` (every call goes through a runner the
+  caller passes in, and every path is worked out at call time from the home folder, so a temp home moves them all).
+  - `ap2 install [--data PATH]` sets up the data folder with `datadir.ensure` (a new `config.yaml` says
+    `mode: shadow`; an existing one is never rewritten, and install never changes the mode) and refuses a
+    `config.yaml` the gate cannot read before the launcher or the plist is written (the data folder layout is set
+    up first). It finds `claude`, `gh`, `git` and `python3` on the current PATH, builds v1's C launcher
+    (`autopilot.install.build_launcher`, unchanged) for `bin/ap2` (a launcher that cannot be built, such as a file
+    where its folder goes, is one `ap2: cannot build the launcher at ...` line and exit 1, with no plist written and
+    no launchctl call), writes the plist through a temp file, then runs `launchctl bootout gui/<uid>/com.assistant.gate`
+    (its result ignored) and `launchctl bootstrap gui/<uid> <plist>`. A failed bootstrap is one
+    `ap2: launchctl bootstrap failed: ...` line and exit 1. It prints `{label, plist, program, interval, data_dir,
+    mode, tools, note}` as JSON. Install writes only on this Mac, never Jira, Slack or GitHub, so it does not call
+    `require_live`. A second install gives the same plist and the same calls.
+  - `ap2 uninstall` runs `launchctl bootout gui/<uid>/com.assistant.gate` only, removes the plist and the launcher (a
+    missing one is fine) and prints `{label, removed}`. The data folder is kept.
+  - The label is `com.assistant.gate`, never v1's `com.autopilot.gate` or secretary's `com.secretary.gate`: it
+    matches the package (`lib/assistant/`) and the data folder (`~/Documents/Assistant`). The plist is
+    `~/Library/LaunchAgents/com.assistant.gate.plist`; the launcher is
+    `~/Library/Application Support/assistant/assistant-gate`, outside any synced folder, since macOS refuses a login
+    item whose program sits in a cloud-synced folder. Reverse: `ap2 uninstall`, change `LABEL`, `ap2 install`.
+  - Plist keys: `Label`, `ProgramArguments` (`[launcher]`, or `[bin/ap2, gate]` when no C compiler works; the output's
+    `note` then says why that can fail in a cloud-synced folder), `StartInterval: 60`, `RunAtLoad: true`,
+    `EnvironmentVariables` (`PATH`: the found tools' folders, then v1's system folders, each once; `AP2_DATA`: the
+    resolved data folder; no `AUTOPILOT_DATA`), `StandardOutPath: /dev/null` and `StandardErrorPath:
+    <data>/gate.err.log`. stdout is dropped because each run is already in `gate.json` and `gate.log`, and the run's
+    JSON in `gate.log` would add lines without a time (7.4); stderr keeps Python errors and the `ap2: ...` line.
+    Reverse: point stdout at a file.
+  - The plist is v2's only install setting: no `install.json` and no `config.yaml` key (the interval is fixed at 60,
+    7.1). Doctor reads the plist back.
+  - `ap2 doctor [--data PATH]` is read-only (`datadir.resolve`, never `ensure`: a missing data folder stays missing).
+    It prints v1's lines, `ok   <name>: <detail>` or `FAIL <name>: <detail>` then `     fix: ...`, and exits 1 when a
+    check fails, 0 otherwise. A check that breaks is a failed line, never a traceback. The checks: `launchd job` (the
+    plist reads, its `Label` is v2's, `launchctl print gui/<uid>/com.assistant.gate` exits 0, its `AP2_DATA` is this
+    data folder; fix: `ap2 install` with the same `--data`; `launchctl print` runs only when the plist reads and names
+    v2's label), `gate ran recently` (`gate.json` `last_run_at` under 3 minutes old, 7.4; fix: look at `gate.log` and
+    `gate.err.log`), `data folder` (accepted by the lookup, there, a folder, writable, `config.yaml` reads),
+    `tool claude`, `tool gh`, `tool git`, `tool python3` (found on the PATH written in the plist, the one launchd
+    gives the job; on the current PATH, said so, when there is no plist; `clang` is not checked, since only install
+    needs it and it has a fallback), `active profile` (`profiles.active` loads; no key or models command runs; fix:
+    `profiles.FIX`) and `mode` (`shadow` or `live`, reported, not judged: it fails only when `config.yaml` cannot be
+    read).
 - How the local server pushes updates to an open page (polling is fine).
   - **[decided by the builder]** Polling: the page asks `/api/state` every 10 seconds and redraws the top bar,
     the rail and the open list, so the heartbeat and new cards show without a reload.
