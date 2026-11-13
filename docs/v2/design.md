@@ -1880,7 +1880,11 @@ Calls the author made without asking (check them):
     removed; looked for in the segment as written and in its words with quotes and backslashes removed, as the shell
     removes them before it runs a word, so `c\p`, `c''p`, `c\<newline>p` and `sed '-i'` are `cp` and `sed -i`, and
     again with each `$NAME` taken out first: it may expand to nothing, and its name runs on into the next quoted
-    text, so `$x'c'p` and `$x$'\x63p'` (words `$xcp`) are `cp` too, found by the shell differential; and
+    text, so `$x'c'p` and `$x$'\x63p'` (words `$xcp`) are `cp` too, found by the shell differential; again
+    with each backslash escape that `printf` or `echo` print as a blank or a line break (`\n`, `\t`, `\v`, `\f`,
+    `\012`, `\0012`, `\x0a`, `\u000a`, ...) read as a blank, so the verb after one is a word of its own to the shell
+    that reads the printed text (`printf 'echo hi\nrm <data>/x\n' | sh`, `printf 'all:\n\trm <data>/x\n' | make -f
+    -`, zsh's `echo 'echo hi\nrm <data>/x' | sh`, `sh <(printf 'true\nrm <data>/x')` are denied); and
     v1's `sed -x ... -i` widened to an in-place flag anywhere after the `sed` in its segment, `-i`, a cluster with an
     `i` or `I` such as `-ni` or `-i.bak`, or `--in-place`, so `sed -e 's/a/b/' -i '' <data>/x` is one too,
     fail-closed: a quoted word that only looks like such a flag counts). It is best effort: it reads the command text, so a path built at run time (a variable, `$(...)`, a
@@ -2278,8 +2282,11 @@ Calls the author made without asking (check them):
       -5`), `exec < "$(echo <data>/list)"; xargs rm`, and a later shell that reads its input (`exec < <(sed 's/^/rm
       /' <<< <data>/x); sh`, judged as a shell below) are denied; `exec < $AP2_RUN_DIR/list; xargs rm`, `exec 3<
       <data>/items/C1.yaml; read -r -u 3 first; exec 3<&-; find $AP2_RUN_DIR/tmp -name '*.tmp' | xargs rm -f` and
-      `exec 4< <pkg>/README.md; git ls-files | xargs touch` are allowed. What a segment sends on
-      also holds its
+      `exec 4< <pkg>/README.md; git ls-files | xargs touch` are allowed. What a stage reads from that input is
+      also in what it sends on, made at run time (`exec 3< <(ls -d <data>/x); cat <&3 | xargs rm`, `exec 3< <(ls
+      -d <data>/x); sed 's/^/rm /' <&3 | sh`, `exec < <(ls -d <data>/x); sed 's/^/rm /' | sh` are denied; `exec 3<
+      <(ls <data>/items); find $AP2_RUN_DIR/tmp -name '*.tmp' | xargs rm -f`, which never reads fd 3, is allowed).
+      What a segment sends on also holds its
       command substitutions' output and every segment of a compound that ends in it: a `{ ...; }` group, a `for`,
       `while`, `until` or `select` loop to its `done`, an `if` to its `fi`, a `case` to its `esac`, and a `(...)`
       (so `{ ls <data>/items; } | xargs touch`, `for f in <data>/items/*; do echo $f; done | xargs touch`, `(ls
@@ -2352,12 +2359,24 @@ Calls the author made without asking (check them):
       printer or `cat` is itself the stage piped straight into the shell, outside any group, loop or `(...)` (in one
       its words can join another command's output: `{ printf 'rm '; echo <data>/x; } | sh`, `for f in
       <data>/items/*; do echo "rm $f"; done | sh`); the shell is `sh`, `bash`, `zsh`, `ksh` or `dash`, not `csh` or
-      `tcsh`, whose script the guard does not read as its own; and its text (`_exact_script`) holds no `$` but
-      `$AP2_RUN_DIR`, `$AP2_DATA`, `$HOME` and their `${...}` forms, no backtick, no `%` (a `printf` format), no `cd`
-      or `pushd`, no word that binds a name (`f=<data>/x`) and no `for`, `while`, `until`, `read`, `select` or `set`
-      word, a `set` with only option flags aside (`set -Eeuo pipefail`, `set -o pipefail`): those make the script's
-      words other text at run time, which the shell's own reading does not follow (`echo 'f=<data>/x; rm $f' | sh`,
-      `cat <<'EOF' | sh` with `f=<data>/x` and `rm $f`, `echo 'cd <data>/items && rm -f x' | sh` are denied).
+      `tcsh`, whose script the guard does not read as its own (csh's `setenv HOME <data>/items; rm -f ~/x` moves
+      `~`); and its text (`_exact_script`: a printer's segment and the words it prints, or the body), once its `#`
+      comments are dropped (a `#` outside quotes at the start of a line or after a blank no backslash escapes; a
+      text with a `<<`, `((` or `[[` keeps them, fail-closed), holds no `$` but `$AP2_RUN_DIR`, `$AP2_DATA`, `$HOME`
+      and their `${...}` forms, no backtick, no `%` when the printer is `printf` (a format; a `date +%F` line in a
+      body or an `echo` is none), no word that binds a name (`f=<data>/x`, `a[i]=x`; a subscript of more than 256
+      characters counts as one, so the scan stays linear), and no `cd`, `chdir`, `pushd`, `for`, `while`, `until`,
+      `read`, `select` or `set` word where a command starts (the start, after a newline, `;`, `&`, `|`, `(`, `)`,
+      `{`, `}`, `]` or `!`, there or after a keyword or runner there such as `then`, `do`, `if`, `eval`, `command
+      -p`, `builtin`, `time`, `noglob` or `repeat N`; quotes or backslashes before it or between its letters too:
+      `'cd'`, `c''d`, `c\d`), a `set` with only option flags aside (`set -Eeuo pipefail`, `set -euo pipefail  #
+      strict mode`): those make the script's words other text at run time, which the shell's own reading does not
+      follow (`echo 'f=<data>/x; rm $f' | sh`, `cat <<'EOF' | sh` with `f=<data>/x` and `rm $f`, `echo 'cd
+      <data>/items && rm -f x' | sh`, `echo 'chdir <data>/items; rm -f x' | zsh`, `echo 'eval cd <data>/items; rm
+      -f x' | sh` are denied). A keyword in a comment or in quoted prose is none (`# wait for the build`, `echo
+      'waiting for CI, then select the next card'`), so `cat <<'EOF' | bash` with a `# Summarize the cards for the
+      journal` comment, `date +%F`, `set -euo pipefail  # strict mode` and `echo 'select the next card'` lines that
+      read the data folder and write the run directory is allowed.
       Accepted false denies: printers in a group (`{ echo 'set -e'; echo 'ls <data>/items | wc -l'; echo 'date >>
       <run>/j.md'; } | bash`), a `printf` format (`printf '%s\n' 'ls <data>/items | wc -l' 'echo ok > <run>/ok' |
       sh`), and such a script with any other `$` (`$f`, `$?`, `$1`) or a `cd`, when it names the data folder and
@@ -2446,7 +2465,11 @@ Calls the author made without asking (check them):
       of characters that only go into a word (or that `_segments` steps over) are read with one regex match. A
       shell's quoted script of 32,000 empty backticks in every reading (`sh "$$(x)" "${x:-'}" bash -c "sh -c '`` ``
       ...' <data>/y" <data>/x`) took 1.1-1.4 s and ran out of budget (a deny for its size alone); it now takes
-      under 0.1 s and is allowed, and every shape at 64 KiB takes under 0.35 s here. `_fallback`, which runs with
+      under 0.1 s and is allowed, and every shape at 64 KiB takes under 0.35 s here. A `-c` script of newlines before
+      a `$0` (`ls | xargs sh -c '<newlines>x$0'`), read from each newline over the whole run, took about 30 s at 64
+      KiB (the deadline then denied a harmless read) and a fed body of `a[` repeated, scanned to its end from each
+      `a`, 3.2 s in three readings; the positional scan now skips only blanks and tabs and a subscript scan stops
+      at 256 characters, and both take under 0.1 s. `_fallback`, which runs with
       no timer after the deadline, reads no words: it searches the JSON-unescaped text as written and with every
       quote, backslash, `$` before a quote and line continuation taken out (and again with `\xHH`-style escapes
       decoded), so a 1 MiB payload of backticks, which took 1.5 s there before (6 s wall at a load of 25, past

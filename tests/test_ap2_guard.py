@@ -1915,9 +1915,17 @@ class DecideTest(unittest.TestCase):
                     f"{{ cat <<'EOF'; echo {x}; }} | sh\n{rm} \\\nEOF", f"{{ printf 'chmod 000 '; echo {x}; }} | sh"],
                    deny=True)
         self.assertTrue(guard._exact_script("set -Eeuo pipefail\nls $AP2_DATA | wc -l > ${AP2_RUN_DIR}/n"))
-        for text in ("set -- a", "set -k", "read f", "f=a", "cd a", "echo $x", "echo `x`", "printf '%b'", "for f"):
+        for text in ("set -- a", "set -k", "read f", "f=a", "cd a", "chdir a", "pushd a", "echo $x", "echo `x`",
+                     "for f", "a[" + "b" * 300 + "]=c", "x; c''d a", "echo 'a #'\ncd a", "a \\\n# x; cd a",
+                     "'cd' a", "\\cd a", "if cd a; then :; fi", "command -p cd a", "(( 1 #)); cd a"):
             with self.subTest(text=text):
                 self.assertFalse(guard._exact_script(text))
+        # A `%` is a format only to `printf`; a `#` comment and prose words out of command position are no indirection.
+        self.assertFalse(guard._exact_script("printf '%b'", True))
+        for text in ("date +%F", "# for the journal\nls", "set -euo pipefail  # strict mode", "echo waiting for CI",
+                     "grep -h '^title:' x | sort"):
+            with self.subTest(text=text):
+                self.assertTrue(guard._exact_script(text))
         # An `exec` input: later shells read it too, a `<(a | b)` gives its whole pipeline, any later command counts.
         self.check([f"exec < <(sed 's/^/{rm} /' <<< {x}); sh",
                     f"exec < <(printf '%s\\n' a b | sed 's|^|{d}/items/|'); xargs {rm}",
@@ -1968,6 +1976,49 @@ class DecideTest(unittest.TestCase):
                     f"ls build | xargs {rm} -f; jq -r '.items[]|{{id}}' <<'EOF'\n{d}/items/a\nEOF",
                     f"ls {d}/items | tee $AP2_RUN_DIR/items.txt | ./scripts/count.sh",
                     f"find \"$AP2_RUN_DIR/$sub\" -name '*.tmp' | sed 's/^/{rm} -f /' | sh"], deny=False)
+
+    def test_finding_rows_of_the_twentieth_round_pin_their_rules(self):
+        """Rows for an escape a printer turns into a blank before a verb, what a stage reads from an `exec` input, a
+        script's comments, prose and `%` words that make no indirection, `chdir`, and rows that fail when the shell
+        basename, `zsh`, `pushd`, POSIX-shell, positional-run or `<(` rule they name is taken out."""
+        rm, x, d = "r" + "m", f"{DATA}/x", DATA
+        # A printer's `\\n` or `\\t` right before a verb is a blank to the shell that reads the printed text.
+        self.check([f"printf 'echo hi\\n{rm} {x}\\n' | sh", f"printf 'echo hi\\n{rm} {x}\\n' | bash",
+                    f"printf 'mkdir -p {RUN}/a\\ncp /etc/hosts {d}/new\\n' | sh",
+                    f"printf 'true;\\t{rm} {x}\\n' | sh", f"printf 'true\\n{rm} {x}\\n' | xargs -0 sh -c",
+                    f"bash -c \"$(printf 'true\\n{rm} {x}')\"", f"sh <(printf 'true\\n{rm} {x}')",
+                    f"sh <<< \"$(printf 'true\\n{rm} {x}')\"", f"printf 'all:\\n\\t{rm} {x}\\n' | make -f -",
+                    f"echo 'echo hi\\n{rm} {x}' | sh", f"printf 'true\\012{rm} {x}' | sh",
+                    f"printf 'true\\x0a{rm} {x}' | sh"], deny=True)
+        # What a stage reads from an `exec` input is in what it sends on.
+        self.check([f"exec 3< <(ls -d {x}); cat <&3 | xargs {rm}", f"exec 3< <(ls -d {x}); sed 's/^/{rm} /' <&3 | sh",
+                    f"exec 3< <(ls -d {x}); sed 's/^/{rm} /' <&3 | xargs -I{{}} sh -c {{}}",
+                    f"exec < <(ls -d {x}); sed 's/^/{rm} /' | sh"], deny=True)
+        # `chdir` moves zsh as `cd` does; a shell or `zsh` word by its full path or name keeps the outer words code;
+        # `pushd`; csh's `setenv HOME` moves `~`, which only a POSIX shell's exact script may hold unread; a `-c`
+        # script that runs `$0` after `;` or `exec`, or sources it.
+        q = f"printf '%s\\n' {x} | sed 's/.*/\"{rm} -f &\"/' | xargs"
+        self.check([f"echo 'chdir {d}/items; {rm} -f x' | zsh", f"cat <<'EOF' | zsh\nchdir {d}/items\n{rm} -f x\nEOF",
+                    f"/bin/sh -c \"{rm} -f $(ls -d {x})\"", f"zsh -c \"{rm} -f $(ls -d {x})\"",
+                    f"echo 'pushd {d}/items && {rm} -f x' | sh", f"echo 'setenv HOME {d}/items; {rm} -f ~/x' | csh",
+                    f"{q} sh -c 'set -e; $0'", f"{q} sh -c 'exec $0'", f"{q} bash -c '. /dev/stdin <<< \"$0\"'"],
+                   deny=True)
+        # Round-nineteen rows that stay denied: a loop, a name, a `cd`, a group around the printer; a quoted or
+        # escaped `cd`, one after `eval`.
+        self.check([f"for f in {d}/items/*; do echo \"{rm} $f\"; done | sh", f"echo 'f={x}; {rm} $f' | sh",
+                    f"echo 'cd {d}/items && {rm} -f x' | sh", f"{{ printf '{rm} -f '; ls -d {x}; }} | sh",
+                    f"echo 'ls; c\\d {d}/items; {rm} -f x' | sh", f"echo 'eval cd {d}/items; {rm} -f x' | sh"],
+                   deny=True)
+        # Comments, `date +%F`, a commented `set`, prose words: the script is still exact; an fd never read feeds none.
+        self.check([f"cat <<'EOF' | bash\n# Summarize the cards for the journal\ngrep -h '^title:' {d}/items/*.yaml"
+                    f" | sort\nmkdir -p \"$AP2_RUN_DIR/out\"\ncp README.md \"$AP2_RUN_DIR/out/\"\nEOF",
+                    f"cat <<'EOF' | bash\ncat {d}/config.yaml\n# wait for the build\n{rm} -rf build/\nEOF",
+                    f"cat <<'EOF' | bash\nset -Eeuo pipefail\ncat \"$AP2_DATA/config.yaml\"\ndate +%F\n"
+                    f"touch \"$AP2_RUN_DIR/done\"\nEOF",
+                    f"cat <<'EOF' | bash\nset -euo pipefail  # strict mode\nls {d}/items | wc -l\n"
+                    f"touch \"$AP2_RUN_DIR/done\"\nEOF",
+                    f"echo 'ls {d}/items | wc -l; echo waiting for CI | tee -a {RUN}/j.md' | sh",
+                    f"exec 3< <(ls {d}/items); find $AP2_RUN_DIR/tmp -name '*.tmp' | xargs {rm} -f"], deny=False)
 
     def test_each_run_directory_mention_in_a_word_is_judged_on_its_own(self):
         """A quoted journal line can name the run directory twice: each mention that stays inside it is fine, and a
@@ -2266,7 +2317,15 @@ class DecideTest(unittest.TestCase):
                   "echo | sh": fill("echo 'set -e cd x=1 %' | sh; "),
                   "cat | sh": "cat <<'E' | sh\n" + "set -e; ls $AP2_DATA | wc\n" * ((size - 30) // 27) + "E\n",
                   "xargs -I sh": fill("ls $AP2_DATA | xargs -n 1 -I {} sh -c 'eval \"$0\"' {}; "),
-                  "sh -c $(": fill('sh -c "rm $(ls $AP2_DATA)" '), "-c $0": fill("$0 ", "ls | xargs sh -c '") + "'"}
+                  "sh -c $(": fill('sh -c "rm $(ls $AP2_DATA)" '), "-c $0": fill("$0 ", "ls | xargs sh -c '") + "'",
+                  # A newline run before a `$0`, a long subscript in a fed body in three readings, many comments and
+                  # quotes in a fed body, escapes before verbs, an `exec` input many stages read.
+                  "-c \\n$0": "ls | xargs sh -c '" + "\n" * (size - 20) + "x$0'",
+                  "cat | sh a[": pad("cat <<'A' | sh; : \"$$(x)\" \"${x:-'}\"\n" + "a[" * (size // 2))[:-4] + "\nA\n",
+                  "cat | sh #": "cat <<'A' | sh\n" + "ls $AP2_DATA # for 'x' \"y\"\n" * ((size - 30) // 30) + "A\n",
+                  "cat | sh '": "cat <<'A' | sh\n" + "''" * (size // 2 - 20) + "\nA\n",
+                  "printf \\n": fill("\\n\\t\\012 rm ", "printf '") + "' | sh",
+                  "exec < |": "exec < $AP2_DATA/l; " + "sed s/a/b/ | " * ((size - 30) // 13) + "sh"}
         # The slowest shapes (a shell's script read again in both `$$(` readings, about 0.3 s here) get a bound a
         # few times their time (1 s), so a slowdown of that much is seen well before the 2 s deadline; the rest
         # keep 2 s.

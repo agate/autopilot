@@ -1633,10 +1633,24 @@ def _writes(text: str) -> bool:
     """v1's `_WRITE.search(text)`, in linear time (its sed form widened): `sed` with an in-place flag after it
     (`_sed_in_place`), `dd` with an `of=` after it
     and no `|`, `;` or `&` between, and `open(` with a `, 'w'` (or a, x, +) mode after it and no `)` between, are
-    found piece by piece."""
+    found piece by piece. A text with a backslash is searched again with each escape that `printf` or `echo` turn
+    into a blank or a newline (`_BLANK_ESCAPE`: `\\n`, `\\t`, `\\012`, `\\x0a`, ...) read as a blank, so the verb
+    after it is a word of its own (`printf 'echo hi\\nrm <data>/x' | sh`)."""
+    if _writes_as_is(text):
+        return True
+    blanked = _BLANK_ESCAPE.sub(" ", text) if "\\" in text else text
+    return blanked != text and _writes_as_is(blanked)
+
+
+def _writes_as_is(text: str) -> bool:
     return bool(_WRITE.search(text) or _sed_in_place(text)
                 or any(_after_first(p, _DD, _OF) for p in re.split(r"[|;&]", text))
                 or any(_after_first(p, _OPEN, _MODE) for p in text.split(")")))
+
+
+# The backslash escapes `printf` and `echo` (`echo -e`, zsh's `echo`) print as a blank or a line break: `\n`, `\t`,
+# `\v`, `\f`, the octal ones (`\11`, `\012`, `\0012`), the hex ones (`\x9`, `\x0a`) and `\u`/`\U` ones.
+_BLANK_ESCAPE = re.compile(r"\\+(?:[ntvf]|0{0,2}1[123]|x0?[9aAbBcC]|[uU]0{0,7}[9aAbBcC])")
 
 
 def _harmless(text: str) -> str:
@@ -1969,8 +1983,12 @@ def _fed_writes(segs: list, parsed: list, marks: _Marks, pid: bool, sq: bool, bu
             return True
         if (j in shells and gpiped[0] == 2 and gpiped[3]) or (stdin[0] and shell_reads(j, stdin)):
             return True
-        gen = _either(_either(_NOTHING if exact and _printer(p) and _exact_script(seg) else state, gbodies), subs)
+        plain = (exact and _printer(p) and _exact_script(seg, p.words[p.lead] == "printf")
+                 and _exact_script(_printed(p)))
+        gen = _either(_either(_NOTHING if plain else state, gbodies), subs)
         state = _either(_either(state, bodies), subs)
+        state = _either(state, stdin)  # what a stage reads from the shell's input is in what it sends on,
+        gen = _either(gen, stdin)  # made at run time
         if seg.prev is not None:
             state = _either(state, piped)
             gen = _either(gen, piped)  # a command's output from what it reads is made at run time
@@ -2030,29 +2048,73 @@ def _xargs_code(words: list, k: int) -> bool:
 # (the script's start, after `;`, `&`, `|`, `(`, `{`, a newline or a keyword) runs it; so may one in a script that
 # holds a shell, `eval`, `source`, `.` or an interpreter word (`eval "$0"`, `echo "$0" | sh`, `python3 -c "$0"`).
 _POSITIONAL = re.compile(r"\$\{?[0-9@*]")
-_POSITIONAL_RUN = re.compile(r"(?:^|[;&|({\n]|\b(?:then|do|else|exec|command|builtin|env|time|nohup)\s)\s*[\"']?"
-                             r"\$\{?[0-9@*]")
+_POSITIONAL_RUN = re.compile(r"(?:^|[;&|({\n]|\b(?:then|do|else|exec|command|builtin|env|time|nohup)\s)[ \t]*"
+                             r"[\"']?\$\{?[0-9@*]")
 _CODE_TOKEN = re.compile(r"[\w.+-]+")
 
 
-def _exact_script(text: str) -> bool:
-    """Whether the text `text` (a printer's segment, or the lines of a heredoc body `cat` passes on) is a shell's
-    script as the guard's own reading of it reads it (`_fed_writes`): no `$` but the guard's own names
-    (`_GUARD_NAMES`), no backtick, no `%` (a `printf` format), no `cd` or `pushd` (a relative path then lands
-    elsewhere), no word that binds a name (`f=<data>/x`) and no `for`, `while`, `until`, `read`, `select` or `set`
-    word, `set` with only option flags aside (`set -Eeuo pipefail`, `_SET_FLAGS`): each may make the script's
-    words other text at run time (`f=<data>/x; rm $f`), which that reading does not follow."""
-    text = _GUARD_NAMES.sub("", _SET_FLAGS.sub(" ", text)) if "$" in text or "set" in text else text
-    return not _INDIRECT.search(text)
+def _exact_script(text: str, fmt: bool = False) -> bool:
+    """Whether the text `text` (a printer's segment and the text it prints, `_printed`, or the lines of a heredoc
+    body `cat` passes on) is a shell's script as the guard's own reading of it reads it (`_fed_writes`): once its
+    `#` comments are dropped (`_uncommented`), no `$` but the guard's own names (`_GUARD_NAMES`), no backtick, no
+    `%` when the printer is `printf` (`fmt`: a format; `date +%F` is none), no word that binds a name (`f=<data>/x`,
+    `a[i]=x`; a subscript past 256 characters counts as one, `_BINDS`), and no `cd`, `chdir` or `pushd` (a relative
+    path then lands elsewhere) and no `for`, `while`, `until`, `read`, `select` or `set` where a command starts
+    (`_KEYWORD_AT`; quoted or escaped too, `c''d`; not in quoted prose), `set` with only option flags aside (`set
+    -Eeuo pipefail`, `_SET_FLAGS`): each may make the script's words other text at run time (`f=<data>/x; rm $f`),
+    which that reading does not follow."""
+    if "#" in text:
+        text = _uncommented(text)
+    if fmt and "%" in text:
+        return False
+    if "set" in text:
+        text = _SET_FLAGS.sub(" ", text)
+    if "$" in text:
+        text = _GUARD_NAMES.sub("", text)
+    return not ("$" in text or "`" in text or _BINDS.search(text) or _KEYWORD_AT.search(text))
+
+
+def _printed(p) -> str:
+    """The text the plain printer `p` (a `_Parsed`) prints, as the shell that reads it gets it: its words after the
+    printer, quotes removed, its redirects and leading `-` words (`echo -n`) aside, joined by blanks."""
+    words = [w for k, w in enumerate(p.words) if k > p.lead and k not in p.ops]
+    start = next((k for k, w in enumerate(words) if w[:1] != "-"), len(words))
+    return " ".join(words[start:])
+
+
+def _uncommented(text: str) -> str:
+    """`text` with each `#` comment dropped, to the end of its line: a `#` outside quotes, at the start of the text
+    or a line or after a blank that no backslash escapes (`_COMMENT`). Fail-closed, a text with a `<<`, `((` or `[[`
+    keeps its comments (a heredoc body line or an arithmetic or test word may hold a `#` that starts none)."""
+    if "<<" in text or "((" in text or "[[" in text:
+        return text
+    return _COMMENT.sub(lambda m: "" if m.group(0)[0] == "#" else m.group(0), text)
 
 
 # The names `_exact_script` lets a script expand (the guard reads them itself), the words it does not let one hold,
 # and a `set` that only turns options on or off (`set -e`, `set -o pipefail`; no `--` and no positional words).
 _GUARD_NAMES = re.compile(r"\$(?:\{(?:AP2_RUN_DIR|AP2_DATA|HOME)\}|(?:AP2_RUN_DIR|AP2_DATA|HOME)(?![A-Za-z0-9_]))")
-_INDIRECT = re.compile(r"[$`%]|(?<![\w.\-/])(?:cd|pushd|for|while|until|read|select|set)(?![\w.\-/])"
-                       r"|(?<![\w.\-/=])[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=")
+# A word that binds a name (`f=x`, `f+=x`, `a[i]=x`); a subscript longer than 256 characters counts as one too, so the
+# scan stays linear (fail-closed).
+_BINDS = re.compile(r"(?<![\w.\-/=])[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]{0,256}\]\+?=|\[[^\]]{256}|\+?=)")
+# A word that moves the shell or makes other text at run time, where a command starts: at the start, after a newline,
+# `;`, `&`, `|`, `(`, `)`, `{`, `}`, `]` or `!`, there or after a keyword or a runner there that runs the next word
+# in this shell and its flags (`then`, `do`, `if`, `eval`, `command -p`, `builtin`, `time`, zsh's `noglob`, `-` and
+# `repeat N`, ...; `if x; then cd y`); blanks, quotes and backslashes may come before each (`'cd'`, `\cd`) and
+# between its letters (`c''d`, `c\d`). Quoted prose (`echo 'select the next card'`, `echo 'then read it'`) is no
+# command start; a printer's own script is read from its printed words (`_printed`), where it starts.
+_KEYWORD_AT = re.compile(
+    r"(?:^|[\n;&|(){}\]!])[ \t'\"\\]*(?:(?:"
+    + "|".join("[\\\\'\"]*".join(w) for w in ("then", "do", "else", "elif", "if", "while", "until", "time", "command",
+                                              "builtin", "eval", "exec", "noglob", "nocorrect", "nohup", "env",
+                                              "coproc", "-"))
+    + r")[\\'\"]*(?:[ \t]+[-+][\w-]*)*[ \t][ \t'\"\\]*|repeat[ \t]+\w+[ \t][ \t'\"\\]*)*(?:"
+    + "|".join("[\\\\'\"]*".join(w) for w in ("cd", "chdir", "pushd", "for", "while", "until", "read", "select", "set"))
+    + r")(?![\w.\-/])")
 _SET_FLAGS = re.compile(r"(?<![\w.\-/])set(?:[ \t]+[-+][eEuxv]*(?:o[ \t]+(?:pipefail|errexit|nounset|xtrace|verbose"
                         r"|errtrace))?(?![\w.\-/]))+(?=[ \t]*(?:$|[\n;&|'\"]))", re.M)
+# What `_uncommented` keeps whole (a quoted text, an escaped character) and the comments it drops.
+_COMMENT = re.compile(r"'[^']*'?|\"(?:[^\"\\]|\\.)*\"?|\\.|(?<![^ \t\n])(?<!\\[ \t\n])#[^\n]*", re.S)
 
 
 def _exec_input(seg: str, p) -> bool:
