@@ -24,9 +24,9 @@ def job_block(text, name):
         return None
     block = []
     for line in lines[start + 1:]:
-        # Any line at 2 spaces or less (the next job, a top-level key) ends the job; a comment line, at any indent,
-        # does not. The rest of a quoted string or flow collection may also sit there: `open_values` fails the
-        # check on the line that opened it.
+        # Any non-blank line at 2 spaces or less (the next job, a top-level key) ends the job; a comment line, at any
+        # indent, does not. The rest of a quoted string or flow collection may also sit there: `open_values` fails
+        # the check on the line that opened it.
         if line.strip() and not line.strip().startswith("#") and indent(line) <= 2:
             break
         block.append(line)
@@ -131,11 +131,15 @@ def quoted_end(line, i):
 def flow_end(line, i):
     """Where the flow collection opening at `line[i]` (`[` or `{`) ends; None when not on this line.
 
-    Quoted parts are skipped, and a ` #` outside them starts a comment, so the rest of the line does not count."""
+    Quoted parts are skipped, and a ` #` outside them starts a comment, so the rest of the line does not count.
+    A quote opens a string only where one can start (after `[`, `{`, `,`, `:` or `?`); anywhere else (`it's`, `5"`)
+    it sits inside a plain scalar, which this reader does not follow, so the end cannot be read: None."""
     depth = 0
     while i < len(line):
         c = line[i]
         if c in "\"'":
+            if line[:i].rstrip(" \t")[-1:] not in tuple("[{,:?"):
+                return None
             i = quoted_end(line, i)
             if i is None:
                 return None
@@ -521,7 +525,8 @@ class SwitchCheckTest(unittest.TestCase):
                 (["        env: {A: 1,", "      B: 2}", "        continue-on-error: true"],
                  [f"the `{SETUP_PYTHON}` step sets `continue-on-error: true`"]),
                 (["        env: [1,", "    x: 2]", "        continue-on-error: true"], []),
-                (["        env: {A: {B: 1},", "    x: 2}", "        continue-on-error: true"], [])):
+                (["        env: {A: {B: 1},", "    x: 2}", "        continue-on-error: true"], []),
+                (['        env: {A: "}", B: "x,', '    y: z"}', "        continue-on-error: true"], [])):
             with self.subTest(lines=lines):
                 copy = insert_after(self.text, "python-version: ${{ matrix.python-version }}", "\n".join(lines))
                 self.assertEqual(step_switch_problems(copy, SETUP_PYTHON),
@@ -550,11 +555,26 @@ class SwitchCheckTest(unittest.TestCase):
     def test_a_value_that_closes_on_its_line_is_not_a_problem(self):
         for line in ("        name: 'it''s'", '        name: "a \\" b"', '        name: "a # b"',
                      '        with: {a: "]", b: 1}', "        name: [a, '[', {b: c}] # [", '          "a b": "c"',
-                     "        run: echo \"it's", '        name: "a" # "', "        working-directory: 'C:\\'"):
+                     "        run: echo \"it's", '        name: "a" # "', "        working-directory: 'C:\\'",
+                     '        with: {title: "Fix #42", labels: bug}'):
             with self.subTest(line=line):
                 copy = insert_after(self.text, "python-version: ${{ matrix.python-version }}", line)
                 self.assertEqual(job_switch_problems(copy), [])
                 self.assertEqual(step_switch_problems(copy, SETUP_PYTHON), [])
+
+    def test_a_quote_inside_a_plain_scalar_of_a_flow_value_is_a_problem(self):
+        # A quote in the middle of a plain scalar (`it's`) does not open a string; read as one, it pairs with a
+        # later quote and hides the real end of the value, so the check cannot tell where it ends and must fail.
+        for first in ("    env: {GREETING: it's me, CLOSE: '}', MODE: ci,",
+                      '    env: {SIZE: 5" disk, Q: "}", MODE: ci,'):
+            with self.subTest(first=first):
+                copy = self.text.rstrip("\n") + "\n" + first + "\n  }\n    continue-on-error: true\n"
+                self.assertEqual(job_switch_problems(copy), [open_job_value(first.strip())])
+        # The same quote in a value that does close on its line fails too (a known spurious red).
+        copy = insert_after(self.text, "python-version: ${{ matrix.python-version }}", "        with: {msg: it's}")
+        self.assertEqual(job_switch_problems(copy), [open_job_value("with: {msg: it's}")])
+        self.assertEqual(step_switch_problems(copy, SETUP_PYTHON),
+                         [open_step_value("with: {msg: it's}", SETUP_PYTHON)])
 
     def test_a_quoted_key_with_a_value_running_on_is_a_problem(self):
         copy = insert_after(self.text, "python-version: ${{ matrix.python-version }}",
@@ -601,6 +621,11 @@ class SwitchCheckTest(unittest.TestCase):
                 + '\n      - run: |\n          make\n        working-directory: "./\n    tests: here"\n'
                   "        continue-on-error: true\n")
         self.assertEqual(job_switch_problems(copy), [open_job_value('working-directory: "./')])
+
+    def test_a_dash_run_block_body_is_not_read_as_a_value(self):
+        copy = self.text.rstrip("\n") + '\n      - run: |\n          "it\'s [ {\n          make\n'
+        self.assertEqual(step_switch_problems(copy, "make"), [])
+        self.assertEqual(job_switch_problems(copy), [])
 
     def test_a_job_whose_id_starts_with_an_underscore_ends_the_unittest_job(self):
         copy = (self.text.rstrip("\n")
