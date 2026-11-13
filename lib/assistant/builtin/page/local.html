@@ -1354,6 +1354,12 @@ table.grid tr[aria-selected="true"] td{background:var(--accent-soft)}
     if (S.route === r && r.name === 'card' && capKey(S.state) !== cap && (r.arg === before || r.arg === capId(S.state))) {
       await loadCard(r.arg);
     }
+    // Settings: its Access box is drawn from the state, so redraw it with the new one (the top bar's links to
+    // Settings land on the screen already open and draw nothing).
+    if (r.name === 'settings') {
+      const old = $('access-set');
+      if (old) old.replaceWith(accessSet());
+    }
   }
 
   $('search').addEventListener('keydown', e => {

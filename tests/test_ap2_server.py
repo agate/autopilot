@@ -1727,6 +1727,33 @@ console.log(JSON.stringify(runs));
         self.assertEqual(out["otherCardsNote"], [])
 
     @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_the_settings_access_box_follows_the_state(self):
+        # Settings left open: each tick redraws its Access box from the new state, so it never disagrees with the
+        # top bar; other screens, and a tick whose route changed while it ran, leave the box alone.
+        out = self.run_access(page_functions("capKey", "tick") + """
+let states = [], onPoll = null;
+const poll = async () => { S.state = states.shift(); if (onPoll) onPoll(); };
+const loadList = async () => {}, loadCard = async () => {};
+const replaced = [];
+const box = {replaceWith: n => replaced.push(n)};
+const $ = id => (id === 'access-set' ? box : null);
+const accessSet = () => 'today ' + S.state.usage.gateway.today;
+const st = today => ({access: {cap: {}}, usage: {gateway: {today}}});
+(async () => {
+  const runs = {};
+  for (const [name, route, act] of [['settings', {name: 'settings', arg: null}],
+                                    ['lane', {name: 'lane', arg: 'needs'}],
+                                    ['left', {name: 'settings', arg: null}, () => { S.route = {name: 'lane', arg: 'needs'}; }]]) {
+    S.route = route; S.state = st(8); states = [st(42)]; replaced.length = 0; onPoll = act || null;
+    await tick();
+    runs[name] = replaced.slice();
+  }
+  console.log(JSON.stringify(runs));
+})();
+""")
+        self.assertEqual(out, {"settings": ["today 42"], "lane": [], "left": []})
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
     def test_the_open_card_is_redrawn_when_the_cap_card_opens_again(self):
         # Answered on the page, the card is drawn without buttons; when spend passes the raised limit the same card
         # opens again, and the 10-second tick redraws the card on screen so its buttons come back.
@@ -1803,6 +1830,7 @@ S.state = {access: {profile: {name: 'g', mode: 'gateway', label: 'Team', model: 
 drawAccess();
 const top = flat(boxes.access);
 S.state = {access: {profile: null, profile_error: 'PROFILE-ERR-P', error: 'FOLDER-ERR-F', cap: {},
+                    key_error: 'KEY-SET-K',
                     broken_profiles: [{name: 'x', error: 'BROKEN-E'}]}, usage: gwUsage};
 const set = flat(accessSet());
 // The top bar's alerts are links: the open cap card, and Settings for a profile that does not work.
@@ -1828,7 +1856,7 @@ console.log(JSON.stringify({top, set, links, profileSet}));
         self.assertIn('[usage.today_short {"spent":"$512.00","limit":"$500.00"}]', top)
         self.assertIn("big · high", top)  # the badge's model and effort
         self.assertIn('[access.workers {"label":"Team"}]', top)
-        for t in ("PROFILE-ERR-P", "FOLDER-ERR-F", "[access.profile_error]", "BROKEN-E",
+        for t in ("PROFILE-ERR-P", "FOLDER-ERR-F", "[access.profile_error]", "KEY-SET-K", "BROKEN-E",
                   '[access.broken {"name":"x"}]', "$512.00 / $500.00", "[usage.today]"):
             with self.subTest(t):
                 self.assertIn(t, sett)
@@ -1843,7 +1871,7 @@ console.log(JSON.stringify([
   usageShort(gw({today: null, limit: 500})),
   usageShort({mode: 'subscription', windows: [{kind: 'seven_day', percent: 7}, {kind: 'five_hour', percent: 81.6}]}),
   usageShort({mode: 'subscription', windows: null}), usageShort({mode: null}),
-  usageRows(gw({today: 512, week: 2300, month: 2300, limit: 500, counted_at: null, unknown: true})),
+  usageRows(gw({today: 512, week: 900, month: 2300, limit: 500, counted_at: null, unknown: true})),
   usageRows({mode: 'subscription', windows: [{kind: 'opus_week', percent: 3}], stale: true,
              credits_used_usd: 2300, credits_limit_usd: 5000}),
   usageRows({mode: 'subscription', windows: null})]));
@@ -1856,7 +1884,7 @@ console.log(JSON.stringify([
         self.assertEqual(out[10], '[usage.window_short {"kind":"[usage.five_hour]","pct":82}]')
         self.assertEqual(out[11:13], ["", ""])
         self.assertEqual([r["value"] for r in out[13]],
-                         ["$512.00 / $500.00", "$2,300.00", "$2,300.00", "[usage.never]", "[usage.unknown]",
+                         ["$512.00 / $500.00", "$900.00", "$2,300.00", "[usage.never]", "[usage.unknown]",
                           '[usage.resets {"pct":42,"when":"when:R"}]'])
         self.assertEqual(out[13][-1]["label"], '[usage.page_sessions {"kind":"[usage.five_hour]"}]')
         self.assertEqual([(r["label"], r["value"]) for r in out[14]],
