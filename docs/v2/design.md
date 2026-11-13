@@ -1716,17 +1716,18 @@ Calls the author made without asking (check them):
   - The page is one file with inline CSS and JS and no fonts or scripts from another host. It writes card text
     only as text (`textContent`), never as HTML. Screens by hash route: `#/lane/<lane>`, `#/search/<words>`,
     `#/project/<id>` (its children), `#/card/<id>`, `#/sources[/<name>]`, `#/templates[/<kind>]`, `#/settings`.
-    The top bar has search, the heartbeat ("Last check: 25s ago", red when late), the running count, and the
-    language switch only when `secondary_language` is set; the switch changes the whole page, labels and plain
-    words, shows the language codes (`EN`, `ZH`) so it puts no second language on the screen itself, and is
+    The top bar has search, the heartbeat ("Last check: 25s ago", red when late), the running count, the access
+    badge, usage and alerts (see "Access on the pages" choice 6), and the language switch only when
+    `secondary_language` is set; the switch changes the whole page, labels and plain words, shows the language
+    codes (`EN`, `ZH`) so it puts no second language on the screen itself, and is
     remembered in the browser. Labels are a table per language in the page, `en` and `zh` so far (a code such as `zh-Hans` uses `zh`);
     a text that is missing in the chosen language says so instead of showing another language.
   - Later work: template buttons (lane change, restore, child), the chat box (9.3), the Restore points screen,
     real worker counts, answering questions (the workers slice), "started at login" (launchd), a pause lift (`ap2
     cap resume`) on the page, and labels for languages other than `en` and `zh`.
 - **[decided by the builder]** The phone page data (design 9.2, 9.4, 10). `phone.build(data, cfg=None, now=None,
-  plugin_dir=None)` in `lib/assistant/phone.py` turns the card store into one JSON document; `ap2 phone build
-  [--data PATH] [--out PATH]` prints it (UTF-8, sorted keys, one line) or writes it to `--out` through a temp file
+  plugin_dir=None, usage_file=None)` in `lib/assistant/phone.py` turns the card store into one JSON document;
+  `ap2 phone build [--data PATH] [--out PATH]` prints it (UTF-8, sorted keys, one line) or writes it to `--out` through a temp file
   next to it and a rename, so a reader never sees half a file. It sets up the data folder as `ap2 serve` does;
   a bad config, a damaged card file or an `--out` folder that does not exist is one `ap2:` line and exit 1.
   - Settings, in `config.yaml`: `phone_history_days` (a whole number from 0 to 365, default 3; `true` is not a
@@ -1764,7 +1765,8 @@ Calls the author made without asking (check them):
     unchanged.
   - **[decided by the builder]** Once titles have one slot per language, a hidden card's full-card `title` holds
     the phrase per language, so one screen never shows both languages.
-  - Local paths: three texts can name a file on this Mac, `full[id].template_error` (a bad user template's
+  - Local paths: three card and heartbeat texts can name a file on this Mac (and the access texts, see "Access on
+    the pages" choice 7), `full[id].template_error` (a bad user template's
     file), `heartbeat.error` (`<data>/gate.json`) and `full[id].card.ask.text` (a worker's ask, such as a parked
     worker's worktree). In the phone's copy of each, the data folder's path (as given and resolved) becomes
     `<data>`, then the home folder's (`Path.home()`, as given and resolved) becomes `~`, so
@@ -1788,7 +1790,8 @@ Calls the author made without asking (check them):
       `/Users/x/repo/Users/x/repo/a` reads `~/repo~/repo/a`. The folder's path in any spot still names the user or
       the data folder's place; a path that looks odd is a wrong label, never a leak; and each left-side rule tried
       let a realistic text through.
-    - **[decided by the builder]** Only these three texts are scrubbed; a card's own words (its title, plain
+    - **[decided by the builder]** Only these three texts and the access texts of "Access on the pages" choice 7
+      are scrubbed; a card's own words (its title, plain
       words, questions) are what a person or a source wrote and stay as they are.
   - Read-only, in shadow and live mode alike: building writes nothing in the data folder (it reads the store
     without its lock file, as the local page's GETs do, and never builds `index.sqlite`), starts no process and

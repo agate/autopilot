@@ -1471,6 +1471,76 @@ console.log(JSON.stringify([
                       "    if (capAnswers.length) det.append(capSection(c, capAnswers));", text)  # the card view
         self.assertEqual(set(cap.ANSWERS), {"raise50", "raise100", "accept_unknown", "pause"})
 
+    # A plain-object `h` (tag, attrs, kids) and `flat`, every text of a tree in order, for running the page's
+    # drawing functions under node.
+    DOM_STUBS = """
+const h = (tag, attrs, ...kids) => ({tag, attrs: attrs || {}, kids,
+  replaceChildren(...k) { this.kids = k; }});
+const flat = n => (n === null || n === undefined || n === false) ? []
+  : Array.isArray(n) ? n.flatMap(flat)
+  : typeof n === 'object' ? [...(n.attrs && n.attrs.text != null ? [String(n.attrs.text)] : []), ...flat(n.kids)]
+  : [String(n)];
+const find = (n, tag) => (n === null || n === undefined || typeof n !== 'object') ? []
+  : Array.isArray(n) ? n.flatMap(k => find(k, tag)) : [...(n.tag === tag ? [n] : []), ...find(n.kids, tag)];
+"""
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_cap_buttons_post_their_own_answer_and_reload_the_list(self):
+        out = self.run_access(page_functions("capSection") + self.DOM_STUBS + """
+const calls = [];
+const post = async (path, body) => { calls.push(['post', path, body]); return {}; };
+const poll = async () => { calls.push(['poll']); };
+const loadList = async () => { calls.push(['loadList']); };
+const loadCard = async id => { calls.push(['loadCard', id]); };
+S.route = null;
+const opts = ['raise50', 'raise100', 'pause'];
+(async () => {
+  const shown = find(capSection({id: 'C1', kind: 'cap'}, opts), 'button').map(b => [b.attrs.text, b.attrs.class]);
+  const clicks = [];
+  for (let i = 0; i < opts.length; i++) {
+    calls.length = 0;
+    const b = find(capSection({id: 'C1', kind: 'cap'}, opts), 'button')[i];
+    await b.attrs.onclick();
+    clicks.push(calls.slice());
+  }
+  console.log(JSON.stringify({shown, clicks}));
+})();
+""")
+        self.assertEqual(out["shown"], [["[cap.raise50]", "btn"], ["[cap.raise100]", "btn"],
+                                        ["[cap.pause]", "btn quiet"]])
+        for opt, calls in zip(["raise50", "raise100", "pause"], out["clicks"]):
+            with self.subTest(opt):
+                self.assertEqual(calls[0], ["post", "/api/cap/answer", {"card_id": "C1", "option": opt}])
+                self.assertIn(["loadList"], calls)
+                self.assertEqual(len([c for c in calls if c[0] == "post"]), 1)
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_the_top_bar_and_the_access_set_draw_every_text(self):
+        out = self.run_access(page_functions("drawAccess", "accessSet") + self.DOM_STUBS + """
+const boxes = {};
+const $ = id => (boxes[id] = boxes[id] || h('span', {id}));
+const gwUsage = {mode: 'gateway', windows: [], gateway: {today: 512, limit: 500, week: 900, month: 2300,
+                 counted_at: null}};
+S.state = {access: {profile: {name: 'g', mode: 'gateway', label: 'Team', model: 'big', effort: 'high'},
+                    key_error: 'KEY-BROKEN-K', cap: {}}, usage: gwUsage};
+drawAccess();
+const top = flat(boxes.access);
+S.state = {access: {profile: null, profile_error: 'PROFILE-ERR-P', error: 'FOLDER-ERR-F', cap: {},
+                    broken_profiles: [{name: 'x', error: 'BROKEN-E'}]}, usage: gwUsage};
+const set = flat(accessSet());
+console.log(JSON.stringify({top, set}));
+""")
+        top, sett = out["top"], out["set"]
+        self.assertIn(" KEY-BROKEN-K", top)  # the alert's server text, after its label
+        self.assertIn("[access.key_error]", top)
+        self.assertIn('[usage.today_short {"spent":"$512.00","limit":"$500.00"}]', top)
+        self.assertIn("big · high", top)  # the badge's model and effort
+        self.assertIn('[access.workers {"label":"Team"}]', top)
+        for t in ("PROFILE-ERR-P", "FOLDER-ERR-F", "[access.profile_error]", "BROKEN-E",
+                  '[access.broken {"name":"x"}]', "$512.00 / $500.00", "[usage.today]"):
+            with self.subTest(t):
+                self.assertIn(t, sett)
+
     @unittest.skipUnless(shutil.which("node"), "needs node")
     def test_usage_values_are_shown_in_full(self):
         out = self.run_access("""

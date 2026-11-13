@@ -152,6 +152,39 @@ class SummaryTest(ViewCase):
         self.assertEqual(a["broken_profiles"][0]["name"], "zz")
         self.assertIn("zz.json", a["broken_profiles"][0]["error"])
 
+    def test_a_cap_too_big_for_a_float_or_a_too_deep_file_is_an_error_field(self):
+        (self.data / profiles.FOLDER).mkdir(exist_ok=True)
+        big = json.dumps(gateway("big", daily_cap_usd=-1)).replace('"daily_cap_usd": -1', '"daily_cap_usd": 1'
+                                                                    + "0" * 400)
+        self.assertIn("0" * 400, big)
+        (self.data / profiles.FOLDER / "big.json").write_text(big)
+        (self.data / profiles.FOLDER / "deep.json").write_text("[" * 100_000 + "]" * 100_000)
+        a = self.summary()["access"]
+        self.assertEqual(a["profile"]["name"], "subscription")
+        self.assertIsNone(a["profile_error"])
+        broken = {b["name"]: b["error"] for b in a["broken_profiles"]}
+        self.assertEqual(set(broken), {"big", "deep"})
+        self.assertTrue(broken["big"].startswith("big: OverflowError: "), broken["big"])
+        self.assertTrue(broken["deep"].startswith("deep: RecursionError: "), broken["deep"])
+        self.assertNotIn(str(self.tmp), json.dumps(a))
+        status, raw = self.state_over_http()
+        self.assertEqual(status, 200, raw)
+        self.assertIn("big", [b["name"] for b in json.loads(raw)["access"]["broken_profiles"]])
+        built = phone.build(self.data, cfg=Config(), now=NOW.astimezone(timezone.utc), usage_file=self.usage)
+        self.assertIn("big", [b["name"] for b in built["access"]["broken_profiles"]])
+        # The active one: the same text is the profile error, with the fix.
+        (self.data / profiles.ACTIVE).write_text(json.dumps({"name": "big"}))
+        a = self.summary()["access"]
+        self.assertIsNone(a["profile"])
+        self.assertTrue(a["profile_error"].startswith("big: OverflowError: "), a["profile_error"])
+        self.assertIn(profiles.FIX, a["profile_error"])
+        (self.data / profiles.ACTIVE).write_text('{"name": ' + "[" * 100_000 + "]" * 100_000 + "}")
+        a = self.summary()["access"]
+        self.assertTrue(a["profile_error"].startswith("the active profile: RecursionError: "), a["profile_error"])
+        self.assertIn(profiles.FIX, a["profile_error"])
+        status, raw = self.state_over_http()
+        self.assertEqual(status, 200, raw)
+
     def test_an_unreadable_profiles_folder_is_an_error_field(self):
         (self.data / profiles.FOLDER).mkdir(exist_ok=True)
         os.rename(self.data / profiles.FOLDER, self.tmp / "real-profiles")

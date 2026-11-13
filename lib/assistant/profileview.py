@@ -6,7 +6,9 @@ Everything here is a read of what the other modules keep, made with their own re
 `profiles.names` / `load`, `keys.cached_error` (the cached key record: no key command runs), `cap.state`,
 `cap.today_limit` and `cap.paused`, `spend.last` (the totals the cap read last: the ledger is never read here) and
 v1's `budget.read` (Claude Code's cached usage windows). It runs no process, opens no connection and writes nothing,
-so a page request may call it. A ProfileError or CapError becomes text in the block it comes from, never a crash.
+so a page request may call it. A ProfileError or CapError becomes text in the block it comes from, never a crash;
+so does an ArithmeticError or RecursionError from a profiles read (a hand-edited file: a cap too big for a float, a
+JSON nest too deep), as `<name>: <error type>: <error>` with no path in it.
 Named `profileview`, not `access`: the design keeps `access.py` for the health checks.
 """
 from __future__ import annotations
@@ -22,6 +24,11 @@ from assistant.config import ConfigError
 
 PAGE_SESSIONS = "subscription"  # page sessions (dispatcher, page answers, refresh) always run on the subscription
 PROFILE_KEYS = ("name", "label", "mode", "model", "effort", "daily_cap_usd")
+ODD = (ArithmeticError, RecursionError)  # what a profiles read can raise beside ConfigError on a hand-edited file
+
+
+def _odd(name, e: BaseException) -> str:
+    return f"{name}: {type(e).__name__}: {e}"
 
 
 def summary(data, now: datetime, usage_file) -> dict:
@@ -39,6 +46,12 @@ def _active(data: Path) -> tuple:
         return profiles.active(data), None
     except ConfigError as e:  # ProfileError: it names the file and holds profiles.FIX
         return None, str(e)
+    except ODD as e:
+        try:
+            name = profiles.active_name(data)
+        except (ConfigError, *ODD):
+            name = "the active profile"
+        return None, f"{_odd(name, e)}; {profiles.FIX}"
 
 
 def access(data: Path, now: datetime, p: Optional[dict], profile_error: Optional[str]) -> dict:
@@ -49,11 +62,17 @@ def access(data: Path, now: datetime, p: Optional[dict], profile_error: Optional
     except ConfigError as e:
         found = []
         out["error"] = str(e)
+    except ODD as e:
+        found = []
+        out["error"] = _odd("profiles", e)
     for name in found:
         try:
             q = profiles.load(data, name)
         except ConfigError as e:
             out["broken_profiles"].append({"name": name, "error": str(e)})
+            continue
+        except ODD as e:
+            out["broken_profiles"].append({"name": name, "error": _odd(name, e)})
             continue
         out["profiles"].append({"name": name, "label": q.get("label"), "mode": q.get("mode"),
                                 "needs_choice": profiles.needs_choice(data, q)})
