@@ -459,7 +459,8 @@ class CheckTest(KeyCase):
                book({"at": "yesterday", "ok": True, "profile": "g"}),
                book({"at": (NOW + timedelta(hours=1)).isoformat(), "ok": True, "profile": "g"}),
                json.dumps({"ok": True, "profile": "g"}),  # the old shape is held to the same rules
-               json.dumps({"at": NOW.isoformat(), "ok": True, "profile": None}))
+               json.dumps({"at": NOW.isoformat(), "ok": True, "profile": None}),
+               json.dumps({"at": NOW.isoformat(), "ok": True, "profile": ["g"]}))
         for i, text in enumerate(bad, 1):
             f.write_bytes(text.encode("utf-8", "surrogateescape") if text != "\xff\xfe" else b"\xff\xfe")
             self.assertIsNone(keys.check(self.data, p, NOW), text)
@@ -1049,6 +1050,10 @@ class RotateCliTest(CliCase):
         self.assertEqual(self.ap2("rotate", "h").returncode, 0)
         self.assertFalse((self.data / keys.STATE).exists())
         self.assertFalse((self.data / keys.REFRESH).exists())
+        # A malformed file holds no record for h, so rotating h leaves it as it is.
+        (self.data / keys.STATE).write_text("[]")
+        self.assertEqual(self.ap2("rotate", "h").returncode, 0)
+        self.assertEqual((self.data / keys.STATE).read_bytes(), b"[]")
 
     def test_rotate_runs_with_every_stream_closed(self):
         self.save(rotate_command="true")

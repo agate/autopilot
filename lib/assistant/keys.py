@@ -109,7 +109,7 @@ def _put(path: Path, name: str, rec: Optional[dict]) -> None:
     removed when no profile is left; a drop for a profile with no record writes nothing. A symlink raises."""
     book = _records(path)
     if rec is None:
-        if name not in book and book:
+        if name not in book:
             return
         book.pop(name, None)
         if not book:
