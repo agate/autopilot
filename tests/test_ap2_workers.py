@@ -3822,6 +3822,29 @@ class PrReviewRoleTest(PrReviewCase):
                 self.assertIn(rule, ro["permissions"]["deny"])
                 self.assertNotIn(rule, base["permissions"]["deny"])
 
+    def test_the_read_only_floor_denies_the_other_github_write_commands(self):
+        # One plain gh command can still write with the user's login: push a merge onto the PR's branch (which moves
+        # its head and starts another review), lock it, check it out, close an issue, run a workflow, edit the repo,
+        # its labels, secrets or variables, a gist, the cache, a ruleset, a project, an extension, an alias, the login
+        # or the gh config. Each is denied by rule; the read commands a review runs are not.
+        env = {"AP2_RUN_DIR": str(transcripts.run_dir(self.data, "c-20260105-090000-abcdef"))}
+        base = workers_mod.floor("implement", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+        ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+        for cmd in ("gh pr update-branch", "gh pr lock", "gh pr unlock", "gh pr checkout", "gh issue", "gh workflow",
+                    "gh run rerun", "gh run cancel", "gh run delete", "gh repo", "gh label", "gh secret",
+                    "gh variable", "gh gist", "gh cache", "gh ruleset", "gh project", "gh extension", "gh alias",
+                    "gh auth", "gh config set"):
+            rule = f"Bash({cmd}:*)"
+            with self.subTest(rule=rule):
+                self.assertIn(rule, roles.READ_ONLY_BASH_DENIED)
+                self.assertIn(rule, ro)
+                self.assertNotIn(rule, base)
+        self.assertEqual(len(ro), len(set(ro)))  # each rule once
+        prefixes = [r[len("Bash("):-len(":*)")] for r in ro if r.startswith("Bash(") and r.endswith(":*)")]
+        for read in ("gh pr view 42", "gh pr diff 42", "gh pr checks 42", "gh api repos/o/r/pulls/42"):
+            with self.subTest(read=read):
+                self.assertEqual([p for p in prefixes if read.startswith(p)], [])
+
     def test_the_floor_allows_only_the_workers_own_park(self):
         # Allowed by rule, the park skips the classifier: the rule names the worker's own card and role, so parking
         # another card is judged like any other command (and `ap2 worker park` refuses it in a worker's session).
@@ -3971,7 +3994,9 @@ class PrReviewRoleTest(PrReviewCase):
         # cloud agent, the user's claude.ai pages, a push, a skill, the web), but the tool search and `Task` (the
         # Agent tool's older name) stay open. A worker role keeps today's floor: none of these built-ins.
         env = {"AP2_RUN_DIR": str(transcripts.run_dir(self.data, "c-20260105-090000-abcdef"))}
-        denied = ["RemoteTrigger", "ArtifactData", "Artifact", "Skill", "WebFetch", "CronCreate", "PushNotification"]
+        denied = ["RemoteTrigger", "ArtifactData", "Artifact", "Skill", "WebFetch", "CronCreate", "PushNotification",
+                  "NewBuiltinTool"]  # one the fixed list does not name: denied because discovery found it
+        self.assertNotIn("NewBuiltinTool", roles.READ_ONLY_BUILTIN_DENIED)
         kept = ["ToolSearch", "Agent", "Bash", "Read", "Write", "Glob", "Grep", "Task"]
         project = {"tools": denied + kept}
         ro = workers_mod.floor("pr-review", project, self.data, env)["permissions"]["deny"]

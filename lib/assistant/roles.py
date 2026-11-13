@@ -39,11 +39,19 @@ FLOORS = MappingProxyType({
 # Tools a read-only role never has. Write is not here: it writes the role's result file and nothing else.
 READ_ONLY_DENIED = ("Edit", "NotebookEdit")
 # Bash commands a read-only role never runs (v1's `perms.BASH_DENY` rule shape): its session holds the user's gh and
-# git logins, so the write verbs are denied by rule, not only by its process's prose. `gh api` with a field or a
-# method is not here.
+# git logins, so the write verbs are denied by rule, not only by its process's prose. These cover the PR's own
+# writes (`gh pr update-branch` pushes a merge onto its branch, moving its head, so the next check starts another
+# review), and the gh command groups that change the repo, its issues, workflows and runs, settings, the user's
+# gists, extensions, aliases, login or gh config. A review reads with `gh pr view`, `gh pr diff`, `gh pr checks` and
+# `gh api`, none of which a rule here prefixes. `gh api` with a field or a method is not here.
 READ_ONLY_BASH_DENIED = ("Bash(gh pr merge:*)", "Bash(gh pr close:*)", "Bash(gh pr reopen:*)", "Bash(gh pr ready:*)",
-                         "Bash(gh pr edit:*)", "Bash(gh pr create:*)", "Bash(gh release:*)", "Bash(git push:*)",
-                         "Bash(git commit:*)")
+                         "Bash(gh pr edit:*)", "Bash(gh pr create:*)", "Bash(gh pr update-branch:*)",
+                         "Bash(gh pr lock:*)", "Bash(gh pr unlock:*)", "Bash(gh pr checkout:*)", "Bash(gh issue:*)",
+                         "Bash(gh workflow:*)", "Bash(gh run rerun:*)", "Bash(gh run cancel:*)",
+                         "Bash(gh run delete:*)", "Bash(gh repo:*)", "Bash(gh label:*)", "Bash(gh secret:*)",
+                         "Bash(gh variable:*)", "Bash(gh gist:*)", "Bash(gh cache:*)", "Bash(gh ruleset:*)",
+                         "Bash(gh project:*)", "Bash(gh extension:*)", "Bash(gh alias:*)", "Bash(gh auth:*)",
+                         "Bash(gh config set:*)", "Bash(gh release:*)", "Bash(git push:*)", "Bash(git commit:*)")
 # Built-in tools a read-only role is denied even when the tool discovery does not list them, less the role's own
 # tools (`workers.floor` drops those): v1's `replies.DISALLOWED` without `Task`, plus the claude.ai page tools and the
 # task list. Each one acts outside the floor (a scheduled cloud agent, the user's pages, a push, a message) or is not

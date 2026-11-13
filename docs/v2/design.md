@@ -787,8 +787,13 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
 - **[decided by the builder]** The read-only floor (`roles.FLOORS["read-only"]`). The `pr-review` settings add
   `Edit` and `NotebookEdit` as deny rules (`roles.READ_ONLY_DENIED`) to the worker floor, the GitHub and git write
   commands as Bash deny rules in v1's rule shape (`roles.READ_ONLY_BASH_DENIED`: `gh pr merge`, `gh pr close`,
-  `gh pr reopen`, `gh pr ready`, `gh pr edit`, `gh pr create`, `gh release`, `git push`, `git commit`, each as
-  `Bash(<command>:*)`), because the session holds the user's gh and git logins, every `ap2` command the review
+  `gh pr reopen`, `gh pr ready`, `gh pr edit`, `gh pr create`, `gh pr update-branch`, `gh pr lock`, `gh pr unlock`,
+  `gh pr checkout`, `gh issue`, `gh workflow`, `gh run rerun`, `gh run cancel`, `gh run delete`, `gh repo`,
+  `gh label`, `gh secret`, `gh variable`, `gh gist`, `gh cache`, `gh ruleset`, `gh project`, `gh extension`,
+  `gh alias`, `gh auth`, `gh config set`, `gh release`, `git push`, `git commit`, each as `Bash(<command>:*)`; a
+  review reads with `gh pr view`, `gh pr diff`, `gh pr checks` and `gh api`, which no rule prefixes;
+  `gh pr update-branch` would push a merge onto the PR's branch and move its head, so the next check starts
+  another review), because the session holds the user's gh and git logins, every `ap2` command the review
   does not run (`roles.READ_ONLY_AP2_DENIED`) as Bash deny rules in the same shape, every MCP tool the session
   loads that `Role.tools` does not list (no read-only role lists one) and every MCP server whole (each server those
   tools are on and each one the tool discovery lists, connected or not, so a tool it adds later is covered too),
