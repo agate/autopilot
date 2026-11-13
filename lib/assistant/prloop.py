@@ -528,6 +528,13 @@ def record_check(record: dict, results: dict, ci: str) -> dict:
         planned = _plan(record["rounds"])
     r = _Checker("record_check")
     with _Deep("record_check: results"):
+        # First, before any check can copy, repr or compare a part of them: the record's fixed bound, for the
+        # results too (a repr stops at the recursion limit on one Python and walks 100000 levels on another).
+        # `shared`: a caller may give one findings list under two angles.
+        try:
+            store.check_writable(results, "the check's results are", shared=True)
+        except store.cards.TooDeepError:
+            raise PrLoopError("record_check: results: nested too deep") from None
         r.choice("ci", ci, CI)
         want = [e["angle"]["name"] for e in planned]
         if not isinstance(results, dict):

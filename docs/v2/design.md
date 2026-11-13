@@ -749,7 +749,8 @@ How it is built (`lib/assistant/prloop.py`):
   past the limit, a round after one that ended the loop, a `fix` finding in a round with no commit (unless the
   round records a `stop`, such as a fix that failed), a check whose reviewers or answers differ from the plan, a
   stored `result` or `ended_by` that the rounds do not give, and a record nested more than `store.MAX_DEPTH` (200)
-  deep, refused at any call depth.
+  deep, refused at any call depth. `record_check`'s results share that bound, checked before any other check of
+  them, so a too-deep result is `record_check: results: nested too deep` on every Python.
 - **[decided by the builder]** The decision. `decide(record)` returns `{"next", "result", "ended_by", "reason",
   "plan"}`, `next` one of `round`, `check`, `end`, checked in this order on the last round: a `stop` or any `owner`
   finding ends `stopped` (`ended_by: stop`, point 5: it asks as before); no `fix` finding and CI green ends `clean`
