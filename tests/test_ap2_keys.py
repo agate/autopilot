@@ -458,6 +458,7 @@ class CheckTest(KeyCase):
                book({"ok": True, "profile": "g"}),
                book({"at": "yesterday", "ok": True, "profile": "g"}),
                book({"at": (NOW + timedelta(hours=1)).isoformat(), "ok": True, "profile": "g"}),
+               json.dumps({"profiles": {"g": {"at": NOW.isoformat(), "ok": True}}}),  # an entry with no profile
                json.dumps({"ok": True, "profile": "g"}),  # the old shape is held to the same rules
                json.dumps({"at": NOW.isoformat(), "ok": True, "profile": None}),
                json.dumps({"at": NOW.isoformat(), "ok": True, "profile": ["g"]}))
