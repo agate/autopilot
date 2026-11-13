@@ -110,15 +110,18 @@ class CiWorkflowTest(unittest.TestCase):
         self.assertTrue(any(l.strip() == "python-version: ${{ matrix.python-version }}" for l in setup[0]),
                         "the setup-python step does not use the matrix version")
 
-    def test_job_prints_the_python_version_before_the_tests(self):
-        # The CI log then shows which interpreter really ran the suite.
+    def test_job_sets_up_python_then_prints_the_version_then_runs_the_tests(self):
+        # The version step runs after setup-python, so the log shows the interpreter that really ran the suite.
         all_steps = steps(self.block)
+        setups = [i for i, s in enumerate(all_steps) if any("actions/setup-python@" in l for l in s)]
         names = [i for i, s in enumerate(all_steps)
                  if any(l.strip() in ("run: python --version", "- run: python --version") for l in s)]
         runs = [i for i, s in enumerate(all_steps) if any(RUN_COMMAND in l for l in s)]
+        self.assertEqual(len(setups), 1, "want one actions/setup-python step")
         self.assertEqual(len(names), 1, "want one step running `python --version`")
         self.assertEqual(len(runs), 1)
-        self.assertLess(names[0], runs[0])
+        self.assertLess(setups[0], names[0], "setup-python must run before the version print")
+        self.assertLess(names[0], runs[0], "the version print must run before the tests")
 
 
 if __name__ == "__main__":
