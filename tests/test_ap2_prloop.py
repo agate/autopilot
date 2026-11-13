@@ -960,13 +960,65 @@ class DeepRecordTest(unittest.TestCase):
                     self.assertEqual(outcome(lambda: frames(50, call)), top)
 
     def test_deep_check_results_are_refused(self):
-        # Only a repr walks this value, and where it stops depends on the Python and its stack: 3.12 stops and the
-        # refusal says "nested too deep"; 3.14 on a large stack can walk all 100000 levels, and the refusal is the
-        # plain "must be text" one. Either way it is a PrLoopError, never a RecursionError.
+        # A repr of this value stops at the recursion limit on 3.12 but can walk all 100000 levels on 3.14: the
+        # fixed bound refuses it before any repr, so the refusal is the same on every Python.
         results = {"Correctness": [{"id": "check-1", "bucket": "fix", "text": deep(100000)}], "Test value": []}
-        refusal = r"^record_check: results(: nested too deep$|\['Correctness'\]\[0\]\.text: must be text, not \[\[\[)"
-        with self.assertRaisesRegex(PrLoopError, refusal):
+        with self.assertRaisesRegex(PrLoopError, r"^record_check: results: nested too deep$"):
             prloop.record_check(at_limit(), results, "green")
+
+    def results_with_depth(self, extra):
+        """Check results whose Correctness finding text makes `results` nest MAX_DEPTH + extra deep, counted from
+        the results dict itself (the top one is 1)."""
+        results = {"Correctness": [{"id": "check-1", "bucket": "fix", "text": deep(0)}], "Test value": []}
+        results["Correctness"][0]["text"] = deep(store.MAX_DEPTH - depth(results) + extra)
+        self.assertEqual(depth(results), store.MAX_DEPTH + extra)
+        return results
+
+    def test_the_results_bound_is_the_stores(self):
+        # At the bound the depth check lets the results through and they get their normal answer (the text is not
+        # text); one level past it, the depth check refuses them first.
+        with self.assertRaisesRegex(PrLoopError, r"^record_check: results\['Correctness'\]\[0\]\.text: must be text, "
+                                    r"not \[\[\["):
+            prloop.record_check(at_limit(), self.results_with_depth(0), "green")
+        with self.assertRaisesRegex(PrLoopError, r"^record_check: results: nested too deep$"):
+            prloop.record_check(at_limit(), self.results_with_depth(1), "green")
+
+    def test_the_results_answer_is_the_same_at_any_call_depth(self):
+        def frames(k, call):
+            return call() if k == 0 else frames(k - 1, call)
+
+        def outcome(call):
+            try:
+                return "ok", call()["result"]
+            except PrLoopError as e:
+                return "refused", str(e)
+
+        cases = [("no findings", no_findings(), ("ok", "clean")),
+                 ("depth MAX_DEPTH", self.results_with_depth(0), None),
+                 ("depth MAX_DEPTH + 1", self.results_with_depth(1),
+                  ("refused", "record_check: results: nested too deep")),
+                 ("depth 100000", {"Correctness": [{"id": "check-1", "bucket": "fix", "text": deep(100000)}],
+                                   "Test value": []}, ("refused", "record_check: results: nested too deep"))]
+        for name, results, want in cases:
+            with self.subTest(name):
+                call = lambda: prloop.record_check(at_limit(), results, "green")
+                top = outcome(call)
+                if want is None:
+                    self.assertEqual(top[0], "refused")
+                    self.assertIn("must be text", top[1])
+                else:
+                    self.assertEqual(top, want)
+                self.assertEqual(outcome(lambda: frames(50, call)), top)
+
+    def test_a_findings_list_shared_by_two_angles_is_accepted(self):
+        # One list object given as both angles' findings: the depth walk meets it twice and still lets it through.
+        shared = [{"id": "check-1", "bucket": "fix", "text": "The retry still drops the last payment."}]
+        new = prloop.record_check(at_limit(), {"Correctness": shared, "Test value": shared}, "green")
+        reviewers = new["fix_check"]["reviewers"]
+        self.assertEqual([r["angle"] for r in reviewers], ["Correctness", "Test value"])
+        self.assertEqual([[f["angle"] for f in r["findings"]] for r in reviewers], [["Correctness"], ["Test value"]])
+        self.assertEqual([[f["id"] for f in r["findings"]] for r in reviewers], [["check-1"], ["check-1"]])
+        self.assertEqual(new["result"], prloop.decide(new)["result"])
 
 
 class PurityTest(unittest.TestCase):
