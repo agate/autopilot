@@ -7,8 +7,9 @@ Everything here is a read of what the other modules keep, made with their own re
 `cap.today_limit` and `cap.paused`, `spend.last` (the totals the cap read last: the ledger is never read here) and
 v1's `budget.read` (Claude Code's cached usage windows). It runs no process, opens no connection and writes nothing,
 so a page request may call it. A ProfileError or CapError becomes text in the block it comes from, never a crash;
-so does an ArithmeticError or RecursionError from a profiles read (a hand-edited file: a cap too big for a float, a
-JSON nest too deep), as `<name>: <error type>: <error>` with no path in it.
+so does an ArithmeticError or RecursionError from a profiles, key record or cap read (a hand-edited file: a cap or a
+raise too big for a float, a JSON nest too deep), as `<name>: <error type>: <error>` with no path in it. A pause file
+that raises one counts as paused, as `cap.paused` counts a pause file it cannot read.
 Named `profileview`, not `access`: the design keeps `access.py` for the health checks.
 """
 from __future__ import annotations
@@ -24,7 +25,7 @@ from assistant.config import ConfigError
 
 PAGE_SESSIONS = "subscription"  # page sessions (dispatcher, page answers, refresh) always run on the subscription
 PROFILE_KEYS = ("name", "label", "mode", "model", "effort", "daily_cap_usd")
-ODD = (ArithmeticError, RecursionError)  # what a profiles read can raise beside ConfigError on a hand-edited file
+ODD = (ArithmeticError, RecursionError)  # what a read can raise beside ConfigError on a hand-edited file
 
 
 def _odd(name, e: BaseException) -> str:
@@ -81,16 +82,21 @@ def access(data: Path, now: datetime, p: Optional[dict], profile_error: Optional
             err = keys.cached_error(data, p)
         except ConfigError as e:
             err = str(e)
-        if err:  # the exact line a refused start prints, the fix included
-            out["key_error"] = cap.refusal({"reason": "key", "error": err})
+        except ODD as e:
+            err = _odd(keys.STATE, e)
+        if err:  # the exact line a refused start prints, its fix line included (the hold's own, with the name)
+            out["key_error"] = cap.refusal({"reason": "key", "error": err, "profile": p.get("name")})
     out["cap"] = cap_block(data, now, p)
     return out
 
 
 def cap_block(data: Path, now: datetime, p: Optional[dict]) -> dict:
     """Today's cap state: `{day, card, card_id, limit, raise_pct, paused, pause}`, with `error` when the state file
-    cannot be used (a symlink)."""
-    pz = cap.paused(data)  # never raises: a pause file it cannot read counts as paused
+    cannot be used (a symlink, a hand-edited raise too big for a float)."""
+    try:
+        pz = cap.paused(data)  # a pause file it cannot read counts as paused
+    except ODD as e:  # a JSON nest too deep, on some Pythons: paused too
+        pz = {"reason": "unknown", "error": _odd(cap.PAUSED, e)}
     out = {"day": cap.day(now), "card": None, "card_id": None, "limit": None, "raise_pct": 0,
            "paused": pz is not None, "pause": pz}
     try:
@@ -99,6 +105,8 @@ def cap_block(data: Path, now: datetime, p: Optional[dict]) -> dict:
                    limit=cap.today_limit(data, p, now) if p is not None else None)
     except ConfigError as e:  # CapError
         out["error"] = str(e)
+    except ODD as e:
+        out["error"] = _odd(cap.STATE, e)
     return out
 
 

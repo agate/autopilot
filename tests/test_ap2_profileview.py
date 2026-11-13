@@ -218,6 +218,53 @@ class SummaryTest(ViewCase):
         profiles.use(self.data, "h")
         self.assertIsNone(self.summary()["access"]["key_error"])
 
+    def test_the_key_hold_line_names_the_profile(self):
+        p = self.counting_gateway("team-gw")
+        profiles.use(self.data, "team-gw")
+        # The record a second rejection right after a refresh writes (keys.note_session_end): the hold.
+        (self.data / keys.STATE).write_text(json.dumps({"profiles": {"team-gw": {
+            "at": NOW.isoformat(), "ok": False, "auth": True, "profile": "team-gw", "error": keys.AUTH_AGAIN}}}))
+        a = self.summary()["access"]
+        self.assertIn("ap2 profile rotate team-gw", a["key_error"])
+        self.assertNotIn("NAME", a["key_error"])
+        refused = cap.allowance(self.data, self.tmp / "projects", NOW, p)
+        self.assertEqual(refused["reason"], "key")
+        self.assertEqual(a["key_error"], cap.refusal(refused))
+        self.assertEqual(self.runs(), 0)  # the hold runs no key command
+
+    def test_an_odd_key_record_or_pause_file_is_an_error_not_a_crash(self):
+        self.counting_gateway()
+        profiles.use(self.data, "g")
+        deep = RecursionError("maximum recursion depth exceeded")  # json.loads on a deep nest, on some Pythons only
+        with mock.patch.object(keys, "cached_error", side_effect=deep):
+            a = self.summary()["access"]
+            status, raw = self.state_over_http()
+        self.assertEqual(status, 200, raw)
+        self.assertIn(f"{keys.STATE}: RecursionError: ", a["key_error"])
+        with mock.patch.object(cap, "paused", side_effect=deep):
+            c = self.summary()["access"]["cap"]
+            status, raw = self.state_over_http()
+        self.assertEqual(status, 200, raw)
+        self.assertTrue(c["paused"])  # never start work by accident
+        self.assertEqual(c["pause"], {"reason": "unknown", "error": f"{cap.PAUSED}: RecursionError: {deep}"})
+
+    def test_a_raise_too_big_for_a_float_is_a_cap_error_field(self):
+        self.counting_gateway()
+        profiles.use(self.data, "g")
+        big = json.dumps({"day": "2026-11-11", "raise_pct": 7, "card": None}).replace('"raise_pct": 7',
+                                                                                       '"raise_pct": 1' + "0" * 400)
+        self.assertIn("0" * 400, big)
+        (self.data / cap.STATE).write_text(big)
+        c = self.summary()["access"]["cap"]
+        self.assertTrue(c["error"].startswith(f"{cap.STATE}: OverflowError: "), c["error"])
+        self.assertNotIn(str(self.tmp), c["error"])
+        self.assertEqual(c["day"], "2026-11-11")
+        status, raw = self.state_over_http()
+        self.assertEqual(status, 200, raw)
+        self.assertIn("OverflowError", json.loads(raw)["access"]["cap"]["error"])
+        built = phone.build(self.data, cfg=Config(), now=NOW.astimezone(timezone.utc), usage_file=self.usage)
+        self.assertIn("OverflowError", built["access"]["cap"]["error"])
+
     def test_cap_block_shows_todays_open_card_and_the_pause(self):
         self.counting_gateway()
         profiles.use(self.data, "g")

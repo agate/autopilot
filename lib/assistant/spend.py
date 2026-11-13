@@ -139,8 +139,8 @@ def last(data) -> Optional[dict]:
     try:
         f = _file(data, LAST)
         raw = json.loads(f.read_text(encoding="utf-8"))
-    except (OSError, ValueError, SpendError):  # UnicodeDecodeError is a ValueError
-        return None
+    except (OSError, ValueError, RecursionError, SpendError):  # UnicodeDecodeError is a ValueError; RecursionError
+        return None  # is a JSON nest too deep, on some Pythons
     if not isinstance(raw, dict) or not all(isinstance(raw.get(k), str) for k in ("at", "day")):
         return None
     for k in ("today", "week", "month"):

@@ -1748,6 +1748,11 @@ class LastCountTest(unittest.TestCase):
             with self.subTest(raw):
                 f.write_text(raw, encoding="utf-8", errors="surrogateescape")
                 self.assertIsNone(spend.last(self.data))
+        # A JSON nest too deep raises RecursionError in json.loads on some Pythons (3.12), not on others (3.14).
+        f.write_text(json.dumps({**self.t, "at": NOW.isoformat(), "day": "2026-11-11"}))
+        self.assertIsNotNone(spend.last(self.data))
+        with mock.patch.object(spend.json, "loads", side_effect=RecursionError("maximum recursion depth exceeded")):
+            self.assertIsNone(spend.last(self.data))
         f.unlink()
         real = self.tmp / "real.json"
         real.write_text(json.dumps({**self.t, "at": NOW.isoformat(), "day": "2026-11-11"}))

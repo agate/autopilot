@@ -3222,11 +3222,16 @@ Calls the author made without asking (check them):
      page_sessions: "subscription", profiles: [{name, label, mode, needs_choice}], broken_profiles: [{name, error}],
      key_error, cap: {day, card, card_id, limit, raise_pct, paused, pause}}`. `profile_error` is the ProfileError
      text of `profiles.active` (it holds `profiles.FIX`); then `profile` is null. `key_error` (gateway only) is
-     `cap.refusal({"reason": "key", "error": keys.cached_error(data, p)})` when the cached record holds an error: the
-     exact line a refused start prints, `KEY_FIX` included, so a later change to that line reaches the page with no
-     page change. `cap.limit` is `cap.today_limit` (null on the subscription); `paused` and `pause` are
-     `cap.paused` (any mode). A ProfileError or CapError becomes an `error` field in the block it comes from
-     (`access.error` for the profile listing, `access.cap.error` for the cap state), never a 500. `usage`: `{mode,
+     `cap.refusal({"reason": "key", "error": keys.cached_error(data, p), "profile": p["name"]})` when the cached
+     record holds an error: the exact line a refused start prints, its fix line included (the key hold's own line
+     during the hold), so a later change to that line reaches the page with no page change. `cap.limit` is
+     `cap.today_limit` (null on the subscription); `paused` and `pause` are `cap.paused` (any mode). A ProfileError or
+     CapError becomes an `error` field in the block it comes from (`access.error` for the profile listing,
+     `access.cap.error` for the cap state), never a 500. So does an ArithmeticError or RecursionError from a profiles,
+     key record or cap read (a hand-edited cap or raise too big for a float, a JSON nest too deep), as
+     `<name>: <error type>: <error>` with no path, in `profile_error` (with `profiles.FIX`), the `broken_profiles`
+     entry, `key_error`, `access.error` or `access.cap.error`; a pause file that raises one reads as paused
+     (`reason: unknown`). `usage`: `{mode,
      windows: [{kind, model, percent, resets_at}] | null, stale, credits_used_usd, credits_limit_usd, gateway}`.
      The windows and credits come from v1's `budget.read(usage_file)` (Claude Code's `~/.claude.json`, looked up at
      each request; `ap2 serve` and `ap2 phone build` use that default); on a gateway they are the page sessions'
