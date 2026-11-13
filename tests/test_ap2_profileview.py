@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -249,6 +250,12 @@ class SummaryTest(ViewCase):
         self.assertEqual(c["pause"], {"reason": "unknown", "error": f"{cap.PAUSED}: RecursionError: {deep}"})
 
     def test_a_raise_too_big_for_a_float_is_a_cap_error_field(self):
+        # The HTTP and phone legs read the cap day in this machine's zone: pin one where NOW's day is 2026-11-11.
+        self.addCleanup(time.tzset)
+        zone = mock.patch.dict(os.environ, {"TZ": "America/New_York"})
+        zone.start()
+        self.addCleanup(zone.stop)
+        time.tzset()
         self.counting_gateway()
         profiles.use(self.data, "g")
         big = json.dumps({"day": "2026-11-11", "raise_pct": 7, "card": None}).replace('"raise_pct": 7',
