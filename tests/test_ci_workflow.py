@@ -46,13 +46,21 @@ def job_keys(block):
 
 
 def steps(block):
-    """Each step of the job as its own list of lines, split on the `- ` that opens it."""
+    """Each step of the job as its own list of lines, split on the `- ` that opens it.
+
+    A job-level key after the steps (a line at 6 spaces or less, not a `- ` or a comment) ends the last step."""
     out = []
+    in_step = False
     for line in block:
+        text = line.strip()
         if re.match(r"^      - ", line):
             out.append([line])
-        elif out and (not line.strip() or indent(line) > 6):
-            out[-1].append(line)
+            in_step = True
+        elif not text or indent(line) > 6:
+            if in_step:
+                out[-1].append(line)
+        elif not text.startswith("#"):
+            in_step = False
     return out
 
 
@@ -329,6 +337,14 @@ class SwitchCheckTest(unittest.TestCase):
     def test_job_level_switch_after_the_steps_is_a_problem(self):
         copy = insert_after(self.text, RUN_COMMAND, "    continue-on-error: true")
         self.assertEqual(job_switch_problems(copy), ["the `unittest` job sets `continue-on-error: true`"])
+
+    def test_a_job_level_key_after_the_steps_is_not_blamed_on_the_run_step(self):
+        # The lines under a job-level key that follows `steps:` belong to that key, not to the last step.
+        for lines in (["    env:", "        &a X: 1"], ["    env:", "        if: x"]):
+            with self.subTest(lines=lines):
+                copy = self.text.rstrip("\n") + "\n" + "\n".join(lines) + "\n"
+                self.assertEqual(step_switch_problems(copy, RUN_COMMAND), [])
+                self.assertEqual(job_switch_problems(copy), [])
 
     # A key line the check cannot read (an anchor, a tag, an explicit `? ` key, a merge key) can still carry a
     # switch, so it must fail the check, not be skipped.
