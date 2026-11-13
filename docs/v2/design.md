@@ -1724,7 +1724,7 @@ Calls the author made without asking (check them):
     a text that is missing in the chosen language says so instead of showing another language.
   - Later work: template buttons (lane change, restore, child), the chat box (9.3), the Restore points screen,
     real worker counts, answering questions (the workers slice), "started at login" (launchd), a pause lift (`ap2
-    cap resume`) on the page, and labels for languages other than `en` and `zh`.
+    cap resume`) and the profile switch (see "Access on the pages" choice 5) on the page, and labels for languages other than `en` and `zh`.
 - **[decided by the builder]** The phone page data (design 9.2, 9.4, 10). `phone.build(data, cfg=None, now=None,
   plugin_dir=None, usage_file=None)` in `lib/assistant/phone.py` turns the card store into one JSON document;
   `ap2 phone build [--data PATH] [--out PATH]` prints it (UTF-8, sorted keys, one line) or writes it to `--out` through a temp file
