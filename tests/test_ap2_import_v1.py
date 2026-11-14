@@ -1767,6 +1767,45 @@ class TakeOverTest(unittest.TestCase):
         self.assertEqual(projects.path(self.data, "shop").read_text(encoding="utf-8"), "repo: /made/meanwhile\n")
         self.assertEqual(list(self.data.rglob("*.ap2-part")), [])
 
+    def test_a_data_folder_without_hard_links_is_copied_by_rename(self):
+        def no_link(src, dst, *a, **k):  # what exFAT or FAT gives
+            raise OSError(errno.ENOTSUP, os.strerror(errno.ENOTSUP), str(src), None, str(dst))
+
+        with mock.patch("os.link", no_link):
+            report = self.take_over()
+        entry = self.project_entry(report)
+        self.assertEqual(entry["project_file"], "written")
+        self.assertEqual(projects.load(self.data, "shop")["repo"], "/srv/repos/shop")
+        record = self.data / "v1" / "shop"
+        sources = [p for p in self.shop.rglob("*") if p.is_file() and not p.is_symlink()
+                   and "out" not in p.relative_to(self.shop).parts and p.name != "state.lock"]
+        self.assertTrue(sources)
+        for src in sources:
+            rel = src.relative_to(self.shop)
+            with self.subTest(rel=str(rel)):
+                self.assertEqual((record / rel).read_bytes(), src.read_bytes())
+                self.assertEqual((record / rel).stat().st_mtime_ns, src.stat().st_mtime_ns)
+                self.assertIn(f"v1/shop/{rel}", entry["files"]["copied"])
+        run2 = transcripts_run_dir(self.data, self.by_key()["v1:shop:PROJ-2"]["id"])
+        src = self.shop / "runs" / "PROJ-2" / "journal.md"
+        self.assertEqual((run2 / "journal.md").read_bytes(), src.read_bytes())
+        self.assertEqual((run2 / "journal.md").stat().st_mtime_ns, src.stat().st_mtime_ns)
+        self.assertEqual(list(self.data.rglob("*.ap2-part")), [])
+
+    def test_without_hard_links_a_project_file_made_meanwhile_is_kept(self):
+        def no_link(src, dst, *a, **k):
+            if str(dst).endswith("shop.yaml"):
+                Path(dst).write_text("repo: /made/meanwhile\n", encoding="utf-8")
+            raise OSError(errno.ENOTSUP, os.strerror(errno.ENOTSUP), str(src), None, str(dst))
+
+        with mock.patch("os.link", no_link):
+            line = self.fails("--take-over", "shop")
+        self.assertIn("cannot write", line)
+        self.assertIn("shop.yaml", line)
+        self.assertIn(os.strerror(errno.EEXIST), line)
+        self.assertEqual(projects.path(self.data, "shop").read_text(encoding="utf-8"), "repo: /made/meanwhile\n")
+        self.assertEqual(list(self.data.rglob("*.ap2-part")), [])
+
     def test_a_copy_cut_short_leaves_no_file_and_the_next_run_copies_it_whole(self):
         def short(src, dst, *a, **k):
             data = src.read()
@@ -1866,6 +1905,20 @@ class TakeOverTest(unittest.TestCase):
         report = self.take_over()
         self.assertEqual(self.project_entry(report)["project_file"], "kept")
         self.assertEqual(path.read_bytes(), before)
+
+    def test_a_hand_written_project_file_is_kept_whatever_v1s_values(self):
+        path = projects.path(self.data, "shop")
+        path.parent.mkdir(parents=True)
+        path.write_text("repo: /my/own/checkout\n", encoding="utf-8")
+        before = path.read_bytes()
+        for bad in ({"health_checks": [{"name": "vpn", "command": "true", "timeout": float("inf")}]},
+                    {"resources": "device"}):
+            with self.subTest(bad=bad):
+                cfg = json.loads((FIXTURE / "projects" / "shop" / "config.json").read_text())
+                (self.shop / "config.json").write_text(json.dumps(dict(cfg, **bad)))
+                report = self.take_over()
+                self.assertEqual(self.project_entry(report)["project_file"], "kept")
+                self.assertEqual(path.read_bytes(), before)
 
     def test_a_v1_value_projects_load_refuses_stops_the_take_over(self):
         for bad in ({"resources": "device"}, {"resources": ["ok", 3]}, {"repo": 7},

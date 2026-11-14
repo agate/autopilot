@@ -3806,7 +3806,7 @@ Calls the author made without asking (check them):
       `ap pause NAME` in v1); its state.json lists a worker (the line names each `task role` and says to run
       `ap worker end NAME TASK ROLE` in v1, which saves the session on the task); the project does not read (as
       for the import), a task's `sessions` names a role v2 has no worker for or holds a text that is not a session
-      id; a config.json value the project file would refuse; a link where a copy goes. `--dry-run` reports
+      id; a config.json value the project file would refuse (when the file is written); a link where a copy goes. `--dry-run` reports
       `take_over: {paused, workers}` and what would be added, changed and copied instead of refusing the first two.
     - Live cards: every card gets `taken_over` (the time) and a live `do` (v2 works on it, v1 is paused for it).
       A task card also gets `branch` (v1's; an open task without one gets `projects.branch(project, <v1 id>,
@@ -3834,7 +3834,8 @@ Calls the author made without asking (check them):
       name + `.ap2-part`), so a v1 file name of up to 255 bytes is still copied. The temp file is removed in every
       case; one a killed run left is replaced (unlinked, never written through), and one left next to a destination
       that exists (a run killed just after the link) is removed by the next run, never followed. A destination made meanwhile is never overwritten: `os.link` refuses it
-      and the take-over stops with one line. A v1 file whose name ends in `.ap2-part` is listed under `skipped`, so
+      and the take-over stops with one line. On a file system without hard links (exFAT, FAT, some network shares)
+      the temp file is renamed into place after a check that the destination is still absent. A v1 file whose name ends in `.ap2-part` is listed under `skipped`, so
       it never meets a temp name. Each open task's `runs/<task>/` is also copied into its card's run folder
       (`<data>/sessions/<card>/`), where v2's workers read and write; none is when v1's `runs/` is itself a link (it
       is listed under `skipped`), and a task id that is not one plain path part (`.`, `..`, one holding a separator)
@@ -3851,7 +3852,9 @@ Calls the author made without asking (check them):
       JSON being inside the YAML subset; a `null` or empty value is left out), only when it does not exist
       (`project_file: written`, `kept`, or `write` on a dry run). A value `projects.load` would refuse, or one that
       does not read back the same, or one holding text that is not valid Unicode (a lone surrogate `json.loads`
-      takes from a `\ud800` escape, which cannot be written as UTF-8), stops the take-over before any write.
+      takes from a `\ud800` escape, which cannot be written as UTF-8), stops the take-over before any write; these
+      checks run only when the file is written, so a project file written by hand first is kept and v1's values
+      are never checked.
     - Second run: a card with `taken_over` is never rebuilt from v1 (`unchanged`), so what v2 changed since stays;
       a copy whose destination exists is never written (`same`, or `kept` when its bytes differ; a copy cut short
       left no destination, so it is copied again); a file removed

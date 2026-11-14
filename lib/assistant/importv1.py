@@ -18,14 +18,16 @@ first (`ap pause NAME`: v1's `paused` file, or `stopped: true`) with no v1 worke
 v1's folder is only read (`os.scandir`, `os.stat`, and copies from it). Its cards turn live (`taken_over`, the
 branch, worktree, needs, spec and saved sessions v2's workers continue), every decision gets a card (settled ones
 `done`, with the answer), the whole project folder is copied to `<data>/v1/<name>/` and each open task's run folder
-into its card's run folder (same bytes and mtime, through a temp file linked in place; never overwritten, never
-removed, v1's links skipped, a link on the v2 side refused), and `<data>/projects/<name>.yaml` is written from
-config.json when it does not exist. A card with `taken_over` is never rebuilt from v1, and the plain import skips
-a project whose project card has it.
+into its card's run folder (same bytes and mtime, through a temp file linked in place, or renamed in place after a
+check that the destination is absent where the file system has no hard links; never overwritten, never removed,
+v1's links skipped, a link on the v2 side refused), and `<data>/projects/<name>.yaml` is written from config.json
+when it does not exist (its values are checked only then). A card with `taken_over` is never rebuilt from v1, and
+the plain import skips a project whose project card has it.
 """
 from __future__ import annotations
 
 import copy
+import errno
 import filecmp
 import hashlib
 import io
@@ -71,6 +73,9 @@ BAD_BRANCH = re.compile(r"[\s\x00-\x1f\x7f:~^?*\[\\]|\.\.|@\{|^[-/.]|[/.]$|//|/\
 # The temp file a copy or the project file is written to first, next to it, then linked in place: a write cut short
 # never leaves a part file at the final name. Its name is short and fixed (`_temp`), so a long v1 name still fits.
 PART = ".ap2-part"
+# What `os.link` raises on a file system without hard links (exFAT, FAT, some network shares): the temp file is
+# then renamed into place after a check that the destination is still absent.
+NO_LINK = {getattr(errno, n) for n in ("ENOTSUP", "EOPNOTSUPP", "EPERM", "EXDEV") if hasattr(errno, n)}
 # The longest text a v1 label may give, in characters: a template longer than this is shown as its key (before it
 # is parsed), and a label that would fill longer is shown as written. v1's own labels are about 100 characters.
 MAX_LABEL = 1_000
@@ -719,11 +724,12 @@ def _take_over(store: Store, name: str, folder: Path, langs: tuple, labels: Labe
     if not dry_run and working:
         stop(f"v1 still lists a worker on it ({', '.join(working)}); run `ap worker end {name} TASK ROLE` in v1 "
              f"for each first, so its session is saved on the task")
-    text, values = _project_file(cfg, stop)
     pfile = projects.path(data, name)
     seen = set()
     _refuse_link(pfile, data, seen)
     has_file = os.path.lexists(pfile)
+    # config.json's values matter only when the project file is written: a kept one is never checked against them.
+    text, values = ("", {}) if has_file else _project_file(cfg, stop)
     setup = projects.load(data, name) if has_file else dict(copy.deepcopy(projects.DEFAULTS), **values, name=name)
     record = data / RECORD / name
     live = {"at": cards.stamp(store.clock()), "project": setup, "record": record}
@@ -892,7 +898,9 @@ def _clear_temp(dst: Path) -> None:
 
 def _place(dst: Path, source, like: Optional[Path] = None) -> None:
     """Write the bytes of the open file `source` to `dst`, which must not exist: into its temp file (`_temp`) next
-    to it, then `os.link` puts it at `dst` (FileExistsError when `dst` was made meanwhile: never overwritten).
+    to it, then `os.link` puts it at `dst` (FileExistsError when `dst` was made meanwhile: never overwritten). On a
+    file system without hard links (`os.link` raises an errno in NO_LINK) the temp is renamed to `dst` with
+    `os.replace` after a check that `dst` is still absent (FileExistsError when it is not).
     With `like`, the temp takes `like`'s mode and mtime first (`shutil.copystat`). The temp file is removed in every
     case, so a write cut short (a full disk, Ctrl-C) leaves nothing at `dst`; one a killed run left is replaced, never
     written through (it is unlinked, then made new with O_EXCL). One left next to a `dst` that exists (a run killed
@@ -905,7 +913,14 @@ def _place(dst: Path, source, like: Optional[Path] = None) -> None:
             shutil.copyfileobj(source, f)
         if like is not None:
             shutil.copystat(like, tmp, follow_symlinks=False)
-        os.link(tmp, dst)
+        try:
+            os.link(tmp, dst)
+        except OSError as e:
+            if e.errno not in NO_LINK:  # FileExistsError included: `dst` made meanwhile
+                raise
+            if os.path.lexists(dst):
+                raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), str(dst)) from e
+            os.replace(tmp, dst)
     finally:
         try:
             os.unlink(tmp)
