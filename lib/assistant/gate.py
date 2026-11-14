@@ -715,6 +715,11 @@ def _unsee(seen: dict, why: list, ids: set) -> dict:
     return out
 
 
+def _named(why: list) -> set:
+    """The card ids the round's reasons `why` name."""
+    return {w["card"] for w in why if isinstance(w.get("card"), str)}
+
+
 def _unsee_saved(data: Path, now: datetime, why: list, ids: set) -> None:
     """Undo the round's reasons of the cards `ids` in pass.json's `seen` (written when the round started), so the
     next round is due for them. A missing or damaged pass.json is left as it is (the next `_pass_due` says so).
@@ -731,13 +736,15 @@ def _start_dispatch(data: Path, now: datetime, store: Store, due: bool, claude, 
     due, the first group of a new round, and then `pass_started` moves `seen` (once per round) to `present`, the
     snapshot `_pass_due` took in this run, so what lands while the pass launches stays unseen. A new round freezes
     pass.json's `why` (written by `_pass_due` in this run, before `pass_started` clears it) on the pass's record, and
-    the queue carries it to each next group. The profile and the cap are asked first: a refusal starts nothing and
-    keeps the queue, and a due pass stays due. A group that does not start (any error) is one error and is dropped
-    from the round, and its cards' reasons are left unseen (`_unsee`; also the cards of a project `groups` refused),
-    so the next round is due for them and tries again: one error each round, not each run, and no group holds the
-    head of the queue. After any other error the next group is tried in the same run; after `claude --bg` itself
-    fails (`dispatch.LaunchError`) no other group is tried this run, and the rest of the queue waits for the next
-    run. A new round where none starts and none is left in the queue stays due."""
+    the queue carries it to each next group. A new round serves only the groups holding a card its `why` names
+    (`dispatch.named`); with none, nothing starts and `seen` moves (but for a refused project's cards). The profile
+    and the cap are asked first: a refusal starts nothing and keeps the queue, and a due pass stays due. A group that
+    does not start (any error) is one error and is dropped from the round, and its cards' reasons are left unseen
+    (`_unsee`; also the cards of a project `groups` refused), so the next round is due for them and tries again
+    (that round serves only them), and no group holds the head of the queue. After any other error the next group
+    is tried in the same run; after `claude --bg` itself fails (`dispatch.LaunchError`) no other group is tried
+    this run, and the rest of the queue waits for the next run. A new round where none starts and none is left in
+    the queue stays due."""
     try:
         rec = dispatch.read_record(data)
     except (OSError, ValueError, RecursionError):  # damaged since `_finish_dispatch` looked: the next run removes it
@@ -755,6 +762,9 @@ def _start_dispatch(data: Path, now: datetime, store: Store, due: bool, claude, 
         why = saved.get("why") if isinstance(saved.get("why"), list) else []
         try:
             queue, bad = dispatch.groups(data, store)
+            # Only the groups holding a card the round names: a failed group's retry costs no pass for the others.
+            queue = dispatch.named(store, queue, _named(why))
+            refused = dispatch.members(store, [], [e["project"] for e in bad]) if bad else set()
         except (CardError, OSError, RecursionError) as e:
             errors.append({"dispatch": True, "error": str(e)})
             log(f"dispatch: error: {e}")
@@ -762,13 +772,13 @@ def _start_dispatch(data: Path, now: datetime, store: Store, due: bool, claude, 
         for e in bad:
             errors.append(e)
             log(f"project {e['project']}: refused: {e['error']}; its cards are tried again next round")
-        if not queue:
-            if not bad:  # nothing live to serve: what changed is seen, so the pass is not due every run
-                try:
-                    pass_started(data, now, store, present=present)
-                except (CardError, WorkerError, OSError, RecursionError) as e:
-                    errors.append({"pass": True, "error": str(e)})
-                    log(f"pass: error: {e}")
+        if not queue:  # nothing the round names to serve: what changed is seen (a refused project's cards are not),
+            try:  # so the pass is not due every run for the rest, and a refused project costs no pass
+                snap = present if present is not None else _present(data, store)
+                pass_started(data, now, store, present=_unsee(snap, why, refused))
+            except (CardError, WorkerError, OSError, RecursionError) as e:
+                errors.append({"pass": True, "error": str(e)})
+                log(f"pass: error: {e}")
             return
     try:
         prof = dispatch.launch_profile(data, now, transcripts_dir, claude=claude, store=store)
@@ -797,7 +807,8 @@ def _start_dispatch(data: Path, now: datetime, store: Store, due: bool, claude, 
     if failed or bad:
         try:
             unseen = dispatch.members(store, failed, [e["project"] for e in bad])
-        except (CardError, OSError, RecursionError) as e:  # its cards are seen: at worst one round late
+        except (CardError, OSError, RecursionError) as e:  # which cards they hold is unknown: every card the
+            unseen = _named(why)  # round names is left unseen, so the next round is due for them all
             errors.append({"dispatch": True, "error": str(e)})
             log(f"dispatch: error: {e}")
     if started is None:

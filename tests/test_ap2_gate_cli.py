@@ -38,6 +38,7 @@ class Ap2GateCommandTest(unittest.TestCase):
         (fakes / "bin").mkdir()
         (fakes / "bin" / "claude").symlink_to(ROOT / "tests" / "bin" / "fake-claude-v2")
         (fakes / "home").mkdir()
+        (fakes / "tmp").mkdir()  # TMPDIR: where the no-project pass's own folder lands, removed with `fakes`
         self.fakes = fakes
 
     def run_ap2(self, *args):
@@ -46,7 +47,8 @@ class Ap2GateCommandTest(unittest.TestCase):
         # argparse from coloring its usage and errors.
         env.update(HOME=str(self.home), AP2_DATA=str(self.data), PYTHON_COLORS="0", TZ="Pacific/Kiritimati",
                    PATH=f"{self.fakes / 'bin'}{os.pathsep}{env.get('PATH', '')}",
-                   FAKE_CLAUDE_HOME=str(self.fakes / "home"), FAKE_CLAUDE_LOG=str(self.fakes / "claude.log"))
+                   FAKE_CLAUDE_HOME=str(self.fakes / "home"), FAKE_CLAUDE_LOG=str(self.fakes / "claude.log"),
+                   TMPDIR=str(self.fakes / "tmp"))
         return subprocess.run([sys.executable, str(AP2), *args], capture_output=True, text=True, env=env,
                               errors="replace", timeout=30)
 

@@ -3,12 +3,14 @@ driven by the v2 runbook (`builtin/RUNBOOK.md`), that decides what happens next 
 
 - `groups(data, store)`: the groups a pass may serve, one per distinct `repo` of the projects live cards name (a
   taken-over v1 card is live, a plain imported v1 copy is not), plus the group None (cards with no project, and
-  projects with no repo), which runs in the data folder.
+  projects with no repo), which runs in an empty folder of its own (`OWN_PREFIX`, outside the data folder).
+- `named(store, groups, ids)`: the groups that hold a live card of `ids` (a new round serves only those).
 - `settings(data, profile, projects, mode, claude)`: the pass's `--settings`, built like the worker floor.
 - `start(data, group, queue, profile, now, mode, why)`: start one pass and record it in `<data>/dispatch.json`
-  `{group, projects, short_id, session_id, started_at, profile, queue, why, token, looks, seen_busy}`, with a spend
-  launch row (kind `dispatcher`). `queue` holds the groups of this round still to serve, `why` the round's reasons
-  (pass.json's `why` when the round started), and `token` the pass's own (`AP2_PASS` in its env).
+  `{group, projects, short_id, session_id, started_at, profile, queue, why, token, looks, seen_busy, cwd?}`, with a
+  spend launch row (kind `dispatcher`). `queue` holds the groups of this round still to serve, `why` the round's
+  reasons (pass.json's `why` when the round started), `token` the pass's own (`AP2_PASS` in its env), and `cwd`
+  (the group None only) its own folder.
 - `finish(data, now)`: a later gate run ends the pass: its turn ended, it was stopped or is gone, it ran past
   DISPATCH_MAX_MIN minutes, or it said `ap2 pass end` (`end`, which writes `<data>/dispatch-end.json`). Waiting at
   a permission prompt opens one `ask` card (`fix`, from `dispatch`) and keeps the stopped session for `claude
@@ -24,7 +26,9 @@ import json
 import os
 import re
 import secrets
+import shutil
 import subprocess
+import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -51,6 +55,10 @@ ROLE = "dispatcher"  # AP2_ROLE: the Bash guard acts on it; the park hook leaves
 FROM = "dispatch"  # the `from` of the asks the pass and its end open
 KIND = "dispatch"  # the kind and feed of the card a pass at a permission prompt opens
 NO_PROJECT = "cards with no project"  # the label of the group None
+# The group None's pass runs in an empty folder of its own (`tempfile.mkdtemp`), never in the data folder: there a
+# relative write passes the Bash guard (it judges only the data-folder paths a command names), and the data folder
+# would be the session's project root, whose `.claude/`, `.mcp.json` and `CLAUDE.md` a later session loads.
+OWN_PREFIX = "ap2-dispatch-"
 # How a pass ended, for its gate.log line (`finish` returns the key as `how`).
 HOW = {"ended": "it ran ap2 pass end", "turn": "its turn ended", "gone": "its session is gone",
        "late": "it ran too long, or the clock went back", "blocked": "it waits at a permission prompt"}
@@ -141,6 +149,22 @@ def members(store: Store, served: list, refused=()) -> set:
     return out
 
 
+def named(store: Store, served: list, ids) -> list:
+    """The groups of `served` that hold a live card of `ids` (as `members` counts them), in order. Raises CardError
+    or OSError when the store does not read."""
+    ids, keys = set(ids), set()
+    for c in store.list():
+        if c["id"] not in ids or not _live(c):
+            continue
+        name = c.get("project")
+        if name is None or (isinstance(name, str) and cards.blank(name)):
+            keys.add(None)
+        else:
+            keys.add(name if isinstance(name, str) else repr(name))
+    return [g for g in served if (g.get("group") is None and None in keys)
+            or any(n in keys for n in g.get("projects") or [])]
+
+
 def label(group: dict) -> str:
     return ", ".join(group.get("projects") or []) or NO_PROJECT
 
@@ -202,7 +226,7 @@ def launch_profile(data, now: datetime, transcripts_dir=None, claude: Optional[s
 
 
 def prompt(data, group: dict) -> str:
-    where = f"the repo {group['group']}" if group.get("group") else f"the data folder {data}"
+    where = f"the repo {group['group']}" if group.get("group") else "no repo: an empty folder of its own"
     ap2 = workers_module.package_root() / "bin" / "ap2"
     return (f"Run one ap2 dispatcher pass for: {label(group)} (in {where}). Read {RUNBOOK} first and follow it "
             f"exactly. Run ap2 as {ap2} (that exact path; your allow rules name it). The data folder is {data}.")
@@ -210,19 +234,20 @@ def prompt(data, group: dict) -> str:
 
 def start(data, group: dict, queue: list, profile: dict, now: datetime, mode: str,
           claude: Optional[str] = None, why: Optional[list] = None) -> dict:
-    """Start one pass for `group` on `profile`, in the group's repo (the data folder for the group None), and record
-    it in `<data>/dispatch.json` with the rest of the round in `queue` and the round's reasons in `why` (the pass
-    reads them with `ap2 pass status`). The pass gets a token of its own, `AP2_PASS` in its env and `token` on the
-    record, so `ap2 pass end` from another pass ends nothing. In any mode but live it loads no MCP server
-    (`--strict-mcp-config`, no `--mcp-config`). The record is written right after the launch (a record that cannot
-    be written stops the session again), then with the session id once the listing shows it (best effort); a spend
-    launch row (kind `dispatcher`) follows, and a failure there is the record's `note`. Raises LaunchError when
-    `claude --bg` fails, DispatchError (or ConfigError, WorkerError) for this group, when nothing started: also when
-    the launch cannot enter the group's repo (an OSError naming it), so the next group is still tried."""
+    """Start one pass for `group` on `profile`, in the group's repo (for the group None, a new empty folder made by
+    `tempfile.mkdtemp` with OWN_PREFIX, kept as the record's `cwd` and removed by `finish`, or here when nothing
+    started), and record it in `<data>/dispatch.json` with the rest of the round in `queue` and the round's reasons in
+    `why` (the pass reads them with `ap2 pass status`). The pass gets a token of its own, `AP2_PASS` in its env and
+    `token` on the record, so `ap2 pass end` from another pass ends nothing. In any mode but live it loads no MCP server
+    (`--strict-mcp-config`, no `--mcp-config`). The record is written right after the launch (a record that cannot be
+    written stops the session again), then with the session id once the listing shows it (best effort); a spend launch
+    row (kind `dispatcher`) follows, and a failure there is the record's `note`. Raises LaunchError when `claude --bg`
+    fails, DispatchError (or ConfigError, WorkerError) for this group, when nothing started: also when the launch cannot
+    enter the group's repo (an OSError naming it), so the next group is still tried."""
     data, claude = Path(data), _claude(claude)
     projs = [projects_module.load(data, n) for n in group.get("projects") or []]
-    cwd = Path(group["group"]) if group.get("group") else data
-    if not cwd.is_dir():
+    cwd = Path(group["group"]) if group.get("group") else None
+    if cwd is not None and not cwd.is_dir():
         raise DispatchError(f"no dispatcher pass started for {label(group)}: the repo {cwd} is not a folder")
     s = settings(data, profile, projs, mode, claude=claude)
     run = data / RUN_DIR
@@ -243,22 +268,34 @@ def start(data, group: dict, queue: list, profile: dict, now: datetime, mode: st
     env = {k: v for k, v in os.environ.items() if not k.startswith(("AUTOPILOT_", "AP2_"))}
     env.update(s["env"])
     env["AP2_PASS"] = token  # the launch env only: the shared settings file never holds a newer pass's token
+    own = None
+    if cwd is None:
+        try:
+            own = cwd = Path(tempfile.mkdtemp(prefix=OWN_PREFIX))
+        except OSError as e:
+            raise DispatchError(f"no dispatcher pass started for {label(group)}: cannot make its empty folder: "
+                                f"{e}") from e
     try:
         short = v1_workers._launch(argv, str(cwd), env)
     except OSError as e:
+        _remove_own(own)  # nothing started
         if e.filename == str(cwd):  # the repo cannot be entered (no access, or gone since the check): this group's
             raise DispatchError(f"no dispatcher pass started for {label(group)}: cannot enter the repo {cwd}: "
                                 f"{e.strerror or e}") from e
         raise LaunchError(f"cannot start the dispatcher pass for {label(group)}: {e}") from e
     except (RuntimeError, subprocess.SubprocessError) as e:
+        _remove_own(own)
         raise LaunchError(f"cannot start the dispatcher pass for {label(group)}: {e}") from e
     rec = {"group": group.get("group"), "projects": list(group.get("projects") or []), "short_id": short,
            "session_id": "", "started_at": cards.stamp(now), "profile": profile["name"], "queue": list(queue),
            "why": list(why or []), "token": token, "looks": 0, "seen_busy": False}
+    if own is not None:
+        rec["cwd"] = str(own)
     try:
         write_json(data / DISPATCH, rec)
     except OSError as e:
         _run(claude, "stop", short)
+        _remove_own(own)
         raise DispatchError(f"cannot record the dispatcher pass in {data / DISPATCH}: {e}; the session {short} was "
                             f"stopped") from e
     row = v1_sessions.find_by_id(short, v1_sessions.list_all(claude) or []) or {}
@@ -277,6 +314,24 @@ def start(data, group: dict, queue: list, profile: dict, now: datetime, mode: st
     return rec
 
 
+def _remove_own(own: Optional[Path]) -> None:
+    if own is not None:
+        shutil.rmtree(own, ignore_errors=True)
+
+
+def _own_folder(rec: dict) -> Optional[Path]:
+    """The group None's own folder on the record `rec` (its `cwd`), or None: only a folder `start` could have made
+    (named with OWN_PREFIX, right in the temp folder, not a link), so a record naming any other path removes nothing."""
+    cwd = rec.get("cwd")
+    if rec.get("group") is not None or not isinstance(cwd, str):
+        return None
+    path = Path(cwd)
+    if not (path.is_absolute() and path.name.startswith(OWN_PREFIX) and not path.is_symlink()
+            and os.path.realpath(path.parent) == os.path.realpath(tempfile.gettempdir())):
+        return None
+    return path
+
+
 # -- the record -----------------------------------------------------------------------------------------------------
 
 def _group_ok(g) -> bool:
@@ -287,7 +342,8 @@ def _group_ok(g) -> bool:
 def read_record(data) -> Optional[dict]:
     """`<data>/dispatch.json`, or None when there is none. A record with a `short_id` is an open pass; one without
     holds only the round's `queue` and `why`. `why` (a list of objects) and `token` may be missing (a record written
-    before they were). Raises ValueError (or OSError) when it is not one of these."""
+    before they were), and `cwd` (a string: the group None's own folder) is there only for that group. Raises
+    ValueError (or OSError) when it is not one of these."""
     path = Path(data) / DISPATCH
     try:
         rec = json.loads(path.read_text(encoding="utf-8"))
@@ -306,7 +362,7 @@ def read_record(data) -> Optional[dict]:
         if not (isinstance(rec["short_id"], str) and _SHORT.match(rec["short_id"]) and _group_ok(rec)
                 and isinstance(rec.get("started_at"), str)
                 and (looks is None or (isinstance(looks, int) and not isinstance(looks, bool)))
-                and isinstance(rec.get("seen_busy", False), bool)):
+                and isinstance(rec.get("seen_busy", False), bool) and isinstance(rec.get("cwd", ""), str)):
             raise ValueError(shape)
         cards.parse_stamp(rec["started_at"])
     return rec
@@ -315,8 +371,9 @@ def read_record(data) -> Optional[dict]:
 def end(data, now: datetime) -> dict:
     """`ap2 pass end`: mark the open pass ended at `now`, so the next gate run ends its session at once. The marker is
     its own file (`dispatch-end.json`), since the gate rewrites `dispatch.json` on its runs. Raises DispatchError
-    when no pass is open, or when `AP2_PASS` is set (a pass runs it) and is not the open pass's token: an older pass
-    (one stopped at a prompt and resumed by the user) ends nothing. Without `AP2_PASS` (a person at a terminal) it
+    when no pass is open, when `AP2_PASS` is set (a pass runs it) and is not the open pass's token (an older pass,
+    one stopped at a prompt and resumed by the user, ends nothing), or when `AP2_ROLE` is set without `AP2_PASS` (a
+    worker: Workers strip every AP2_* name, so it never has `AP2_PASS`). Without either (a person at a terminal) it
     ends the open pass."""
     data = Path(data)
     try:
@@ -326,6 +383,8 @@ def end(data, now: datetime) -> dict:
     if not rec or "short_id" not in rec:
         raise DispatchError("no dispatcher pass is open")
     mine = os.environ.get("AP2_PASS")
+    if os.environ.get("AP2_ROLE") and not mine:
+        raise DispatchError("only the open dispatcher pass or a person ends it")
     if mine and mine != rec.get("token"):
         raise DispatchError(f"this session is not the open dispatcher pass ({rec['short_id']}); it ends nothing")
     marker = {"short_id": rec["short_id"], "started_at": rec["started_at"], "ended_at": cards.stamp(now)}
@@ -387,10 +446,11 @@ def finish(data, now: datetime, claude: Optional[str] = None, transcripts_dir=No
     ended (state done or failed, or status idle, once a run saw it busy or LOOKS runs saw it so), it was stopped or
     is gone (its process dead), it ran past DISPATCH_MAX_MIN minutes, or it started more than `routines.GRACE` after
     now (an error ending with `routines.WENT_BACK`): it is stopped (`claude stop`), its spend settled, and removed
-    (`claude rm`). Waiting at a permission prompt (state blocked, status waiting) opens one ask card instead and is
-    stopped but not removed, for `claude attach`. Any end but `ap2 pass end` and the prompt is one error. Then the
-    record keeps only the round's queue, or goes. A failed listing waits for the next run (one error once the pass is
-    late). The kept queue carries the round's `why`, for each next group's record. Returns `{open, ended, how,
+    (`claude rm`), and with it (or when it is gone) the group None's own folder. Waiting at a permission prompt
+    (state blocked, status waiting) opens one ask card instead and is stopped but not removed, for `claude attach`
+    (its own folder is kept too). Any end but `ap2 pass end` and the prompt is one error. Then the record keeps only
+    the round's queue, or goes. A failed listing waits for the next run (one error once the pass is late). The kept
+    queue carries the round's `why`, for each next group's record. Returns `{open, ended, how,
     short_id, group, projects, card?, errors}`."""
     data, claude = Path(data), _claude(claude)
     path = data / DISPATCH
@@ -460,13 +520,19 @@ def finish(data, now: datetime, claude: Optional[str] = None, transcripts_dir=No
                 out["errors"].append({"dispatch": True, "error": f"the dispatcher pass {short} waits at a permission "
                                                                  f"prompt (`claude attach {short}`), but its card "
                                                                  f"cannot be written: {e}"})
-    elif s is not None:
-        try:
-            done = _run(claude, "rm", short)
-            if done.returncode != 0:
-                raise OSError(f"exit {done.returncode}")
-        except (OSError, subprocess.SubprocessError) as e:
-            out["errors"].append({"dispatch": True, "error": f"cannot remove the dispatcher session {short}: {e}"})
+    else:
+        removed = s is None  # gone: nothing to remove
+        if s is not None:
+            try:
+                done = _run(claude, "rm", short)
+                if done.returncode != 0:
+                    raise OSError(f"exit {done.returncode}")
+                removed = True
+            except (OSError, subprocess.SubprocessError) as e:
+                out["errors"].append({"dispatch": True, "error": f"cannot remove the dispatcher session {short}: "
+                                                                 f"{e}"})
+        if removed:  # the session is gone: so is the group None's own folder (a blocked pass keeps it for attach)
+            _remove_own(_own_folder(rec))
     if how == "late" and ahead:
         out["errors"].append({"dispatch": True, "error": f"the dispatcher pass {short} ({name}) started at "
                                                          f"{rec['started_at']}, later than now ({cards.stamp(now)}); "

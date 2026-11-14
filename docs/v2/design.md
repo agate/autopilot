@@ -1924,18 +1924,22 @@ Calls the author made without asking (check them):
   - Groups: `dispatch.groups(data, store)` gives one group per distinct `repo` of the projects (`projects.load`)
     named by live cards (not `done`, not an imported v1 copy without `taken_over`: a taken-over v1 card is live,
     and the take-over writes its `projects/<name>.yaml` when it is missing), with the project names sorted, and last the group
-    None: live cards with no `project`, and projects with no `repo`. That pass runs in the data folder. A project
+    None: live cards with no `project`, and projects with no `repo`. That pass runs in a new empty folder of its own
+    (`tempfile.mkdtemp`, prefix `ap2-dispatch-`), not in the data folder (the choice below). A project
     that does not load is one error `{"project", "error"}` (`project <name>: refused: ...` in gate.log) and is left
     out; the others still group.
   - Start: after the pass-due check, when no pass is open, a run starts at most one pass: the next group of
     `<data>/dispatch.json`'s `queue`, or, when a pass is due, the first group of a new round, and then calls
-    `gate.pass_started`. The start is `claude --bg -n "ap2 dispatch · <projects, or cards with no project>"
-    --permission-mode auto --settings <data>/sessions/dispatch/settings-dispatcher.json [--model <model>]
-    [--strict-mcp-config] <prompt>` in the group's repo, the prompt naming the runbook's absolute path, the projects
-    and the data folder. `dispatch.json` is `{group, projects, short_id, session_id, started_at, profile, queue, why,
-    token, looks, seen_busy}`. `why` is the round's reasons, frozen when the round starts: the gate reads the `why`
-    the pass-due check just wrote to `pass.json` before `pass_started` empties it, puts it on the record, and the
-    queue-only record `{queue, why}` carries it to each next group's record; the pass reads it as `dispatch.why` from
+    `gate.pass_started`. A new round serves only the groups that hold a card its `why` names (`dispatch.named`); a
+    reason whose card is in no group (a done card, an imported v1 copy, a refused project's card) serves no pass.
+    The start is `claude --bg -n "ap2 dispatch · <projects, or cards with no project>" --permission-mode auto
+    --settings <data>/sessions/dispatch/settings-dispatcher.json [--model <model>] [--strict-mcp-config] <prompt>`
+    in the group's repo (the group None's own folder for that group), the prompt naming the runbook's absolute
+    path, the projects and the data folder. `dispatch.json` is `{group, projects, short_id, session_id, started_at,
+    profile, queue, why, token, looks, seen_busy, cwd?}` (`cwd`, the group None's own folder, only for that group).
+    `why` is the round's reasons, frozen when the round starts: the gate reads the `why` the pass-due check just
+    wrote to `pass.json` before `pass_started` empties it, puts it on the record, and the queue-only record
+    `{queue, why}` carries it to each next group's record; the pass reads it as `dispatch.why` from
     `ap2 pass status` (a record without it, written before it was, reads as no reasons). `token` is the pass's own
     random token, also `AP2_PASS` in its launch env (not in the shared settings file). The profile and the cap are
     asked first (`dispatch.launch_profile`): a refusal starts nothing and is one error `{"dispatch": true, "error"}`,
@@ -1945,8 +1949,9 @@ Calls the author made without asking (check them):
     is due for them and tries again (the choice below). After a failure for that group the next group of the round
     is tried in the same run. When `claude --bg` fails (`dispatch.LaunchError`, also a launch that hangs to its
     120-second timeout) no other group is tried that run, and the rest of the queue waits for the next run. A new
-    round where none starts and none is left in the queue stays due. A round with nothing live to serve (and no
-    project error) calls `pass_started`, so the same change does not make a pass due every run.
+    round where none starts and none is left in the queue stays due. A new round with no group to serve calls
+    `pass_started` (with a refused project's cards left unseen), so the same change does not make a pass due every
+    run, and a refused project costs one error line per run and no pass, and stays due until it is fixed.
     Each start is one gate.log line and one gate.json `dispatch` entry `{"did": "started", ...}`.
   - End: early in each run `dispatch.finish` looks the pass up in `claude agents`. It ends when `ap2 pass end`
     marked it (`<data>/dispatch-end.json` `{short_id, started_at, ended_at, token}`, its own file because the gate
@@ -1954,9 +1959,11 @@ Calls the author made without asking (check them):
     how `ended`), when its turn ended (state done or failed, or status idle, once a run saw it busy, the start's
     listing included, or after LOOKS (3) runs saw it so; `turn`), when it was stopped or is gone (`gone`), or
     past DISPATCH_MAX_MIN (30) minutes (`late`). It is stopped (`claude stop`), its spend settled, and removed
-    (`claude rm`). Waiting at a permission prompt (state blocked, status waiting; `blocked`)
-    opens one card (kind and feed `dispatch`, lane needs, keyed `dispatch:<short id>`) whose ask is `fix`, from
-    `dispatch`, telling the user to `claude attach <id>`, and the session is stopped but not removed. Each end but
+    (`claude rm`), and with it (or when it is gone) the group None's own folder (only a folder the record's `cwd`
+    names that has the prefix, right in the temp folder). Waiting at a permission prompt (state blocked, status
+    waiting; `blocked`) opens one card (kind and feed `dispatch`, lane needs, keyed `dispatch:<short id>`) whose ask
+    is `fix`, from `dispatch`, telling the user to `claude attach <id>`, and the session is stopped but not removed;
+    its own folder is kept with it. Each end but
     `ended` and `blocked` is one error. A start more than the 5-minute grace after now is `late` with an error that
     ends with "the clock may have gone back", as the scan session's. A failed listing waits (one error once the
     pass is late); a damaged record (also one whose `looks` is not a whole number or whose `seen_busy` is not true
@@ -1997,7 +2004,9 @@ Calls the author made without asking (check them):
   - Commands: `ap2 pass status` prints `{pass, dispatch, mode}`; `ap2 pass end` writes the end marker (no open
     pass: one `ap2: ...` line, exit 1). Run with `AP2_PASS` set (by a pass) that is not the open pass's token, it
     is refused the same way and ends nothing: a pass stopped at a prompt and resumed by the user later cannot end
-    another group's pass. Without `AP2_PASS` (a person at a terminal) it ends the open pass. `ap2 card ask CARD
+    another group's pass. With `AP2_ROLE` set and no `AP2_PASS` (a worker: Workers strip every `AP2_*` name, so a
+    worker never has `AP2_PASS`) it is refused too ("only the open dispatcher pass or a person ends it"). Without
+    either (a person at a terminal) it ends the open pass. `ap2 card ask CARD
     --type T --text-file F [--from dispatch]` sets the ask `{type, from, text}` and the lane `needs` through
     `Store.update_checked`, refused while the card has an open ask and for an imported v1 copy that is not taken
     over; `ap2 card lane CARD LANE` moves a card, refusing such a copy too (a taken-over card is v2's to move). A
@@ -2017,10 +2026,24 @@ Calls the author made without asking (check them):
       leaves `ready`, a result file leaves `results`, an answered ask is marked `""`, which no open ask's signature
       is), and inside a running round the gate undoes them in `pass.json`'s `seen` (a missing or damaged one is left
       as it is). The cards of a project `groups` refused are left unseen the same way. So the next round is due for
-      them and tries again: one error each round, not each run, and no group holds the head of the queue (a group
-      whose launch fails only in its own repo would otherwise stop every group and every later round). A
-      `LaunchError` still ends that run's attempts, so a hung `claude --bg` costs at most one 120-second timeout per
-      run; the failed group is dropped too. Reverse: keep the failed group at the head of the queue.
+      them and tries again, and no group holds the head of the queue (a group whose launch fails only in its own repo
+      would otherwise stop every group and every later round). When the store does not read to find a failed
+      group's cards, every card the round's `why` names is left unseen. A `LaunchError` still ends that run's
+      attempts, so a hung `claude --bg` costs at most one 120-second timeout per run; the failed group is dropped
+      too. Reverse: keep the failed group at the head of the queue.
+    - A round serves only the groups its `why` names: the retry of a failed group (or a refused project) costs no
+      pass for the others. Each new round queues only the groups that hold a card named in its `why`; a refused
+      project's card is in no group, so the round that retries it starts nothing, writes `seen` with that card left
+      unseen, and is one error line each run until the project is fixed, with no spend. Without this, a persistent
+      failure would start a fresh pass for every healthy group on every run. Reverse: queue every live group in each
+      round.
+    - The group None's pass runs in a new empty folder of its own, outside the data folder, not in the data folder
+      as the spec says: the Bash guard judges only the data-folder paths a command names, so a relative write from
+      inside the data folder (`config.yaml`, `dispatch.json`, `items/`, `.claude/settings.json`) would pass it, and
+      the data folder would be the session's project root, whose `.claude/`, `.mcp.json` and `CLAUDE.md` a later
+      session loads. The pr-review worker runs outside the data folder for the same reason. The pass still finds
+      the data folder through `AP2_DATA` and writes its texts to `AP2_RUN_DIR`. `finish` removes the folder with the
+      session, and keeps it with a pass kept for `claude attach`. Reverse: run it in the data folder.
     - Answered asks: the runbook acts on each `answered` entry of its group (an ask that closed). `ap2 card show`
       gives the card; the closed ask itself is in the restore point the closing `audit` entry names
       (`<data>/restore/<id>.json`, `card.ask`), since the card's `ask` no longer holds it. Only an ask from

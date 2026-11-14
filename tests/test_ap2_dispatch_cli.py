@@ -33,7 +33,7 @@ class Ap2Case(unittest.TestCase):
         self.data = self.tmp / "data"
 
     def run_ap2(self, *args, extra=None):
-        env = {k: v for k, v in os.environ.items() if k not in ("AP2_DATA", "AP2_PASS", "LC_ALL")}
+        env = {k: v for k, v in os.environ.items() if k not in ("AP2_DATA", "AP2_PASS", "AP2_ROLE", "LC_ALL")}
         env.update(HOME=str(self.home), AP2_DATA=str(self.data), PYTHONIOENCODING="utf-8", PYTHON_COLORS="0")
         env.update(extra or {})
         return subprocess.run([sys.executable, str(AP2), *args], capture_output=True, text=True, env=env,
@@ -105,6 +105,19 @@ class PassCommandTest(Ap2Case):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(json.loads(r.stdout)["token"], "ab" * 8)
         self.assertEqual(json.loads((self.data / dispatch.END).read_text())["token"], "ab" * 8)
+
+    def test_end_from_a_worker_ends_nothing(self):
+        """A worker has `AP2_ROLE` but never `AP2_PASS` (Workers strip every AP2_* name from its env): it is not a
+        person at a terminal, so it ends no pass."""
+        self.ok("config")
+        rec = {"group": None, "projects": [], "short_id": "s0007", "session_id": "", "profile": "subscription",
+               "started_at": "2026-11-10T14:00:00Z", "queue": [], "why": [], "token": "ab" * 8}
+        (self.data / dispatch.DISPATCH).write_text(json.dumps(rec))
+        line = self.fails("pass", "end", extra={"AP2_ROLE": "implement"})
+        self.assertEqual(line, "ap2: only the open dispatcher pass or a person ends it\n")
+        self.assertFalse((self.data / dispatch.END).exists())
+        r = self.run_ap2("pass", "end", extra={"AP2_ROLE": "dispatcher", "AP2_PASS": "ab" * 8})  # the pass itself
+        self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_a_bad_pass_command_is_a_usage_error(self):
         self.fails("pass", "start", code=2)
