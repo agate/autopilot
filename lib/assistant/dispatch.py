@@ -42,7 +42,6 @@ from assistant.store import Store, write_json
 
 DISPATCH = "dispatch.json"  # <data>/dispatch.json: the open pass and the round's queue
 END = "dispatch-end.json"  # <data>/dispatch-end.json: `ap2 pass end`'s marker, a file of its own (see `end`)
-PASS = "pass.json"  # gate.PASS; named here too, so the floor can deny editing it without importing the gate
 RUN_DIR = Path(transcripts.SESSIONS) / "dispatch"  # the pass's own folder: its settings and its ask texts
 SETTINGS = "settings-dispatcher.json"  # `sessions/**/settings-*.json`: in the worker floor's protected files
 DISPATCH_MAX_MIN = 30  # a pass still working after this many minutes is stopped
@@ -82,7 +81,8 @@ class DispatchError(ConfigError):
 
 
 class LaunchError(DispatchError):
-    """`claude --bg` itself failed (or hung until its timeout): no other group of the round would start either."""
+    """`claude --bg` failed (or hung until its timeout): no other group is tried in this run (each would wait its
+    timeout too), and this group is dropped from the round, as any group that does not start."""
 
 
 # -- groups ---------------------------------------------------------------------------------------------------------
@@ -122,6 +122,25 @@ def groups(data, store: Store) -> tuple:
     return [{"group": g, "projects": sorted(found[g])} for g in ordered], errors
 
 
+def members(store: Store, served: list, refused=()) -> set:
+    """The ids of the live cards the groups `served` hold (a group's `projects`; the group None also holds the live
+    cards with no project), and of the live cards naming a project in `refused` (the ones `groups` left out), keyed
+    as `groups` keys them. Raises CardError or OSError when the store does not read."""
+    names = {n for g in served for n in (g.get("projects") or [])} | set(refused)
+    none = any(g.get("group") is None for g in served)
+    out = set()
+    for c in store.list():
+        if not _live(c):
+            continue
+        name = c.get("project")
+        if name is None or (isinstance(name, str) and cards.blank(name)):
+            if none:
+                out.add(c["id"])
+        elif (name if isinstance(name, str) else repr(name)) in names:
+            out.add(c["id"])
+    return out
+
+
 def label(group: dict) -> str:
     return ", ".join(group.get("projects") or []) or NO_PROJECT
 
@@ -142,7 +161,7 @@ def settings(data, profile: dict, projects: list, mode: str, claude: Optional[st
     data = Path(data)
     workers_module.require_literal(data)
     pkg = workers_module.package_root()
-    deny = [f"Edit(/{data}/{name})" for name in workers_module.PROTECTED + (PASS, DISPATCH, END)]
+    deny = [f"Edit(/{data}/{name})" for name in workers_module.PROTECTED]  # pass.json, DISPATCH and END too
     deny += [f"Edit(/{pkg}/**)"] + list(v1_perms.BASH_DENY)
     tools = sorted({t for p in projects for t in (p.get("tools") or [])})
     deny += v1_perms.denied_tools(tools)

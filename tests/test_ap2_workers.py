@@ -390,6 +390,9 @@ class ProjectSetupTest(WorkerCase):
             self.assertIn(f"Edit(/{self.data}/{name})", deny)
         self.assertIn(f"Edit(/{self.data}/gate.json)", deny)
         self.assertIn(f"Edit(/{self.data}/routines/**)", deny)
+        # The dispatcher pass's control files: a forged dispatch.json would have the gate stop another session.
+        for name in ("pass.json", "dispatch.json", "dispatch-end.json"):
+            self.assertIn(f"Edit(/{self.data}/{name})", deny)
         self.assertIn("Bash(gh pr comment:*)", deny)
         self.assertEqual(settings["permissions"]["allow"],
                          [f"Bash({ROOT / 'bin' / 'ap2'} worker park {cid} implement:*)"])

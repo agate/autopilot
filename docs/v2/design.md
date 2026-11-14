@@ -1939,13 +1939,14 @@ Calls the author made without asking (check them):
     `ap2 pass status` (a record without it, written before it was, reads as no reasons). `token` is the pass's own
     random token, also `AP2_PASS` in its launch env (not in the shared settings file). The profile and the cap are
     asked first (`dispatch.launch_profile`): a refusal starts nothing and is one error `{"dispatch": true, "error"}`,
-    the queue is kept and a due pass stays due. A group whose start fails for that group (its repo is not a folder,
-    or the launch cannot enter it: an OSError naming the repo, such as a folder with no access or one removed since
-    the check; its settings are refused) is one error, and the next group of the round is tried in the same run. When
-    `claude --bg` itself fails (`dispatch.LaunchError`, also a launch that hangs to its 120-second timeout), every
-    other group would fail the same way: it is one error, no other group is tried that run, and the queue is kept
-    from that group on, so the next run tries again. A new round where none starts stays due. A round with nothing
-    live to serve (and no project error) calls `pass_started`, so the same change does not make a pass due every run.
+    the queue is kept and a due pass stays due. A group that does not start (any error: its repo is not a folder,
+    the launch cannot enter it, its settings are refused, or `claude --bg` fails) is one error naming it, is dropped
+    from the round, and its cards are left unseen (as are the cards of a project `groups` refused), so the next round
+    is due for them and tries again (the choice below). After a failure for that group the next group of the round
+    is tried in the same run. When `claude --bg` fails (`dispatch.LaunchError`, also a launch that hangs to its
+    120-second timeout) no other group is tried that run, and the rest of the queue waits for the next run. A new
+    round where none starts and none is left in the queue stays due. A round with nothing live to serve (and no
+    project error) calls `pass_started`, so the same change does not make a pass due every run.
     Each start is one gate.log line and one gate.json `dispatch` entry `{"did": "started", ...}`.
   - End: early in each run `dispatch.finish` looks the pass up in `claude agents`. It ends when `ap2 pass end`
     marked it (`<data>/dispatch-end.json` `{short_id, started_at, ended_at, token}`, its own file because the gate
@@ -1962,8 +1963,10 @@ Calls the author made without asking (check them):
     or false) is removed with one error, so it never holds later passes back. Then the record keeps only `{queue,
     why}` (so the same run starts the next group) or goes. Each end is one gate.log line and one gate.json
     `dispatch` entry.
-  - Floor: the pass's settings are built like the worker floor: the data folder's protected files (and `pass.json`,
-    `dispatch.json`, `dispatch-end.json`) and the package denied for Edit, v1's dispatcher Bash denials
+  - Floor: the pass's settings are built like the worker floor: the data folder's protected files (`PROTECTED`,
+    which holds `pass.json`, `dispatch.json` and `dispatch-end.json` too, so no worker can edit them either: a forged
+    `dispatch.json` naming another session would have the next gate run stop and remove it, and a `{"queue": []}`
+    record would hide the open pass) and the package denied for Edit, v1's dispatcher Bash denials
     (`perms.BASH_DENY`: text-prefix rules for the plain `gh pr comment`, `gh pr review`, `gh issue comment|create`,
     `gh pr edit --add-reviewer`; best effort, `gh -R o/r pr comment` or `gh pr edit 5 --add-reviewer bob` gets past
     them, so the runbook says never to do these at all), in every mode the outward MCP tools of the group's projects'
@@ -2009,6 +2012,15 @@ Calls the author made without asking (check them):
     - `seen` moves when a round starts, to the very snapshot the round's `why` came from (`_pass_due` hands its
       look to `pass_started`, which writes it as `seen` instead of looking again): a change that lands while the
       round runs, the first pass's launch included, makes the next round due; at worst one extra pass.
+    - A group that does not start is dropped from the round, and its cards are left unseen: for a new round
+      `pass_started` writes `seen` with those cards' reasons in the round's `why` undone (`gate._unsee`: a ready card
+      leaves `ready`, a result file leaves `results`, an answered ask is marked `""`, which no open ask's signature
+      is), and inside a running round the gate undoes them in `pass.json`'s `seen` (a missing or damaged one is left
+      as it is). The cards of a project `groups` refused are left unseen the same way. So the next round is due for
+      them and tries again: one error each round, not each run, and no group holds the head of the queue (a group
+      whose launch fails only in its own repo would otherwise stop every group and every later round). A
+      `LaunchError` still ends that run's attempts, so a hung `claude --bg` costs at most one 120-second timeout per
+      run; the failed group is dropped too. Reverse: keep the failed group at the head of the queue.
     - Answered asks: the runbook acts on each `answered` entry of its group (an ask that closed). `ap2 card show`
       gives the card; the closed ask itself is in the restore point the closing `audit` entry names
       (`<data>/restore/<id>.json`, `card.ask`), since the card's `ask` no longer holds it. Only an ask from

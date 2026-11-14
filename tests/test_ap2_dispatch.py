@@ -126,6 +126,8 @@ class FloorTest(DispatchCase):
                              "dispatch-end.json", "sessions/**/settings-*.json", "projects/**"):
                     self.assertIn(f"Edit(/{self.data}/{name})", deny)
                 self.assertIn(f"Edit(/{workers.package_root()}/**)", deny)
+                for name in (gate.PASS, dispatch.DISPATCH, dispatch.END):  # every worker's floor denies them too
+                    self.assertIn(name, workers.PROTECTED)
                 self.assertEqual(s["env"]["AP2_ROLE"], "dispatcher")
                 self.assertEqual(s["env"]["AP2_DATA"], str(self.data))
                 self.assertEqual(s["env"]["AP2_RUN_DIR"], str(self.data / "sessions" / "dispatch"))
@@ -396,8 +398,20 @@ class RoundTest(DispatchCase):
     def setUp(self):
         super().setUp()
         project_file(self.data, "shop", self.repo)
-        self.add_card(project="shop")
-        self.add_card()
+        self.shop = self.add_card(project="shop")
+        self.loose = self.add_card()
+
+    def failing_in(self, folder: Path):
+        """`_launch` failing with a RuntimeError in `folder` only (as `claude --bg` printing no short id in one
+        repo), and the fake claude everywhere else."""
+        real = dispatch.v1_workers._launch
+
+        def launch(argv, cwd, env):
+            if cwd == str(folder):
+                raise RuntimeError("claude --bg printed no short id")
+            return real(argv, cwd, env)
+
+        return mock.patch.object(dispatch.v1_workers, "_launch", side_effect=launch)
 
     def test_the_groups_of_a_round_go_one_after_another_and_seen_moves_once(self):
         with mock.patch.object(gate, "pass_started", wraps=gate.pass_started) as started:
@@ -441,27 +455,97 @@ class RoundTest(DispatchCase):
                 with self.assertRaises(ValueError):
                     dispatch.read_record(self.data)
 
-    def test_a_launch_that_fails_is_tried_once_per_run_not_once_per_group(self):
+    def test_a_launch_that_fails_is_tried_once_per_run_and_its_group_is_dropped_from_the_round(self):
         with mock.patch.object(dispatch.v1_workers, "_launch",
                                side_effect=subprocess.TimeoutExpired("claude", 120)) as launch:
             out = self.gate(self.T)
         self.assertEqual(launch.call_count, 1)
         [err] = [e for e in out["errors"] if e.get("dispatch")]
         self.assertIn("cannot start the dispatcher pass for shop", err["error"])
-        self.assertIn("no other group is tried this run", self.gate_log())
-        self.assertIs(self.pass_file()["due"], True)
-        self.assertFalse((self.data / dispatch.DISPATCH).exists())
-        # In a round already under way the queue is kept from the group that could not launch.
-        self.gate(self.T + timedelta(minutes=1))
+        self.assertIn("shop is dropped from this round and tried again next round; no other group is tried this run",
+                      self.gate_log())
+        # The rest of the round waits for the next run; the failed group's card is left unseen.
+        rec = self.record()
+        self.assertEqual(sorted(rec), ["queue", "why"])
+        self.assertEqual(rec["queue"], [{"group": None, "projects": []}])
+        self.assertEqual(sorted(w["card"] for w in rec["why"]), sorted([self.shop, self.loose]))
+        self.assertEqual(self.pass_file()["seen"]["ready"], [self.loose])
+
+    def test_a_group_whose_launch_fails_at_the_head_of_a_new_round_never_holds_the_round(self):
+        with self.failing_in(self.repo):
+            out = self.gate(self.T)
+            self.assertEqual(out["dispatch"], [])
+            self.assertIn("claude --bg printed no short id", [e for e in out["errors"] if e.get("dispatch")][0]["error"])
+            out = self.gate(self.T + timedelta(minutes=1))  # the next group, not the failed one again
+            self.assertEqual([(e["did"], e["group"]) for e in out["dispatch"]], [("started", None)])
+            self.assertEqual([e for e in out["errors"] if e.get("dispatch")], [])
+            self.assertEqual(self.record()["queue"], [])
+            dispatch.end(self.data, self.T + timedelta(minutes=1))
+            out = self.gate(self.T + timedelta(minutes=2))  # the next round is due for the failed group's card
+        self.assertIs(out["pass_due"], True)
+        self.assertEqual(json.loads((self.data / "gate.json").read_text())["pass_due"], True)
+        self.assertEqual([e["did"] for e in out["dispatch"]], ["ended"])
+        self.assertEqual(len([e for e in out["errors"] if e.get("dispatch")]), 1)  # one error this round
+        self.assertEqual(self.pass_file()["seen"]["ready"], [self.loose])
+        self.assertEqual(self.record()["queue"], [{"group": None, "projects": []}])  # dropped from this round too
+        self.gate(self.T + timedelta(minutes=3))  # healed: this round's next group first
+        dispatch.end(self.data, self.T + timedelta(minutes=3))
+        out = self.gate(self.T + timedelta(minutes=4))  # then the next round serves it
+        self.assertEqual([(e["did"], e["group"]) for e in out["dispatch"]],
+                         [("ended", None), ("started", str(self.repo))])
+        self.assertEqual(self.record()["why"], [{"why": "ready", "card": self.shop}])
+
+    def test_a_group_whose_launch_fails_inside_a_running_round_is_dropped_and_left_unseen(self):
+        first = self.tmp / "a-repo"
+        first.mkdir()
+        project_file(self.data, "alpha", first)
+        alpha = self.add_card(project="alpha")
+        self.gate(self.T)
+        self.assertEqual(self.record()["group"], str(first))
         why = self.record()["why"]
+        self.assertEqual(sorted(self.pass_file()["seen"]["ready"]), sorted([alpha, self.shop, self.loose]))
         dispatch.end(self.data, self.T + timedelta(minutes=1))
-        with mock.patch.object(dispatch.v1_workers, "_launch", side_effect=RuntimeError("no")) as launch:
-            out = self.gate(self.T + timedelta(minutes=2))
-        self.assertEqual(launch.call_count, 1)
+        with self.failing_in(self.repo):
+            out = self.gate(self.T + timedelta(minutes=1))
+        self.assertEqual([e["did"] for e in out["dispatch"]], ["ended"])
         self.assertEqual(self.record(), {"queue": [{"group": None, "projects": []}], "why": why})
-        out = self.gate(self.T + timedelta(minutes=3))
-        self.assertEqual(out["dispatch"][0]["did"], "started")
-        self.assertIsNone(out["dispatch"][0]["group"])
+        self.assertNotIn(self.shop, self.pass_file()["seen"]["ready"])
+        out = self.gate(self.T + timedelta(minutes=2))  # the next group, not the failed one
+        self.assertEqual([(e["did"], e["group"]) for e in out["dispatch"]], [("started", None)])
+        dispatch.end(self.data, self.T + timedelta(minutes=2))
+        out = self.gate(self.T + timedelta(minutes=3))  # a new round, due for the failed group's card
+        self.assertEqual([e["did"] for e in out["dispatch"]], ["ended", "started"])
+        self.assertEqual(self.record()["why"], [{"why": "ready", "card": self.shop}])
+
+    def test_a_refused_project_next_to_a_healthy_group_is_tried_again_next_round(self):
+        (self.data / "projects" / "broken.yaml").write_text("nope: 1\n", encoding="utf-8")
+        broken = self.add_card(project="broken")
+        out = self.gate(self.T)
+        self.assertEqual([e.get("project") for e in out["errors"]], ["broken"])
+        self.assertEqual(out["dispatch"][0]["group"], str(self.repo))
+        self.assertNotIn(broken, self.pass_file()["seen"]["ready"])
+        dispatch.end(self.data, self.T + timedelta(minutes=1))
+        out = self.gate(self.T + timedelta(minutes=1))  # the round's next group: no second error this round
+        self.assertEqual([e["did"] for e in out["dispatch"]], ["ended", "started"])
+        self.assertEqual([e for e in out["errors"] if e.get("project")], [])
+        dispatch.end(self.data, self.T + timedelta(minutes=2))
+        out = self.gate(self.T + timedelta(minutes=2))
+        self.assertIs(out["pass_due"], True)
+        self.assertEqual([e.get("project") for e in out["errors"]], ["broken"])  # the error repeats
+        self.assertEqual([e["did"] for e in out["dispatch"]], ["ended", "started"])
+        self.assertEqual(self.record()["why"], [{"why": "ready", "card": broken}])
+
+    def test_unsee_undoes_only_the_reasons_of_the_given_cards(self):
+        seen = {"ready": ["a", "b"], "results": {"a/handback.json": 5, "b/handback.json": 6},
+                "asks": {"a": "fix/dispatch//", "b": "fix/dispatch//"}}
+        why = [{"why": "ready", "card": "a"}, {"why": "result", "card": "a", "file": "handback.json"},
+               {"why": "answered", "card": "a"}, {"why": "ready", "card": "b"}, {"why": "ready", "card": ["x"]}]
+        got = gate._unsee(seen, why, {"a"})
+        self.assertEqual(got, {"ready": ["b"], "results": {"b/handback.json": 6},
+                               "asks": {"a": gate.UNSEEN, "b": "fix/dispatch//"}})
+        present = {"ready": [], "results": {}, "asks": {}}
+        self.assertIn({"why": "answered", "card": "a"}, gate._why(present, got))  # still a reason
+        self.assertEqual(seen["ready"], ["a", "b"])  # not changed in place
 
     def test_a_repo_the_launch_cannot_enter_is_this_groups_error_and_the_next_group_starts(self):
         """A folder that exists but cannot be entered fails the launch with an OSError naming it: that is this
@@ -473,8 +557,8 @@ class RoundTest(DispatchCase):
         second.mkdir()
         project_file(self.data, "alpha", first)
         project_file(self.data, "beta", second)
-        self.add_card(project="alpha")
-        self.add_card(project="beta")
+        alpha = self.add_card(project="alpha")
+        beta = self.add_card(project="beta")
         first.chmod(0)
         self.addCleanup(first.chmod, 0o755)
         out = self.gate(self.T)
@@ -488,6 +572,8 @@ class RoundTest(DispatchCase):
         self.assertEqual(self.record()["queue"], [{"group": str(self.repo), "projects": ["shop"]},
                                                   {"group": None, "projects": []}])
         self.assertIs(self.pass_file()["due"], False)
+        self.assertNotIn(alpha, self.pass_file()["seen"]["ready"])  # left unseen: the next round tries it again
+        self.assertIn(beta, self.pass_file()["seen"]["ready"])
 
     def test_a_repo_gone_between_the_check_and_the_launch_is_this_groups_error(self):
         err = FileNotFoundError(2, "No such file or directory", str(self.repo))

@@ -181,11 +181,14 @@ CLOSES = {"end": ("ended", "ended", True), "done": ("ended", "ended", False),
 # with the data folder's price override, the daily cap's state, pause and stop lock, the key health's records (a worker
 # must not mark a failing key as working), and the gate's heartbeat, SQLite's files next to the index (`-wal`, `-shm`,
 # `-journal`), routines and chat. A worker's Bash is kept out of the whole data folder but its own run directory by
-# the guard hook (`ap2 hook-guard`, guard.py), best effort.
+# the guard hook (`ap2 hook-guard`, guard.py), best effort. The dispatcher pass's control files are here too
+# (gate.PASS, dispatch.DISPATCH and dispatch.END, named as text since both modules import this one): a forged
+# `dispatch.json` would have the next gate run stop and remove another session, or hide the open pass.
 PROTECTED = ("config.yaml", "workers.json", ".workers.lock", ".store.lock", CAP_STOP_LOCK, "index.sqlite",
              "index.sqlite-*", "gate.json", "items/**", "restore/**", "projects/**", "templates/**", "sources/**",
              "routines/**", "chat/**", "sessions/**/settings-*.json", f"{profiles.FOLDER}/**", profiles.ACTIVE,
-             f"{spend.FOLDER}/**", spend.PRICES, cap.STATE, cap.PAUSED, keys.STATE, keys.REFRESH)
+             f"{spend.FOLDER}/**", spend.PRICES, cap.STATE, cap.PAUSED, keys.STATE, keys.REFRESH,
+             "pass.json", "dispatch.json", "dispatch-end.json")
 SPEND_LINE = 300  # the longest stderr line a failed ledger step prints
 
 
