@@ -37,6 +37,19 @@ def utc(*args) -> datetime:
     return datetime(*args, tzinfo=UTC)
 
 
+def too_deep(path: Path):
+    """Make every json.loads of `path`'s present text raise the RecursionError a file nested too deep gives. Nesting
+    depth alone does not do it on every Python (3.14's decoder parses 100k levels), so the error is forced; any
+    other text is decoded as usual, so the rest of the run reads its files."""
+    real, text = json.loads, path.read_text(encoding="utf-8")
+
+    def loads(s, *a, **kw):
+        if s == text:
+            raise RecursionError("maximum recursion depth exceeded while decoding a JSON array")
+        return real(s, *a, **kw)
+    return mock.patch.object(json, "loads", loads)
+
+
 def routine(**over) -> dict:
     r = {"title": "Daily digest", "schedule": {"days": "daily", "at": ["09:00"]}, "tz": "UTC",
          "missed_run": "once_within: 3h", "last_slot": None, "paused": False}
@@ -658,7 +671,8 @@ class WatchTest(GateCase):
     def test_a_watches_file_nested_too_deep_is_a_damaged_file(self):
         path = self.data / "watches.json"
         path.write_text("[" * 100_000 + "]" * 100_000, encoding="utf-8")
-        out = self.gate(self.T, watches=[{"name": "slack", "every": "5m"}])
+        with too_deep(path):
+            out = self.gate(self.T, watches=[{"name": "slack", "every": "5m"}])
         self.assertEqual(out["watches_due"], ["slack"])
         self.assertEqual([e.get("watches") for e in out["errors"]], [str(path)])
         self.assertIn("recursion", out["errors"][0]["error"])
@@ -1920,7 +1934,8 @@ class PassDueTest(LoopCase):
 
     def test_a_workers_file_nested_too_deep_is_one_pass_error_and_the_run_completes(self):
         (self.data / "workers.json").write_text('{"workers": ' + "[" * 100_000 + "]" * 100_000 + "}")
-        out = self.gate(self.T)
+        with too_deep(self.data / "workers.json"):
+            out = self.gate(self.T)
         self.assertEqual([e for e in out["errors"] if "pass" in e],
                          [{"pass": True, "error": out["errors"][-1]["error"]}])
         self.assertIn("recursion", out["errors"][-1]["error"])
