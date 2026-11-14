@@ -120,6 +120,11 @@ def on_phone(card: dict, cfg: config.Config, now: datetime) -> bool:
     return at >= now - timedelta(days=cfg.phone_history_days)
 
 
+# The record fields that hold what people wrote: a source's `text`, and a taken-over v1 question's `body`, `answer`,
+# `options`, `links` and `action` (v1's one-off spec, whose `prompt` is words too; see importv1 `_Maker.question`).
+WORDS = frozenset({"text", "body", "answer", "options", "links", "action"})
+
+
 def _record(card: dict) -> Optional[dict]:
     """The source record the card was made from, or None."""
     src = card.get("source")
@@ -202,10 +207,12 @@ def build(data, cfg: Optional[config.Config] = None, now: Optional[datetime] = N
             card["title"] = dict(texts)
             card["plain"]["what"] = dict(texts)
             card.pop("key", None)  # a source's key may be made from the record's text; the phone does not use it
-            record = {k: v for k, v in card["source"]["record"].items() if k != "text"}
+            record = {k: v for k, v in card["source"]["record"].items() if k not in WORDS}
             card["source"]["record"] = record
             out["source_block"]["text"] = None
             out["source_block"]["record"] = copy.deepcopy(record)
+            if isinstance(card.get("ask"), dict):
+                card["ask"].pop("text", None)  # a taken-over v1 question's ask carries its body
         if "template_error" in out:
             out["template_error"] = scrub(out["template_error"])
         if isinstance(card.get("ask"), dict) and "text" in card["ask"]:

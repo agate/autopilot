@@ -41,7 +41,7 @@ from assistant import cards, engine, routines, scan, sources, transcripts
 from assistant import workers as workers_module
 from assistant.cards import CardError
 from assistant.config import ConfigError
-from assistant.importv1 import FEED as V1_FEED
+from assistant.importv1 import FEED as V1_FEED, TAKEN_OVER
 from assistant.resources import Registry, WorkerError
 from assistant.store import Store, write_json
 
@@ -551,8 +551,10 @@ def _empty_seen() -> dict:
 def _present(data: Path, store: Store) -> dict:
     """What a pass would look at now: the ready card ids, the result files with their whole-second mtime, and each
     open ask as `card -> type/from/reason/role`. Ready is a cheap wake-up, not the start plan: a planned card with
-    no ask and no worker on record, or a routine run card in Running with no worker and no sessions; never an
-    imported v1 copy that is not taken over. Raises CardError, WorkerError or OSError."""
+    no ask and no worker on record, a routine run card in Running with no worker and no sessions, or a taken-over
+    v1 code card in Running with no ask and no worker whose session on some role is still the one the take-over
+    wrote (`_left_by_take_over`); never an imported v1 copy that is not taken over. Raises CardError, WorkerError or
+    OSError."""
     on_record = {r.get("card") for r in Registry(data).read()}
     ready, asks = [], {}
     for c in store.list():
@@ -562,7 +564,7 @@ def _present(data: Path, store: Store) -> dict:
         if ask is not None or cid in on_record or (c.get("feed") == V1_FEED and not c.get("taken_over")):
             continue
         if c.get("lane") == "planned" or (c.get("kind") == "routine" and c.get("lane") == "running"
-                                          and not c.get("sessions")):
+                                          and not c.get("sessions")) or _left_by_take_over(c):
             ready.append(cid)
     results = {}
     base = data / transcripts.SESSIONS  # each card's run directory is <data>/sessions/<card>
@@ -575,6 +577,16 @@ def _present(data: Path, store: Store) -> dict:
             except FileNotFoundError:
                 continue
     return {"ready": ready, "results": results, "asks": asks}
+
+
+def _left_by_take_over(c: dict) -> bool:
+    """A v1 task taken over while in progress: a code card in Running with a session the take-over wrote (its `why`
+    is importv1's TAKEN_OVER). v2's own stop leaves a resume ask instead, so without this nothing would wake a pass
+    for it; once v2 saves a session on that role its `why` changes and this rule lets go."""
+    sessions = c.get("sessions")
+    return (bool(c.get("taken_over")) and c.get("kind") == "code" and c.get("lane") == "running"
+            and isinstance(sessions, dict)
+            and any(isinstance(s, dict) and s.get("why") == TAKEN_OVER for s in sessions.values()))
 
 
 def _read_pass(path: Path):

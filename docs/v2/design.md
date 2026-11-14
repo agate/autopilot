@@ -1836,7 +1836,11 @@ Calls the author made without asking (check them):
     atomically, `{"due", "since", "why", "seen", "checked_at"}`, and gate.json `pass_due`. It compares what is
     there now with `seen`, what was there when the last pass started: the ready card ids (a `planned` card with no
     ask, no worker on record and a `feed` other than `v1-import` unless the card has `taken_over`; or a `routine`
-    card in Running with no worker and no `sessions`), the result files
+    card in Running with no worker and no `sessions`; or a `code` card with `taken_over` in Running with no ask, no
+    worker on record and a `sessions.<role>` whose `why` is still `taken over from v1` (`importv1.TAKEN_OVER`): a
+    v1 task taken over while in progress, a state v2's own stop never leaves, as that leaves a resume ask; once v2
+    saves a session on that role its `why` changes and the rule lets go, `seen` keeps it to one wake-up, and the
+    taken-over project card is not `code` so it stays out; reverse: drop `gate._left_by_take_over`), the result files
     `<data>/sessions/<card>/<handback|review|prloop>.json` with their whole-second
     mtime (as v1's `fingerprint` does), and each open ask as `card -> type/from/reason/role`. `why` lists `{"why":
     "ready" | "result" | "answered", "card", "file"?}` for each ready card or result entry not in `seen`, and each ask
@@ -2098,7 +2102,11 @@ Calls the author made without asking (check them):
     null` and `title_hidden: {<language>: text}` for each configured language, so the page shows the chosen language
     only (anti-goal 1); the full card's `title` is the text per language, like `title_hidden`, `plain.what` is the
     text per language too, `key` is removed (a source's key may be made from the text), `source.record` loses
-    `text`, and the source block's `text` is null and its `record` has no `text`. The source block keeps `name`,
+    `text`, and the source block's `text` is null and its `record` has no `text`. **[decided by the builder]** A
+    taken-over v1 question also keeps v1's words in its record and ask: both records also lose `body`, `answer`,
+    `options`, `links` and `action` (v1's one-off spec, whose `prompt` is words), and the card's `ask.text` (the
+    body) is removed; `kind`, `task`, `status`, `created_at`, `answered_at` and `handling` (a true/false) stay. Reverse:
+    take a field out of `phone.WORDS`. The source block keeps `name`,
     `author`, `place`, `at` and the http(s) `link`, so Open in source still works. The text names who and where
     only: `{author} wrote {thing} in {place}` (`Ana wrote a message in #team`), or without an author `Someone wrote
     ...`, or without a place no `in ...`; `{thing}` is `a message` for a `brings: messages` source, `an item` for
@@ -3823,10 +3831,13 @@ Calls the author made without asking (check them):
       `spec`, and `sessions` from v1's `{role: session id}` as `{role: {id, ids, cwd: <worktree or "">, needs,
       state: ended, why: "taken over from v1", at}}`, the shape `Workers._save_session` writes, so
       `start(..., resume=True)` continues it in its worktree. `lane` and `status` are mapped as by the import. The gate
-      counts a taken-over planned card as ready (its feed stays `v1-import`), so a pass comes for it.
+      counts a taken-over planned card as ready (its feed stays `v1-import`), so a pass comes for it, and a
+      taken-over code card in Running whose session still says `taken over from v1` too (see Pass due).
       Every decision gets a card: an open `ask` or `gate` an open question card; every other one (answered,
       resolved, undone, open `self` and `system`) a done question card (`ask: null`) whose `source.record` keeps
-      `kind`, `task`, `status`, `answer`, `answered_at` and `created_at`; `not_imported.decisions` is 0. Every
+      `kind`, `task`, `status`, `answer`, `answered_at` and `created_at`; `not_imported.decisions` is 0. A question
+      card whose decision has left state.json (v1 archived it) is closed again whatever its lane, ask or title, so
+      it too gets `taken_over` and the settled live `do`. Every
       decision card's `source.record` also keeps v1's `body`, `options`, `links`, `handling` and `action` as given
       (null when unset), and an open one's
       `ask.text` (what v2 shows with an ask) is the body's text in the primary language when it is not blank, so

@@ -541,13 +541,15 @@ def plan(name: str, folder: Path, langs: tuple, labels: Labels, existing: dict, 
             continue
         out.append(make.question(d, task_ids, True))
     # v1 removes a decision from state.json only when it archives it, and it archives only settled ones: a question
-    # card still open whose decision is gone is closed too, and so is a closed one whose title is still one text.
+    # card still open whose decision is gone is closed too, and so is a closed one whose title is still one text. A
+    # take-over closes each one again, so it too gets `taken_over` and the settled live `do`.
     ids = task_ids | {d["id"] for d in decisions}
     prefix = f"v1:{name}:"
     for key in sorted(own):
         old = existing[key]
         if (key.startswith(prefix) and key[len(prefix):] not in ids and old.get("kind") == "question"
-                and (old.get("lane") != "done" or old.get("ask") is not None or isinstance(old.get("title"), str))):
+                and (live or old.get("lane") != "done" or old.get("ask") is not None
+                     or isinstance(old.get("title"), str))):
             out.append(make.closed(old))
     for entry in out:
         try:

@@ -1640,6 +1640,22 @@ class TakeOverTest(unittest.TestCase):
             self.assertTrue(got[f"v1:shop:{task}"]["taken_over"])
             self.assertNotIn("branch", got[f"v1:shop:{task}"])
 
+    def test_a_closed_card_whose_decision_v1_archived_is_taken_over_too(self):
+        self.ok("--project", "shop")  # D1 open: an open read-only question card
+        self.edit_state("projects/shop", lambda s: s["decisions"][0].update(
+            status="answered", answer="stripe", answered_at="2026-11-06T10:00:00Z"))
+        self.ok("--project", "shop")  # D1 answered: the card is closed
+        before = self.by_key()["v1:shop:D1"]
+        self.assertEqual((before["lane"], before["ask"]), ("done", None))
+        self.assertNotIn("taken_over", before)
+        self.edit_state("projects/shop", lambda s: s.update(decisions=[d for d in s["decisions"] if d["id"] != "D1"]))
+        self.take_over()  # D1 is gone from state.json: v1 archived it
+        card = self.by_key()["v1:shop:D1"]
+        self.assertEqual(card["id"], before["id"])
+        self.assertTrue(card["taken_over"])
+        self.assertEqual(card["plain"]["do"]["en"], importv1.PHRASES["en"]["do_settled"])
+        self.assertEqual(self.actions(self.take_over())["v1:shop:D1"], "unchanged")
+
     # -- 5. every file the project holds is copied -------------------------------------------------------------
 
     def test_every_file_is_copied_with_its_bytes_and_mtime(self):
