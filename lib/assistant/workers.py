@@ -1196,8 +1196,13 @@ class Workers:
         cwd = str(Path(cwd).resolve()) if cwd else ""  # absolute, so later checks from any folder find it
         if cwd and self._in_data(cwd):
             whose = "the parked worker" if source == "parked" else f"the card's saved {role} session"
-            hint = ("(a card with no repo needs no --cwd)" if source == "given" else
-                    f"(it is {whose}'s folder); pass --cwd <another folder>")
+            if source == "given":
+                hint = "(a card with no repo needs no --cwd)"
+            elif resume:  # claude finds a saved session by its folder: a resume elsewhere cannot find it
+                hint = (f"(it is {whose}'s folder); the saved session cannot be resumed outside its folder: end the "
+                        "worker and start the role again without --resume, with --cwd <another folder>")
+            else:
+                hint = f"(it is {whose}'s folder); pass --cwd <another folder>"
             raise WorkerError(f"the worker's folder {cwd} is in the data folder {self.data}; a worker never runs "
                               f"there {hint}")
         if source in ("parked", "saved"):
@@ -1694,8 +1699,9 @@ class Workers:
         (`_remake_own_dir`). Raises WorkerError."""
         if plan["cwd"] and self._in_data(plan["cwd"]):
             raise WorkerError(f"cannot start the session: the worker's folder {plan['cwd']} is in the data folder "
-                              f"{self.data}; a worker never runs there; start it with --resume --cwd <another "
-                              "folder>")
+                              f"{self.data}; a worker never runs there, and the saved session cannot be resumed "
+                              "outside its folder: end the worker and start the role again without --resume, with "
+                              "--cwd <another folder>")
         self._remake_own_dir(plan["cwd"])
         if not (plan["cwd"] and Path(plan["cwd"]).is_dir()):  # checked first, so a gone worktree says so
             raise WorkerError(f"cannot start the session: the worker's folder {plan['cwd'] or '(none)'} is gone")

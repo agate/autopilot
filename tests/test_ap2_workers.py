@@ -1307,7 +1307,7 @@ class LifecycleTest(WorkerCase):
             w._resume_tools(dict(plan, cwd=str(other)))
         self.assertFalse(other.exists())
         inside = self.data / f"{workers_mod.OWN_DIR}x"
-        with self.assertRaisesRegex(WorkerError, "is in the data folder"):
+        with self.assertRaisesRegex(WorkerError, "is in the data folder.*start the role again without --resume"):
             w._resume_tools(dict(plan, cwd=str(inside)))
         self.assertFalse(inside.exists())
 
@@ -1317,7 +1317,10 @@ class LifecycleTest(WorkerCase):
         with self.assertRaises(WorkerError) as e:
             self.workers().start(cid, "implement", prompt="Go on.", resume=True)
         self.assertIn("is in the data folder", str(e.exception))
-        self.assertIn("saved implement session's folder); pass --cwd <another folder>", str(e.exception))
+        self.assertIn("saved implement session's folder); the saved session cannot be resumed outside its folder: "
+                      "end the worker and start the role again without --resume, with --cwd <another folder>",
+                      str(e.exception))
+        self.assertNotIn("--resume --cwd", str(e.exception))
         self.assertNotIn("needs no --cwd", str(e.exception))
         self.assertFalse(inside.exists())  # never made again there
         self.assertEqual((self.bg_calls(), self.discovery_calls()), ([], []))

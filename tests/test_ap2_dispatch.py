@@ -481,6 +481,22 @@ class StartTest(DispatchCase):
         self.assertIn("is the data folder or inside it", errs[0]["error"])
         self.assertEqual(self.dispatch_calls(), [])
 
+    def test_a_temp_folder_inside_the_data_folder_is_refused_before_the_launch(self):
+        """A TMPDIR inside the data folder: the group None's new folder would land there."""
+        tmp = self.data / "tmpx"
+        tmp.mkdir()
+        patch = mock.patch.object(tempfile, "tempdir", str(tmp))
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.add_card()
+        out = self.gate(self.T)
+        errs = [e for e in out["errors"] if e.get("dispatch")]
+        self.assertEqual(len(errs), 1)
+        self.assertRegex(errs[0]["error"], "empty folder .* is in the data folder .*; set TMPDIR to a folder outside")
+        self.assertEqual(self.dispatch_calls(), [])
+        self.assertEqual(list(tmp.iterdir()), [])  # the folder it made is gone again
+        self.assertFalse((self.data / dispatch.DISPATCH).exists() and "short_id" in self.record())
+
     def test_a_profile_that_does_not_load_starts_nothing(self):
         self.add_card()
         (self.data / profiles.ACTIVE).write_text("not json", encoding="utf-8")

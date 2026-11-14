@@ -245,8 +245,9 @@ def start(data, group: dict, queue: list, profile: dict, now: datetime, mode: st
     written stops the session again), then with the session id once the listing shows it (best effort); a spend launch
     row (kind `dispatcher`) follows, and a failure there is the record's `note`. Raises LaunchError when `claude --bg`
     fails, DispatchError (or ConfigError, WorkerError) for this group, when nothing started: also for a repo that is
-    the data folder or inside it (`datadir.within`), and when the launch cannot enter the group's repo (an OSError
-    naming it), so the next group is still tried."""
+    the data folder or inside it (`datadir.within`), for a group None folder made there (a TMPDIR inside the data
+    folder; the folder is removed again), and when the launch cannot enter the group's repo (an OSError naming it), so
+    the next group is still tried."""
     data, claude = Path(data), _claude(claude)
     projs = [projects_module.load(data, n) for n in group.get("projects") or []]
     cwd = Path(group["group"]) if group.get("group") else None
@@ -283,6 +284,10 @@ def start(data, group: dict, queue: list, profile: dict, now: datetime, mode: st
         except OSError as e:
             raise DispatchError(f"no dispatcher pass started for {label(group)}: cannot make its empty folder: "
                                 f"{e}") from e
+        if datadir.within(own, data):  # a temp folder (TMPDIR) inside the data folder: before anything launches
+            _remove_own(own)
+            raise DispatchError(f"no dispatcher pass started for {label(group)}: its empty folder {own} is in the "
+                                f"data folder {data}; set TMPDIR to a folder outside it")
     try:
         short = v1_workers._launch(argv, str(cwd), env)
     except OSError as e:

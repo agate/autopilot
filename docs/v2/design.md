@@ -2053,8 +2053,9 @@ Calls the author made without asking (check them):
       inside the data folder (`config.yaml`, `dispatch.json`, `items/`, `.claude/settings.json`) would pass it, and
       the data folder would be the session's project root, whose `.claude/`, `.mcp.json` and `CLAUDE.md` a later
       session loads. The pr-review worker runs outside the data folder for the same reason. The pass still finds
-      the data folder through `AP2_DATA` and writes its texts to `AP2_RUN_DIR`. `finish` removes the folder with the
-      session, and keeps it with a pass kept for `claude attach`. The workers it starts stay out of the data folder
+      the data folder through `AP2_DATA` and writes its texts to `AP2_RUN_DIR`. A new folder that lands in the data
+      folder anyway (a `TMPDIR` inside it) is removed again and the group starts no pass (one `DispatchError` line).
+      `finish` removes the folder with the session, and keeps it with a pass kept for `claude attach`. The workers it starts stay out of the data folder
       too: the runbook starts a card with no repo without `--cwd`, so `Workers.start` gives it a new empty folder of
       its own (prefix `ap2-worker-`, left in the temp folder), and refuses a `--cwd` that is the data folder or inside
       it. A group whose `repo` is the data folder or inside it (a data folder kept in git) starts no pass either: one
@@ -3059,7 +3060,9 @@ Calls the author made without asking (check them):
     (`datadir.within`: symlinks followed, letter case ignored, a same-folder check along the parents for macOS
     firmlinks): there a relative write passes the Bash guard, and the data folder would be the session's project
     root. The line says where the folder came from: a given one, that a card with no repo needs no `--cwd`; a
-    parked or saved one, to pass `--cwd <another folder>`. A card with no repo (no project, or a project with no
+    parked or saved one, to pass `--cwd <another folder>`, or on `--resume` (claude finds a saved session by its
+    folder, so it cannot be resumed elsewhere) to end the worker and start the role again without `--resume`, with
+    `--cwd <another folder>`. A card with no repo (no project, or a project with no
     `repo`) started with no folder (none given, parked or saved) runs in a new empty folder (`tempfile.mkdtemp`,
     prefix `ap2-worker-`, mode 0700), saved as the role's `cwd`, so `--resume` reuses it. That new folder is checked
     the same way before the tool discovery (a `TMPDIR` inside the data folder is refused and the folder removed), and
