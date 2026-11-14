@@ -593,6 +593,39 @@ class HideTest(PhoneCase):
         self.assertNotIn(MARKER, json.dumps(data, ensure_ascii=False))
         self.assertNotIn("key", data["full"][card["id"]]["card"])
 
+    def test_a_taken_over_v1_question_keeps_its_words_off_the_phone(self):
+        # As importv1 writes a taken-over v1 question: the body, answer, options, links and one-off action in the
+        # record, and the body as the ask's text.
+        body, answer = f"Two providers fit {MARKER}.", f"{MARKER}-yes"
+        record = {"kind": "gate", "task": None, "status": "open", "created_at": "2026-11-09T17:02:11Z",
+                  "answer": answer, "answered_at": None, "body": {"en": body},
+                  "options": [{"label": f"{MARKER} first"}], "links": [f"{MARKER} link"], "handling": None,
+                  "action": {"tool": "Bash", "option": answer, "prompt": f"run {MARKER}"}}
+        card = self.add(kind="question", feed="v1-import", title=f"{MARKER} question", taken_over=NOW.isoformat(),
+                        source={"name": "v1-import", "record": record},
+                        ask={"type": "approve", "from": "v1", "text": body})
+        self.assertIn(body, json.dumps(self.build(), ensure_ascii=False))  # hiding off: the words are there
+        off = self.build()["full"][card["id"]]["card"]
+        self.assertEqual(off["ask"]["text"], body)
+        self.assertEqual(off["source"]["record"]["answer"], answer)
+        data = self.build(phone_hide_quotes=True)
+        self.assertNotIn(MARKER, json.dumps(data, ensure_ascii=False))
+        full = data["full"][card["id"]]
+        for rec in (full["card"]["source"]["record"], full["source_block"]["record"]):
+            self.assertEqual(sorted(rec), ["answered_at", "created_at", "handling", "kind", "status", "task"])
+        self.assertEqual(full["card"]["ask"], {"type": "approve", "from": "v1"})
+
+    def test_a_hidden_card_keeps_a_v2_question_on_the_phone(self):
+        # Only v1's own ask carries quoted words; a question v2 asks about a hidden card still shows, scrubbed.
+        card = self.pr42()
+        ask = {"type": "answer", "from": "prloop", "role": "loop", "reason": "max_rounds",
+               "text": f"The PR loop stopped after round 3 in {self.data}/runs. What should it do?"}
+        Store(self.data, cfg=self.cfg).update(card["id"], {"ask": ask}, by="test")
+        data = self.build(phone_hide_quotes=True)
+        self.assertNotIn(MARKER, json.dumps(data, ensure_ascii=False))
+        self.assertEqual(data["full"][card["id"]]["card"]["ask"],
+                         {**ask, "text": "The PR loop stopped after round 3 in <data>/runs. What should it do?"})
+
     def test_a_hidden_project_title_is_hidden_in_the_projects_list(self):
         card = self.add(kind="project", title=f"{MARKER} project",
                         source={"name": "gh-mine", "link": None, "record": {"text": MARKER, "author": "Ana"}})
