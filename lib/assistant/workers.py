@@ -127,6 +127,9 @@ REVIEW_COMMAND = "/autopilot:pr-review "  # then the card id and the stage, the 
 APPLY_FAILED = "review_apply_failed"  # the `reason` of the ask a pr-review report that could not be applied raises
 REVIEW_IDLE = "review_idle"  # the `reason` of the ask a pr-review worker closed idle with no report raises
 REVIEW_DIR = "ap2-pr-review-"  # the prefix of the empty folder an auto-started pr-review worker runs in
+# The prefix of the empty folder a worker on a card with no repo runs in when no folder is given (`start`): never the
+# data folder, where a relative write passes the Bash guard and which would be the session's project root.
+OWN_DIR = "ap2-worker-"
 QUESTION_MAX = 64 * 1024  # the most of question.json `check` reads (under the worker list's lock)
 WORKER_TEXT_MAX = 2000  # the most characters of worker-derived text (`_safe_text`) in a failed apply's ask or a note
 SHADOW_REVIEW = "shadow mode starts no worker; this card waits for its review in live mode"
@@ -1166,8 +1169,10 @@ class Workers:
     def _plan_start(self, records: list, card: dict, role: str, project: dict, saved: dict, cwd, needs,
                     resume: bool, profile: dict) -> dict:
         """Everything a start decides from the worker list: no other worker on the card, the slot and `needs`, the
-        ports, the session to resume and the folder. Raises WorkerError when the start may not go ahead. `start()`
-        runs it on a read of the list before the tool discovery, and again under the lock before it launches."""
+        ports, the session to resume and the folder. Raises WorkerError when the start may not go ahead (also for a
+        folder that is the data folder or inside it). A card with no repo and no folder (given, parked or saved) gets
+        `cwd` "": `start()` then makes it an empty folder of its own. `start()` runs it on a read of the list before
+        the tool discovery, and again under the lock (with that folder) before it launches."""
         card_id = card["id"]
         old = self._find(records, card_id, role)
         other = next((r for r in records if r["card"] == card_id and r is not old), None)
@@ -1185,7 +1190,10 @@ class Workers:
             raise WorkerError(f"card {card_id}: no saved {role} session to resume")
         cwd = cwd or (parked or {}).get("cwd") or saved.get("cwd") or ""
         cwd = str(Path(cwd).resolve()) if cwd else ""  # absolute, so later checks from any folder find it
-        if not cwd or not Path(cwd).is_dir():
+        if cwd and Path(cwd).is_relative_to(self.data.resolve()):
+            raise WorkerError(f"the worker's folder {cwd} is in the data folder {self.data}; a worker never runs "
+                              f"there (a card with no repo needs no --cwd)")
+        if (cwd or project.get("repo")) and not (cwd and Path(cwd).is_dir()):
             raise WorkerError(f"the worker's folder {cwd or '(none given)'} is not a folder; pass --cwd")
         primary = self.cfg.primary_language
         branch = card.get("branch") or projects.branch(project, card.get("key") or card_id,
@@ -1203,6 +1211,8 @@ class Workers:
         taken, so no other start, end or check waits on it; under the lock every check is made again on the list
         as it is then, and the floor is written with the ports picked there. With `due` (the auto-start's
         `_review_is_due`), the card is read again under the lock and nothing starts unless `due(card)` still holds.
+        A card with no repo and no folder runs in a new empty folder of its own (`tempfile.mkdtemp`, OWN_DIR); no
+        worker runs in the data folder or under it.
         """
         config.require_live(self.cfg, f"start a {role} worker on card {card_id}")
         if role not in ROLES:
@@ -1217,6 +1227,12 @@ class Workers:
         self._refuse_at_cap(self._allowance(prof, now))
         # A start the list already refuses fails here, before any discovery runs.
         planned = self._plan_start(self.registry.read(), card, role, project, saved, cwd, needs, resume, prof)
+        if not planned["cwd"]:  # no repo and no folder: an empty one of its own, saved as the role's `cwd`, which
+            try:  # `--resume` reuses (it is left in the temp folder)
+                cwd = str(Path(tempfile.mkdtemp(prefix=OWN_DIR)).resolve())
+            except OSError as e:
+                raise WorkerError(f"cannot make an empty folder for the worker: {e}") from None
+            planned = dict(planned, cwd=cwd)
         require_literal(self.data)  # before the tool discovery runs a session
         found = self._tools(project, planned["cwd"], planned["env"], prof, card_id, role)
         with self.registry.locked() as records:

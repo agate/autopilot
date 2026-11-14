@@ -232,6 +232,8 @@ class RunbookTest(Ap2Case):
         self.assertIn("**`prreview.json`.** The gate already applied it (`ap2 worker check`); leave it.", text)
         self.assertIn("the absolute `ap2` path your prompt names", text)
         self.assertNotIn("(denied in every mode)", text)  # v1's prefix rules deny only the plain forms
+        self.assertIn("A card with no repo is started without `--cwd`", text)  # never in the data folder
+        self.assertNotIn("runs in `$AP2_DATA`", text)
 
     def test_the_runbook_acts_on_answered_asks(self):
         """`dispatch.why` names an ask that closed (`answered`); a step must act on it, or an approved merge (or a

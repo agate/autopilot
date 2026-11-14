@@ -15,7 +15,8 @@ driven by the v2 runbook (`builtin/RUNBOOK.md`), that decides what happens next 
   DISPATCH_MAX_MIN minutes, or it said `ap2 pass end` (`end`, which writes `<data>/dispatch-end.json`). Waiting at
   a permission prompt opens one `ask` card (`fix`, from `dispatch`) and keeps the stopped session for `claude
   attach`. Then the record is removed, or keeps only the queue and the round's `why`, so the next run starts the
-  next group.
+  next group. After `claude --bg` fails, the queue-only record also holds `retry_at` (LAUNCH_RETRY_MIN minutes on):
+  no pass starts before it.
 
 The gate calls `finish` early in a run and starts a pass after the pass-due check (`gate._start_dispatch`); it never
 waits for a pass, and one pass is open at a time for the whole data folder.
@@ -49,6 +50,7 @@ END = "dispatch-end.json"  # <data>/dispatch-end.json: `ap2 pass end`'s marker, 
 RUN_DIR = Path(transcripts.SESSIONS) / "dispatch"  # the pass's own folder: its settings and its ask texts
 SETTINGS = "settings-dispatcher.json"  # `sessions/**/settings-*.json`: in the worker floor's protected files
 DISPATCH_MAX_MIN = 30  # a pass still working after this many minutes is stopped
+LAUNCH_RETRY_MIN = 15  # after `claude --bg` fails (or hangs), no pass starts for this many minutes (`retry_at`)
 LOOKS = 3  # a pass never seen busy has ended once a gate run has seen its turn over this many times (v1: 3 polls)
 NAME_PREFIX = "ap2 dispatch · "
 ROLE = "dispatcher"  # AP2_ROLE: the Bash guard acts on it; the park hook leaves it alone (not a worker role)
@@ -341,9 +343,10 @@ def _group_ok(g) -> bool:
 
 def read_record(data) -> Optional[dict]:
     """`<data>/dispatch.json`, or None when there is none. A record with a `short_id` is an open pass; one without
-    holds only the round's `queue` and `why`. `why` (a list of objects) and `token` may be missing (a record written
-    before they were), and `cwd` (a string: the group None's own folder) is there only for that group. Raises
-    ValueError (or OSError) when it is not one of these."""
+    holds only the round's `queue` and `why`, and after a failed launch `retry_at` (a time stamp: no pass starts
+    before it). `why` (a list of objects) and `token` may be missing (a record written before they were), and `cwd`
+    (a string: the group None's own folder) is there only for that group. Raises ValueError (or OSError) when it is
+    not one of these."""
     path = Path(data) / DISPATCH
     try:
         rec = json.loads(path.read_text(encoding="utf-8"))
@@ -355,8 +358,10 @@ def read_record(data) -> Optional[dict]:
         raise ValueError(shape)
     why = rec.get("why", [])
     if not (isinstance(why, list) and all(isinstance(w, dict) for w in why)
-            and isinstance(rec.get("token", ""), str)):
+            and isinstance(rec.get("token", ""), str) and isinstance(rec.get("retry_at", ""), str)):
         raise ValueError(shape)
+    if "retry_at" in rec:
+        cards.parse_stamp(rec["retry_at"])
     if "short_id" in rec:
         looks = rec.get("looks")
         if not (isinstance(rec["short_id"], str) and _SHORT.match(rec["short_id"]) and _group_ok(rec)

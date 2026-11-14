@@ -743,18 +743,39 @@ def _start_dispatch(data: Path, now: datetime, store: Store, due: bool, claude, 
     (`_unsee`; also the cards of a project `groups` refused), so the next round is due for them and tries again
     (that round serves only them), and no group holds the head of the queue. After any other error the next group
     is tried in the same run; after `claude --bg` itself fails (`dispatch.LaunchError`) no other group is tried
-    this run, and the rest of the queue waits for the next run. A new round where none starts and none is left in
-    the queue stays due."""
+    this run, and the queue-only record (made for a new round) holds the rest of the queue and `retry_at`, now plus
+    `dispatch.LAUNCH_RETRY_MIN` minutes: no run starts a pass before then (a `retry_at` further away than that means
+    the clock went back, and is ignored), so a `claude --bg` that keeps hanging costs one timeout per backoff, not
+    one per run. A running round's queue is checked again with `dispatch.named` (a store error keeps it as it is, one
+    error): a group whose named cards went (done, say) is not served, and a queue left with none is removed. A new
+    round where none starts and none is left in the queue stays due."""
     try:
         rec = dispatch.read_record(data)
     except (OSError, ValueError, RecursionError):  # damaged since `_finish_dispatch` looked: the next run removes it
         return
     if rec is not None and "short_id" in rec:
         return  # one pass at a time
+    retry = (rec or {}).get("retry_at")
+    if retry and now < cards.parse_stamp(retry) <= now + timedelta(minutes=dispatch.LAUNCH_RETRY_MIN):
+        return  # a launch failed lately: no `claude --bg` before retry_at (one further away: the clock went back)
     queue = list((rec or {}).get("queue") or [])
     why = list((rec or {}).get("why") or [])
     new_round = not queue
     bad = []
+    if not new_round:
+        try:  # a group whose named cards went since the round started (done, say) costs no pass
+            queue = dispatch.named(store, queue, _named(why))
+        except (CardError, OSError, RecursionError) as e:  # which cards they hold is unknown: the queue is kept
+            errors.append({"dispatch": True, "error": str(e)})
+            log(f"dispatch: error: {e}")
+        if not queue:
+            try:
+                (data / dispatch.DISPATCH).unlink(missing_ok=True)
+                log("dispatch: no group left in the round holds a card it names; the round is over")
+            except OSError as e:
+                errors.append({"dispatch": True, "error": str(e)})
+                log(f"dispatch: error: {e}")
+            return
     if new_round:
         if not due:
             return
@@ -786,15 +807,16 @@ def _start_dispatch(data: Path, now: datetime, store: Store, due: bool, claude, 
         errors.append({"dispatch": True, "error": str(e) or type(e).__name__})
         log(f"dispatch: not started: {e}")
         return
-    started, failed, rest = None, [], []
+    started, failed, rest, retry = None, [], [], None
     for i, group in enumerate(queue):
         try:
             started = dispatch.start(data, group, queue[i + 1:], prof, now, store.cfg.mode, claude=claude, why=why)
             break
-        except dispatch.LaunchError as e:  # claude --bg failed (or hung 120 s): the next group waits for the next run
-            errors.append({"dispatch": True, "error": str(e)})
+        except dispatch.LaunchError as e:  # claude --bg failed (or hung 120 s): no pass starts before `retry`
+            retry = cards.stamp(now + timedelta(minutes=dispatch.LAUNCH_RETRY_MIN))
+            errors.append({"dispatch": True, "error": f"{e}; next try at {retry}"})
             log(f"dispatch: not started: {e}; {dispatch.label(group)} is dropped from this round and tried again "
-                f"next round; no other group is tried this run")
+                f"next round; no other group is tried this run; next try at {retry}")
             failed.append(group)
             rest = queue[i + 1:]
             break
@@ -812,18 +834,20 @@ def _start_dispatch(data: Path, now: datetime, store: Store, due: bool, claude, 
             errors.append({"dispatch": True, "error": str(e)})
             log(f"dispatch: error: {e}")
     if started is None:
-        if new_round and not rest:
-            return  # nothing started and nothing waits: the pass stays due
         try:
-            if rest:  # the next run starts the next group
+            if retry:  # a launch failed: the next run at or after `retry` starts the next group (or a new round)
+                write_json(data / dispatch.DISPATCH, {"queue": rest, "why": why, "retry_at": retry})
+            elif rest:  # the next run starts the next group
                 write_json(data / dispatch.DISPATCH, {"queue": rest, "why": why})
-            else:  # every group left in the round failed: the round is over
+            elif not new_round:  # every group left in the round failed: the round is over
                 (data / dispatch.DISPATCH).unlink(missing_ok=True)
         except OSError as e:
             errors.append({"dispatch": True, "error": str(e)})
             log(f"dispatch: error: {e}")
             if new_round:
                 return  # no queue was written: the pass stays due
+        if new_round and not rest:
+            return  # nothing started and nothing waits: the pass stays due
     else:
         entries.append({"did": "started", "short_id": started["short_id"], "group": started["group"],
                         "projects": started["projects"]})

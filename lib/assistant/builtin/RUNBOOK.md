@@ -92,7 +92,8 @@ For each `ready` card in `dispatch.why` of your group (live mode only, and only 
 4. Write the brief: the template's `brief` with the card's fields, the card's spec or source text, and its
    criteria. Save it as `$AP2_RUN_DIR/brief-<card>-<role>.md`.
 5. Run `ap2 worker start <card> <role> --cwd <folder> --prompt-file <brief>` (add `--needs A,B` for its
-   resources, `--resume` to continue the role's saved session). A card with no repo runs in `$AP2_DATA`.
+   resources, `--resume` to continue the role's saved session). A card with no repo is started without `--cwd`:
+   it runs in an empty folder of its own (never `--cwd $AP2_DATA`, which is refused).
 6. Run `ap2 card lane <card> running` once its first worker started.
 
 ## 5. Ask the user

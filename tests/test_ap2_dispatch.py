@@ -12,7 +12,7 @@ from unittest import mock
 
 from tests.helpers import ROOT
 from tests.test_ap2_gate import FAKE, LoopCase
-from assistant import dispatch, gate, profiles, routines, spend, workers
+from assistant import cards, dispatch, gate, profiles, routines, spend, workers
 from assistant.importv1 import FEED as V1_FEED
 
 
@@ -36,6 +36,13 @@ class DispatchCase(LoopCase):
         tmp = mock.patch.object(tempfile, "tempdir", str(self.tmp))
         tmp.start()
         self.addCleanup(tmp.stop)
+        # In-process calls run as a person at a terminal, even inside a v2 worker (which exports AP2_ROLE); a test
+        # that needs either name sets it itself.
+        env = mock.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        for name in ("AP2_ROLE", "AP2_PASS"):
+            os.environ.pop(name, None)
 
     def own_folder(self, cwd: str) -> Path:
         """`cwd` is a group None pass's own folder: new, empty, in the temp folder, outside the data folder."""
@@ -397,11 +404,64 @@ class StartTest(DispatchCase):
         [err] = out["errors"]
         self.assertIs(err["dispatch"], True)
         self.assertIn("cannot start the dispatcher pass", err["error"])
-        self.assertFalse((self.data / dispatch.DISPATCH).exists())
+        retry = cards.stamp(self.T + timedelta(minutes=dispatch.LAUNCH_RETRY_MIN))
+        self.assertTrue(err["error"].endswith(f"; next try at {retry}"), err)
+        self.assertIn(f"no other group is tried this run; next try at {retry}", self.gate_log())
+        # A new round: a queue-only record of its own, with nothing queued and the backoff.
+        self.assertEqual(self.record(), {"queue": [], "why": self.record()["why"], "retry_at": retry})
         self.assertIs(self.pass_file()["due"], True)
         self.assertEqual(out["dispatch"], [])
-        out = self.gate(self.T + timedelta(minutes=1))  # the next run tries again
+        out = self.gate(self.T + timedelta(minutes=dispatch.LAUNCH_RETRY_MIN))  # the run at retry_at tries again
         self.assertEqual(out["dispatch"][0]["did"], "started")
+        self.assertNotIn("retry_at", self.record())
+
+    def test_a_launch_that_keeps_failing_is_tried_once_per_backoff_not_once_per_run(self):
+        """A `claude --bg` that hangs costs its 120-second timeout (under the gate lock) once per LAUNCH_RETRY_MIN
+        minutes: the runs in between start nothing and make no launch call."""
+        self.add_card()
+        hang = subprocess.TimeoutExpired("claude", 120)
+        with mock.patch.object(dispatch.v1_workers, "_launch", side_effect=hang) as launch:
+            self.gate(self.T)
+            self.assertEqual(launch.call_count, 1)
+            for minute in range(1, dispatch.LAUNCH_RETRY_MIN):
+                out = self.gate(self.T + timedelta(minutes=minute))
+                self.assertEqual((launch.call_count, out["dispatch"]), (1, []), minute)
+                self.assertEqual([e for e in out["errors"] if e.get("dispatch")], [], minute)
+                self.assertIs(out["pass_due"], True)
+            self.gate(self.T + timedelta(minutes=dispatch.LAUNCH_RETRY_MIN))
+            self.assertEqual(launch.call_count, 2)
+        again = self.T + timedelta(minutes=2 * dispatch.LAUNCH_RETRY_MIN)
+        self.assertEqual(self.record()["retry_at"], cards.stamp(again))
+
+    def test_a_retry_at_beyond_the_backoff_means_the_clock_went_back_and_is_ignored(self):
+        self.add_card()
+        far = cards.stamp(self.T + timedelta(minutes=dispatch.LAUNCH_RETRY_MIN, seconds=1))
+        (self.data / dispatch.DISPATCH).write_text(json.dumps({"queue": [], "why": [], "retry_at": far}))
+        out = self.gate(self.T)
+        self.assertEqual([e["did"] for e in out["dispatch"]], ["started"])
+
+    def test_a_record_with_retry_at_is_no_open_pass_and_a_bad_one_does_not_read(self):
+        retry = cards.stamp(self.T + timedelta(minutes=5))
+        (self.data / dispatch.DISPATCH).write_text(json.dumps({"queue": [], "why": [], "retry_at": retry}))
+        self.assertEqual(dispatch.read_record(self.data)["retry_at"], retry)
+        self.assertIsNone(dispatch.finish(self.data, self.T, claude=FAKE))
+        with self.assertRaisesRegex(dispatch.DispatchError, "no dispatcher pass is open"):
+            dispatch.end(self.data, self.T)
+        for bad in (7, "soon"):
+            with self.subTest(bad=bad):
+                (self.data / dispatch.DISPATCH).write_text(json.dumps({"queue": [], "retry_at": bad}))
+                with self.assertRaises(ValueError):
+                    dispatch.read_record(self.data)
+
+    def test_a_group_that_fails_for_another_reason_does_not_back_off(self):
+        project_file(self.data, "shop", self.tmp / "gone")
+        self.add_card(project="shop")
+        out = self.gate(self.T)
+        self.assertIn("is not a folder", [e for e in out["errors"] if e.get("dispatch")][0]["error"])
+        self.assertFalse((self.data / dispatch.DISPATCH).exists())
+        (self.tmp / "gone").mkdir()
+        out = self.gate(self.T + timedelta(minutes=1))  # the next round tries it again at once
+        self.assertEqual([e["did"] for e in out["dispatch"]], ["started"])
 
     def test_a_profile_that_does_not_load_starts_nothing(self):
         self.add_card()
@@ -503,31 +563,34 @@ class RoundTest(DispatchCase):
                       self.gate_log())
         # The rest of the round waits for the next run; the failed group's card is left unseen.
         rec = self.record()
-        self.assertEqual(sorted(rec), ["queue", "why"])
+        self.assertEqual(sorted(rec), ["queue", "retry_at", "why"])
+        self.assertEqual(rec["retry_at"], cards.stamp(self.T + timedelta(minutes=dispatch.LAUNCH_RETRY_MIN)))
         self.assertEqual(rec["queue"], [{"group": None, "projects": []}])
         self.assertEqual(sorted(w["card"] for w in rec["why"]), sorted([self.shop, self.loose]))
         self.assertEqual(self.pass_file()["seen"]["ready"], [self.loose])
 
     def test_a_group_whose_launch_fails_at_the_head_of_a_new_round_never_holds_the_round(self):
+        back = dispatch.LAUNCH_RETRY_MIN  # each failed launch: no pass starts for this many minutes
         with self.failing_in(self.repo):
             out = self.gate(self.T)
             self.assertEqual(out["dispatch"], [])
             self.assertIn("claude --bg printed no short id", [e for e in out["errors"] if e.get("dispatch")][0]["error"])
-            out = self.gate(self.T + timedelta(minutes=1))  # the next group, not the failed one again
+            out = self.gate(self.T + timedelta(minutes=back))  # the next group, not the failed one again
             self.assertEqual([(e["did"], e["group"]) for e in out["dispatch"]], [("started", None)])
             self.assertEqual([e for e in out["errors"] if e.get("dispatch")], [])
             self.assertEqual(self.record()["queue"], [])
-            dispatch.end(self.data, self.T + timedelta(minutes=1))
-            out = self.gate(self.T + timedelta(minutes=2))  # the next round is due for the failed group's card
+            dispatch.end(self.data, self.T + timedelta(minutes=back))
+            out = self.gate(self.T + timedelta(minutes=back + 1))  # the next round is due for the failed group's card
         self.assertIs(out["pass_due"], True)
         self.assertEqual(json.loads((self.data / "gate.json").read_text())["pass_due"], True)
         self.assertEqual([e["did"] for e in out["dispatch"]], ["ended"])
         self.assertEqual(len([e for e in out["errors"] if e.get("dispatch")]), 1)  # one error this round
         self.assertEqual(self.pass_file()["seen"]["ready"], [self.loose])
-        # The round names only the failed group's card: the group None is not served again, so no round is left.
-        self.assertFalse((self.data / dispatch.DISPATCH).exists())
+        # The round names only the failed group's card: the group None is not served again, so nothing is queued.
+        self.assertEqual(self.record()["queue"], [])
+        self.assertEqual(self.record()["retry_at"], cards.stamp(self.T + timedelta(minutes=2 * back + 1)))
         self.assertEqual(len(self.dispatch_calls()), 1)
-        out = self.gate(self.T + timedelta(minutes=3))  # healed: the next round serves it, and only it
+        out = self.gate(self.T + timedelta(minutes=2 * back + 1))  # healed: the next round serves it, and only it
         self.assertEqual([(e["did"], e["group"]) for e in out["dispatch"]], [("started", str(self.repo))])
         self.assertEqual(self.record()["why"], [{"why": "ready", "card": self.shop}])
         self.assertEqual(self.record()["queue"], [])
@@ -545,14 +608,39 @@ class RoundTest(DispatchCase):
         with self.failing_in(self.repo):
             out = self.gate(self.T + timedelta(minutes=1))
         self.assertEqual([e["did"] for e in out["dispatch"]], ["ended"])
-        self.assertEqual(self.record(), {"queue": [{"group": None, "projects": []}], "why": why})
+        retry = self.T + timedelta(minutes=1 + dispatch.LAUNCH_RETRY_MIN)
+        self.assertEqual(self.record(), {"queue": [{"group": None, "projects": []}], "why": why,
+                                         "retry_at": cards.stamp(retry)})
         self.assertNotIn(self.shop, self.pass_file()["seen"]["ready"])
-        out = self.gate(self.T + timedelta(minutes=2))  # the next group, not the failed one
+        out = self.gate(retry)  # the next group, not the failed one
         self.assertEqual([(e["did"], e["group"]) for e in out["dispatch"]], [("started", None)])
-        dispatch.end(self.data, self.T + timedelta(minutes=2))
-        out = self.gate(self.T + timedelta(minutes=3))  # a new round, due for the failed group's card
+        dispatch.end(self.data, retry)
+        out = self.gate(retry + timedelta(minutes=1))  # a new round, due for the failed group's card
         self.assertEqual([e["did"] for e in out["dispatch"]], ["ended", "started"])
         self.assertEqual(self.record()["why"], [{"why": "ready", "card": self.shop}])
+
+    def test_a_queued_group_whose_named_cards_went_starts_no_pass(self):
+        """The running round's queue is checked again: the group None's only named card moved to done while the
+        first pass ran, so no pass starts for it and the round is over."""
+        self.gate(self.T)
+        self.assertEqual(self.record()["queue"], [{"group": None, "projects": []}])
+        self.store().update(self.loose, {"lane": "done"}, by="test")
+        dispatch.end(self.data, self.T + timedelta(minutes=1))
+        out = self.gate(self.T + timedelta(minutes=1))
+        self.assertEqual([e["did"] for e in out["dispatch"]], ["ended"])
+        self.assertEqual([e for e in out["errors"] if e.get("dispatch")], [])
+        self.assertEqual(len(self.dispatch_calls()), 1)
+        self.assertFalse((self.data / dispatch.DISPATCH).exists())
+        self.assertIn("no group left in the round holds a card it names; the round is over", self.gate_log())
+
+    def test_a_store_that_does_not_read_keeps_the_running_rounds_queue(self):
+        self.gate(self.T)
+        dispatch.end(self.data, self.T + timedelta(minutes=1))
+        with mock.patch.object(dispatch, "named", side_effect=OSError("lock timeout")):
+            out = self.gate(self.T + timedelta(minutes=1))
+        self.assertEqual([e for e in out["errors"] if e.get("dispatch")], [{"dispatch": True, "error": "lock timeout"}])
+        self.assertEqual([(e["did"], e["group"]) for e in out["dispatch"]], [("ended", str(self.repo)),
+                                                                             ("started", None)])
 
     def test_a_refused_project_next_to_healthy_groups_costs_them_no_pass(self):
         """The refused project's card stays due, but a round serves only the groups its `why` names, and that card

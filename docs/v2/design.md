@@ -398,7 +398,7 @@ roles:
 
 A user template, or one Claude drafts, can combine roles and write briefs. It cannot add tools or permissions: each
 role keeps the tools and permission floor it ships with. Which folder a role runs in comes from the card (its repo
-worktree, or the data folder).
+worktree, or, for a card with no repo, a new empty folder of its own; never the data folder).
 
 ### 6.1 Review angles **[decided]**
 
@@ -1948,8 +1948,15 @@ Calls the author made without asking (check them):
     from the round, and its cards are left unseen (as are the cards of a project `groups` refused), so the next round
     is due for them and tries again (the choice below). After a failure for that group the next group of the round
     is tried in the same run. When `claude --bg` fails (`dispatch.LaunchError`, also a launch that hangs to its
-    120-second timeout) no other group is tried that run, and the rest of the queue waits for the next run. A new
-    round where none starts and none is left in the queue stays due. A new round with no group to serve calls
+    120-second timeout) no other group is tried that run, the error and its gate.log line end with "next try at
+    <stamp>", and the queue-only record (made for a new round too) holds the rest of the queue and `retry_at`, that
+    stamp: now plus LAUNCH_RETRY_MIN (15) minutes. No run starts a pass before it (the choice below); a `retry_at`
+    further away than LAUNCH_RETRY_MIN minutes means the clock went back, and is ignored. A record with `retry_at`
+    is still queue-only: `finish` passes it by, and it is no open pass. A running round's queue is checked again
+    with `dispatch.named` before each start: a group whose named cards went since the round started (moved to
+    `done`, say) is not served, and a queue left with none is removed, so nothing starts; a store that does not read
+    there keeps the queue as it is, with one error. A new round where none starts and none is left in the queue
+    stays due. A new round with no group to serve calls
     `pass_started` (with a refused project's cards left unseen), so the same change does not make a pass due every
     run, and a refused project costs one error line per run and no pass, and stays due until it is fixed.
     Each start is one gate.log line and one gate.json `dispatch` entry `{"did": "started", ...}`.
@@ -2029,8 +2036,11 @@ Calls the author made without asking (check them):
       them and tries again, and no group holds the head of the queue (a group whose launch fails only in its own repo
       would otherwise stop every group and every later round). When the store does not read to find a failed
       group's cards, every card the round's `why` names is left unseen. A `LaunchError` still ends that run's
-      attempts, so a hung `claude --bg` costs at most one 120-second timeout per run; the failed group is dropped
-      too. Reverse: keep the failed group at the head of the queue.
+      attempts; the failed group is dropped too. Reverse: keep the failed group at the head of the queue.
+    - A failed launch backs off: after a `LaunchError` no pass starts for LAUNCH_RETRY_MIN (15) minutes
+      (`retry_at` on the queue-only record), so a `claude --bg` that keeps hanging costs one 120-second timeout per
+      15 minutes, not one per run while `.gate.lock` is held, as the scan waits for its watch's next due time. A
+      group that fails for any other reason does not back off. Reverse: try again on the next run.
     - A round serves only the groups its `why` names: the retry of a failed group (or a refused project) costs no
       pass for the others. Each new round queues only the groups that hold a card named in its `why`; a refused
       project's card is in no group, so the round that retries it starts nothing, writes `seen` with that card left
@@ -2043,7 +2053,10 @@ Calls the author made without asking (check them):
       the data folder would be the session's project root, whose `.claude/`, `.mcp.json` and `CLAUDE.md` a later
       session loads. The pr-review worker runs outside the data folder for the same reason. The pass still finds
       the data folder through `AP2_DATA` and writes its texts to `AP2_RUN_DIR`. `finish` removes the folder with the
-      session, and keeps it with a pass kept for `claude attach`. Reverse: run it in the data folder.
+      session, and keeps it with a pass kept for `claude attach`. The workers it starts stay out of the data folder
+      too: the runbook starts a card with no repo without `--cwd`, so `Workers.start` gives it a new empty folder of
+      its own (prefix `ap2-worker-`, left in the temp folder), and refuses a `--cwd` that is the data folder or inside
+      it. Reverse: run it in the data folder.
     - Answered asks: the runbook acts on each `answered` entry of its group (an ask that closed). `ap2 card show`
       gives the card; the closed ask itself is in the restore point the closing `audit` entry names
       (`<data>/restore/<id>.json`, `card.ask`), since the card's `ask` no longer holds it. Only an ask from
@@ -3036,7 +3049,13 @@ Calls the author made without asking (check them):
     v2's own). A resume is `claude --bg --resume <id> -n ... --permission-mode ... --settings ... <prompt>`.
     The resume id comes from the card or the worker list, so it is checked first: letters, digits and `-`, not
     starting with `-`. Anything else is refused before claude runs, so it can never become a flag. `--cwd` is
-    saved absolute, so a later check run from another folder still finds it.
+    saved absolute, so a later check run from another folder still finds it. A folder that is the data folder or
+    inside it is refused (one `WorkerError` line), whether given, parked or saved: there a relative write passes the
+    Bash guard, and the data folder would be the session's project root. A card with no repo (no project, or a
+    project with no `repo`) started with no folder (none given, parked or saved) runs in a new empty folder
+    (`tempfile.mkdtemp`, prefix `ap2-worker-`), saved as the role's `cwd`, so `--resume` reuses it; these folders
+    are left in the temp folder (nothing removes them). A card with a repo and no folder is still refused ("pass
+    --cwd").
   - `check()` classifies each worker: done (its result file newer than its start), question (`question.json`
     newer than its start), parked, unknown (the listing failed: nothing is done), dead (no session, its process
     gone, or state failed), blocked (status waiting), idle (state blocked or done, or status idle), running. Done:

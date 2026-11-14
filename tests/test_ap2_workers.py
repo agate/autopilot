@@ -1219,6 +1219,44 @@ class LifecycleTest(WorkerCase):
             self.workers().start(cid, "implement", cwd=self.tmp / "nope")
         self.assertEqual(self.bg_calls(), [])
 
+    def test_a_cwd_in_the_data_folder_is_refused(self):
+        """There a relative write passes the Bash guard, and the data folder would be the session's project root."""
+        (self.data / "sub").mkdir()
+        for folder in (self.data, self.data / "sub"):
+            with self.subTest(folder=folder):
+                cid = self.add_card()
+                with self.assertRaisesRegex(WorkerError, "is in the data folder"):
+                    self.workers().start(cid, "implement", cwd=folder)
+        self.assertEqual((self.bg_calls(), self.discovery_calls()), ([], []))
+
+    def test_a_card_with_no_repo_and_no_cwd_runs_in_an_empty_folder_of_its_own(self):
+        scratch = self.tmp / "scratch"
+        scratch.mkdir()
+        patch = mock.patch.object(tempfile, "tempdir", str(scratch))
+        patch.start()
+        self.addCleanup(patch.stop)
+        (self.data / "projects").mkdir()
+        (self.data / "projects" / "notes.yaml").write_text("branch_prefix: me\n")
+        for over in ({}, {"project": "notes"}):  # no project, and a project with no repo
+            with self.subTest(**over):
+                cid = self.add_card(**over)
+                rec = self.workers().start(cid, "implement", prompt="Do the work.")
+                folder = Path(rec["cwd"])
+                self.assertTrue(folder.name.startswith(workers_mod.OWN_DIR), folder)
+                self.assertEqual(folder.parent, scratch)
+                self.assertFalse(folder.is_relative_to(self.data))
+                self.assertEqual(list(folder.iterdir()), [])
+                self.assertEqual(self.bg_calls()[-1]["cwd"], str(folder))
+                self.assertEqual(self.get(cid)["sessions"]["implement"]["cwd"], str(folder))  # `--resume` reuses it
+
+    def test_a_card_with_a_repo_and_no_cwd_is_still_refused(self):
+        (self.data / "projects").mkdir()
+        (self.data / "projects" / "shop.yaml").write_text(f"repo: {self.wt}\n")
+        cid = self.add_card(project="shop")
+        with self.assertRaisesRegex(WorkerError, r"\(none given\) is not a folder; pass --cwd"):
+            self.workers().start(cid, "implement", prompt="Do the work.")
+        self.assertEqual(self.bg_calls(), [])
+
 
 # -- 5. no process waits for a human -------------------------------------------------------------------------------
 
@@ -4766,7 +4804,7 @@ class PrReviewDonePathTest(PrReviewCase):
         self.workers().check()
         self.assertEqual(len(self.review_starts()), 1)
         # A start by hand is the user's new try: it closes that ask, as every start closes the role's own asks.
-        self.workers().start(cid, "pr-review", cwd=transcripts.run_dir(self.data, cid), prompt="Again.")
+        self.workers().start(cid, "pr-review", cwd=self.wt, prompt="Again.")
         self.assertIsNone(self.get(cid).get("ask"))
 
     def test_a_report_with_a_lone_surrogate_key_still_asks_the_user(self):
