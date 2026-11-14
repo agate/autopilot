@@ -16,9 +16,12 @@ Then (phase 2): every worker on record is checked (`Workers.check`, 8.2); the wa
 files (`watch_list`); a due `via: command` watch is read here (`Engine.read`), all of them in READ_BUDGET (120)
 seconds per run (a read's timeout is cut to what is left, less READ_FLOOR (10) seconds kept for each read still to go,
 or an even share when that is more, so one hanging read cannot use the time of the others; a read stopped at that
-cut is read again once each due watch had its first try, with what is left, so one slow read is not cut by its place
-in the order; once it is spent a watch waits for its next due time, so one slow read cannot hold the
-lock, and with it every later run and routine slot, for long; a long read belongs to `ap2 source read`); the due
+cut while it still ran, or after it exited 0, is read again once each due watch had its first try, when what is
+left gives it more time than its first try had, so one slow read is not cut by its place in the order; a watch
+whose first try was cut while it held more than an even share gets `cut_at` in watches.json and is read after the
+others next time, until a first try ends inside its share; once the budget is spent a watch waits for its next due
+time, so one slow read cannot hold the lock, and with it every later run and routine slot, for long; a long read
+belongs to `ap2 source read`); the due
 `mcp`, `connector` and `skill` watches share one scan session (`scan.start`), which a later run takes into cards
 when it ends (`scan.finish`); and
 `<data>/pass.json` records whether a dispatcher pass is due and why (`pass_due`). The gate starts no pass: the pass calls `pass_started` when it starts.
@@ -232,7 +235,8 @@ def _parse_time(text) -> Optional[datetime]:
 
 def due_watches(data: Path, watches, now: datetime):
     """The watches due at `now` (`now - last_check_at >= every`), as `(names, errors)`; records `last_check_at`
-    for each due one in `<data>/watches.json`. Each watch is `{name, every, last_check_at?}`; the time saved in
+    for each due one in `<data>/watches.json` (a saved watch's other keys, such as `cut_at`, are kept). Each watch
+    is `{name, every, last_check_at?}`; the time saved in
     watches.json wins when it is later. A given or saved time later than `now` (past the grace) means the clock went
     back, and it is reported. A saved time ahead makes the watch due now, so its time is written again and it
     recovers on its own (a watch looked at once early is harmless). A given time ahead is left out, so the saved
@@ -267,7 +271,8 @@ def due_watches(data: Path, watches, now: datetime):
         last = max((t for t in (given, saved) if t is not None and t not in ahead), default=None)
         if last is None or saved_ahead or now - last >= every:
             found.append(name)
-            state[name] = {"last_check_at": cards.stamp(now)}
+            kept = state.get(name) if isinstance(state.get(name), dict) else {}
+            state[name] = dict(kept, last_check_at=cards.stamp(now))
     if found:
         write_json(data / WATCHES, state)
     return found, errors
@@ -371,17 +376,41 @@ def _log_read(log, entry: dict) -> None:
         f"unchanged, {entry['dropped']} dropped")
 
 
+def _cut_last_time(entry) -> bool:
+    """True when a watch's saved entry has a `cut_at` that is a UTC stamp; anything else (none, damaged, not text)
+    means it was not cut."""
+    at = entry.get("cut_at") if isinstance(entry, dict) else None
+    if not isinstance(at, str):
+        return False
+    try:
+        cards.parse_stamp(at)
+    except ValueError:
+        return False
+    return True
+
+
 def _read_commands(data: Path, now: datetime, cfg, names: list, reads: list, errors: list, log) -> None:
     """Read each due `via: command` watch (`Engine.read`); a failed read is one error and the next still reads.
     The reads share READ_BUDGET seconds: each read's timeout is cut to what is left, less READ_FLOOR seconds kept for
     each read still to go (or to an even share of what is left, when that is more), so one hanging read cannot use
-    the time of the others. A read stopped at that cut (`engine.ReadCut`) is no error yet: once every due watch had
-    its first try, it is read again with what is left, shared the same way among the reads cut, so no read fails only
-    by its place in the order. Only that second try's failure is its one error (the first try's when nothing is left
-    by then). Once it is spent a watch is not read (one error); its time stays written, so it is read at its next due
-    time."""
+    the time of the others. A read stopped at that cut while it still ran or after it exited 0 (`engine.ReadCut`) is
+    no error yet: once every due watch had its first try, it is read again with what is left, shared the same way
+    among the reads cut, so no read fails only by its place in the order; that is its one error when it fails. A
+    second try that would get no more time than the first try had is not run: the first try's error is the one. A
+    read that fails any other way (exit not 0 by itself too) is its error at once. Once it is spent a watch is not
+    read (one error); its time stays written, so it is read at its next due time.
+
+    The watches cut last time go last (a stable sort, so by name otherwise): a watch whose first try is cut while it
+    held more than an even share (it used time owed to the reads after it), or that was already marked, gets this
+    run's stamp as `cut_at` in watches.json; a first try that ends inside its share (read, or failed by itself)
+    removes it. A cut at no more than an even share marks nothing: that read only lost time to the ones before it.
+    The write is best effort (one error); it changes no other key."""
     if not names:
         return
+    path = data / WATCHES
+    state, _ = _read_watch_state(data)  # as `due_watches` just wrote it; damaged, it was reported there
+    names = sorted(names, key=lambda n: _cut_last_time(state.get(n)))
+    marks = {}  # name -> True (cut: mark it) or False (inside its share: clear it)
     began = monotonic()
     eng = engine.Engine(data, cfg, clock=lambda: now)
 
@@ -390,7 +419,10 @@ def _read_commands(data: Path, now: datetime, cfg, names: list, reads: list, err
         errors.append({"watch": name, "error": why})
         log(f"watch {name}: error: {why}")
 
-    cut = []  # (name, the first try's ReadCut), in order
+    def share(left: float, after: int) -> float:
+        return max(left / (after + 1), left - READ_FLOOR * after)
+
+    cut = []  # (name, the first try's ReadCut, the first try's cap), in order
     for i, name in enumerate(names):
         left = READ_BUDGET - (monotonic() - began)
         if left <= 0:
@@ -399,30 +431,50 @@ def _read_commands(data: Path, now: datetime, cfg, names: list, reads: list, err
             errors.append({"watch": name, "error": why})
             log(f"watch {name}: error: {why}")
             continue
+        after = len(names) - i - 1  # the reads still to go after this one
+        cap = share(left, after)
         try:
-            after = len(names) - i - 1  # the reads still to go after this one
-            result = eng.read(name, max_timeout=max(left / (after + 1), left - READ_FLOOR * after))
+            result = eng.read(name, max_timeout=cap)
         except engine.ReadCut as e:
-            cut.append((name, e))
+            cut.append((name, e, cap))
+            if cap > left / (after + 1) or _cut_last_time(state.get(name)):
+                marks[name] = True
             continue
         except Exception as e:  # noqa: BLE001 - one watch's failure never stops the run; a SourceError is ours
+            marks[name] = False
             failed(name, e)
             continue
+        marks[name] = False
         reads.append(_read_entry(name, "command", result))
         _log_read(log, reads[-1])
-    for i, (name, first) in enumerate(cut):  # the second try, with what is left after every first try
-        left = READ_BUDGET - (monotonic() - began)
-        if left <= 0:
+    for i, (name, first, first_cap) in enumerate(cut):  # the second try, with what is left after every first try
+        cap = share(READ_BUDGET - (monotonic() - began), len(cut) - i - 1)
+        if cap <= first_cap:  # no more time than the first try had: running it again could only be cut again
             failed(name, first)
             continue
         try:
-            after = len(cut) - i - 1
-            result = eng.read(name, max_timeout=max(left / (after + 1), left - READ_FLOOR * after))
+            result = eng.read(name, max_timeout=cap)
         except Exception as e:  # noqa: BLE001 - as above; a second cut is its error too
             failed(name, e)
             continue
         reads.append(_read_entry(name, "command", result))
         _log_read(log, reads[-1])
+    changed = False
+    for name, mark in marks.items():
+        entry = state.get(name)  # a dict for each due watch, unless watches.json could not be read (then none)
+        if isinstance(entry, dict) and mark:
+            entry["cut_at"] = cards.stamp(now)
+            changed = True
+        elif isinstance(entry, dict) and "cut_at" in entry:
+            del entry["cut_at"]
+            changed = True
+    if changed:
+        try:
+            write_json(path, state)
+        except OSError as e:
+            why = f"{path}: cannot save which command reads were cut: {e}"
+            errors.append({"watches": str(path), "error": why})
+            log(f"watches: error: {why}")
 
 
 def _start_scan(data: Path, now: datetime, cfg, store: Store, claude, transcripts_dir, names: list, errors: list,

@@ -253,6 +253,28 @@ class CommandReadTest(EngineCase):
                 self.engine().read("nap", dry_run=True, max_timeout=cap)
             self.assertNotIsInstance(caught.exception, engine.ReadCut)
 
+    def test_a_command_that_exits_not_0_with_its_output_held_open_is_not_a_read_cut(self):
+        script = self.tmp / "fails.py"
+        script.write_text("import subprocess, sys; subprocess.Popen(['sleep', '30']); sys.exit(1)\n")
+        self.user_source("fails", f"""\
+            source: fails
+            brings: messages
+            read: {{ via: command, run: '{sys.executable} {script}', timeout: 60 }}
+            fill: paths
+            form: {{ id: .id, at: .at, text: .text }}
+            link: none
+            sort: {{ all: alert }}
+            """)
+        with self.assertRaisesRegex(SourceError, r"^fails: read.run exited with 1, but something it started still "
+                                                 r"held its output open after 0.5 seconds \(its read.timeout of 60 "
+                                                 r"was cut") as caught:
+            self.engine().read("fails", dry_run=True, max_timeout=0.5)
+        self.assertNotIsInstance(caught.exception, engine.ReadCut)
+
+    def test_a_cut_under_a_twentieth_of_a_second_is_never_named_0_seconds(self):
+        self.assertEqual([engine._seconds(t) for t in (60, 37.5, 0.5, 0.04, 0.001)],
+                         ["60", "37.5", "0.5", "0.04", "0.001"])
+
     @staticmethod
     def full(fd):
         raise OSError(errno.ENOSPC, "No space left on device")

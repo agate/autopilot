@@ -1625,11 +1625,133 @@ class CommandWatchTest(LoopCase):
         with mock.patch.object(gate, "READ_BUDGET", 3):
             out = self.gate(self.T)
         self.assertEqual(out["watches_due"], ["a1", "b2"])
-        self.assertEqual([e["watch"] for e in out["errors"]], ["a1"])  # its second try, with what b2 left, is cut too
+        self.assertEqual([e["watch"] for e in out["errors"]], ["a1"])  # what b2 left is less than its first try had
         self.assertRegex(out["errors"][0]["error"], r"took longer than [0-9.]+ seconds \(its read.timeout of 60 was")
         self.assertEqual([(r["watch"], r["made"]) for r in out["reads"]], [("b2", 1)])
         self.assertTrue(marker.exists())
         self.assertEqual([c["key"] for c in self.store().list()], ["b2:i2"])
+
+
+    def reads_given(self):
+        """Patch Engine.read to note each read's name; returns the list it fills."""
+        given = []
+        real = engine.Engine.read
+
+        def read(eng, name, dry_run=False, max_timeout=None):
+            given.append(name)
+            return real(eng, name, dry_run=dry_run, max_timeout=max_timeout)
+
+        patch = mock.patch.object(engine.Engine, "read", read)
+        patch.start()
+        self.addCleanup(patch.stop)
+        return given
+
+    def saved_watches(self) -> dict:
+        return json.loads((self.data / "watches.json").read_text())
+
+    def test_a_cut_read_whose_second_try_would_get_less_time_is_not_run_again(self):
+        marker = self.tmp / "a1-runs"
+        self.command_source("a1")
+        (self.tmp / "a1.py").write_text(f"import time; open({str(marker)!r}, 'a').write('ran\\n'); time.sleep(30)\n")
+        self.command_source("b2", items=[item(2)])
+        with mock.patch.object(gate, "READ_BUDGET", 2), mock.patch.object(gate, "READ_FLOOR", 0.5):
+            out = self.gate(self.T)  # a1's first cap is 1.5 seconds; b2 leaves less than that
+        self.assertEqual([e["watch"] for e in out["errors"]], ["a1"])
+        self.assertRegex(out["errors"][0]["error"], r"^a1: read.run took longer than 1.5 seconds \(its read.timeout "
+                                                    r"of 60 was cut")
+        self.assertEqual(marker.read_text(), "ran\n")
+        self.assertEqual(len(list((self.data / "sources" / ".raw" / "a1").glob("*.json"))), 1)
+        self.assertEqual([r["watch"] for r in out["reads"]], ["b2"])
+
+    def test_a_command_that_exits_not_0_with_its_output_held_open_is_not_read_again(self):
+        marker = self.tmp / "a1-runs"
+        self.command_source("a1")
+        (self.tmp / "a1.py").write_text(f"import subprocess, sys; open({str(marker)!r}, 'a').write('ran\\n'); "
+                                        f"subprocess.Popen(['sleep', '30']); sys.exit(1)\n")
+        for n, name in enumerate(("b2", "c3", "d4", "e5"), start=2):
+            self.command_source(name, items=[item(n)])
+        with mock.patch.object(gate, "READ_BUDGET", 4), mock.patch.object(gate, "READ_FLOOR", 1):
+            out = self.gate(self.T)  # a1's first cap is 0.8 seconds; the others leave far more
+        self.assertEqual([e["watch"] for e in out["errors"]], ["a1"])
+        self.assertIn("exited with 1, but something it started still held its output open", out["errors"][0]["error"])
+        self.assertEqual(marker.read_text(), "ran\n")
+        self.assertEqual(sorted(r["watch"] for r in out["reads"]), ["b2", "c3", "d4", "e5"])
+
+    def test_a_hanging_read_cut_while_it_held_more_than_its_share_is_read_last_next_time(self):
+        self.command_source("a1")
+        (self.tmp / "a1.py").write_text("import time; time.sleep(30)\n")
+        self.command_source("b2")  # needs 1 second: more than its floor, far less than its own timeout of 60
+        (self.tmp / "b2.py").write_text(f"import json, time; time.sleep(1); "
+                                        f"print(json.dumps({json.dumps([item(2)])}))\n")
+        given = self.reads_given()
+        with mock.patch.object(gate, "READ_BUDGET", 3), mock.patch.object(gate, "READ_FLOOR", 0.5):
+            first = self.gate(self.T)  # a1 gets 2.5 seconds, b2 the 0.5 left; neither has more for a second try
+            self.assertEqual(given, ["a1", "b2"])
+            self.assertEqual([e["watch"] for e in first["errors"]], ["a1", "b2"])
+            self.assertEqual(self.saved_watches(), {"a1": {"last_check_at": "2026-11-10T14:00:00Z",
+                                                           "cut_at": "2026-11-10T14:00:00Z"},
+                                                    "b2": {"last_check_at": "2026-11-10T14:00:00Z"}})
+            second = self.gate(self.T + timedelta(minutes=5))
+        self.assertEqual(given[2:], ["b2", "a1"])
+        self.assertEqual([(r["watch"], r["made"]) for r in second["reads"]], [("b2", 1)])
+        self.assertEqual([e["watch"] for e in second["errors"]], ["a1"])
+        self.assertEqual(self.saved_watches(), {"a1": {"last_check_at": "2026-11-10T14:05:00Z",
+                                                       "cut_at": "2026-11-10T14:05:00Z"},
+                                                "b2": {"last_check_at": "2026-11-10T14:05:00Z"}})
+
+    def test_a_first_try_that_ends_inside_its_share_clears_cut_at_and_keeps_the_other_keys(self):
+        self.command_source("a1", items=[item(1)])
+        self.command_source("b2", fail=True)  # failed by itself, inside its share
+        write_json(self.data / "watches.json", {
+            "a1": {"last_check_at": "2026-11-10T13:00:00Z", "cut_at": "2026-11-10T13:00:00Z", "note": 1},
+            "b2": {"last_check_at": "2026-11-10T13:00:00Z", "cut_at": "2026-11-10T13:00:00Z"},
+            "z9": {"last_check_at": "2026-11-10T13:00:00Z", "cut_at": "2026-11-10T13:00:00Z"}})  # not a watch now
+        given = self.reads_given()
+        out = self.gate(self.T)
+        self.assertEqual(given, ["a1", "b2"])  # both were cut last time: by name
+        self.assertEqual([e["watch"] for e in out["errors"]], ["b2"])
+        self.assertEqual(self.saved_watches(), {
+            "a1": {"last_check_at": "2026-11-10T14:00:00Z", "note": 1},
+            "b2": {"last_check_at": "2026-11-10T14:00:00Z"},
+            "z9": {"last_check_at": "2026-11-10T13:00:00Z", "cut_at": "2026-11-10T13:00:00Z"}})
+
+    def test_a_damaged_cut_at_means_not_cut_and_the_run_goes_on(self):
+        for n, name in enumerate(("a0", "b1", "c2", "d3")):
+            self.command_source(name, items=[item(n)])
+        write_json(self.data / "watches.json", {
+            "a0": {"last_check_at": "2026-11-10T13:00:00Z", "cut_at": "2026-11-10T13:00:00Z"},
+            "b1": {"last_check_at": "2026-11-10T13:00:00Z", "cut_at": 5},
+            "c2": {"last_check_at": "2026-11-10T13:00:00Z", "cut_at": "x"},
+            "d3": {"last_check_at": "2026-11-10T13:00:00Z", "cut_at": [1]}})
+        given = self.reads_given()
+        out = self.gate(self.T)
+        self.assertEqual(given, ["b1", "c2", "d3", "a0"])  # only a0's cut_at is a stamp
+        self.assertEqual(out["errors"], [])
+        self.assertEqual(sorted(r["watch"] for r in out["reads"]), ["a0", "b1", "c2", "d3"])
+        self.assertEqual(self.saved_watches(), {n: {"last_check_at": "2026-11-10T14:00:00Z"}
+                                                for n in ("a0", "b1", "c2", "d3")})
+
+    def test_a_failed_write_of_cut_at_is_one_error_and_the_run_goes_on(self):
+        self.command_source("a1", items=[item(1)])
+        write_json(self.data / "watches.json",
+                   {"a1": {"last_check_at": "2026-11-10T13:00:00Z", "cut_at": "2026-11-10T13:00:00Z"}})
+        real = gate.write_json
+        calls = []
+
+        def write(path, obj):
+            calls.append(Path(path).name)
+            if Path(path).name == "watches.json" and calls.count("watches.json") == 2:
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real(path, obj)
+
+        with mock.patch.object(gate, "write_json", write):
+            out = self.gate(self.T)
+        self.assertEqual([(r["watch"], r["made"]) for r in out["reads"]], [("a1", 1)])
+        self.assertEqual(len(out["errors"]), 1)
+        self.assertIn("cannot save which command reads were cut", out["errors"][0]["error"])
+        self.assertIn("watches: error:", self.gate_log())
+        self.assertEqual(self.saved_watches(), {"a1": {"last_check_at": "2026-11-10T14:00:00Z",
+                                                       "cut_at": "2026-11-10T13:00:00Z"}})
 
 
 class ScanWatchTest(LoopCase):

@@ -2,7 +2,8 @@
 
 - `read(name)` runs a `via: command` source's `read.run` itself (argv split with `shlex`, no shell, a timeout
   that `max_timeout` may cut shorter, the data folder as the working folder) and saves its raw stdout first, under
-  `<data>/sources/.raw/<source>/<UTC stamp>-<6 hex>.json`. A read stopped at that shorter cap raises `ReadCut`.
+  `<data>/sources/.raw/<source>/<UTC stamp>-<6 hex>.json`. A read stopped at that shorter cap, while it was still
+  running or after it exited 0, raises `ReadCut`.
 - `read_saved(name, raw_path, records=None)` takes output saved by someone else (a scan session for `mcp`,
   `connector` and `skill`, slice 4). For `fill: ai` the scan session's records come in `records`.
 - A record missing a required field (`status` too for `brings: work`), or a field a link or key pattern names, is
@@ -58,8 +59,11 @@ STOP_TRIES = 100
 
 
 class ReadCut(SourceError):
-    """A read stopped at the `max_timeout` it was given, which was shorter than its own `read.timeout`: with more
-    time it might have ended. The gate gives such a read a second try with what is left of its time."""
+    """A read stopped at the `max_timeout` it was given, which was shorter than its own `read.timeout`, while the
+    command was still running or after it exited 0 with something it started still holding its output open: with
+    more time it might have ended. A command that exited with another code failed by itself, which is a plain
+    SourceError. The gate gives a ReadCut read a second try only when it has more time for it than the first try
+    had."""
 
 
 # The catchable signals whose default action ends the process and that a terminal, shell, supervisor or user may
@@ -174,7 +178,8 @@ class Engine:
         would become. `max_timeout` (seconds) caps the source's `read.timeout`: the gate passes what is left of its
         time for command reads, less the time it keeps for the reads still to go; None keeps the source's own
         timeout. A read stopped at that cap (when it was shorter than the source's own timeout) raises `ReadCut`,
-        a SourceError with the same message."""
+        a SourceError with the same message, unless the command had already exited with a code other than 0: that
+        is its own failure, a plain SourceError."""
         src = self.source(name)
         if src.via != "command":
             raise SourceError(f"{src.file}: read.via is {src.via}; only a scan session can make that read. Give "
@@ -282,7 +287,8 @@ class Engine:
                 if ended == "full":
                     raise SourceError(f"{src.name}: read.run printed more than {MAX_OUTPUT} bytes; "
                                       f"stopped{saved}") from failed
-                timed_out = ReadCut if cut else SourceError  # stopped at the gate's cap, not at its own timeout
+                # Stopped at the gate's cap, not at its own timeout, and not after it failed by itself (exit not 0).
+                timed_out = ReadCut if cut and code in (None, 0) else SourceError
                 if code is not None:
                     raise timed_out(f"{src.name}: read.run exited with {code}, but something it started still "
                                     f"held its output open after {waited} seconds{cut}; stopped{saved}") \
@@ -658,8 +664,11 @@ def _hold_signals() -> dict:
 
 
 def _seconds(t) -> str:
-    """A timeout as the errors name it: `60`, or `37.5` for a cut one."""
-    return str(t) if isinstance(t, int) else f"{t:.1f}".rstrip("0").rstrip(".")
+    """A timeout as the errors name it: `60`, or `37.5` for a cut one (`0.04` for one under 0.05, never `0`)."""
+    if isinstance(t, int):
+        return str(t)
+    text = f"{t:.1f}".rstrip("0").rstrip(".")
+    return f"{t:.2g}" if text == "0" and t > 0 else text
 
 
 def _pump(proc: subprocess.Popen, out: bytearray, err: bytearray, seconds: float) -> str:

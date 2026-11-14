@@ -1566,7 +1566,10 @@ Calls the author made without asking (check them):
     pass reads those); a missing `every` is left out too; any other `every` is one error `{"watch", "error"}`, and a
     file that does not load one error `{"source", "error"}`; the others still run. A watch is due when `now -
     last_check_at >= every` (or it was never checked); the gate lists it in `watches_due` and saves `last_check_at`
-    in `<data>/watches.json`, whose time wins when it is later than the one given. **[decided by the builder]**
+    in `<data>/watches.json`, whose time wins when it is later than the one given. watches.json is one object keyed
+    by watch name, each `{last_check_at, cut_at?}`: `cut_at` (a UTC stamp) marks a command watch whose read was cut
+    by the budget (below); writing `last_check_at` keeps it, and writing it keeps every other key. **[decided by the
+    builder]**
     `gate.run(data, now, watches=None)` (what `ap2 gate` passes) means "from the user's source files, and read
     them"; a list a caller passes (`[{name, every, last_check_at?}]`) is only timed, never read, which keeps the
     timing tests as they are. A due `via: command` watch is read by the gate itself (`Engine.read`); `reads` gets
@@ -1575,20 +1578,49 @@ Calls the author made without asking (check them):
     command reads of one run share one time budget, `READ_BUDGET` (120 seconds), counted from when the reads begin. Each
     read may use what is left of it, less `READ_FLOOR` (10) seconds kept for each read still to go (or an even share
     of what is left, when that is more). So one hanging read cannot take the others' time. A source's
-    `read.timeout` (up to 600) that is longer is cut under the gate. A read stopped at that cut is no error yet. Once
-    every due watch had its first try, each read cut this way runs again, in order, with what is left, shared the
-    same way among them (one cut read gets all of it). So one slow read is not cut by its place in the order, and a
-    hanging read only gets the time the others left. Only the second try's failure is an error, the usual timeout
-    one that names the seconds it waited; when nothing is left for a second try, the first try's error is the one.
-    A watch gets one error at most. A read that fails any other way (its own timeout, exit not 0, an unset setting)
-    is its error at once and is not tried again. Once
-    the budget is spent, a due watch is not started: one error `{"watch", "error": "not read: this run's 120
+    `read.timeout` (up to 600) that is longer is cut under the gate. **[decided by the dispatcher]** Four rules.
+    (1) Two passes: a read stopped at that cut is no error yet; once every due watch had its first try, each read
+    cut this way runs again, in order, with what is left, shared the same way among them (one cut read gets all of
+    it). So one slow read is not cut by its place in the order, and a hanging read only gets the time the others
+    left. (2) A second try runs only when the time it would get is more than its first try had; otherwise the first
+    try's error stands, naming the seconds that first try waited, and the command is not run again (no extra raw
+    copy). Only the second try's failure is an error, the usual timeout one that names the seconds it waited. A
+    watch gets one error at most. (3) A read counts as cut (`engine.ReadCut`) only when the gate's cut stopped it
+    while it still ran, or after it exited 0 while something it started still held its output open. A read that
+    fails any other way (its own timeout, exit not 0 by itself even with its output still held open, an unset
+    setting) is its error at once and is not tried again. (4) A watch whose first try was cut while it held more
+    than an even share of what was left (so it used time owed to the reads after it), or that already had a
+    `cut_at`, gets this run's stamp as `cut_at` in watches.json; a first try that ends inside its share (read, or
+    failed by itself) removes it; a second try that then works keeps it. A cut at no more than an even share marks
+    nothing: that read only lost time to the ones before it, and marking it too would put it back behind the
+    hanging one. The next run reads the due command watches with a `cut_at` last, otherwise by name (a stable
+    sort); a `cut_at` that is missing, not text or not a UTC stamp means not cut. The write of `cut_at` uses the
+    same atomic write and is best effort: a failure is one error `{"watches", "error"}` and the run goes on (the
+    reads already made their cards and the watch times are written; only the order of the next run is lost).
+    Why: fixing only the second try and the exit code (option A) left a healthy read that needs 30 seconds failing
+    every run behind a hanging one sorted first (the hanging one takes 110 seconds, the healthy one gets its 10);
+    with `cut_at` the hanging one goes last and the healthy one gets the large share. A fixed 30-second cap per read
+    with no shared budget (option C) lets 6 reads hold the gate lock 3 minutes and pushes every read over 30
+    seconds to `ap2 source read`.
+    Once the budget is spent, a due watch is not started: one error `{"watch", "error": "not read: this run's 120
     seconds for command reads were spent; it is read at its next due time"}`. Its time was already written, so it
     is not rewound; it waits for its next due time. Why: a read runs inside the gate lock, so while it hangs every
     later run finds the lock held and does nothing, and a routine slot that came due meanwhile is found more than
     `routines.GRACE` (5 minutes) late and, with `missed_run: skip`, skipped. A read that needs longer belongs to
-    `ap2 source read <name>`, which has no budget. The due `mcp`, `connector` and
-    `skill` watches of one run go into one scan plan (`scan.plan`) and, when it has calls, one scan session
+    `ap2 source read <name>`, which has no budget. Known limit **[decided by the dispatcher]**: the budget bounds
+    only the command reads. The gate's `claude` CLI calls have their own timeouts in v1 (`lib/autopilot`: `claude
+    agents` 60 seconds, `claude stop` 60, the `--bg` launch 120) and the run has no overall deadline.
+    `Workers.check` makes one listing, a stop per worker it stops, and per planned resume a tool listing (up to
+    `DISCOVER_TIMEOUT`, 180 seconds) and a launch, so its worst case grows with the number of workers on record;
+    `scan.finish` (listing, stop, settle's listing: up to 180 seconds) and `scan.start` (a gateway profile's key
+    check, the cap's listing, the launch, the listing after it: 240 seconds and the key check) add theirs. When the
+    CLI hangs on every call, a run with a scan to finish and one to start takes about 540 seconds even with no
+    worker (180 + 120 for the reads + 240), past `routines.GRACE` (5 minutes), and a routine slot that came due
+    meanwhile can be found late and, with `missed_run: skip`, skipped. Not bounded here: a deadline in the gate can
+    only skip whole steps; it cannot stop `Workers.check` partway (its calls are unbounded in count and their
+    timeouts live in v1), so a real bound needs a deadline inside `Workers.check` and the scan calls. The due
+    `mcp`, `connector` and `skill` watches of one run go into one scan plan (`scan.plan`) and, when it has calls,
+    one scan session
     (`scan.start`); a later run takes it into cards when it ends (`scan.finish`, its reads and errors in `reads` and
     `errors`). While `<data>/scan-session.json` exists no second scan starts and the scan watches are not timed, so
     their `last_check_at` is not written. A paused cap, an allowance of 0 or an active profile that does not load
