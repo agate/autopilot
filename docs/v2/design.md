@@ -1588,20 +1588,22 @@ Calls the author made without asking (check them):
     watch gets one error at most. (3) A read counts as cut (`engine.ReadCut`) only when the gate's cut stopped it
     while it still ran, or after it exited 0 while something it started still held its output open. A read that
     fails any other way (its own timeout, exit not 0 by itself even with its output still held open, an unset
-    setting) is its error at once and is not tried again. (4) A watch whose first try was stopped at the gate's
-    cap while it held more than an even share of what was left (so it used time owed to the reads after it) gets
-    this run's stamp as `cut_at` in watches.json, whether it was cut or failed at the cap after it exited not 0
-    with its output held open (that failure is still its error at once, by (3); the engine sets `at_cap` on the
-    error of every read stopped at the cap, so the gate does not guess from the time it took). A first try stopped
-    at the cap while it held no more than an even share keeps what it had: an old `cut_at` stays as it was, not
-    refreshed, and none is added (that read only lost time to the ones before it, and marking it would put it back
-    behind the hanging one). A first try that ends before its cap (read, or failed by itself) removes it; a second
-    try that then works keeps it. The next run reads the due command watches with no `cut_at` first, then those
-    with one, the oldest stamp first (the one cut over its share most recently goes last), by name otherwise; a
-    `cut_at` that is missing, not text or not a UTC stamp means not cut. Why the old stamp is kept: a healthy watch
-    that stalled once behind a hanging one would otherwise be marked as the hanging one is, be read last by name
-    every run and fail every run; with its older stamp it goes first the next time the hanging one took the large
-    share, reads, and loses its mark. The write of `cut_at` uses the same atomic write and is best effort: a
+    setting) is its error at once and is not tried again. (4) A first try stopped by a timeout, its own or the
+    gate's, while it held more than an even share of what was left (so it used time owed to the reads after it) is
+    marked: the watch gets this run's stamp as `cut_at` in watches.json, whether it was cut, failed at the cap
+    after it exited not 0 with its output held open, or was stopped by its own `read.timeout` above that share
+    (those failures are still its error at once, by (3); the engine sets `waited`, the seconds it was given, on
+    the error of every read a timeout stopped, so the gate does not guess from the time it took). A first try
+    stopped by a timeout while it held no more than an even share keeps what it had: an old `cut_at` stays as it
+    was, not refreshed, and none is added (that read only lost time to the ones before it, and marking it would
+    put it back behind the hanging one). A first try that ends by itself (read, or failed another way) clears it;
+    a second try that then works keeps it. The next run reads the due command watches with no `cut_at` first, then
+    those with one, the oldest stamp first (the one cut over its share most recently goes last), by name otherwise;
+    a `cut_at` that is missing, not text or not a UTC stamp means not cut, and so does one more than
+    `routines.GRACE` later than now (a clock that was ahead would otherwise pin the watch at the back until real
+    time passed it). Why the old stamp is kept: a healthy watch that stalled once behind a hanging one would
+    otherwise be marked as the hanging one is, be read last by name every run and fail every run; with its older
+    stamp it goes first the next time the hanging one took the large share, reads, and loses its mark. The write of `cut_at` uses the same atomic write and is best effort: a
     failure is one error `{"watches", "error"}` and the run goes on (the reads already made their cards and the
     watch times are written; only the order of the next run is lost).
     Why: fixing only the second try and the exit code (option A) left a healthy read that needs 30 seconds failing

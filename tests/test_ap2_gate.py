@@ -1582,7 +1582,7 @@ class CommandWatchTest(LoopCase):
     def test_a_read_cut_by_its_place_in_the_order_is_read_again_with_what_is_left(self):
         names = ("a1", "b2", "c3", "d4", "e5", "f6", "g7", "h8", "i9")
         self.command_source("a1")
-        (self.tmp / "a1.py").write_text(f"import json, time; time.sleep(1); "
+        (self.tmp / "a1.py").write_text(f"import json, time; time.sleep(3); "
                                         f"print(json.dumps({json.dumps([item(1)])}))\n")
         for n, name in enumerate(names[1:], start=2):
             self.command_source(name, items=[item(n)])
@@ -1593,14 +1593,14 @@ class CommandWatchTest(LoopCase):
             given.append((name, max_timeout))
             return real(eng, name, dry_run=dry_run, max_timeout=max_timeout)
 
-        with mock.patch.object(gate, "READ_BUDGET", 4), mock.patch.object(gate, "READ_FLOOR", 0.5), \
+        with mock.patch.object(gate, "READ_BUDGET", 20), mock.patch.object(gate, "READ_FLOOR", 2.5), \
                 mock.patch.object(engine.Engine, "read", read):
-            out = self.gate(self.T)  # a1's first cap is 4 / 9 seconds
+            out = self.gate(self.T)  # a1's first cap is max(20 / 9, 20 - 2.5 * 8) seconds: less than its 3
         self.assertEqual(out["errors"], [])
         self.assertEqual(sorted(r["watch"] for r in out["reads"]), list(names))
         self.assertEqual([n for n, _ in given], list(names) + ["a1"])
-        self.assertAlmostEqual(given[0][1], 4 / 9, places=2)
-        self.assertGreater(given[-1][1], 2)  # all that the eight others left
+        self.assertAlmostEqual(given[0][1], 20 / 9, places=2)
+        self.assertGreater(given[-1][1], 3)  # all that the eight others left: enough for its 3 seconds
         self.assertIn("a1:i1", [c["key"] for c in self.store().list()])
 
     def test_a_read_that_fails_for_its_own_reason_is_not_read_again(self):
@@ -1750,6 +1750,60 @@ class CommandWatchTest(LoopCase):
             (["b2", "a1"], ["b2"], {"a1": "2026-11-10T14:10:00Z", "b2": None}),  # b2's is older: it goes first
             (["b2", "a1"], ["b2"], {"a1": "2026-11-10T14:10:00Z", "b2": None}),
         ])
+
+    def test_a_hanging_read_stopped_by_its_own_timeout_over_its_share_is_read_last_next_time(self):
+        marker = self.tmp / "a1-runs"
+        script = self.tmp / "a1.py"
+        script.write_text(f"import time; open({str(marker)!r}, 'a').write('ran\\n'); time.sleep(30)\n")
+        self.source("a1", f"""\
+            source: a1
+            brings: messages
+            read:
+              via: command
+              run: '{sys.executable} {script}'
+              timeout: 2
+              every: 5m
+            fill: paths
+            form: {{ id: .id, at: .at, text: .text }}
+            link: none
+            sort: {{ all: alert }}
+            """)
+        self.command_source("b2")  # needs 1.5 seconds: more than an even share of 3, far less than its own 60
+        (self.tmp / "b2.py").write_text(f"import json, time; time.sleep(1.5); "
+                                        f"print(json.dumps({json.dumps([item(2)])}))\n")
+        given = self.reads_given()
+        with mock.patch.object(gate, "READ_BUDGET", 3), mock.patch.object(gate, "READ_FLOOR", 0.5):
+            first = self.gate(self.T)  # a1's cap is 2.5, its own timeout of 2 stops it: more than the even 1.5
+            self.assertEqual(given, ["a1", "b2"])
+            self.assertEqual([e["watch"] for e in first["errors"]], ["a1", "b2"])
+            self.assertRegex(first["errors"][0]["error"], r"^a1: read.run took longer than 2 seconds; stopped")
+            self.assertEqual(marker.read_text(), "ran\n")  # its own timeout: not read again
+            self.assertEqual(self.saved_watches(), {"a1": {"last_check_at": "2026-11-10T14:00:00Z",
+                                                           "cut_at": "2026-11-10T14:00:00Z"},
+                                                    "b2": {"last_check_at": "2026-11-10T14:00:00Z"}})
+            second = self.gate(self.T + timedelta(minutes=5))
+        self.assertEqual(given[2:], ["b2", "a1"])
+        self.assertEqual([(r["watch"], r["made"]) for r in second["reads"]], [("b2", 1)])
+        self.assertEqual([e["watch"] for e in second["errors"]], ["a1"])
+
+    def test_a_cut_at_from_a_clock_that_was_ahead_means_not_cut(self):
+        self.command_source("a1")
+        (self.tmp / "a1.py").write_text("import time; time.sleep(30)\n")
+        self.command_source("b2")  # needs 1 second
+        (self.tmp / "b2.py").write_text(f"import json, time; time.sleep(1); "
+                                        f"print(json.dumps({json.dumps([item(2)])}))\n")
+        write_json(self.data / "watches.json", {
+            "a1": {"last_check_at": "2026-11-10T13:00:00Z", "cut_at": "2026-11-10T13:55:00Z"},
+            "b2": {"last_check_at": "2026-11-10T13:00:00Z", "cut_at": "2027-11-10T14:00:00Z"}})  # a year ahead
+        given = self.reads_given()
+        with mock.patch.object(gate, "READ_BUDGET", 3), mock.patch.object(gate, "READ_FLOOR", 0.5):
+            out = self.gate(self.T)
+        self.assertEqual(given, ["b2", "a1"])
+        self.assertEqual([(r["watch"], r["made"]) for r in out["reads"]], [("b2", 1)])
+        self.assertEqual([e["watch"] for e in out["errors"]], ["a1"])
+        self.assertEqual(self.saved_watches(), {"a1": {"last_check_at": "2026-11-10T14:00:00Z",
+                                                       "cut_at": "2026-11-10T13:55:00Z"},
+                                                "b2": {"last_check_at": "2026-11-10T14:00:00Z"}})
 
     def test_a_first_try_that_ends_inside_its_share_clears_cut_at_and_keeps_the_other_keys(self):
         self.command_source("a1", items=[item(1)])

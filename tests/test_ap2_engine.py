@@ -296,6 +296,33 @@ class CommandReadTest(EngineCase):
                 self.assertIs(getattr(caught.exception, "at_cap", False), at_cap)
                 self.assertEqual(isinstance(caught.exception, engine.ReadCut), name == "nap" and at_cap)
 
+    def test_every_timeout_stop_says_how_long_it_waited_and_no_other_error_does(self):
+        scripts = {"nap": "import time; time.sleep(5)\n",
+                   "held": "import subprocess, sys; subprocess.Popen(['sleep', '30']); sys.exit(1)\n",
+                   "fails": "import sys; sys.exit(1)\n",
+                   "ok": "print('[]')\n"}
+        for name, body in scripts.items():
+            script = self.tmp / f"{name}.py"
+            script.write_text(body)
+            own = 1 if name in ("nap", "held") else 60
+            self.user_source(name, f"""\
+                source: {name}
+                brings: messages
+                read: {{ via: command, run: '{sys.executable} {script}', timeout: {own} }}
+                fill: paths
+                form: {{ id: .id, at: .at, text: .text }}
+                link: none
+                sort: {{ all: alert }}
+                """)
+        for name, cap, waited in (("nap", 0.5, 0.5), ("held", 0.5, 0.5),  # stopped at the cap
+                                  ("nap", None, 1), ("nap", 2, 1), ("held", 2, 1),  # stopped by its own timeout
+                                  ("fails", 0.5, None)):  # exit 1 by itself
+            with self.subTest(name=name, cap=cap):
+                with self.assertRaises(SourceError) as caught:
+                    self.engine().read(name, dry_run=True, max_timeout=cap)
+                self.assertEqual(getattr(caught.exception, "waited", None), waited)
+        self.engine().read("ok", dry_run=True, max_timeout=0.5)  # a read that works raises nothing to carry it
+
     def test_a_cut_under_a_twentieth_of_a_second_is_never_named_0_seconds(self):
         self.assertEqual([engine._seconds(t) for t in (60, 37.5, 0.5, 0.04, 0.001)],
                          ["60", "37.5", "0.5", "0.04", "0.001"])

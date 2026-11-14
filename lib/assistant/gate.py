@@ -18,10 +18,10 @@ seconds per run (a read's timeout is cut to what is left, less READ_FLOOR (10) s
 or an even share when that is more, so one hanging read cannot use the time of the others; a read stopped at that
 cut while it still ran, or after it exited 0, is read again once each due watch had its first try, when what is
 left gives it more time than its first try had, so one slow read is not cut by its place in the order; a watch
-whose first try was stopped at its cap while it held more than an even share gets `cut_at` in watches.json and is
-read after the others next time (the oldest stamp first among them), until a first try ends before its cap; once
-the budget is spent a watch waits for its next due time, so one slow read cannot hold the lock, and with it every
-later run and routine slot, for long; a long read belongs to `ap2 source read`); the due
+whose first try was stopped by a timeout, its own or the cap, while it held more than an even share gets `cut_at`
+in watches.json and is read after the others next time (the oldest stamp first among them), until a first try ends
+by itself; once the budget is spent a watch waits for its next due time, so one slow read cannot hold the lock,
+and with it every later run and routine slot, for long; a long read belongs to `ap2 source read`); the due
 `mcp`, `connector` and `skill` watches share one scan session (`scan.start`), which a later run takes into cards
 when it ends (`scan.finish`); and
 `<data>/pass.json` records whether a dispatcher pass is due and why (`pass_due`). The gate starts no pass: the pass calls `pass_started` when it starts.
@@ -376,16 +376,18 @@ def _log_read(log, entry: dict) -> None:
         f"unchanged, {entry['dropped']} dropped")
 
 
-def _cut_last_time(entry) -> Optional[datetime]:
-    """The `cut_at` of a watch's saved entry when it is a UTC stamp; anything else (none, damaged, not text) means
-    it was not cut (None)."""
+def _cut_last_time(entry, now: datetime) -> Optional[datetime]:
+    """The `cut_at` of a watch's saved entry when it is a UTC stamp no more than routines.GRACE later than `now`;
+    anything else (none, damaged, not text, ahead of the clock) means it was not cut (None)."""
     at = entry.get("cut_at") if isinstance(entry, dict) else None
     if not isinstance(at, str):
         return None
     try:
-        return cards.parse_stamp(at)
+        at = cards.parse_stamp(at)
     except ValueError:
         return None
+    # Gaps, not `now + GRACE`, so a `now` at the end of the calendar cannot overflow.
+    return None if at - now > routines.GRACE else at
 
 
 def _read_commands(data: Path, now: datetime, cfg, names: list, reads: list, errors: list, log) -> None:
@@ -400,23 +402,24 @@ def _read_commands(data: Path, now: datetime, cfg, names: list, reads: list, err
     read (one error); its time stays written, so it is read at its next due time.
 
     The watches cut last time go last, the oldest `cut_at` first among them (the one cut over its share most
-    recently goes last), by name otherwise: a watch whose first try is stopped at its cap while it held more than an
-    even share (it used time owed to the reads after it), whether that was a cut or a failure (exit not 0) at the
-    cap, gets this run's stamp as `cut_at` in watches.json; a first try stopped at no more than an even share keeps
-    what it had (an old stamp is not refreshed: that read only lost time to the ones before it); a first try that
-    ends before its cap (read, or failed by itself) removes it. The write is best effort (one error); it changes no
-    other key."""
+    recently goes last), by name otherwise; a `cut_at` more than routines.GRACE ahead of `now` means not cut. A
+    watch whose first try is stopped by a timeout, its own or the gate's cap, while it held more than an even share
+    (it used time owed to the reads after it; the error's `waited`), whether that was a cut or a failure at the
+    cap, gets this run's stamp as `cut_at` in watches.json; a first try stopped by a timeout at no more than an even
+    share keeps what it had (an old stamp is not refreshed: that read only lost time to the ones before it); a first
+    try that ends by itself (read, or failed another way) removes it. The write is best effort (one error); it
+    changes no other key."""
     if not names:
         return
     path = data / WATCHES
     state, _ = _read_watch_state(data)  # as `due_watches` just wrote it; damaged, it was reported there
 
     def order(n: str):
-        at = _cut_last_time(state.get(n))
+        at = _cut_last_time(state.get(n), now)
         return (False,) if at is None else (True, at, n)
 
     names = sorted(names, key=order)
-    marks = {}  # name -> True (stopped at a cap over its share: this run's stamp) or False (ended before it: clear)
+    marks = {}  # name -> True (a timeout stop over its share: this run's stamp) or False (ended by itself: clear)
     began = monotonic()
     eng = engine.Engine(data, cfg, clock=lambda: now)
 
@@ -428,8 +431,11 @@ def _read_commands(data: Path, now: datetime, cfg, names: list, reads: list, err
     def share(left: float, after: int) -> float:
         return max(left / (after + 1), left - READ_FLOOR * after)
 
-    def at_cap(name: str, cap: float, left: float, after: int) -> None:
-        if cap > left / (after + 1):  # it used time owed to the reads after it
+    def mark(name: str, e: BaseException, left: float, after: int) -> None:
+        waited = getattr(e, "waited", None)  # set on every timeout stop, its own timeout or the cap
+        if waited is None:  # ended by itself
+            marks[name] = False
+        elif waited > left / (after + 1):  # it used time owed to the reads after it
             marks[name] = True
         # else: stopped at no more than an even share, it keeps what it had (an old stamp stays as it was)
 
@@ -448,13 +454,10 @@ def _read_commands(data: Path, now: datetime, cfg, names: list, reads: list, err
             result = eng.read(name, max_timeout=cap)
         except engine.ReadCut as e:
             cut.append((name, e, cap))
-            at_cap(name, cap, left, after)
+            mark(name, e, left, after)
             continue
         except Exception as e:  # noqa: BLE001 - one watch's failure never stops the run; a SourceError is ours
-            if getattr(e, "at_cap", False):  # failed by itself, but only once the cap stopped it: marked as a cut
-                at_cap(name, cap, left, after)
-            else:
-                marks[name] = False
+            mark(name, e, left, after)  # a timeout stop, its own or at the cap, held its time like a cut
             failed(name, e)
             continue
         marks[name] = False
