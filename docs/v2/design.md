@@ -849,7 +849,8 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   which the floor allows by rule; deny wins over allow, so it is not denied); the `hook-*` commands are left alone:
   `review apply`, `review sync`, every `card` and `worker` command but those two, and every other command
   (`config`, `search`, `restore`, `source`, `scan`, `gate`, `template`, `profile`, `spend`, `cap`, `serve`, `phone`,
-  `import-v1`). In a worker's own session (`AP2_ROLE` set), `review plan`, `review check` and `worker park` refuse
+  `import-v1`, `install`, `uninstall`, `doctor`). In a worker's own session (`AP2_ROLE` set), `review plan`,
+  `review check` and `worker park` refuse
   a card (for the park, a card and role) that is not the worker's own (`AP2_CARD`, `AP2_ROLE`), the park reads the
   real usage file and ignores `--usage`, and the floor's park allow rule names only the worker's own card and role,
   so an injected review cannot rewrite another card's plan or park any worker until a date it made up; a user at a
