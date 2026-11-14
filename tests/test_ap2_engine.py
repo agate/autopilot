@@ -214,6 +214,119 @@ class CommandReadTest(EngineCase):
         [raw] = (self.data / "sources" / ".raw" / "slow").glob("*.json")
         self.assertEqual(raw.read_text(), "[1, 2")
 
+    def test_max_timeout_cuts_the_sources_timeout(self):
+        sleeper = self.tmp / "nap.py"
+        sleeper.write_text("import time; time.sleep(5)\n")
+        self.user_source("nap", f"""\
+            source: nap
+            brings: messages
+            read: {{ via: command, run: '{sys.executable} {sleeper}', timeout: 60 }}
+            fill: paths
+            form: {{ id: .id, at: .at, text: .text }}
+            link: none
+            sort: {{ all: alert }}
+            """)
+        began = time.monotonic()
+        with self.assertRaisesRegex(SourceError, r"^nap: read.run took longer than 1 seconds \(its read.timeout of "
+                                                 r"60 was cut to the time this read was given\); stopped$"):
+            self.engine().read("nap", dry_run=True, max_timeout=1)
+        self.assertLess(time.monotonic() - began, 4)
+        with self.assertRaisesRegex(SourceError, r"took longer than 0.5 seconds \("):
+            self.engine().read("nap", dry_run=True, max_timeout=0.5)
+
+    def test_only_a_read_stopped_at_a_shorter_cap_is_a_read_cut(self):
+        sleeper = self.tmp / "nap.py"
+        sleeper.write_text("import time; time.sleep(5)\n")
+        self.user_source("nap", f"""\
+            source: nap
+            brings: messages
+            read: {{ via: command, run: '{sys.executable} {sleeper}', timeout: 1 }}
+            fill: paths
+            form: {{ id: .id, at: .at, text: .text }}
+            link: none
+            sort: {{ all: alert }}
+            """)
+        with self.assertRaisesRegex(engine.ReadCut, r"took longer than 0.5 seconds \(its read.timeout of 1 was"):
+            self.engine().read("nap", dry_run=True, max_timeout=0.5)
+        for cap in (None, 2):  # its own timeout of 1 is what stops it
+            with self.assertRaisesRegex(SourceError, r"took longer than 1 seconds; stopped$") as caught:
+                self.engine().read("nap", dry_run=True, max_timeout=cap)
+            self.assertNotIsInstance(caught.exception, engine.ReadCut)
+
+    def test_a_command_that_exits_not_0_with_its_output_held_open_is_not_a_read_cut(self):
+        script = self.tmp / "fails.py"
+        script.write_text("import subprocess, sys; subprocess.Popen(['sleep', '30']); sys.exit(1)\n")
+        self.user_source("fails", f"""\
+            source: fails
+            brings: messages
+            read: {{ via: command, run: '{sys.executable} {script}', timeout: 60 }}
+            fill: paths
+            form: {{ id: .id, at: .at, text: .text }}
+            link: none
+            sort: {{ all: alert }}
+            """)
+        with self.assertRaisesRegex(SourceError, r"^fails: read.run exited with 1, but something it started still "
+                                                 r"held its output open after 0.5 seconds \(its read.timeout of 60 "
+                                                 r"was cut") as caught:
+            self.engine().read("fails", dry_run=True, max_timeout=0.5)
+        self.assertNotIsInstance(caught.exception, engine.ReadCut)
+
+    def test_only_an_error_of_a_read_stopped_at_the_cap_says_so_whatever_its_exit(self):
+        scripts = {"nap": "import time; time.sleep(5)\n",
+                   "held": "import subprocess, sys; subprocess.Popen(['sleep', '30']); sys.exit(1)\n",
+                   "fails": "import sys; sys.exit(1)\n"}
+        for name, body in scripts.items():
+            script = self.tmp / f"{name}.py"
+            script.write_text(body)
+            self.user_source(name, f"""\
+                source: {name}
+                brings: messages
+                read: {{ via: command, run: '{sys.executable} {script}', timeout: {1 if name == "nap" else 60} }}
+                fill: paths
+                form: {{ id: .id, at: .at, text: .text }}
+                link: none
+                sort: {{ all: alert }}
+                """)
+        for name, cap, at_cap in (("nap", 0.5, True), ("held", 0.5, True),  # a ReadCut, then a failure at the cap
+                                  ("nap", None, False), ("nap", 2, False),  # its own timeout
+                                  ("fails", 0.5, False)):  # exit 1 by itself, before the cap
+            with self.subTest(name=name, cap=cap):
+                with self.assertRaises(SourceError) as caught:
+                    self.engine().read(name, dry_run=True, max_timeout=cap)
+                self.assertIs(getattr(caught.exception, "at_cap", False), at_cap)
+                self.assertEqual(isinstance(caught.exception, engine.ReadCut), name == "nap" and at_cap)
+
+    def test_every_timeout_stop_says_how_long_it_waited_and_no_other_error_does(self):
+        scripts = {"nap": "import time; time.sleep(5)\n",
+                   "held": "import subprocess, sys; subprocess.Popen(['sleep', '30']); sys.exit(1)\n",
+                   "fails": "import sys; sys.exit(1)\n",
+                   "ok": "print('[]')\n"}
+        for name, body in scripts.items():
+            script = self.tmp / f"{name}.py"
+            script.write_text(body)
+            own = 1 if name in ("nap", "held") else 60
+            self.user_source(name, f"""\
+                source: {name}
+                brings: messages
+                read: {{ via: command, run: '{sys.executable} {script}', timeout: {own} }}
+                fill: paths
+                form: {{ id: .id, at: .at, text: .text }}
+                link: none
+                sort: {{ all: alert }}
+                """)
+        for name, cap, waited in (("nap", 0.5, 0.5), ("held", 0.5, 0.5),  # stopped at the cap
+                                  ("nap", None, 1), ("nap", 2, 1), ("held", 2, 1),  # stopped by its own timeout
+                                  ("fails", 0.5, None)):  # exit 1 by itself
+            with self.subTest(name=name, cap=cap):
+                with self.assertRaises(SourceError) as caught:
+                    self.engine().read(name, dry_run=True, max_timeout=cap)
+                self.assertEqual(getattr(caught.exception, "waited", None), waited)
+        self.engine().read("ok", dry_run=True, max_timeout=0.5)  # a read that works raises nothing to carry it
+
+    def test_a_cut_under_a_twentieth_of_a_second_is_never_named_0_seconds(self):
+        self.assertEqual([engine._seconds(t) for t in (60, 37.5, 0.5, 0.04, 0.001)],
+                         ["60", "37.5", "0.5", "0.04", "0.001"])
+
     @staticmethod
     def full(fd):
         raise OSError(errno.ENOSPC, "No space left on device")

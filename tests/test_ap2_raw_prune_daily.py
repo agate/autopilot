@@ -5,6 +5,7 @@ Every test injects the time and uses temp folders only; none reads the machine's
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -18,13 +19,12 @@ from unittest import mock
 
 from tests.helpers import ROOT
 from assistant import cards, engine, gate
-from assistant.store import Store
 from tests.test_ap2_cli import temp_inside_the_accounts_claude
 from tests.test_ap2_raw_prune import NOW, RAW, RawCase, name
 
 UTC = timezone.utc
 SUMMARY = "run: 0 routine slot(s), 0 watch(es) due, 0 pruned, 0 error(s)"
-KEYS = ["errors", "last_run_at", "pruned", "routines", "watches_due"]
+KEYS = ["errors", "last_run_at", "pass_due", "pruned", "reads", "routines", "watches_due", "workers"]
 
 
 class DailyCase(RawCase):
@@ -45,19 +45,20 @@ class DailyCase(RawCase):
         return [line[len(prefix):] for line in self.log() if line.startswith(prefix)]
 
     def counted(self):
-        """Patch `engine.prune_raw` and `Store.list` with wrappers that count their calls (and still run)."""
+        """Patch `engine.prune_raw` with a wrapper that counts its calls and the card reads it asks for (`list`; the
+        pass record reads the cards on every run as well, which is not counted here), and still runs."""
         calls = {"prune_raw": 0, "list": 0}
-        real_prune, real_list = engine.prune_raw, Store.list
+        real_prune = engine.prune_raw
 
         def prune_raw(data, now, linked):
             calls["prune_raw"] += 1
-            return real_prune(data, now, linked)
 
-        def store_list(s, *a, **k):
-            calls["list"] += 1
-            return real_list(s, *a, **k)
+            def counted_linked(*a, **k):
+                calls["list"] += 1
+                return linked(*a, **k)
+            return real_prune(data, now, counted_linked)
 
-        return calls, (mock.patch.object(engine, "prune_raw", prune_raw), mock.patch.object(Store, "list", store_list))
+        return calls, (mock.patch.object(engine, "prune_raw", prune_raw), contextlib.nullcontext())
 
 
 # -- criterion 1: the first run of a UTC day prunes ---------------------------------------------------------------

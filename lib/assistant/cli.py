@@ -793,10 +793,16 @@ def _gate_now(text: str):
 
 def _gate_parser(sub) -> None:
     g = sub.add_parser("gate", help="run the gate once and print what it did",
-                       description="One gate run, no AI: start the routine slots that are due (card first, then "
-                                   "last_slot), list the watches that are due, prune restore points older than 30 "
-                                   "days, and write gate.json and gate.log. Prints the run as JSON. While another "
-                                   "run holds the gate lock, prints {\"locked\": true, ...} and exits 0.")
+                       description="One gate run, no AI of its own: start the routine slots that are due (card "
+                                   "first, then last_slot); check every worker on record (end the done, ask the "
+                                   "questions, resume a dead one once in live mode, pause the idle and the "
+                                   "blocked); read the due watches from the user's own source files (a via: command "
+                                   "one here; the mcp, connector and skill ones in one scan session, which a later "
+                                   "run takes into cards); prune restore points older than 30 days; write pass.json "
+                                   "(whether a dispatcher pass is due and why), "
+                                   "gate.json and gate.log. It starts no dispatcher pass. Prints the run as JSON. "
+                                   "While another run holds the gate lock, prints {\"locked\": true, ...} and exits "
+                                   "0.")
     g.add_argument("--now", type=_gate_now, metavar="ISO", help="run as if it were this time (default: now)")
     g.add_argument("--data", metavar="PATH", help=DATA_HELP)
 
@@ -804,7 +810,8 @@ def _gate_parser(sub) -> None:
 def cmd_gate(args) -> int:
     from assistant import cards, gate
     data = datadir.ensure(datadir.resolve(args.data))
-    _print_json(gate.run(data, args.now or cards.now_utc()))
+    usage = Path.home() / ".claude.json"  # read only: a parked subscription worker resumes from the gate
+    _print_json(gate.run(data, args.now or cards.now_utc(), usage_file=usage if usage.is_file() else None))
     return 0
 
 
@@ -994,7 +1001,8 @@ COMMANDS["review"] = cmd_review
 
 
 # --- ap2 scan (scan sessions, design 5.3) ------------------------------------------------------------------------
-# Starting the session itself is a later slice; these are its plan, its PostToolUse hook and its take.
+# The plan, the two hooks (save-raw after a tool call, hook-allow before one) and the take; the gate starts
+# and finishes the session itself (gate.py, scan.start and scan.finish).
 
 def _scan_parser(sub) -> None:
     sc = sub.add_parser("scan", help="plan a scan session, save its replies, take its cards",
@@ -1014,6 +1022,12 @@ def _scan_parser(sub) -> None:
                                        "from stdin and append it to the scan folder's calls.jsonl when the plan "
                                        "names its tool.")
     sv.add_argument("--plan", required=True, metavar="FILE", help="the scan's plan.json")
+    ha = sc_sub.add_parser("hook-allow", help="the PreToolUse hook: allow only the scan's planned calls",
+                           description="Read one PreToolUse hook payload from stdin and print the allow or deny: a "
+                                       "planned call's tool, a Write to a planned records file, or for a skill the "
+                                       "skill and Read, Glob and Grep. Everything else, and any error, is denied. "
+                                       "Exits 0.")
+    ha.add_argument("--plan", required=True, metavar="FILE", help="the scan's plan.json")
     tk = sc_sub.add_parser("take", help="turn a finished scan into cards",
                            description="Build each planned call's raw output from the scan log and read it "
                                        "(ap2 source read --raw), printing each read and the errors.")
@@ -1025,6 +1039,8 @@ def _scan_parser(sub) -> None:
 def cmd_scan(args) -> int:
     from assistant import engine as engine_module, scan
 
+    if args.scan_command == "hook-allow":
+        return scan.hook_allow_main(["--plan", args.plan], sys.stdin)
     if args.scan_command == "save-raw":
         if sys.stdin is None:
             raise scan.ScanError("cannot read the hook payload: stdin is closed")
@@ -1215,6 +1231,9 @@ def main(argv: list) -> int:
     if argv[:1] == ["hook-guard"]:  # runs before every worker Bash call: skip the parser
         from assistant import guard
         return guard.main(argv[1:], sys.stdin)
+    if argv[:2] == ["scan", "hook-allow"] and "-h" not in argv and "--help" not in argv:
+        from assistant import scan  # runs before every scan-session tool call: skip the parser, and never fail open
+        return scan.hook_allow_main(argv[2:], sys.stdin)
     # sys.stderr is None when stderr is closed; print(file=None) would then write to stdout, so say nothing.
     parser = _parser()
     try:

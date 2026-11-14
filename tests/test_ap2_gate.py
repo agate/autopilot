@@ -12,16 +12,22 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
+import textwrap
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
 from tests.helpers import ROOT  # noqa: F401  (puts lib/ on sys.path)
-from assistant import cards, gate, restore, routines
+from assistant import cards, cap, engine, gate, resources, restore, routines, scan, transcripts
 from assistant.config import Config, ConfigError
 from assistant.store import Store, write_json
+from assistant.workers import IDLE_MIN, Workers
+
+FAKE = str(ROOT / "tests" / "bin" / "fake-claude-v2")
+LIVE = Config(mode="live")
 
 UTC = timezone.utc
 LA = "America/Los_Angeles"
@@ -29,6 +35,19 @@ LA = "America/Los_Angeles"
 
 def utc(*args) -> datetime:
     return datetime(*args, tzinfo=UTC)
+
+
+def too_deep(path: Path):
+    """Make every json.loads of `path`'s present text raise the RecursionError a file nested too deep gives. Nesting
+    depth alone does not do it on every Python (3.14's decoder parses 100k levels), so the error is forced; any
+    other text is decoded as usual, so the rest of the run reads its files."""
+    real, text = json.loads, path.read_text(encoding="utf-8")
+
+    def loads(s, *a, **kw):
+        if s == text:
+            raise RecursionError("maximum recursion depth exceeded while decoding a JSON array")
+        return real(s, *a, **kw)
+    return mock.patch.object(json, "loads", loads)
 
 
 def routine(**over) -> dict:
@@ -64,6 +83,124 @@ class GateCase(unittest.TestCase):
 
     def routine_cards(self) -> list:
         return self.store().list(kind="routine")
+
+
+# -- the loop (phase 2): workers, watches from the user's sources, reads, the scan session, pass due ---------------
+
+def card_fields(**over) -> dict:
+    c = {"kind": "code", "lane": "planned", "feed": "x", "links": [], "pri": "P2", "origin": "found",
+         "plain": {k: {"en": "w"} for k in cards.PLAIN_LINES}}
+    c.update(over)
+    return c
+
+
+def item(n: int) -> dict:
+    return {"id": f"i{n}", "at": "2026-11-10T13:00:00Z", "text": f"item {n}"}
+
+
+class LoopCase(GateCase):
+    """The gate with the fake claude (tests/bin/fake-claude-v2) and a temp home: no real claude, gh or launchctl."""
+    T = utc(2026, 11, 10, 14, 0)
+
+    def setUp(self):
+        super().setUp()
+        self.tmp = Path(tempfile.mkdtemp(prefix="ap2-gate-loop-")).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.fake_home = self.tmp / "fake-claude"
+        self.fake_home.mkdir()
+        self.log = self.tmp / "claude.log"
+        (self.tmp / "home").mkdir()
+        patch = mock.patch.dict(os.environ, {"FAKE_CLAUDE_HOME": str(self.fake_home), "FAKE_CLAUDE_LOG": str(self.log),
+                                             "HOME": str(self.tmp / "home")})
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.wt = self.tmp / "worktree"
+        self.wt.mkdir()
+        (self.data / "sources").mkdir()
+
+    def gate(self, now, **kw) -> dict:
+        kw.setdefault("claude", FAKE)
+        kw.setdefault("transcripts_dir", self.fake_home / "projects")
+        return gate.run(self.data, now, **kw)
+
+    def calls(self) -> list:
+        return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
+
+    def argvs(self) -> list:
+        return [c["argv"] for c in self.calls()]
+
+    def bg_calls(self) -> list:
+        return [c for c in self.calls() if c["argv"][:1] == ["--bg"]]
+
+    def set_agent(self, short, **fields):
+        f = self.fake_home / "agents.json"
+        rows = json.loads(f.read_text())
+        for a in rows:
+            if a["id"] == short:
+                a.update(fields)
+        f.write_text(json.dumps(rows))
+
+    def store(self, now=None, cfg=None) -> Store:
+        return Store(self.data, cfg, clock=lambda: now or self.T)
+
+    def add_card(self, **over) -> str:
+        return self.store().add(card_fields(**over), by="test")["id"]
+
+    def workers(self, at=None) -> Workers:
+        return Workers(self.data, cfg=LIVE, claude=FAKE, transcripts_dir=self.fake_home / "projects",
+                       clock=lambda: at or self.T, store=self.store(at, LIVE))
+
+    def start_worker(self, card_id=None) -> dict:
+        return self.workers().start(card_id or self.add_card(), "implement", cwd=self.wt, prompt="Do the work.")
+
+    def run_file(self, card_id, name, body=None) -> Path:
+        d = transcripts.run_dir(self.data, card_id)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / name).write_text(json.dumps(body if body is not None else {"summary": "done"}))
+        return d / name
+
+    def source(self, name, text) -> Path:
+        p = self.data / "sources" / f"{name}.yaml"
+        p.write_text(textwrap.dedent(text), encoding="utf-8")
+        return p
+
+    def command_source(self, name, items=(), every="5m", fail=False) -> Path:
+        script = self.tmp / f"{name}.py"
+        script.write_text("import sys; sys.stderr.write('boom\\n'); sys.exit(3)\n" if fail else
+                          f"import json; print(json.dumps({json.dumps(list(items))}))\n")
+        every_line = f"\n{' ' * 14}every: {every}" if every is not None else ""  # the template's own indent
+        return self.source(name, f"""\
+            source: {name}
+            brings: messages
+            read:
+              via: command
+              run: '{sys.executable} {script}'{every_line}
+            fill: paths
+            form: {{ id: .id, at: .at, text: .text }}
+            link: none
+            sort: {{ all: alert }}
+            """)
+
+    def mcp_source(self, name, tool="list_incidents", every="5m") -> Path:
+        return self.source(name, f"""\
+            source: {name}
+            brings: messages
+            read:
+              via: mcp
+              server: vendor
+              tool: {tool}
+              every: {every}
+            fill: paths
+            form: {{ id: .id, at: .at, text: .text }}
+            link: none
+            sort: {{ all: alert }}
+            """)
+
+    def scan_record(self) -> dict:
+        return json.loads((self.data / "scan-session.json").read_text())
+
+    def gate_log(self) -> str:
+        return (self.data / "gate.log").read_text(encoding="utf-8")
 
 
 # -- criterion 1: routine files -----------------------------------------------------------------------------------
@@ -531,6 +668,18 @@ class WatchTest(GateCase):
                 self.assertIn(f"watches: error: {path}", (self.data / "gate.log").read_text())
                 self.assertEqual(json.loads(path.read_text()), {"slack": {"last_check_at": "2026-11-10T14:00:00Z"}})
 
+    def test_a_watches_file_nested_too_deep_is_a_damaged_file(self):
+        path = self.data / "watches.json"
+        path.write_text("[" * 100_000 + "]" * 100_000, encoding="utf-8")
+        with too_deep(path):
+            out = self.gate(self.T, watches=[{"name": "slack", "every": "5m"}])
+        self.assertEqual(out["watches_due"], ["slack"])
+        self.assertEqual([e.get("watches") for e in out["errors"]], [str(path)])
+        self.assertIn("recursion", out["errors"][0]["error"])
+        self.assertEqual(json.loads((self.data / "gate.json").read_text(encoding="utf-8")), out)
+        self.assertIn(f"watches: error: {path}", (self.data / "gate.log").read_text())
+        self.assertEqual(json.loads(path.read_text()), {"slack": {"last_check_at": "2026-11-10T14:00:00Z"}})
+
     def test_a_lone_surrogate_in_watches_json_is_a_damaged_file(self):
         path = self.data / "watches.json"
         path.write_text('{"\\ud800": {"last_check_at": null}}', encoding="utf-8")
@@ -567,7 +716,8 @@ class HeartbeatTest(GateCase):
         heartbeat = json.loads((self.data / "gate.json").read_text())
         self.assertEqual(heartbeat, out)
         self.assertEqual(heartbeat["last_run_at"], "2026-11-10T14:30:05Z")
-        self.assertEqual(sorted(heartbeat), ["errors", "last_run_at", "pruned", "routines", "watches_due"])
+        self.assertEqual(sorted(heartbeat), ["errors", "last_run_at", "pass_due", "pruned", "reads", "routines",
+                                             "watches_due", "workers"])
         self.gate(utc(2026, 11, 10, 14, 31, 5))
         self.assertEqual(json.loads((self.data / "gate.json").read_text())["last_run_at"], "2026-11-10T14:31:05Z")
 
@@ -628,7 +778,7 @@ class HeartbeatTest(GateCase):
 
 # -- criterion 7: no AI, no network, no writes outside the data folder, one run at a time -------------------------
 
-class NoOutsideEffectsTest(GateCase):
+class NoOutsideEffectsTest(LoopCase):
     def test_no_process_no_socket_no_exec_and_writes_only_inside_data(self):
         self.put(last_slot="2026-11-09T09:00")
         self.put("late", last_slot="2026-11-09T09:00", missed_run="skip")
@@ -674,6 +824,53 @@ class NoOutsideEffectsTest(GateCase):
         self.assertTrue(written)
         for path in written:
             self.assertTrue(Path(path).resolve().is_relative_to(self.data), path)
+
+    def test_in_shadow_mode_with_a_worker_and_due_watches_every_effect_stays_inside(self):
+        self.start_worker()  # started in live mode, before anything is watched; the gate runs in shadow mode
+        self.command_source("feed", items=[item(1)])
+        self.mcp_source("vendor-a")
+        started, written = [], []
+        real_popen, real_open, real_os_open = subprocess.Popen, builtins.open, os.open
+
+        class Watched(real_popen):
+            def __init__(self, args, *a, **k):
+                started.append(list(args))
+                super().__init__(args, *a, **k)
+
+        def watch_open(file, mode="r", *a, **k):
+            if any(ch in mode for ch in "wax+"):
+                written.append(os.fspath(file))
+            return real_open(file, mode, *a, **k)
+
+        def watch_os_open(path, flags, *a, **k):
+            if flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT):
+                written.append(os.fspath(path))
+            return real_os_open(path, flags, *a, **k)
+
+        patches = [mock.patch.object(subprocess, "Popen", Watched), mock.patch.object(builtins, "open", watch_open),
+                   mock.patch.object(os, "open", watch_os_open),
+                   mock.patch.object(engine.Engine, "apply_writes", side_effect=AssertionError("no writes"))]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        out = self.gate(self.T)
+        for p in reversed(patches):
+            p.stop()
+        self.assertEqual(out["watches_due"], ["feed", "vendor-a"])
+        self.assertEqual([r["watch"] for r in out["reads"]], ["feed"])
+        self.assertEqual(out["errors"], [])
+        self.assertTrue(written)
+        for path in written:
+            if path != os.devnull:  # subprocess opens it for a child's stdin (DEVNULL); nothing is written there
+                self.assertTrue(Path(path).resolve().is_relative_to(self.data), path)
+        script = [sys.executable, str(self.tmp / "feed.py")]
+        self.assertIn(script, started)
+        bg = [a for a in started if a[1:2] == ["--bg"]]
+        self.assertEqual(len(bg), 1)
+        self.assertTrue(bg[0][bg[0].index("-n") + 1].startswith("ap2 scan · "), bg[0])
+        for argv in started:
+            with self.subTest(argv=argv):
+                self.assertTrue(argv == script or (argv[0] == FAKE and argv[1] in ("agents", "stop", "--bg")), argv)
 
     def test_a_held_lock_makes_a_second_run_do_nothing(self):
         import fcntl
@@ -1206,6 +1403,852 @@ class InvisibleTextTest(GateCase):
             with self.subTest(name=name):
                 (self.data / "watches.json").unlink(missing_ok=True)
                 self.assertEqual(self.gate(self.T, watches=[{"name": name, "every": "5m"}])["watches_due"], [name])
+
+
+class GateWorkersTest(LoopCase):
+    def test_a_done_worker_is_ended(self):
+        a = self.start_worker()
+        self.run_file(a["card"], "handback.json")
+        out = self.gate(self.T)
+        self.assertEqual([(e["card"], e["role"], e["did"]) for e in out["workers"]], [(a["card"], "implement", "ended")])
+        self.assertEqual(resources.Registry(self.data).read(), [])
+        self.assertEqual(self.store().get(a["card"])["sessions"]["implement"]["state"], "ended")
+        self.assertIn(["stop", a["short_id"]], self.argvs())
+        self.assertIn(f"worker {a['card']} implement: ended", self.gate_log())
+
+    def test_a_question_becomes_the_cards_answer_ask(self):
+        a = self.start_worker()
+        self.run_file(a["card"], "question.json", {"text": "Which port should it use?"})
+        out = self.gate(self.T)
+        self.assertEqual(out["workers"][0]["did"], "asked")
+        ask = self.store().get(a["card"])["ask"]
+        self.assertEqual(ask["type"], "answer")
+        self.assertIn("Which port should it use?", json.dumps(ask))
+
+    def test_a_dead_worker_in_shadow_mode_keeps_its_record_and_is_not_resumed(self):
+        a = self.start_worker()
+        (self.fake_home / "agents.json").write_text("[]")
+        out = self.gate(self.T)
+        [entry] = out["workers"]
+        self.assertEqual((entry["state"], entry["did"]), ("dead", "nothing"))
+        self.assertIn("shadow mode", entry["note"])
+        self.assertEqual(len(resources.Registry(self.data).read()), 1)
+        self.assertEqual(len(self.bg_calls()), 1)  # only the start, no resume
+        self.assertEqual(out["errors"], [])
+
+    def test_an_idle_worker_is_stopped_after_idle_min(self):
+        a = self.start_worker()
+        self.set_agent(a["short_id"], state="done", status="idle")
+        self.assertEqual(self.gate(self.T)["workers"][0]["did"], "nothing")
+        self.assertNotIn(["stop", a["short_id"]], self.argvs())
+        out = self.gate(self.T + timedelta(minutes=IDLE_MIN))
+        self.assertEqual(out["workers"][0]["did"], "paused")
+        self.assertIn(["stop", a["short_id"]], self.argvs())
+        self.assertEqual(self.store().get(a["card"])["sessions"]["implement"]["state"], "paused")
+
+    def test_with_no_worker_on_record_no_process_runs(self):
+        with mock.patch.object(subprocess, "run", side_effect=AssertionError("no process")), \
+                mock.patch.object(subprocess, "Popen", side_effect=AssertionError("no process")):
+            out = self.gate(self.T)
+        self.assertEqual((out["workers"], out["errors"]), ([], []))
+
+    def test_a_check_that_raises_is_one_error_and_the_run_goes_on(self):
+        self.start_worker()
+        with mock.patch.object(Workers, "check", side_effect=RuntimeError("boom")):
+            out = self.gate(self.T)
+        self.assertEqual(out["errors"], [{"workers": True, "error": "RuntimeError: boom"}])
+        self.assertEqual(json.loads((self.data / "gate.json").read_text()), out)
+
+
+class WatchListTest(LoopCase):
+    def test_a_user_extends_file_is_a_watch_and_a_builtin_alone_is_not(self):
+        self.assertEqual(gate.watch_list(self.data), ([], []))  # the built-in sources alone
+        self.source("github-my-prs", "extends: github-my-prs\n")
+        self.assertEqual(gate.watch_list(self.data),
+                         ([{"name": "github-my-prs", "every": "5m", "via": "command"}], []))
+
+    def test_each_pass_and_no_every_are_left_out_and_a_bad_every_is_one_error(self):
+        self.command_source("each", every="each pass")
+        self.command_source("never", every=None)
+        self.command_source("bad", every="5 minutes")
+        self.command_source("ok", every="1h")
+        watches, errors = gate.watch_list(self.data)
+        self.assertEqual(watches, [{"name": "ok", "every": "1h", "via": "command"}])
+        self.assertEqual([e["watch"] for e in errors], ["bad"])
+        self.assertIn("5 minutes", errors[0]["error"])
+
+    def test_a_file_that_does_not_load_is_one_error_and_the_others_still_run(self):
+        self.source("broken", "source: broken\nbrings: messages\n")
+        self.command_source("ok", items=[item(1)])
+        watches, errors = gate.watch_list(self.data)
+        self.assertEqual([w["name"] for w in watches], ["ok"])
+        self.assertEqual([e["source"] for e in errors], ["broken"])
+        out = self.gate(self.T)
+        self.assertEqual([e.get("source") for e in out["errors"]], ["broken"])
+        self.assertEqual([r["watch"] for r in out["reads"]], ["ok"])
+
+
+class CommandWatchTest(LoopCase):
+    def test_a_due_command_watch_is_read_and_makes_its_cards(self):
+        self.command_source("feed", items=[item(1), item(2)])
+        out = self.gate(self.T)
+        self.assertEqual(out["watches_due"], ["feed"])
+        self.assertEqual(out["reads"], [{"watch": "feed", "via": "command", "made": 2, "updated": 0, "unchanged": 0,
+                                         "dropped": 0}])
+        self.assertEqual(sorted(c["key"] for c in self.store().list()), ["feed:i1", "feed:i2"])
+        again = self.gate(self.T + timedelta(minutes=4))
+        self.assertEqual((again["watches_due"], again["reads"]), ([], []))
+        third = self.gate(self.T + timedelta(minutes=5))
+        self.assertEqual(third["reads"][0]["unchanged"], 2)
+
+    def test_a_failing_command_is_one_error_and_the_next_watch_is_still_read(self):
+        self.command_source("afail", fail=True)
+        self.command_source("bok", items=[item(1)])
+        out = self.gate(self.T)
+        self.assertEqual([e["watch"] for e in out["errors"]], ["afail"])
+        self.assertIn("exited with 3", out["errors"][0]["error"])
+        self.assertEqual([(r["watch"], r["made"]) for r in out["reads"]], [("bok", 1)])
+        self.assertIn("watch afail: error:", self.gate_log())
+
+    def test_the_look_itself_makes_no_card(self):
+        self.command_source("quiet")
+        out = self.gate(self.T)
+        self.assertEqual(out["reads"][0]["made"], 0)
+        self.assertEqual(self.store().list(), [])
+
+    def test_once_the_read_budget_is_spent_a_due_watch_is_not_read_and_waits_for_its_next_time(self):
+        self.command_source("a1", items=[item(1)])
+        self.command_source("b2", items=[item(2)])
+        marker = self.tmp / "b2-ran"
+        (self.tmp / "b2.py").write_text(f"open({str(marker)!r}, 'w').close(); print('[]')\n")
+        clock = iter([0.0, 0.0])  # the start, then before a1; before b2 the budget is spent
+        with mock.patch("assistant.gate.monotonic", lambda: next(clock, gate.READ_BUDGET + 1.0)):
+            out = self.gate(self.T)
+        self.assertEqual(out["watches_due"], ["a1", "b2"])
+        self.assertEqual([r["watch"] for r in out["reads"]], ["a1"])
+        self.assertEqual(out["errors"], [{"watch": "b2", "error": "not read: this run's 120 seconds for command "
+                                                                  "reads were spent; it is read at its next due "
+                                                                  "time"}])
+        self.assertFalse(marker.exists())
+        self.assertIn("watch b2: error: not read", self.gate_log())
+        self.assertIn("b2", json.loads((self.data / "watches.json").read_text()))  # its time stays written
+        self.assertEqual(self.gate(self.T + timedelta(minutes=4))["watches_due"], [])
+
+    def test_each_read_may_use_what_is_left_less_a_floor_for_each_read_still_to_go(self):
+        for name in ("a1", "b2", "c3", "d4"):
+            self.command_source(name)
+        given = []
+        real = engine.Engine.read
+
+        def read(eng, name, dry_run=False, max_timeout=None):
+            given.append(max_timeout)
+            return real(eng, name, dry_run=dry_run, max_timeout=max_timeout)
+
+        # the start, then before each read: a1 took 35, b2 took 50, c3 took 30 (115 of 120 used)
+        clock = iter([0.0, 0.0, 35.0, 85.0, 115.0])
+        with mock.patch("assistant.gate.monotonic", lambda: next(clock)), \
+                mock.patch.object(engine.Engine, "read", read):
+            self.gate(self.T)
+        self.assertEqual(gate.READ_FLOOR, 10)
+        self.assertEqual(given, [120 - 3 * 10, 85 - 2 * 10, 35 - 10, 5])
+
+    def test_when_the_floors_are_more_than_what_is_left_each_read_gets_an_even_share(self):
+        for name in ("a1", "b2", "c3"):
+            self.command_source(name)
+        given = []
+        real = engine.Engine.read
+
+        def read(eng, name, dry_run=False, max_timeout=None):
+            given.append(max_timeout)
+            return real(eng, name, dry_run=dry_run, max_timeout=max_timeout)
+
+        clock = iter([0.0, 0.0, 0.0, 0.0])  # nothing used
+        with mock.patch("assistant.gate.monotonic", lambda: next(clock)), \
+                mock.patch.object(gate, "READ_BUDGET", 12), mock.patch.object(engine.Engine, "read", read):
+            self.gate(self.T)
+        self.assertEqual(given, [4.0, 6.0, 12.0])  # 12 - 20 is less than 12 / 3, then 12 - 10 is less than 12 / 2
+
+    def test_a_slow_first_read_is_not_cut_by_its_place_in_the_order(self):
+        self.command_source("a1")
+        (self.tmp / "a1.py").write_text(f"import json, time; time.sleep(1.5); "
+                                        f"print(json.dumps({json.dumps([item(1)])}))\n")
+        for n, name in enumerate(("b2", "c3", "d4"), start=2):
+            self.command_source(name, items=[item(n)])
+        with mock.patch.object(gate, "READ_BUDGET", 4), mock.patch.object(gate, "READ_FLOOR", 0.5):
+            out = self.gate(self.T)  # an even split would cut a1 at 1 second
+        self.assertEqual(out["errors"], [])
+        self.assertEqual([(r["watch"], r["made"]) for r in out["reads"]], [("a1", 1), ("b2", 1), ("c3", 1), ("d4", 1)])
+
+    def test_a_read_cut_by_its_place_in_the_order_is_read_again_with_what_is_left(self):
+        names = ("a1", "b2", "c3", "d4", "e5", "f6", "g7", "h8", "i9")
+        self.command_source("a1")
+        (self.tmp / "a1.py").write_text(f"import json, time; time.sleep(3); "
+                                        f"print(json.dumps({json.dumps([item(1)])}))\n")
+        for n, name in enumerate(names[1:], start=2):
+            self.command_source(name, items=[item(n)])
+        given = []
+        real = engine.Engine.read
+
+        def read(eng, name, dry_run=False, max_timeout=None):
+            given.append((name, max_timeout))
+            return real(eng, name, dry_run=dry_run, max_timeout=max_timeout)
+
+        with mock.patch.object(gate, "READ_BUDGET", 20), mock.patch.object(gate, "READ_FLOOR", 2.5), \
+                mock.patch.object(engine.Engine, "read", read):
+            out = self.gate(self.T)  # a1's first cap is max(20 / 9, 20 - 2.5 * 8) seconds: less than its 3
+        self.assertEqual(out["errors"], [])
+        self.assertEqual(sorted(r["watch"] for r in out["reads"]), list(names))
+        self.assertEqual([n for n, _ in given], list(names) + ["a1"])
+        self.assertAlmostEqual(given[0][1], 20 / 9, places=2)
+        self.assertGreater(given[-1][1], 3)  # all that the eight others left: enough for its 3 seconds
+        self.assertIn("a1:i1", [c["key"] for c in self.store().list()])
+
+    def test_a_read_that_fails_for_its_own_reason_is_not_read_again(self):
+        marker = self.tmp / "a1-runs"
+        self.command_source("a1")
+        (self.tmp / "a1.py").write_text(f"import sys; open({str(marker)!r}, 'a').write('ran\\n'); sys.exit(1)\n")
+        self.command_source("b2", items=[item(2)])
+        with mock.patch.object(gate, "READ_BUDGET", 4), mock.patch.object(gate, "READ_FLOOR", 0.5):
+            out = self.gate(self.T)
+        self.assertEqual([e["watch"] for e in out["errors"]], ["a1"])
+        self.assertIn("exited with 1", out["errors"][0]["error"])
+        self.assertEqual(marker.read_text(), "ran\n")
+        self.assertEqual([r["watch"] for r in out["reads"]], ["b2"])
+
+    def test_a_hanging_read_is_one_error_and_does_not_use_the_time_of_the_next_watch(self):
+        self.command_source("a1")
+        (self.tmp / "a1.py").write_text("import time; time.sleep(30)\n")
+        self.command_source("b2", items=[item(2)])
+        marker = self.tmp / "b2-ran"
+        (self.tmp / "b2.py").write_text(f"import json; open({str(marker)!r}, 'w').close(); "
+                                        f"print(json.dumps({json.dumps([item(2)])}))\n")
+        with mock.patch.object(gate, "READ_BUDGET", 3):
+            out = self.gate(self.T)
+        self.assertEqual(out["watches_due"], ["a1", "b2"])
+        self.assertEqual([e["watch"] for e in out["errors"]], ["a1"])  # what b2 left is less than its first try had
+        self.assertRegex(out["errors"][0]["error"], r"took longer than [0-9.]+ seconds \(its read.timeout of 60 was")
+        self.assertEqual([(r["watch"], r["made"]) for r in out["reads"]], [("b2", 1)])
+        self.assertTrue(marker.exists())
+        self.assertEqual([c["key"] for c in self.store().list()], ["b2:i2"])
+
+
+    def reads_given(self):
+        """Patch Engine.read to note each read's name; returns the list it fills."""
+        given = []
+        real = engine.Engine.read
+
+        def read(eng, name, dry_run=False, max_timeout=None):
+            given.append(name)
+            return real(eng, name, dry_run=dry_run, max_timeout=max_timeout)
+
+        patch = mock.patch.object(engine.Engine, "read", read)
+        patch.start()
+        self.addCleanup(patch.stop)
+        return given
+
+    def saved_watches(self) -> dict:
+        return json.loads((self.data / "watches.json").read_text())
+
+    def test_a_cut_read_whose_second_try_would_get_less_time_is_not_run_again(self):
+        marker = self.tmp / "a1-runs"
+        self.command_source("a1")
+        (self.tmp / "a1.py").write_text(f"import time; open({str(marker)!r}, 'a').write('ran\\n'); time.sleep(30)\n")
+        self.command_source("b2", items=[item(2)])
+        with mock.patch.object(gate, "READ_BUDGET", 2), mock.patch.object(gate, "READ_FLOOR", 0.5):
+            out = self.gate(self.T)  # a1's first cap is 1.5 seconds; b2 leaves less than that
+        self.assertEqual([e["watch"] for e in out["errors"]], ["a1"])
+        self.assertRegex(out["errors"][0]["error"], r"^a1: read.run took longer than 1.5 seconds \(its read.timeout "
+                                                    r"of 60 was cut")
+        self.assertEqual(marker.read_text(), "ran\n")
+        self.assertEqual(len(list((self.data / "sources" / ".raw" / "a1").glob("*.json"))), 1)
+        self.assertEqual([r["watch"] for r in out["reads"]], ["b2"])
+
+    def test_a_command_that_exits_not_0_with_its_output_held_open_is_not_read_again(self):
+        marker = self.tmp / "a1-runs"
+        self.command_source("a1")
+        (self.tmp / "a1.py").write_text(f"import subprocess, sys; open({str(marker)!r}, 'a').write('ran\\n'); "
+                                        f"subprocess.Popen(['sleep', '30']); sys.exit(1)\n")
+        for n, name in enumerate(("b2", "c3", "d4", "e5"), start=2):
+            self.command_source(name, items=[item(n)])
+        with mock.patch.object(gate, "READ_BUDGET", 4), mock.patch.object(gate, "READ_FLOOR", 1):
+            out = self.gate(self.T)  # a1's first cap is 0.8 seconds; the others leave far more
+        self.assertEqual([e["watch"] for e in out["errors"]], ["a1"])
+        self.assertIn("exited with 1, but something it started still held its output open", out["errors"][0]["error"])
+        self.assertEqual(marker.read_text(), "ran\n")
+        self.assertEqual(sorted(r["watch"] for r in out["reads"]), ["b2", "c3", "d4", "e5"])
+
+    def test_a_hanging_read_cut_while_it_held_more_than_its_share_is_read_last_next_time(self):
+        self.command_source("a1")
+        (self.tmp / "a1.py").write_text("import time; time.sleep(30)\n")
+        self.command_source("b2")  # needs 1 second: more than its floor, far less than its own timeout of 60
+        (self.tmp / "b2.py").write_text(f"import json, time; time.sleep(1); "
+                                        f"print(json.dumps({json.dumps([item(2)])}))\n")
+        given = self.reads_given()
+        with mock.patch.object(gate, "READ_BUDGET", 3), mock.patch.object(gate, "READ_FLOOR", 0.5):
+            first = self.gate(self.T)  # a1 gets 2.5 seconds, b2 the 0.5 left; neither has more for a second try
+            self.assertEqual(given, ["a1", "b2"])
+            self.assertEqual([e["watch"] for e in first["errors"]], ["a1", "b2"])
+            self.assertEqual(self.saved_watches(), {"a1": {"last_check_at": "2026-11-10T14:00:00Z",
+                                                           "cut_at": "2026-11-10T14:00:00Z"},
+                                                    "b2": {"last_check_at": "2026-11-10T14:00:00Z"}})
+            second = self.gate(self.T + timedelta(minutes=5))
+        self.assertEqual(given[2:], ["b2", "a1"])
+        self.assertEqual([(r["watch"], r["made"]) for r in second["reads"]], [("b2", 1)])
+        self.assertEqual([e["watch"] for e in second["errors"]], ["a1"])
+        self.assertEqual(self.saved_watches(), {"a1": {"last_check_at": "2026-11-10T14:05:00Z",  # cut at an even
+                                                       "cut_at": "2026-11-10T14:00:00Z"},  # share: the old stamp
+                                                "b2": {"last_check_at": "2026-11-10T14:05:00Z"}})
+
+    def test_a_first_try_that_exits_not_0_at_a_cap_over_its_share_is_marked_but_not_read_again(self):
+        marker = self.tmp / "a1-runs"
+        self.command_source("a1")  # exits 1 at once, but the child it started holds its output past the cap
+        (self.tmp / "a1.py").write_text(f"import subprocess, sys; open({str(marker)!r}, 'a').write('ran\\n'); "
+                                        f"subprocess.Popen(['sleep', '30']); sys.exit(1)\n")
+        self.command_source("b2")  # needs 1 second
+        (self.tmp / "b2.py").write_text(f"import json, time; time.sleep(1); "
+                                        f"print(json.dumps({json.dumps([item(2)])}))\n")
+        given = self.reads_given()
+        with mock.patch.object(gate, "READ_BUDGET", 3), mock.patch.object(gate, "READ_FLOOR", 0.5):
+            first = self.gate(self.T)  # a1 holds 2.5 seconds, b2 gets the 0.5 left
+            self.assertEqual(given, ["a1", "b2"])
+            self.assertEqual([e["watch"] for e in first["errors"]], ["a1", "b2"])
+            self.assertIn("exited with 1, but something it started still held its output open",
+                          first["errors"][0]["error"])
+            self.assertEqual(marker.read_text(), "ran\n")  # its own failure: not read again
+            self.assertEqual(self.saved_watches(), {"a1": {"last_check_at": "2026-11-10T14:00:00Z",
+                                                           "cut_at": "2026-11-10T14:00:00Z"},
+                                                    "b2": {"last_check_at": "2026-11-10T14:00:00Z"}})
+            second = self.gate(self.T + timedelta(minutes=5))
+        self.assertEqual(given[2:], ["b2", "a1"])
+        self.assertEqual([(r["watch"], r["made"]) for r in second["reads"]], [("b2", 1)])
+        self.assertEqual([e["watch"] for e in second["errors"]], ["a1"])
+        self.assertEqual(marker.read_text(), "ran\nran\n")
+
+    def test_a_healthy_watch_that_stalled_once_behind_a_hanging_one_is_not_stuck_behind_it(self):
+        self.command_source("a1")
+        (self.tmp / "a1.py").write_text("import time; time.sleep(30)\n")
+        stall = self.tmp / "b2-stalls"
+        self.command_source("b2")  # needs 1 second, but 30 while `stall` is there
+        (self.tmp / "b2.py").write_text(f"import json, os, time; time.sleep(30 if os.path.exists({str(stall)!r}) "
+                                        f"else 1); print(json.dumps({json.dumps([item(2)])}))\n")
+        given = self.reads_given()
+        runs = []
+        with mock.patch.object(gate, "READ_BUDGET", 3), mock.patch.object(gate, "READ_FLOOR", 0.5):
+            for n in range(5):
+                if n == 1:
+                    stall.touch()
+                elif stall.exists():
+                    stall.unlink()
+                at = len(given)
+                out = self.gate(self.T + timedelta(minutes=5 * n))
+                runs.append((given[at:], [r["watch"] for r in out["reads"]],
+                             {k: v.get("cut_at") for k, v in self.saved_watches().items()}))
+        self.assertEqual(runs, [
+            (["a1", "b2"], [], {"a1": "2026-11-10T14:00:00Z", "b2": None}),
+            (["b2", "a1"], [], {"a1": "2026-11-10T14:00:00Z", "b2": "2026-11-10T14:05:00Z"}),  # b2 stalled
+            (["a1", "b2"], [], {"a1": "2026-11-10T14:10:00Z", "b2": "2026-11-10T14:05:00Z"}),  # a1's stamp is older
+            (["b2", "a1"], ["b2"], {"a1": "2026-11-10T14:10:00Z", "b2": None}),  # b2's is older: it goes first
+            (["b2", "a1"], ["b2"], {"a1": "2026-11-10T14:10:00Z", "b2": None}),
+        ])
+
+    def test_a_hanging_read_stopped_by_its_own_timeout_over_its_share_is_read_last_next_time(self):
+        marker = self.tmp / "a1-runs"
+        script = self.tmp / "a1.py"
+        script.write_text(f"import time; open({str(marker)!r}, 'a').write('ran\\n'); time.sleep(30)\n")
+        self.source("a1", f"""\
+            source: a1
+            brings: messages
+            read:
+              via: command
+              run: '{sys.executable} {script}'
+              timeout: 2
+              every: 5m
+            fill: paths
+            form: {{ id: .id, at: .at, text: .text }}
+            link: none
+            sort: {{ all: alert }}
+            """)
+        self.command_source("b2")  # needs 1.5 seconds: more than an even share of 3, far less than its own 60
+        (self.tmp / "b2.py").write_text(f"import json, time; time.sleep(1.5); "
+                                        f"print(json.dumps({json.dumps([item(2)])}))\n")
+        given = self.reads_given()
+        with mock.patch.object(gate, "READ_BUDGET", 3), mock.patch.object(gate, "READ_FLOOR", 0.5):
+            first = self.gate(self.T)  # a1's cap is 2.5, its own timeout of 2 stops it: more than the even 1.5
+            self.assertEqual(given, ["a1", "b2"])
+            self.assertEqual([e["watch"] for e in first["errors"]], ["a1", "b2"])
+            self.assertRegex(first["errors"][0]["error"], r"^a1: read.run took longer than 2 seconds; stopped")
+            self.assertEqual(marker.read_text(), "ran\n")  # its own timeout: not read again
+            self.assertEqual(self.saved_watches(), {"a1": {"last_check_at": "2026-11-10T14:00:00Z",
+                                                           "cut_at": "2026-11-10T14:00:00Z"},
+                                                    "b2": {"last_check_at": "2026-11-10T14:00:00Z"}})
+            second = self.gate(self.T + timedelta(minutes=5))
+        self.assertEqual(given[2:], ["b2", "a1"])
+        self.assertEqual([(r["watch"], r["made"]) for r in second["reads"]], [("b2", 1)])
+        self.assertEqual([e["watch"] for e in second["errors"]], ["a1"])
+
+    def test_a_cut_at_from_a_clock_that_was_ahead_means_not_cut(self):
+        self.command_source("a1")
+        (self.tmp / "a1.py").write_text("import time; time.sleep(30)\n")
+        self.command_source("b2")  # needs 1 second
+        (self.tmp / "b2.py").write_text(f"import json, time; time.sleep(1); "
+                                        f"print(json.dumps({json.dumps([item(2)])}))\n")
+        write_json(self.data / "watches.json", {
+            "a1": {"last_check_at": "2026-11-10T13:00:00Z", "cut_at": "2026-11-10T13:55:00Z"},
+            "b2": {"last_check_at": "2026-11-10T13:00:00Z", "cut_at": "2027-11-10T14:00:00Z"}})  # a year ahead
+        given = self.reads_given()
+        with mock.patch.object(gate, "READ_BUDGET", 3), mock.patch.object(gate, "READ_FLOOR", 0.5):
+            out = self.gate(self.T)
+        self.assertEqual(given, ["b2", "a1"])
+        self.assertEqual([(r["watch"], r["made"]) for r in out["reads"]], [("b2", 1)])
+        self.assertEqual([e["watch"] for e in out["errors"]], ["a1"])
+        self.assertEqual(self.saved_watches(), {"a1": {"last_check_at": "2026-11-10T14:00:00Z",
+                                                       "cut_at": "2026-11-10T13:55:00Z"},
+                                                "b2": {"last_check_at": "2026-11-10T14:00:00Z"}})
+
+    def test_a_first_try_that_ends_inside_its_share_clears_cut_at_and_keeps_the_other_keys(self):
+        self.command_source("a1", items=[item(1)])
+        self.command_source("b2", fail=True)  # failed by itself, inside its share
+        write_json(self.data / "watches.json", {
+            "a1": {"last_check_at": "2026-11-10T13:00:00Z", "cut_at": "2026-11-10T13:00:00Z", "note": 1},
+            "b2": {"last_check_at": "2026-11-10T13:00:00Z", "cut_at": "2026-11-10T13:00:00Z"},
+            "z9": {"last_check_at": "2026-11-10T13:00:00Z", "cut_at": "2026-11-10T13:00:00Z"}})  # not a watch now
+        given = self.reads_given()
+        out = self.gate(self.T)
+        self.assertEqual(given, ["a1", "b2"])  # both were cut last time: by name
+        self.assertEqual([e["watch"] for e in out["errors"]], ["b2"])
+        self.assertEqual(self.saved_watches(), {
+            "a1": {"last_check_at": "2026-11-10T14:00:00Z", "note": 1},
+            "b2": {"last_check_at": "2026-11-10T14:00:00Z"},
+            "z9": {"last_check_at": "2026-11-10T13:00:00Z", "cut_at": "2026-11-10T13:00:00Z"}})
+
+    def test_a_damaged_cut_at_means_not_cut_and_the_run_goes_on(self):
+        for n, name in enumerate(("a0", "b1", "c2", "d3")):
+            self.command_source(name, items=[item(n)])
+        write_json(self.data / "watches.json", {
+            "a0": {"last_check_at": "2026-11-10T13:00:00Z", "cut_at": "2026-11-10T13:00:00Z"},
+            "b1": {"last_check_at": "2026-11-10T13:00:00Z", "cut_at": 5},
+            "c2": {"last_check_at": "2026-11-10T13:00:00Z", "cut_at": "x"},
+            "d3": {"last_check_at": "2026-11-10T13:00:00Z", "cut_at": [1]}})
+        given = self.reads_given()
+        out = self.gate(self.T)
+        self.assertEqual(given, ["b1", "c2", "d3", "a0"])  # only a0's cut_at is a stamp
+        self.assertEqual(out["errors"], [])
+        self.assertEqual(sorted(r["watch"] for r in out["reads"]), ["a0", "b1", "c2", "d3"])
+        self.assertEqual(self.saved_watches(), {n: {"last_check_at": "2026-11-10T14:00:00Z"}
+                                                for n in ("a0", "b1", "c2", "d3")})
+
+    def test_a_failed_write_of_cut_at_is_one_error_and_the_run_goes_on(self):
+        self.command_source("a1", items=[item(1)])
+        write_json(self.data / "watches.json",
+                   {"a1": {"last_check_at": "2026-11-10T13:00:00Z", "cut_at": "2026-11-10T13:00:00Z"}})
+        real = gate.write_json
+        calls = []
+
+        def write(path, obj):
+            calls.append(Path(path).name)
+            if Path(path).name == "watches.json" and calls.count("watches.json") == 2:
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real(path, obj)
+
+        with mock.patch.object(gate, "write_json", write):
+            out = self.gate(self.T)
+        self.assertEqual([(r["watch"], r["made"]) for r in out["reads"]], [("a1", 1)])
+        self.assertEqual(len(out["errors"]), 1)
+        self.assertIn("cannot save which command reads were cut", out["errors"][0]["error"])
+        self.assertIn("watches: error:", self.gate_log())
+        self.assertEqual(self.saved_watches(), {"a1": {"last_check_at": "2026-11-10T14:00:00Z",
+                                                       "cut_at": "2026-11-10T13:00:00Z"}})
+
+
+class ScanWatchTest(LoopCase):
+    def setUp(self):
+        super().setUp()
+        self.mcp_source("vendor-a", "list_incidents")
+        self.mcp_source("vendor-b", "list_changes")
+
+    def test_two_due_scan_watches_share_one_session(self):
+        out = self.gate(self.T)
+        self.assertEqual(out["watches_due"], ["vendor-a", "vendor-b"])
+        [bg] = self.bg_calls()
+        argv = bg["argv"]
+        rec = self.scan_record()
+        folder = Path(rec["plan"]).parent
+        self.assertEqual(sorted(rec), ["plan", "profile", "session_id", "short_id", "started_at"])
+        self.assertEqual((rec["short_id"], rec["profile"], rec["started_at"]), ("s0001", "subscription",
+                                                                               "2026-11-10T14:00:00Z"))
+        self.assertTrue(rec["session_id"])
+        self.assertEqual(argv[argv.index("-n") + 1], f"ap2 scan · {folder.name}")
+        self.assertEqual(argv[argv.index("--model") + 1], "haiku")
+        self.assertEqual(bg["cwd"], str(folder))
+        self.assertEqual([c["source"] for c in scan.load_plan(rec["plan"])[0]["calls"]], ["vendor-a", "vendor-b"])
+        self.assertEqual(argv[-1], scan.load_plan(rec["plan"])[0]["brief"])
+        settings = Path(argv[argv.index("--settings") + 1])
+        self.assertEqual(settings, folder / "settings.json")
+        s = json.loads(settings.read_text())
+        [pre], [post] = s["hooks"]["PreToolUse"], s["hooks"]["PostToolUse"]
+        self.assertEqual(pre["matcher"], "*")
+        self.assertIn(f"scan hook-allow --plan {rec['plan']}", pre["hooks"][0]["command"])
+        self.assertIn(f"scan save-raw --plan {rec['plan']}", post["hooks"][0]["command"])
+        self.assertEqual(s["env"]["AP2_PROFILE"], "subscription")  # the profile's overlay
+        launches = [json.loads(line) for line in (self.data / "spend" / "launches.jsonl").read_text().splitlines()]
+        self.assertEqual([(r["short"], r["kind"]) for r in launches], [("s0001", "scan")])
+        self.assertIn("scan: started s0001 for vendor-a, vendor-b", self.gate_log())
+
+    def test_a_spend_launch_row_that_was_not_written_is_one_scan_error(self):
+        with mock.patch("assistant.spend.record_launch", side_effect=OSError("disk full")):
+            out = self.gate(self.T)
+        self.assertEqual(out["errors"], [{"scan": True, "error": "the spend launch row was not written: disk full"}])
+        self.assertEqual(self.scan_record()["short_id"], "s0001")  # the session still runs, on record
+        self.assertIn("scan: the spend launch row was not written: disk full", self.gate_log())
+
+    def test_a_second_run_while_it_is_open_starts_none_and_writes_no_watch_time(self):
+        self.gate(self.T)
+        times = (self.data / "watches.json").read_text()
+        out = self.gate(self.T + timedelta(minutes=10))
+        self.assertEqual(len(self.bg_calls()), 1)
+        self.assertEqual(out["watches_due"], [])
+        self.assertEqual((self.data / "watches.json").read_text(), times)
+
+    def test_the_record_is_on_file_before_the_listing_is_asked_for_the_session_id(self):
+        from autopilot import sessions
+        real, seen = sessions.list_all, []
+
+        def listing(claude):
+            if self.bg_calls():  # the listing start asks after the launch
+                seen.append(self.scan_record())
+                return None  # the listing fails: the record must still be there
+            return real(claude)
+
+        with mock.patch("autopilot.sessions.list_all", listing):
+            out = self.gate(self.T)
+        self.assertEqual([r["session_id"] for r in seen], [""])
+        self.assertEqual((self.scan_record()["short_id"], self.scan_record()["session_id"]), ("s0001", ""))
+        self.assertEqual([e for e in out["errors"] if e.get("scan")], [])
+        self.assertNotIn(["stop", "s0001"], self.argvs())
+
+    def test_a_record_that_cannot_be_written_stops_the_session(self):
+        real = scan.write_json
+
+        def write(path, obj):
+            if Path(path).name == scan.SESSION:
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real(path, obj)
+
+        with mock.patch("assistant.scan.write_json", write):
+            out = self.gate(self.T)
+        self.assertEqual(len(self.bg_calls()), 1)
+        self.assertIn(["stop", "s0001"], self.argvs())
+        self.assertFalse((self.data / "scan-session.json").exists())
+        [err] = [e for e in out["errors"] if e.get("scan")]
+        self.assertIn("No space left on device", err["error"])
+        self.assertTrue(err["error"].endswith("the session s0001 was stopped"), err["error"])
+
+    def test_a_second_record_write_that_fails_keeps_the_first(self):
+        real, writes = scan.write_json, []
+
+        def write(path, obj):
+            if Path(path).name == scan.SESSION:
+                writes.append(dict(obj))
+                if len(writes) > 1:
+                    raise OSError(errno.ENOSPC, "No space left on device")
+            return real(path, obj)
+
+        with mock.patch("assistant.scan.write_json", write):
+            out = self.gate(self.T)
+        self.assertEqual([bool(w["session_id"]) for w in writes], [False, True])
+        self.assertEqual((self.scan_record()["short_id"], self.scan_record()["session_id"]), ("s0001", ""))
+        self.assertNotIn(["stop", "s0001"], self.argvs())
+        self.assertEqual([e for e in out["errors"] if e.get("scan")], [])
+
+    def test_hook_allow_allows_only_the_planned_tools(self):
+        self.gate(self.T)
+        plan = self.scan_record()["plan"]
+
+        def decide(tool, tool_input=None):
+            out = scan.hook_allow(plan, json.dumps({"tool_name": tool, "tool_input": tool_input or {}}).encode())
+            return out["hookSpecificOutput"]["permissionDecision"]
+
+        self.assertEqual(decide("mcp__vendor__list_incidents"), "allow")
+        self.assertEqual(decide("mcp__vendor__list_changes"), "allow")
+        for tool, tool_input in (("mcp__slack__slack_send_message", {"text": "hi"}), ("Bash", {"command": "ls"}),
+                                 ("Write", {"file_path": str(self.tmp / "x.json"), "content": "[]"}),
+                                 ("mcp__other__list_incidents", {}), ("Read", {"file_path": "/etc/hosts"})):
+            with self.subTest(tool=tool):
+                self.assertEqual(decide(tool, tool_input), "deny")
+
+    def test_a_paused_cap_starts_nothing_and_the_watch_times_stay(self):
+        cap.pause(self.data, self.T)
+        out = self.gate(self.T)
+        self.assertEqual(self.bg_calls(), [])
+        self.assertEqual(len([e for e in out["errors"] if e.get("scan")]), 1)
+        self.assertFalse((self.data / "scan-session.json").exists())
+        self.assertEqual(sorted(json.loads((self.data / "watches.json").read_text())), ["vendor-a", "vendor-b"])
+
+    def test_an_active_profile_that_does_not_load_starts_nothing(self):
+        (self.data / "active-profile.json").write_text('{"name": "nosuch"}')
+        out = self.gate(self.T)
+        self.assertEqual(self.bg_calls(), [])
+        [err] = [e for e in out["errors"] if e.get("scan")]
+        self.assertIn("nosuch", err["error"])
+
+    def test_plan_errors_go_in_errors(self):
+        self.source("vendor-b", """\
+            source: vendor-b
+            brings: messages
+            read: { via: mcp, server: vendor, every: 5m }
+            fill: paths
+            form: { id: .id, at: .at, text: .text }
+            link: none
+            sort: { all: alert }
+            """)
+        out = self.gate(self.T)
+        self.assertEqual([e["source"] for e in out["errors"]], ["vendor-b"])
+        self.assertEqual(len(self.bg_calls()), 1)  # vendor-a still runs
+
+
+class ScanFinishTest(LoopCase):
+    def setUp(self):
+        super().setUp()
+        self.mcp_source("vendor-a", "list_incidents", every="1h")
+        self.gate(self.T)
+        self.rec = self.scan_record()
+
+    def test_a_finished_scan_is_taken_into_cards(self):
+        hook = {"tool_name": "mcp__vendor__list_incidents", "tool_input": {},
+                "tool_response": json.dumps([item(1)])}
+        scan.save_raw(self.rec["plan"], json.dumps(hook).encode())
+        self.set_agent("s0001", state="done", status="idle")
+        out = self.gate(self.T + timedelta(minutes=2))
+        self.assertIn(["stop", "s0001"], self.argvs())
+        self.assertFalse((self.data / "scan-session.json").exists())
+        self.assertEqual(out["reads"], [{"watch": "vendor-a", "via": "mcp", "made": 1, "updated": 0, "unchanged": 0,
+                                         "dropped": 0}])
+        self.assertEqual([c["key"] for c in self.store().list()], ["vendor-a:i1"])
+        self.assertEqual(out["errors"], [])
+        self.assertIn("scan: s0001 ended", self.gate_log())
+
+    def test_a_session_still_working_past_15_minutes_is_stopped_with_one_error(self):
+        self.assertIsNone(self.gate(self.T + timedelta(minutes=14))["errors"] or None)
+        self.assertNotIn(["stop", "s0001"], self.argvs())
+        out = self.gate(self.T + timedelta(minutes=16))
+        self.assertIn(["stop", "s0001"], self.argvs())
+        self.assertFalse((self.data / "scan-session.json").exists())
+        late = [e for e in out["errors"] if e.get("scan")]
+        self.assertEqual(len(late), 1)
+        self.assertIn(f"{gate.scan.SCAN_MAX_MIN} minutes", late[0]["error"])
+
+    def test_a_failed_listing_changes_nothing(self):
+        with mock.patch("autopilot.sessions.list_all", return_value=None):
+            soon = self.gate(self.T + timedelta(minutes=2))
+            out = self.gate(self.T + timedelta(minutes=30))
+        self.assertNotIn(["stop", "s0001"], self.argvs())
+        self.assertEqual(self.scan_record(), self.rec)
+        self.assertEqual((soon["reads"], soon["errors"]), ([], []))
+        self.assertEqual(out["reads"], [])
+        # Past SCAN_MAX_MIN the wait is reported, once per run; the record and the scan watches still wait.
+        self.assertEqual(out["errors"], [{"scan": True, "error": "cannot list the sessions; the scan session s0001 "
+                                                                  "has been open since 2026-11-10T14:00:00Z, and the "
+                                                                  "scan watches wait"}])
+        self.assertEqual(out["watches_due"], [])
+
+    def test_a_session_that_started_later_than_now_is_stopped_with_one_error(self):
+        self.assertEqual(self.gate(self.T - timedelta(minutes=2))["errors"], [])  # inside routines.GRACE
+        self.assertNotIn(["stop", "s0001"], self.argvs())
+        out = self.gate(self.T - timedelta(hours=1))
+        self.assertIn(["stop", "s0001"], self.argvs())
+        self.assertNotEqual(self.scan_record()["short_id"], "s0001")  # taken; the due watch started a new scan
+        [err] = [e for e in out["errors"] if e.get("scan")]
+        self.assertIn("started at 2026-11-10T14:00:00Z, later than now (2026-11-10T13:00:00Z)", err["error"])
+        self.assertTrue(err["error"].endswith(gate.WENT_BACK), err["error"])
+
+    def test_a_failed_listing_for_a_session_that_started_later_than_now_says_the_clock(self):
+        with mock.patch("autopilot.sessions.list_all", return_value=None):
+            out = self.gate(self.T - timedelta(hours=1))
+        self.assertEqual(self.scan_record(), self.rec)
+        [err] = [e for e in out["errors"] if e.get("scan")]
+        self.assertTrue(err["error"].startswith("cannot list the sessions"), err["error"])
+        self.assertTrue(err["error"].endswith(gate.WENT_BACK), err["error"])
+
+    def test_a_take_that_fails_on_the_store_keeps_the_record_and_the_next_run_takes_again(self):
+        hook = {"tool_name": "mcp__vendor__list_incidents", "tool_input": {},
+                "tool_response": json.dumps([item(1)])}
+        scan.save_raw(self.rec["plan"], json.dumps(hook).encode())
+        self.set_agent("s0001", state="done", status="idle")
+        times = (self.data / "watches.json").read_text()
+        with mock.patch("assistant.scan.take", side_effect=cards.CardError("the store is broken")) as take:
+            out = self.gate(self.T + timedelta(hours=2))  # vendor-a would be due again by its time
+        take.assert_called_once()
+        self.assertEqual(self.scan_record(), dict(self.rec, stopped_at="2026-11-10T16:00:00Z"))  # stopped, settled
+        [err] = out["errors"]
+        self.assertTrue(err["scan"])
+        self.assertIn("the store is broken", err["error"])
+        self.assertEqual((out["reads"], out["watches_due"]), ([], []))  # the scan watches are not timed meanwhile
+        self.assertEqual((self.data / "watches.json").read_text(), times)
+        again = self.gate(self.T + timedelta(hours=2, minutes=1))
+        self.assertNotEqual(self.scan_record()["short_id"], "s0001")  # taken; the due watch started a new scan
+        self.assertEqual([r["made"] for r in again["reads"] if r["watch"] == "vendor-a"], [1])
+        self.assertEqual([c["key"] for c in self.store().list()], ["vendor-a:i1"])
+
+    def test_while_the_card_store_cannot_be_read_a_retry_takes_nothing_and_stops_and_settles_once(self):
+        hook = {"tool_name": "mcp__vendor__list_incidents", "tool_input": {},
+                "tool_response": json.dumps([item(1)])}
+        scan.save_raw(self.rec["plan"], json.dumps(hook).encode())
+        self.set_agent("s0001", state="done", status="idle")
+        bad = self.data / "items" / "2026-11" / "c-20261110-130000-abcdef.json"
+        bad.parent.mkdir(parents=True)
+        bad.write_text('{"id": "c-2026', encoding="utf-8")
+        raw = self.data / "sources" / ".raw" / "vendor-a"
+        settled = self.data / "spend" / "settled.jsonl"
+
+        def rows() -> int:
+            return len(settled.read_text().splitlines()) if settled.exists() else 0
+        for minutes in (2, 3, 4):
+            out = self.gate(self.T + timedelta(minutes=minutes))
+            [err] = [e for e in out["errors"] if e.get("scan")]
+            self.assertTrue(err["error"].startswith("the card store cannot be read ("), err["error"])
+            self.assertIn(str(bad), err["error"])
+            self.assertTrue(err["error"].endswith("; the scan session s0001 is taken once it can"), err["error"])
+            self.assertEqual(self.scan_record(), dict(self.rec, stopped_at="2026-11-10T14:02:00Z"))
+            self.assertEqual(sorted(raw.iterdir()) if raw.exists() else [], [])  # no raw copy is saved
+            self.assertEqual(out["watches_due"], [])
+        self.assertEqual(self.argvs().count(["stop", "s0001"]), 1)
+        self.assertEqual(rows(), 1)
+        bad.unlink()  # the store is repaired
+        out = self.gate(self.T + timedelta(minutes=5))
+        self.assertFalse((self.data / "scan-session.json").exists())
+        self.assertEqual([(r["watch"], r["made"]) for r in out["reads"]], [("vendor-a", 1)])
+        self.assertEqual([c["key"] for c in self.store().list()], ["vendor-a:i1"])
+        self.assertEqual([e for e in out["errors"] if e.get("scan")], [])
+        self.assertEqual((self.argvs().count(["stop", "s0001"]), rows()), (1, 1))
+
+    def list_as_stopped(self, short):
+        """The CLI keeps a stopped session on its listing with no pid and no status."""
+        f = self.fake_home / "agents.json"
+        rows = [a for a in json.loads(f.read_text()) if a["id"] != short]
+        f.write_text(json.dumps(rows + [{"id": short, "state": "stopped"}]))
+
+    def test_a_session_the_listing_shows_stopped_is_taken_with_no_late_error(self):
+        hook = {"tool_name": "mcp__vendor__list_incidents", "tool_input": {},
+                "tool_response": json.dumps([item(1)])}
+        scan.save_raw(self.rec["plan"], json.dumps(hook).encode())
+        self.list_as_stopped("s0001")
+        out = self.gate(self.T + timedelta(minutes=3))
+        self.assertFalse((self.data / "scan-session.json").exists())
+        self.assertEqual([(r["watch"], r["made"]) for r in out["reads"]], [("vendor-a", 1)])
+        self.assertEqual([c["key"] for c in self.store().list()], ["vendor-a:i1"])
+        self.assertEqual(out["errors"], [])
+
+    def test_after_a_failed_take_a_session_listed_stopped_is_taken_on_the_next_run(self):
+        hook = {"tool_name": "mcp__vendor__list_incidents", "tool_input": {},
+                "tool_response": json.dumps([item(1)])}
+        scan.save_raw(self.rec["plan"], json.dumps(hook).encode())
+        self.set_agent("s0001", state="done", status="idle")
+        with mock.patch("assistant.scan.take", side_effect=cards.CardError("the store is broken")):
+            first = self.gate(self.T + timedelta(minutes=2))
+        self.assertIn("the store is broken", first["errors"][0]["error"])
+        self.assertEqual(self.scan_record(), dict(self.rec, stopped_at="2026-11-10T14:02:00Z"))
+        self.list_as_stopped("s0001")  # the first run stopped it; the CLI still lists it
+        out = self.gate(self.T + timedelta(minutes=3))  # well before SCAN_MAX_MIN
+        self.assertFalse((self.data / "scan-session.json").exists())
+        self.assertEqual([(r["watch"], r["made"]) for r in out["reads"]], [("vendor-a", 1)])
+        self.assertEqual(out["errors"], [])
+
+    def test_a_session_that_is_gone_is_taken(self):
+        (self.fake_home / "agents.json").write_text("[]")
+        out = self.gate(self.T + timedelta(minutes=2))
+        self.assertFalse((self.data / "scan-session.json").exists())
+        self.assertEqual([e["source"] for e in out["errors"]], ["vendor-a"])  # nothing was logged
+        self.assertIn("no logged call matches", out["errors"][0]["error"])
+
+
+class PassDueTest(LoopCase):
+    def pass_file(self) -> dict:
+        return json.loads((self.data / "pass.json").read_text())
+
+    def test_an_empty_folder_is_not_due(self):
+        out = self.gate(self.T)
+        self.assertIs(out["pass_due"], False)
+        p = self.pass_file()
+        self.assertEqual(sorted(p), ["checked_at", "due", "seen", "since", "why"])
+        self.assertEqual((p["due"], p["since"], p["why"], p["checked_at"]), (False, None, [], "2026-11-10T14:00:00Z"))
+
+    def test_a_planned_card_is_due_until_a_pass_starts(self):
+        cid = self.add_card()
+        out = self.gate(self.T)
+        self.assertIs(out["pass_due"], True)
+        self.assertEqual(self.pass_file()["why"], [{"why": "ready", "card": cid}])
+        self.assertEqual(self.pass_file()["since"], "2026-11-10T14:00:00Z")
+        self.assertIn("pass due: 1 reason(s)", self.gate_log())
+        self.gate(self.T + timedelta(minutes=1))
+        self.assertEqual(self.pass_file()["since"], "2026-11-10T14:00:00Z")  # kept from the first run that found it
+        gate.pass_started(self.data, self.T + timedelta(minutes=2))
+        self.assertIs(self.pass_file()["due"], False)
+        out = self.gate(self.T + timedelta(minutes=3))
+        self.assertIs(out["pass_due"], False)
+        self.assertIsNone(self.pass_file()["since"])
+        self.assertEqual(self.bg_calls(), [])  # nothing is started
+
+    def test_a_new_result_file_is_due(self):
+        cid = self.add_card(lane="running")
+        self.gate(self.T)
+        gate.pass_started(self.data, self.T)
+        self.run_file(cid, "handback.json")
+        out = self.gate(self.T + timedelta(minutes=1))
+        self.assertIs(out["pass_due"], True)
+        self.assertEqual(self.pass_file()["why"], [{"why": "result", "card": cid, "file": "handback.json"}])
+
+    def test_an_ask_that_closed_is_due(self):
+        cid = self.add_card(lane="needs", ask={"type": "confirm", "text": "Ship it?"})
+        self.assertIs(self.gate(self.T)["pass_due"], False)  # an open ask is not ready
+        gate.pass_started(self.data, self.T)
+        self.store().update(cid, {"ask": None}, by="test")
+        self.assertIs(self.gate(self.T + timedelta(minutes=1))["pass_due"], True)
+        self.assertEqual(self.pass_file()["why"], [{"why": "answered", "card": cid}])
+
+    def test_an_ask_closed_by_worker_answer_is_due(self):
+        a = self.start_worker()
+        self.run_file(a["card"], "question.json", {"text": "Which port?"})
+        self.gate(self.T)
+        gate.pass_started(self.data, self.T)
+        self.workers(self.T + timedelta(minutes=1)).answer(a["card"], "Use 7130.")
+        out = self.gate(self.T + timedelta(minutes=2))
+        self.assertIs(out["pass_due"], True)
+        self.assertIn({"why": "answered", "card": a["card"]}, self.pass_file()["why"])
+
+    def test_an_open_ask_a_worker_on_record_and_an_imported_card_are_not_ready(self):
+        self.add_card(ask={"type": "confirm", "text": "Ship it?"})
+        self.add_card(feed="v1-import")
+        self.start_worker()
+        out = self.gate(self.T)
+        self.assertIs(out["pass_due"], False)
+        self.assertEqual(self.pass_file()["seen"]["ready"], [])
+
+    def test_a_routine_run_card_with_no_worker_is_ready(self):
+        self.put(last_slot="2026-11-09T09:00")
+        out = self.gate(utc(2026, 11, 10, 9, 1))
+        self.assertEqual(self.pass_file()["why"], [{"why": "ready", "card": out["routines"][0]["card"]}])
+
+    def test_a_workers_file_nested_too_deep_is_one_pass_error_and_the_run_completes(self):
+        (self.data / "workers.json").write_text('{"workers": ' + "[" * 100_000 + "]" * 100_000 + "}")
+        with too_deep(self.data / "workers.json"):
+            out = self.gate(self.T)
+        self.assertEqual([e for e in out["errors"] if "pass" in e],
+                         [{"pass": True, "error": out["errors"][-1]["error"]}])
+        self.assertIn("recursion", out["errors"][-1]["error"])
+        self.assertIn(f"{self.data / 'workers.json'}: cannot read the worker list", out["errors"][-1]["error"])
+        self.assertIs(out["pass_due"], False)
+        self.assertEqual(json.loads((self.data / "gate.json").read_text(encoding="utf-8")), out)
+        self.assertIn("pass: error:", self.gate_log())
+
+    def test_a_damaged_pass_file_is_one_error(self):
+        cid = self.add_card()
+        for text in ("{", "[]", '{"seen": {"ready": [[1]], "results": {}, "asks": {}}}', '{"seen": {"ready": []}}'):
+            with self.subTest(text=text):
+                (self.data / "pass.json").write_text(text)
+                out = self.gate(self.T)
+                self.assertEqual([e.get("pass") for e in out["errors"]], [str(self.data / "pass.json")])
+                self.assertIs(out["pass_due"], True)  # from an empty seen
+                self.assertEqual(self.pass_file()["why"], [{"why": "ready", "card": cid}])
 
 
 if __name__ == "__main__":

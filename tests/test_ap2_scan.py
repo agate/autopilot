@@ -349,6 +349,18 @@ class SaveRawTest(ScanCase):
             self.assertFalse(scan.save_raw(p["plan"], json.dumps(hook).encode())["kept"])
         self.assertEqual(len(scan.read_log(Path(p["folder"]))[0]), 1)
 
+    def test_a_tool_search_is_never_kept_even_next_to_a_skill(self):
+        self.user("standup", "source: standup\nbrings: messages\nread: { via: skill, skill: team-standup }\n"
+                             "fill: ai\nform: { id: x, at: x, text: x }\nlink: none\nsort: { all: question }\n")
+        hook = {"tool_name": "ToolSearch", "tool_input": {"query": "select:mcp__slack__slack_search_public"},
+                "tool_response": "<functions>a tool's schema</functions>"}
+        for names in (("slack-mentions",), ("slack-mentions", "standup")):  # with a skill, other tools are kept
+            with self.subTest(names=names):
+                self.settings("slack-mentions")
+                p = self.plan(*names)
+                self.assertFalse(scan.save_raw(p["plan"], json.dumps(hook).encode())["kept"])
+                self.assertFalse((Path(p["folder"]) / "calls.jsonl").exists())
+
     def test_a_skill_plan_never_keeps_a_call_that_names_the_scan_folder(self):
         self.user("standup", "source: standup\nbrings: messages\nread: { via: skill, skill: team-standup }\n"
                              "fill: ai\nform: { id: x, at: x, text: x }\nlink: none\nsort: { all: question }\n")
@@ -1076,6 +1088,85 @@ class InvisibleTextTest(ScanCase):
                 out = self.plan("standup")
                 self.assertEqual(out["errors"], [])
                 self.assertEqual([c["source"] for c in out["calls"]], ["standup"])
+
+
+class HookAllowTest(ScanCase):
+    """`hook-allow`, the scan session's PreToolUse guard: only the plan's own tools, its records files and, for a
+    skill, the skill and plain reads. Everything else, and any error, is a deny."""
+
+    def decide(self, plan_file, tool, tool_input=None) -> str:
+        out = scan.hook_allow(plan_file, json.dumps({"tool_name": tool, "tool_input": tool_input or {}}).encode())
+        hook = out["hookSpecificOutput"]
+        self.assertEqual(hook["hookEventName"], "PreToolUse")
+        self.assertTrue(hook["permissionDecisionReason"])
+        return hook["permissionDecision"]
+
+    def test_a_connector_tool_and_its_records_file_are_allowed_and_nothing_else(self):
+        self.settings("slack-mentions")
+        p = self.plan("slack-mentions")
+        folder = Path(p["folder"])
+        self.assertEqual(self.decide(p["plan"], "mcp__claude_ai_Slack__slack_search_public", {"query": "x"}), "allow")
+        self.assertEqual(self.decide(p["plan"], "Write", {"file_path": str(records(p)), "content": "[]"}), "allow")
+        for path in (folder / "plan.json", folder / "calls.jsonl", folder / "records" / "other.records.json",
+                     folder / "records" / ".." / "plan.json", self.tmp / "x.json"):
+            with self.subTest(path=path):
+                self.assertEqual(self.decide(p["plan"], "Write", {"file_path": str(path), "content": "[]"}), "deny")
+        for tool in ("Edit", "Bash", "Read", "Skill", "mcp__claude_ai_Slack__slack_send_message"):
+            with self.subTest(tool=tool):
+                self.assertEqual(self.decide(p["plan"], tool, {"file_path": str(records(p))}), "deny")
+
+    def test_tool_search_is_allowed_only_when_the_plan_calls_an_mcp_tool(self):
+        self.settings("slack-mentions", "jira-epic")
+        self.user("standup", "source: standup\nbrings: messages\nread: { via: skill, skill: team-standup }\n"
+                             "fill: ai\nform: { id: x, at: x, text: x }\nlink: none\nsort: { all: question }\n")
+        query = {"query": "select:mcp__claude_ai_Slack__slack_search_public"}
+        for names, decision in ((("slack-mentions",), "allow"), (("jira-epic",), "allow"),
+                                (("slack-mentions", "standup"), "allow"), (("standup",), "deny")):
+            with self.subTest(names=names):
+                self.assertEqual(self.decide(self.plan(*names)["plan"], "ToolSearch", query), decision)
+
+    def test_the_brief_says_a_listed_tool_may_be_loaded_with_tool_search(self):
+        self.settings("slack-mentions")
+        self.assertIn("load it with ToolSearch first; ToolSearch only loads a tool and calls nothing.",
+                      " ".join(self.plan("slack-mentions")["brief"].split()))
+
+    def test_a_skill_call_may_run_its_skill_and_read(self):
+        self.user("standup", """\
+            source: standup
+            brings: messages
+            read: { via: skill, skill: team-standup }
+            fill: ai
+            form: { id: required, at: required, text: required }
+            link: none
+            sort: { all: question }
+            """)
+        p = self.plan("standup")
+        self.assertEqual(self.decide(p["plan"], "Skill", {"skill": "team-standup"}), "allow")
+        self.assertEqual(self.decide(p["plan"], "Skill", {"skill": "other"}), "deny")
+        for tool in ("Read", "Glob", "Grep"):
+            self.assertEqual(self.decide(p["plan"], tool, {"pattern": "x"}), "allow")
+        for tool in ("Bash", "WebFetch", "Edit", "mcp__slack__slack_send_message"):
+            self.assertEqual(self.decide(p["plan"], tool, {}), "deny")
+
+    def test_a_bad_plan_or_payload_is_a_deny(self):
+        self.settings("slack-mentions")
+        p = self.plan("slack-mentions")
+        for plan_file, payload in ((str(self.tmp / "nosuch" / "plan.json"), b'{"tool_name": "Read"}'),
+                                   (p["plan"], b"not json"), (p["plan"], b"[]"), (p["plan"], b'{"tool_input": {}}')):
+            with self.subTest(payload=payload):
+                out = scan.hook_allow(plan_file, payload)
+                self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_the_command_prints_the_decision_and_exits_0(self):
+        self.settings("slack-mentions")
+        p = self.plan("slack-mentions")
+        env = {k: v for k, v in os.environ.items() if k != "AP2_DATA"}
+        for tool, decision in (("mcp__x__slack_search_public", "allow"), ("Bash", "deny")):
+            r = subprocess.run([sys.executable, str(AP2), "scan", "hook-allow", "--plan", p["plan"]],
+                               input=json.dumps({"tool_name": tool, "tool_input": {}}), capture_output=True,
+                               text=True, env=env, timeout=30)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(json.loads(r.stdout)["hookSpecificOutput"]["permissionDecision"], decision)
 
 
 if __name__ == "__main__":
