@@ -230,7 +230,9 @@ class LinkedTest(RawCase):
         out = self.prune(linked=never)
         never.assert_not_called()
         self.assertEqual(out["removed"], [])
-        with mock.patch.object(Store, "list", side_effect=AssertionError("Store.list must not be called")) as lst:
+        # The pass record reads the cards on every run (gate._present); only the prune's own read is checked here.
+        with mock.patch.object(Store, "list", side_effect=AssertionError("Store.list must not be called")) as lst, \
+                mock.patch.object(gate, "_present", return_value=gate._empty_seen()):
             heartbeat = self.gate()
         lst.assert_not_called()
         self.assertEqual(heartbeat["errors"], [])
@@ -426,7 +428,8 @@ class GateRunTest(RawCase):
         out = self.gate()
         self.assertFalse(old.exists())
         self.assertTrue(young.exists())
-        self.assertEqual(sorted(out), ["errors", "last_run_at", "pruned", "routines", "watches_due"])
+        self.assertEqual(sorted(out), ["errors", "last_run_at", "pass_due", "pruned", "reads", "routines",
+                                       "watches_due", "workers"])
         self.assertEqual(out["pruned"], [])  # restore points only
         self.assertEqual(json.loads((self.data / "gate.json").read_text(encoding="utf-8")), out)
         stamp = cards.stamp(NOW)

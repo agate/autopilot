@@ -128,7 +128,7 @@ class Registry:
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return []
-        except (OSError, ValueError) as e:
+        except (OSError, ValueError, RecursionError) as e:
             raise WorkerError(f"{self.path}: cannot read the worker list: {e}") from e
         if not (isinstance(data, dict) and isinstance(data.get("workers"), list)
                 and all(isinstance(r, dict) for r in data["workers"])):

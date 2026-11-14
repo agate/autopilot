@@ -12,10 +12,18 @@ scan into cards. The session only reads; it decides nothing about work.
   builds its raw file from that log and hands it to `Engine.read_saved`, which copies it under
   `<data>/sources/.raw/<source>/`, checks the records word for word and makes the cards.
 
+- `start(data, plan, profile, now)` starts the session (`claude --bg -n "ap2 scan · <scan>" --model <small model>
+  --settings <scan>/settings.json <brief>`, in the scan folder) and records it in `<data>/scan-session.json` before
+  it asks the listing for the session id (a record that cannot be written stops the session again). The
+  settings hold two hooks: `ap2 scan hook-allow` before every tool call (`hook_allow`: only the planned tools, the
+  records files and, for a skill, the skill and plain reads; all else is denied) and `ap2 scan save-raw` after.
+  `launch_profile` is asked first: the active profile, refused while the cap is paused or at its limit.
+- `finish(data, now)` looks the session up in `claude agents`; once its turn ended, it is gone or it ran past
+  SCAN_MAX_MIN minutes, it is stopped and taken, and the record removed. The gate calls both (one scan at a time).
+
 The session writes only its records files, under `<scan>/records/`; plan.json and calls.jsonl are code's.
 
-Not here yet (design 12): starting the session itself, the gate turning `every:` into due scans, and measuring
-what a scan costs.
+Not here yet (design 12): measuring what a scan costs beyond its spend rows.
 """
 from __future__ import annotations
 
@@ -26,26 +34,41 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import stat
+import subprocess
 import tempfile
-from datetime import timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
-from assistant import cards, config, engine as engine_module, sources
+from autopilot import sessions as v1_sessions
+
+from assistant import cards, config, engine as engine_module, routines, sources
+from assistant.cards import CardError
 from assistant.config import ConfigError
 from assistant.sources import SourceError
-from assistant.store import write_json
+from assistant.store import Store, write_json
 
 SCAN = Path(sources.FOLDER) / ".scan"
 PLAN = "plan.json"
 LOG = "calls.jsonl"
 RECORDS = "records"  # the only folder the session writes in
+SETTINGS = "settings.json"  # the session's --settings, in its scan folder
+SESSION = "scan-session.json"  # <data>/scan-session.json: the open scan session, one at a time
+SCAN_MAX_MIN = 15  # a scan still working after this many minutes is stopped and taken with what it logged
+SMALL_MODEL = "haiku"  # the scan model on a profile with no small_model (the subscription)
+NAME_PREFIX = "ap2 scan · "
+# The tools a skill scan may use besides the Skill itself: plain reads.
+SKILL_READS = ("Read", "Glob", "Grep")
 STAMP = "%Y%m%dT%H%M%SZ"
 VIAS = ("mcp", "connector", "skill")
 # The session's own file writes: never a tool's reply, so a skill scan does not log them.
 OWN_WRITES = ("Write", "Edit", "MultiEdit", "NotebookEdit", "TodoWrite")
+# The tool that loads a deferred tool's schema (MCP tools are deferred while tool search is on). The guard allows it
+# when the plan calls an MCP tool; its reply is a schema, never a source's text, so it is never logged.
+LOAD = "ToolSearch"
 # The line that marks a log cut short (past engine.MAX_OUTPUT in total).
 CUT = {"cut_short": True}
 VERSION = 1
@@ -59,7 +82,8 @@ BRIEF_HEAD = """\
 You are an ap2 scan session. You only read sources; you decide nothing about work.
 
 Rules:
-1. Call only the tools listed below, with exactly the arguments given.
+1. Call only the tools listed below, with exactly the arguments given. If a listed tool is not loaded
+   yet, load it with ToolSearch first; ToolSearch only loads a tool and calls nothing.
 2. Do not copy tool replies into files. ap2 saves every reply itself.
 3. For a call with a records file, write that file as a JSON list with one object per item. Use only the form's
    fields and category. Copy id, thread_id, at and place_id (or place, when there is no place_id) exactly as the
@@ -285,7 +309,7 @@ def keeps(p: dict, tool_name: str, tool_input=None, folder: Optional[Path] = Non
         return False
     if any(calls_tool(call, tool_name) for call in p["calls"]):
         return True  # a planned tool's reply is the source's own text, whatever it says
-    if not any(call["via"] == "skill" for call in p["calls"]) or tool_name in OWN_WRITES:
+    if not any(call["via"] == "skill" for call in p["calls"]) or tool_name in OWN_WRITES or tool_name == LOAD:
         return False
     return not _names(tool_response, words, paths)
 
@@ -611,3 +635,264 @@ def take(data, plan_file, dry_run: bool = False, cfg: Optional[config.Config] = 
         if scratch is not None:
             shutil.rmtree(scratch, ignore_errors=True)
     return {"plan": str(folder / PLAN), "dry_run": dry_run, "reads": reads, "errors": errors}
+
+
+# -- the session: the guard, the start and the finish ---------------------------------------------------------------
+
+# Built-in tools no scan needs, denied in its settings as well, so a guard hook that fails (a timeout) still cannot
+# let a shell or a file edit through; the guard (`hook_allow`) is what keeps the session to its planned calls.
+DENY = ("Bash", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch")
+
+
+def _decision(allow: bool, why: str) -> dict:
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow" if allow else "deny",
+                                   "permissionDecisionReason": why}}
+
+
+def allows(p: dict, tool_name: str, tool_input: dict) -> tuple:
+    """`(allowed, why)` for one tool call of the session of plan `p`: a tool of a planned call (`calls_tool`, the
+    same match the take uses); `Write` to a planned records file; or, when the plan runs a skill, `Skill` with that
+    skill's name or a plain read (`SKILL_READS`); or, when the plan has an `mcp` or `connector` call, `ToolSearch`
+    (`LOAD`), which loads a deferred tool's schema and calls nothing. Nothing else."""
+    if any(calls_tool(call, tool_name) for call in p["calls"]):
+        return True, "a planned scan call"
+    if tool_name == "Write":
+        path = tool_input.get("file_path")
+        wanted = {os.path.normpath(c["records"]) for c in p["calls"] if isinstance(c.get("records"), str)}
+        if isinstance(path, str) and os.path.isabs(path) and os.path.normpath(path) in wanted:
+            return True, "a planned records file"
+    if tool_name == LOAD and any(c["via"] in ("mcp", "connector") for c in p["calls"]):
+        return True, "loads a planned tool"
+    skills = {c.get("skill") for c in p["calls"] if c["via"] == "skill"}
+    if skills and ((tool_name == "Skill" and tool_input.get("skill") in skills) or tool_name in SKILL_READS):
+        return True, "the planned skill"
+    return False, (f"ap2 scan: {tool_name} is not one of this scan's planned calls. Call only the tools the brief "
+                   f"lists, with its arguments, and write only its records files.")
+
+
+def hook_allow(plan_file, payload: bytes) -> dict:
+    """The PreToolUse hook (`ap2 scan hook-allow --plan <plan>`): the allow or deny for one tool call. It fails
+    closed: a plan or payload that cannot be read is a deny, never no opinion."""
+    try:
+        p, _ = load_plan(plan_file)
+        hook = json.loads(payload.decode("utf-8"))
+        name = hook.get("tool_name") if isinstance(hook, dict) else None
+        if not (isinstance(name, str) and name):
+            raise ScanError("the hook payload has no tool_name")
+        tool_input = hook.get("tool_input")
+        ok, why = allows(p, name, tool_input if isinstance(tool_input, dict) else {})
+    except Exception as e:  # noqa: BLE001 - any doubt is a deny
+        return _decision(False, f"ap2 scan: denied, the guard could not decide: {e}"[:500])
+    return _decision(ok, why)
+
+
+def hook_allow_main(argv: list, stdin) -> int:
+    """`ap2 scan hook-allow --plan PLAN`: the payload on stdin, the decision JSON on stdout, exit 0 always."""
+    plan_file = argv[1] if len(argv) == 2 and argv[0] == "--plan" else ""
+    try:
+        src = getattr(stdin, "buffer", stdin)
+        payload = src.read(engine_module.MAX_OUTPUT + 1) if src is not None else b""
+        if isinstance(payload, str):
+            payload = payload.encode("utf-8", errors="surrogateescape")
+    except Exception:  # noqa: BLE001 - no payload: denied below
+        payload = b""
+    out = hook_allow(plan_file, payload) if plan_file else _decision(False, "ap2 scan: hook-allow needs --plan PLAN")
+    try:
+        os.write(1, (json.dumps(out) + "\n").encode())
+    except OSError:
+        pass
+    return 0
+
+
+def _ap2() -> Path:
+    return Path(__file__).resolve().parent.parent.parent / "bin" / "ap2"
+
+
+def _claude(claude: Optional[str]) -> str:
+    return claude or shutil.which("claude") or "claude"
+
+
+def launch_profile(data, now: datetime, transcripts_dir=None, claude: Optional[str] = None, store=None) -> dict:
+    """The profile a scan session starts on: the active one. Raises (a ProfileError, or a ScanError naming the
+    cap's refusal) when it does not load, or the cap is paused or at its limit (`cap.allowance`), so nothing starts."""
+    from assistant import cap, profiles, transcripts
+
+    data = Path(data)
+    prof = profiles.active(data)
+    projects = Path(transcripts_dir) if transcripts_dir else transcripts.default_projects()
+    a = cap.allowance(data, projects, now.astimezone(), prof, listing=lambda: v1_sessions.list_all(_claude(claude)),
+                      store=store)
+    if a.get("allow") == 0:
+        raise ScanError(f"no scan session started: {cap.refusal(a)}")
+    return prof
+
+
+def session_settings(plan_file, profile: dict) -> dict:
+    """The session's `--settings`: the guard before every tool call, the save after, the built-in denials, and the
+    profile's overlay merged under them as the worker floor merges it (`profiles.merge`)."""
+    from assistant import profiles
+
+    ap2, plan_arg = shlex.quote(str(_ap2())), shlex.quote(str(plan_file))
+    hooks = {"PreToolUse": [{"matcher": "*", "hooks": [
+                 {"type": "command", "command": f"{ap2} scan hook-allow --plan {plan_arg}", "timeout": 10}]}],
+             "PostToolUse": [{"matcher": "*", "hooks": [
+                 {"type": "command", "command": f"{ap2} scan save-raw --plan {plan_arg}", "timeout": 30}]}]}
+    floor = {"permissions": {"deny": list(DENY), "allow": []}, "env": {}, "hooks": hooks}
+    return profiles.merge(floor, profiles.overlay(profile))
+
+
+def start(data, p: dict, profile: dict, now: datetime, claude: Optional[str] = None) -> dict:
+    """Start the scan session of plan `p` (as `plan` returned it) on `profile`, in its scan folder, and record it in
+    `<data>/scan-session.json` `{plan, short_id, session_id, started_at, profile}`, with a spend launch row (kind
+    `scan`). The record is written with an empty session id right after the launch, then again with the id once the
+    listing shows it (best effort). Raises ScanError when it cannot start, or when the first record cannot be
+    written (the session is stopped first)."""
+    from autopilot import workers as v1_workers
+
+    from assistant import spend
+
+    data, folder, claude = Path(data), Path(p["folder"]), _claude(claude)
+    settings = session_settings(p["plan"], profile)
+    try:
+        write_json(folder / SETTINGS, settings)
+    except OSError as e:
+        raise ScanError(f"cannot write the scan settings in {folder}: {e}") from e
+    argv = [claude, "--bg", "-n", NAME_PREFIX + folder.name, "--model", profile.get("small_model") or SMALL_MODEL,
+            "--settings", str(folder / SETTINGS), p["brief"]]
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("AUTOPILOT_", "AP2_"))}
+    env.update(settings["env"])
+    try:
+        short = v1_workers._launch(argv, str(folder), env)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as e:
+        raise ScanError(f"cannot start the scan session: {e}") from e
+    # On record before the listing is asked (up to 60 s), so an error or a Ctrl-C there leaves no session running
+    # with no record; `finish` works with an empty session id.
+    rec = {"plan": str(p["plan"]), "short_id": short, "session_id": "", "started_at": cards.stamp(now),
+           "profile": profile["name"]}
+    try:
+        write_json(data / SESSION, rec)
+    except OSError as e:
+        try:
+            subprocess.run([claude, "stop", short], capture_output=True, timeout=60, stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        raise ScanError(f"cannot record the scan session in {data / SESSION}: {e}; the session {short} was "
+                        f"stopped") from e
+    sid = (v1_sessions.find_by_id(short, v1_sessions.list_all(claude)) or {}).get("sessionId") or ""
+    if sid:
+        try:
+            write_json(data / SESSION, dict(rec, session_id=sid))
+            rec = dict(rec, session_id=sid)
+        except OSError:  # the first record stays; it is enough to stop and take the session
+            pass
+    try:
+        spend.record_launch(data, short, "scan", None, profile, session_id=sid, at=now)
+    except Exception as e:  # noqa: BLE001 - bookkeeping never undoes a started session
+        return dict(rec, note=f"the spend launch row was not written: {e}")
+    return rec
+
+
+def _read_session(path: Path) -> dict:
+    rec = json.loads(path.read_text(encoding="utf-8"))
+    ok = (isinstance(rec, dict) and all(isinstance(rec.get(k), str) for k in ("plan", "short_id", "started_at"))
+          and re.fullmatch(r"[A-Za-z0-9_]+", rec["short_id"]))
+    if not ok:
+        raise ValueError("not a scan session record ({plan, short_id, session_id, started_at, profile})")
+    cards.parse_stamp(rec["started_at"])
+    return rec
+
+
+def finish(data, now: datetime, claude: Optional[str] = None, transcripts_dir=None,
+           cfg: Optional[config.Config] = None) -> Optional[dict]:
+    """Look at the open scan session (`<data>/scan-session.json`); None when there is none. Its turn ended (`state`
+    done, blocked or failed, or `status` idle), it was stopped (`state` stopped: the CLI keeps a stopped session on
+    its listing, no pid and no status), it is gone, its process is dead, or it ran past SCAN_MAX_MIN minutes
+    (one more error), or it started more than `routines.GRACE` after now (one error that ends with
+    `routines.WENT_BACK`): it is stopped (`claude stop`, its spend settled), taken (`take`) and the record removed.
+    A failed listing, or a session still working inside the time, waits for the next run; a failed listing once the
+    session is that late adds one error. Once stopped and settled, the record gets a `stopped_at`, so a later run
+    skips the listing, the stop, the settle and the late errors. Before the take, the card store must read; when it
+    does not, the record is kept with one error and nothing is taken (no raw copy), and a later run takes once it
+    reads. When the store reads but a write fails (a CardError or OSError), the take still saves one raw copy each
+    time and raises with the record kept, so the next run checks and takes again. The stop and the settle run once
+    either way. Returns `{open, ended, short_id, reads, errors}`; each read also says its `via`."""
+    from assistant import spend, transcripts
+
+    data, claude = Path(data), _claude(claude)
+    path = data / SESSION
+    out = {"open": True, "ended": False, "short_id": None, "reads": [], "errors": []}
+    try:
+        rec = _read_session(path)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, RecursionError) as e:
+        path.unlink(missing_ok=True)  # else it would hold every later scan back
+        out.update(open=False, errors=[{"scan": True, "error": f"{path}: cannot read the scan session record ({e}); "
+                                                                 f"it was removed"}])
+        return out
+    short, sid = rec["short_id"], rec.get("session_id") or ""
+    out["short_id"] = short
+    # A record with a `stopped_at` was stopped, settled and reported by an earlier run whose take could not go on.
+    if not isinstance(rec.get("stopped_at"), str):
+        started = cards.parse_stamp(rec["started_at"])
+        ahead = started - now > routines.GRACE  # a start later than now never grows old, so it counts as late
+        over = ahead or now - started >= timedelta(minutes=SCAN_MAX_MIN)
+        went_back = f"; {routines.WENT_BACK}" if ahead else ""
+        listing = v1_sessions.list_all(claude)
+        if listing is None:  # unknown, not gone: the next run looks again
+            if over:
+                out["errors"].append({"scan": True, "error": f"cannot list the sessions; the scan session {short} has "
+                                                             f"been open since {rec['started_at']}, and the scan "
+                                                             f"watches wait{went_back}"})
+            return out
+        s = v1_sessions.find_by_id(short, listing)
+        ended = (s is None or (s.get("pid") is not None and not v1_sessions.pid_alive(s.get("pid")))
+                 or s.get("state") in ("done", "blocked", "failed", "stopped") or s.get("status") == "idle")
+        late = not ended and over
+        if not (ended or late):
+            return out
+        projects = Path(transcripts_dir) if transcripts_dir else transcripts.default_projects()
+        try:
+            if s is not None:
+                subprocess.run([claude, "stop", short], capture_output=True, timeout=60, stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.SubprocessError) as e:
+            out["errors"].append({"scan": True, "error": f"cannot stop the scan session {short}: {e}; the next run "
+                                                         f"tries again"})
+            return out
+        finally:
+            try:
+                spend.settle(data, projects, short=short, session_id=sid, listing=lambda: v1_sessions.list_all(claude),
+                             now=now)
+            except Exception:  # noqa: BLE001 - bookkeeping never stops a finish
+                pass
+        if late and ahead:
+            out["errors"].append({"scan": True, "error": f"the scan session {short} started at {rec['started_at']}, "
+                                                         f"later than now ({cards.stamp(now)}); it was stopped and "
+                                                         f"taken with what it logged{went_back}"})
+        elif late:
+            out["errors"].append({"scan": True, "error": f"the scan session {short} was still working after "
+                                                         f"{SCAN_MAX_MIN} minutes; it was stopped and taken with what "
+                                                         f"it logged"})
+        try:  # best effort: without it the next run lists, stops and settles once more
+            write_json(path, dict(rec, stopped_at=cards.stamp(now)))
+        except OSError:
+            pass
+    try:  # the take would fail on the store after saving one more raw copy, so look first
+        Store(data, cfg=cfg, clock=lambda: now).list()
+    except ConfigError:  # config.yaml does not load: the take below reports it
+        pass
+    except (CardError, OSError, RecursionError) as e:
+        out["errors"].append({"scan": True, "error": f"the card store cannot be read ({e}); the scan session "
+                                                     f"{short} is taken once it can"})
+        return out
+    try:
+        p, _ = load_plan(rec["plan"])
+        via = {c["source"]: c["via"] for c in p["calls"]}
+        taken = take(data, rec["plan"], cfg=cfg, clock=lambda: now)
+        out["reads"] = [dict(r, via=via.get(r["source"], "mcp")) for r in taken["reads"]]
+        out["errors"] += taken["errors"]
+    except ConfigError as e:  # a ScanError or SourceError: the plan or its log cannot be read
+        out["errors"].append({"scan": True, "error": str(e)})
+    path.unlink(missing_ok=True)
+    out.update(open=False, ended=True)
+    return out

@@ -42,6 +42,8 @@ SLOT_FORMAT = "%Y-%m-%dT%H:%M"
 MISSED = re.compile(r"(skip|once|once_within: ?([1-9][0-9]{0,2})h)\Z", re.ASCII)
 DEFAULT_MISSED = "once_within: 3h"  # design 11, question 1: the author's recommendation
 GRACE = timedelta(minutes=5)  # a slot older than this at the run is missed
+# Ends an error for a time more than GRACE ahead of now (a last_slot, a watch time, a scan session's start).
+WENT_BACK = "the clock may have gone back"
 LOOK_BACK_DAYS = 7  # a routine that runs once a week still has a slot in the last 7 days
 
 

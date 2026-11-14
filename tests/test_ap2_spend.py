@@ -1253,7 +1253,7 @@ class LedgerTest(SpendCase):
     def test_record_launch_rejects_unknown_kind(self):
         with self.assertRaises(ValueError):
             spend.record_launch(self.data, SHORT, "bogus", None, profile())
-        self.assertEqual(spend.KINDS, ("worker", "dispatcher", "replies", "refresh", "discover", "oneoff"))
+        self.assertEqual(spend.KINDS, ("worker", "dispatcher", "replies", "refresh", "discover", "oneoff", "scan"))
 
     def test_cache_rereads_only_changed_files(self):
         self.put()

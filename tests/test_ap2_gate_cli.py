@@ -1,7 +1,9 @@
 """`ap2 gate [--data PATH] [--now ISO]`, run as a subprocess against a temp data folder (slice 5)."""
 from __future__ import annotations
 
+import contextlib
 import fcntl
+import io
 import json
 import os
 import shutil
@@ -11,8 +13,10 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 from tests.helpers import ROOT
+from assistant import cli
 from tests.test_ap2_cli import temp_inside_the_accounts_claude
 
 AP2 = ROOT / "bin" / "ap2"
@@ -42,6 +46,22 @@ class Ap2GateCommandTest(unittest.TestCase):
         r.update(over)
         (self.data / "routines").mkdir(parents=True, exist_ok=True)
         (self.data / "routines" / f"{name}.json").write_text(json.dumps(r), encoding="utf-8")
+
+    def test_a_run_in_an_empty_folder_prints_the_new_keys(self):
+        r = self.run_ap2("gate", "--now", "2025-11-11T09:01:30-08:00")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = json.loads(r.stdout)
+        self.assertEqual(sorted(out), ["errors", "last_run_at", "pass_due", "pruned", "reads", "routines",
+                                       "watches_due", "workers"])
+        self.assertEqual((out["workers"], out["reads"], out["pass_due"], out["errors"]), ([], [], False, []))
+        self.assertIs(json.loads((self.data / "pass.json").read_text())["due"], False)
+
+    def test_the_help_says_what_a_run_does(self):
+        r = self.run_ap2("gate", "--help")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        text = " ".join(r.stdout.split())
+        for words in ("check every worker", "due watches", "scan session", "pass.json", "starts no dispatcher pass"):
+            self.assertIn(words, text)
 
     def test_gate_prints_the_run_and_writes_the_heartbeat(self):
         self.put_routine()
@@ -164,6 +184,36 @@ class Ap2GateCommandTest(unittest.TestCase):
         r = self.run_ap2("gate", "--help")
         self.assertEqual(r.returncode, 0)
         self.assertIn("--now", r.stdout)
+
+
+class GateUsageFileTest(unittest.TestCase):
+    """`ap2 gate` in process, with `gate.run` patched: the usage file it passes is `~/.claude.json` when that file
+    exists, and None when it does not."""
+
+    def setUp(self):
+        if temp_inside_the_accounts_claude():
+            self.skipTest("the temp folder is inside the account's ~/.claude, so ap2 refuses every temp data folder")
+        self.tmp = Path(tempfile.mkdtemp(prefix="ap2-gate-usage-")).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.home = self.tmp / "home"
+        self.home.mkdir()
+        self.data = self.tmp / "data"
+        env = mock.patch.dict(os.environ, {"HOME": str(self.home)})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def usage_file(self):
+        with mock.patch("assistant.gate.run", return_value={}) as run, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(["gate", "--data", str(self.data)]), 0)
+        run.assert_called_once()
+        return run.call_args.kwargs["usage_file"]
+
+    def test_the_usage_file_is_the_homes_claude_json_only_when_it_exists(self):
+        self.assertEqual(Path.home(), self.home)
+        self.assertIsNone(self.usage_file())
+        (self.home / ".claude.json").write_text("{}", encoding="utf-8")
+        self.assertEqual(self.usage_file(), self.home / ".claude.json")
 
 
 if __name__ == "__main__":

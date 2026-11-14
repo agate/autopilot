@@ -1645,9 +1645,50 @@ Calls the author made without asking (check them):
     `on_pr: {comment: ...}`). `on_<event>: null` turns a write off, and `<action>: null` turns one action off
     (`on_start: { assign: null }` keeps the built-in `transition`). `Engine.apply_writes` still refuses in shadow
     mode before anything and runs nothing in live mode.
-  - Not yet (later slices): starting the scan session itself (`claude` with a small model, its tool allow-list, the
-    hook settings that call `ap2 scan save-raw`); the gate turning a source's `every:` into due watches and plans;
-    measuring a scan's token cost; running `writes` in live mode; `plan: split_here`; one card for a Slack ask
+  - The session itself (the gate starts and finishes it; see the gate entry below): `scan.start` writes
+    `<scan>/settings.json` (a PreToolUse hook, matcher `*`, `ap2 scan hook-allow --plan <plan>`; a PostToolUse
+    hook, `ap2 scan save-raw --plan <plan>`; `Bash`, `Edit`, `MultiEdit`, `NotebookEdit`, `WebFetch` and
+    `WebSearch` denied as well; the active profile's overlay merged under them as the worker floor merges it), then
+    starts `claude --bg -n "ap2 scan · <scan>" --model <small model> --settings <file> <brief>` in the scan folder
+    with the profile's env, and writes `<data>/scan-session.json` `{plan, short_id, session_id, started_at,
+    profile}` and a spend launch row of kind `scan`. A launch row that cannot be written does not stop the session:
+    the start returns a `note`, and the gate reports it as one error `{"scan": true, "error"}`. The record goes on
+    file right after the launch, with `session_id` empty, before the listing (up to 60 seconds) is asked for the session id; then it is written again
+    with the id. So an error or a Ctrl-C during the listing still leaves a record, and the next run stops and takes
+    that session. If that second write fails, the first record stays (`finish` works with an empty id). If the
+    first write fails, the session is stopped (`claude stop <short>`, errors ignored) and the start raises an error
+    that says so, so no session runs with no record. `hook-allow` allows a call only for a planned call's tool
+    (`calls_tool`, the take's own match), a `Write` to a planned records file, or, for a skill call, `Skill` with
+    that skill's name and `Read`, `Glob` and `Grep`, or, when the plan has an `mcp` or `connector` call,
+    `ToolSearch`. While tool search is on (a gateway profile's overlay sets `ENABLE_TOOL_SEARCH`), MCP tools are
+    deferred: the session must load a tool's schema with `ToolSearch` before it can call the tool. `ToolSearch` only
+    loads; it calls nothing and writes nothing. The brief says the session may load a listed tool this way. Its
+    reply is a schema, not a source's text, so it is never logged, even in a plan with a skill. Everything else is
+    denied with a reason, and so is any call it cannot decide (a bad plan or payload): it fails closed, never with
+    no opinion. It runs before every tool call, so `ap2` takes it before the argument parser, as it does
+    `hook-park`. `scan.finish` looks the session up in `claude agents --json --all`: its turn ended (`state` done,
+    blocked or failed, or `status` idle), it was stopped (`state` stopped: the CLI keeps a stopped session on its
+    listing, with no pid and no status, so one a retry or `claude stop` stopped is not waited on), it is gone, or its
+    pid is dead; then it is stopped (`claude stop`, its spend settled first, as a worker's stop is), taken
+    (`scan.take`) and the record removed. Stop first, then take:
+    a stop that fails keeps the record (the next run tries again, so no session is left running with no record), and
+    a session that ran too long logs nothing more while it is taken. A take that fails on the store (a `CardError`
+    or an `OSError`) keeps the record too: the gate reports one `{"scan": true}` error, the next run takes again, and
+    the scan watches are not timed meanwhile. Nothing is lost, and it heals once the store works. The stop and the
+    spend settle run once: the record then gets a `stopped_at`, and a later run skips the listing, the stop, the
+    settle and the late errors. Before each take the card store is read first, and the take runs only when it
+    reads. Until then each run adds one error, `the card store cannot be read (<why>); the scan session <short> is
+    taken once it can`. So a retry while the card store cannot be read adds no raw copy. A retry where the store
+    reads but a write fails still saves one raw copy each time. The stop and the settle run once either way. One
+    still working after `SCAN_MAX_MIN` (15) minutes is stopped and taken with what it logged, plus one error. One
+    whose `started_at` is more than `routines.GRACE` (5 minutes) after now (a run with a later `--now` started it,
+    or the clock went back) is late too, since it would never grow old: it is stopped and taken, with one error that
+    ends with "the clock may have gone back". A failed listing waits for the next run: the record is kept and the
+    scan watches are not timed. Once the session is that late, each such run adds one error, `cannot list the
+    sessions; the scan session <short> has been open since <started_at>, and the scan watches wait`, so a listing
+    that keeps failing is not silent. A record that cannot be read is one error and is removed, so it cannot hold
+    every later scan back.
+  - Not yet (later slices): measuring a scan's token cost; running `writes` in live mode; `plan: split_here`; one card for a Slack ask
     about a PR and the GitHub request for the same PR; `{setting}` patterns in `read.run`; pruning the scan
     folders under `.scan` (the gate prunes only `.raw`); tying a `fill: ai` source's follow-up reads (such as
     `slack_read_thread`) to the threads its planned read returned. Before the
@@ -1690,29 +1731,138 @@ Calls the author made without asking (check them):
     risk a second card. A routine card whose `key` is not text is passed over in that look. The plain words are
     built in for English and Chinese (`zh`, `zh-*`); any other configured language gets the English lines, since
     the gate has no AI to write them.
-  - Watches: until the source loader (slice 3) is on `v2`, the watch list is a plain argument of `gate.run`
-    (`[{name, every, last_check_at?}]`, `every` is `<N>m` or `<N>h`); `ap2 gate` passes none. A watch is due when
-    `now - last_check_at >= every` (or it was never checked); the gate lists it in `watches_due` and saves
-    `last_check_at` in `<data>/watches.json`, whose time wins when it is later than the one given. The gate does not
-    read the source and makes no card for the look. A watches.json that cannot be read, is not JSON or is not an
+  - Watches: `gate.watch_list(data)` reads them from the user's own source files: every name in `<data>/sources/`
+    that loads and whose `read.every` is `<N>m` or `<N>h` is a watch `{name, every, via}`. **[decided by the
+    builder]** Only the user's files are watched, and a one-line `extends: <built-in>` turns a built-in on; a
+    built-in file alone is never watched. Why: the built-in GitHub sources run `gh` every 5 minutes and the Slack
+    and Jira ones cost tokens, so nothing should run in a fresh data folder (or a test folder) before the user asks.
+    Reverse: watch the built-ins by default later. `every: each pass` is left out with no error (the dispatcher
+    pass reads those); a missing `every` is left out too; any other `every` is one error `{"watch", "error"}`, and a
+    file that does not load one error `{"source", "error"}`; the others still run. A watch is due when `now -
+    last_check_at >= every` (or it was never checked); the gate lists it in `watches_due` and saves `last_check_at`
+    in `<data>/watches.json`, whose time wins when it is later than the one given. watches.json is one object keyed
+    by watch name, each `{last_check_at, cut_at?}`: `cut_at` (a UTC stamp) marks a command watch whose read was cut
+    by the budget (below); writing `last_check_at` keeps it, and writing it keeps every other key. **[decided by the
+    builder]**
+    `gate.run(data, now, watches=None)` (what `ap2 gate` passes) means "from the user's source files, and read
+    them"; a list a caller passes (`[{name, every, last_check_at?}]`) is only timed, never read, which keeps the
+    timing tests as they are. A due `via: command` watch is read by the gate itself (`Engine.read`); `reads` gets
+    `{watch, via, made, updated, unchanged, dropped}` per read, a failed read (exit not 0, a timeout, an unset
+    setting) is one error `{"watch", "error"}` and the next watch is still read. **[decided by the builder]** The
+    command reads of one run share one time budget, `READ_BUDGET` (120 seconds), counted from when the reads begin. Each
+    read may use what is left of it, less `READ_FLOOR` (10) seconds kept for each read still to go (or an even share
+    of what is left, when that is more). So one hanging read cannot take the others' time. A source's
+    `read.timeout` (up to 600) that is longer is cut under the gate. **[decided by the dispatcher]** Four rules.
+    (1) Two passes: a read stopped at that cut is no error yet; once every due watch had its first try, each read
+    cut this way runs again, in order, with what is left, shared the same way among them (one cut read gets all of
+    it). So one slow read is not cut by its place in the order, and a hanging read only gets the time the others
+    left. (2) A second try runs only when the time it would get is more than its first try had; otherwise the first
+    try's error stands, naming the seconds that first try waited, and the command is not run again (no extra raw
+    copy). Only the second try's failure is an error, the usual timeout one that names the seconds it waited. A
+    watch gets one error at most. (3) A read counts as cut (`engine.ReadCut`) only when the gate's cut stopped it
+    while it still ran, or after it exited 0 while something it started still held its output open. A read that
+    fails any other way (its own timeout, exit not 0 by itself even with its output still held open, an unset
+    setting) is its error at once and is not tried again. (4) A first try stopped by a timeout, its own or the
+    gate's, while it held more than an even share of what was left (so it used time owed to the reads after it) is
+    marked: the watch gets this run's stamp as `cut_at` in watches.json, whether it was cut, failed at the cap
+    after it exited not 0 with its output held open, or was stopped by its own `read.timeout` above that share
+    (those failures are still its error at once, by (3); the engine sets `waited`, the seconds it was given, on
+    the error of every read a timeout stopped, so the gate does not guess from the time it took). A first try
+    stopped by a timeout while it held no more than an even share keeps what it had: an old `cut_at` stays as it
+    was, not refreshed, and none is added (that read only lost time to the ones before it, and marking it would
+    put it back behind the hanging one). A first try that ends by itself (read, or failed another way) clears it;
+    a second try that then works keeps it. The next run reads the due command watches with no `cut_at` first, then
+    those with one, the oldest stamp first (the one cut over its share most recently goes last), by name otherwise;
+    a `cut_at` that is missing, not text or not a UTC stamp means not cut, and so does one more than
+    `routines.GRACE` later than now (a clock that was ahead would otherwise pin the watch at the back until real
+    time passed it). Why the old stamp is kept: a healthy watch that stalled once behind a hanging one would
+    otherwise be marked as the hanging one is, be read last by name every run and fail every run; with its older
+    stamp it goes first the next time the hanging one took the large share, reads, and loses its mark. The write of `cut_at` uses the same atomic write and is best effort: a
+    failure is one error `{"watches", "error"}` and the run goes on (the reads already made their cards and the
+    watch times are written; only the order of the next run is lost).
+    Why: fixing only the second try and the exit code (option A) left a healthy read that needs 30 seconds failing
+    every run behind a hanging one sorted first (the hanging one takes 110 seconds, the healthy one gets its 10);
+    with `cut_at` the hanging one goes last and the healthy one gets the large share. A fixed 30-second cap per read
+    with no shared budget (option C) lets 6 reads hold the gate lock 3 minutes and pushes every read over 30
+    seconds to `ap2 source read`.
+    Once the budget is spent, a due watch is not started: one error `{"watch", "error": "not read: this run's 120
+    seconds for command reads were spent; it is read at its next due time"}`. Its time was already written, so it
+    is not rewound; it waits for its next due time. Why: a read runs inside the gate lock, so while it hangs every
+    later run finds the lock held and does nothing, and a routine slot that came due meanwhile is found more than
+    `routines.GRACE` (5 minutes) late and, with `missed_run: skip`, skipped. A read that needs longer belongs to
+    `ap2 source read <name>`, which has no budget. Known limit **[decided by the dispatcher]**: the budget bounds
+    only the command reads. The gate's `claude` CLI calls have their own timeouts in v1 (`lib/autopilot`: `claude
+    agents` 60 seconds, `claude stop` 60, the `--bg` launch 120) and the run has no overall deadline.
+    `Workers.check` makes one listing, a stop per worker it stops, and per planned resume a tool listing (up to
+    `DISCOVER_TIMEOUT`, 180 seconds) and a launch, so its worst case grows with the number of workers on record;
+    `scan.finish` (listing, stop, settle's listing: up to 180 seconds) and `scan.start` (a gateway profile's key
+    check, the cap's listing, the launch, the listing after it: 240 seconds and the key check) add theirs. When the
+    CLI hangs on every call, a run with a scan to finish and one to start takes about 540 seconds even with no
+    worker (180 + 120 for the reads + 240), past `routines.GRACE` (5 minutes), and a routine slot that came due
+    meanwhile can be found late and, with `missed_run: skip`, skipped. Not bounded here: a deadline in the gate can
+    only skip whole steps; it cannot stop `Workers.check` partway (its calls are unbounded in count and their
+    timeouts live in v1), so a real bound needs a deadline inside `Workers.check` and the scan calls. The due
+    `mcp`, `connector` and `skill` watches of one run go into one scan plan (`scan.plan`) and, when it has calls,
+    one scan session
+    (`scan.start`); a later run takes it into cards when it ends (`scan.finish`, its reads and errors in `reads` and
+    `errors`). While `<data>/scan-session.json` exists no second scan starts and the scan watches are not timed, so
+    their `last_check_at` is not written. A paused cap, an allowance of 0 or an active profile that does not load
+    starts nothing: one error `{"scan": true, "error"}`, and the watch times stay written. **[decided by the
+    builder]** Scan sessions run in shadow mode too: they only read, and switch-over step 2 compares shadow-mode
+    pages with v1. The PreToolUse guard (`hook-allow`), not the permission mode, keeps the session to its planned
+    tools, so no prompt can make it wait (8.2 rule 3); a connector's server name is known only inside the session,
+    so an allow rule could not name it. The scan model is the active profile's `small_model`, or `haiku` on the
+    subscription (no `small_model`). One scan at a time, at most `SCAN_MAX_MIN` (15) minutes; its launch row is kind
+    `scan` (new in `spend.KINDS`), so a gateway's daily cap counts it. Tests start a scan with `gate.run(...,
+    claude=<tests/bin/fake-claude-v2>)`; no real `claude` runs in any test. The look itself makes no card. A watches.json that cannot be read, is not JSON or is not an
     object is treated like a damaged saved time: the run logs it, adds `{"watches": <path>, "error": ...}` to
     `errors`, starts from no saved times (so each watch is due) and writes the file again when a watch is due. A
     watches.json holding text UTF-8 cannot write (a lone surrogate) is treated the same way; a watch name like that
     is refused as a bad watch, with an error, and the others still run.
+  - Workers: every run checks every worker on record (`Workers.check(by="gate")`, design 8.2): a result file ends
+    it, a `question.json` becomes the card's ask, a dead one is resumed once (live mode) or noted (shadow mode), an
+    idle or blocked one is stopped after its timeout. Only when `workers.json` lists a worker, so a folder with none
+    makes no `claude agents` call. Its entries go in gate.json `workers`; each that did something is one gate.log
+    line; any exception from the check is one error `{"workers": true, "error"}` and the run goes on. **[decided by
+    the builder]** `ap2 gate` passes the usage cache `~/.claude.json` (read only, v1's path) when that file exists,
+    so a parked subscription worker resumes from the gate as v1's gate notices it. No new flag.
+  - Pass due **[decided by the builder]**: every run ends (before the heartbeat) by writing `<data>/pass.json`
+    atomically, `{"due", "since", "why", "seen", "checked_at"}`, and gate.json `pass_due`. It compares what is
+    there now with `seen`, what was there when the last pass started: the ready card ids (a `planned` card with no
+    ask, no worker on record and a `feed` other than `v1-import`; or a `routine` card in Running with no worker and
+    no `sessions`), the result files `<data>/sessions/<card>/<handback|review|prloop>.json` with their whole-second
+    mtime (as v1's `fingerprint` does), and each open ask as `card -> type/from/reason/role`. `why` lists `{"why":
+    "ready" | "result" | "answered", "card", "file"?}` for each ready card or result entry not in `seen`, and each ask
+    in `seen` that is no longer open the same way; `due` is `bool(why)`; `since` is kept from the first run that found
+    it due and reset when it is not due. gate.log gets `pass due: <n> reason(s)` when due. A damaged `pass.json` is
+    one error and the run goes on from an empty `seen`. A `workers.json` that cannot be read (nested too deep
+    included) is one error `{"pass": true, "error"}` that names the file (the workers check reports it too, as its
+    own `{"workers": true}` error), and no `pass.json` is written that run. The gate starts no pass. The choices: a change since the
+    last pass makes a pass due, a standing state does not (as v1's `fingerprint` and `should_dispatch` do), so a
+    pass that could start nothing is not due again every minute; reverse: delete the file, the next run rebuilds it.
+    Only `gate.pass_started(data, now)` updates `seen` (it copies the present state and clears `due`); the pass
+    calls it when it starts, so until there is a pass a due pass stays due. Ready is a cheap wake-up, not the start
+    plan: the gate does not resolve `depends_on` or check `max_workers` or resources (the pass does,
+    `resources.plan`), and an imported v1 copy is never ready. "Answered" means an ask that closed: the store has no
+    answer field on an ask, so an ask that was open at the last pass and is not open now counts; at worst this wakes
+    one extra pass.
   - Heartbeat: every run writes `<data>/gate.json` atomically: `{"last_run_at": <UTC>, "routines": [{routine,
-    slot, key, action (run, late, skip, exists or start), card, late_minutes}], "watches_due": [...], "pruned": [point
-    ids], "errors": [...]}`; text in `errors` that UTF-8 cannot write (a file name that is not UTF-8) is written with
+    slot, key, action (run, late, skip, exists or start), card, late_minutes}], "workers": [the check's entries],
+    "watches_due": [...], "reads": [...], "pruned": [point ids], "pass_due": true | false, "errors": [...]}`; text in `errors` that UTF-8 cannot write (a file name that is not UTF-8) is written with
     backslash escapes. Every line of `<data>/gate.log` starts with the run's UTC time
     (`2026-11-10T14:30:05Z run: ...`), one line per routine action or error and one summary line; past 1 MB it is
     renamed `gate.log.1` (one old file is kept). Each run calls `Store.prune()`, then, on the first run of a UTC
     day, prunes old raw source files (see the source engine above): `pruned <N> raw source file(s) older than 30
-    days` in gate.log when N > 0 (N counts raw files and reports), not in `gate.json`, which keeps its five keys;
+    days` in gate.log when N > 0 (N counts raw files and reports), not in `gate.json` (its eight keys above);
     its errors go in `errors`. A later run the same UTC day does not prune and writes no line for it.
   - One run at a time: `<data>/.gate.lock` is taken with a non-blocking `flock`; a run that finds it held prints
     `{"locked": true, "lock": <path>}`, writes nothing and exits 0. A lock that cannot be taken for any other reason
-    (`ENOLCK` on a network share) is a config error: one `ap2: cannot lock the gate ...` line and exit 1. The gate
-    starts no process, opens no socket and writes only inside the data folder; the time is passed in
-    (`gate.run(data, now)`), never read inside.
+    (`ENOLCK` on a network share) is a config error: one `ap2: cannot lock the gate ...` line and exit 1. The gate's
+    own file writes stay inside the data folder and it opens no socket. The processes it starts are the `claude`
+    CLI (`agents` and `stop` for the worker check and the scan session, and at most one `--bg` scan session per
+    run, never a worker in shadow mode) and each due command watch's `read.run`; with no worker on record and no
+    due watch it starts none. It runs no source `writes`. The time is passed in (`gate.run(data, now)`), never read
+    inside.
   - A clock that went back. A routine whose `last_slot`, read in its `tz`, is more than the 5-minute grace after
     now gets one error, `<file>: last_slot <slot> is later than now (<now>); the clock may have gone back. Set
     last_slot to null or an earlier slot to run it again.`, in `errors` and gate.log; after a `tz` change `<slot>` is
@@ -1738,7 +1888,9 @@ Calls the author made without asking (check them):
     data folder fails) and the data folder exists, `gate.run` appends `<UTC time> fatal: <error>` to gate.log, best
     effort, then raises the same error; `ap2 gate` still prints one `ap2: ...` line and exits 1. launchd's own
     stderr goes to `~/Library/Logs/assistant/gate.err.log` (section 12, "Install").
-  - `ap2 gate [--data PATH] [--now ISO]` runs once and prints the run as JSON. `--now` needs a zone (`Z` or an
+  - `ap2 gate [--data PATH] [--now ISO]` runs once and prints the run as JSON: it starts the due routine slots,
+    checks every worker, reads the due watches from the user's sources, starts or takes one scan session and writes
+    `pass.json`; it starts no dispatcher pass. `--now` needs a zone (`Z` or an
     offset); a time without one is an argument error (exit 2). `--now` may not be later than the real time plus
     the 5-minute grace, also an argument error: a run writes `last_slot`, makes cards and prunes restore points,
     so a run in the future would hold back every real slot until then and prune points and raw files that are only
