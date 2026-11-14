@@ -14,15 +14,15 @@
   name in each slot). A re-run moves a card the old import wrote with a one-text title to that shape once.
 
 `--take-over NAME` moves one project to v2 (design 12, "Take over a v1 project"). The project must be paused in v1
-first (`ap pause NAME`: v1's `paused` file, or `stopped: true`) with no v1 worker listed; v2 never pauses v1 and
-v1's folder is only read (`os.scandir`, `os.stat`, and copies from it). Its cards turn live (`taken_over`, the
-branch, worktree, needs, spec and saved sessions v2's workers continue), every decision gets a card (settled ones
-`done`, with the answer), the whole project folder is copied to `<data>/v1/<name>/` and each open task's run folder
-into its card's run folder (same bytes and mtime, through a temp file linked in place, or renamed in place after a
-check that the destination is absent where the file system has no hard links; never overwritten, never removed,
-v1's links skipped, a link on the v2 side refused), and `<data>/projects/<name>.yaml` is written from config.json
-when it does not exist (its values are checked only then). A card with `taken_over` is never rebuilt from v1, and
-the plain import skips a project whose project card has it.
+first (`ap pause NAME`: v1's `paused` file, or `stopped: true`) with no v1 worker listed and no answer v1 has not
+acted on yet (`handling: true`); v2 never pauses v1 and v1's folder is only read (`os.scandir`, `os.stat`, and
+copies from it). Its cards turn live (`taken_over`, the branch, worktree, needs, spec and saved sessions v2's
+workers continue), every decision gets a card (settled ones `done`, with the answer), the whole project folder is
+copied to `<data>/v1/<name>/` and each open task's run folder into its card's run folder (same bytes and mtime,
+through a temp file linked in place, or renamed in place after a check that the destination is absent where the file
+system has no hard links; never overwritten, never removed, v1's links skipped, a link on the v2 side refused), and
+`<data>/projects/<name>.yaml` is written from config.json when it does not exist (its values are checked only then).
+A card with `taken_over` is never rebuilt from v1, and the plain import skips a project whose project card has it.
 """
 from __future__ import annotations
 
@@ -426,11 +426,14 @@ class _Maker:
         if not os.path.isabs(spec):
             return spec
         normal = Path(os.path.normpath(spec))
-        for base in dict.fromkeys((self.folder, self.folder.resolve())):
-            try:
-                return str(self.live["record"] / normal.relative_to(base))
-            except ValueError:
-                continue
+        # The spec as written and its real path (a link in it, such as a `--from` reached through one), against
+        # `--from`'s project folder and its real path. Nothing is read through it beyond `os.path.realpath`.
+        for path in dict.fromkeys((normal, Path(os.path.realpath(spec)))):
+            for base in dict.fromkeys((self.folder, self.folder.resolve())):
+                try:
+                    return str(self.live["record"] / path.relative_to(base))
+                except ValueError:
+                    continue
         return spec
 
     def question(self, d: dict, task_ids: set, open_: bool) -> dict:
@@ -444,7 +447,8 @@ class _Maker:
         ask = {"type": ASK[d["kind"]], "from": "v1"} if open_ else None
         if self.live:
             record.update(answer=d.get("answer"), answered_at=d.get("answered_at"), body=d.get("body"),
-                          options=d.get("options"), links=d.get("links"))
+                          options=d.get("options"), links=d.get("links"), handling=d.get("handling"),
+                          action=d.get("action"))
             body = self.texts(d.get("body"), "")[self.langs[0]]
             if ask is not None and not cards.blank(body):
                 ask["text"] = body  # what v2's page shows with the ask
@@ -707,7 +711,7 @@ def _take_over(store: Store, name: str, folder: Path, langs: tuple, labels: Labe
 
     existing = _cards_by_key(store, True)  # reads only: nothing is created before the checks pass
     try:
-        cfg, tasks, _ = read_project(folder)
+        cfg, tasks, decisions = read_project(folder)
         state = _read_object(folder, "state.json")
     except _Refused as e:
         stop(e)
@@ -715,6 +719,9 @@ def _take_over(store: Store, name: str, folder: Path, langs: tuple, labels: Labe
     if not isinstance(listed, list):
         stop("state.json: workers is not a list")
     working = [f"{w.get('task')} {w.get('role')}" if isinstance(w, dict) else cards.shown(w) for w in listed]
+    # An answer v1 took but has not acted on yet (`ap decision resolve ... --handling`): its next pass would act on it,
+    # then `ap decision handled` drops the flag. Paused, no v1 pass runs, and a settled card would never act on it.
+    handling = [d["id"] for d in decisions if d.get("handling") is True]
     # How v1 records the pause (`ap pause` writes `paused`; `stopped: true` in config.json), read as v1 reads it.
     try:
         paused = (folder / "paused").exists() or cfg.get("stopped") is True
@@ -725,6 +732,10 @@ def _take_over(store: Store, name: str, folder: Path, langs: tuple, labels: Labe
     if not dry_run and working:
         stop(f"v1 still lists a worker on it ({', '.join(working)}); run `ap worker end {name} TASK ROLE` in v1 "
              f"for each first, so its session is saved on the task")
+    if not dry_run and handling:
+        stop(f"v1 has not acted on the answer{'s' if len(handling) > 1 else ''} to {', '.join(handling)} yet; run "
+             f"`ap resume {name}` in v1, let one pass act on {'them' if len(handling) > 1 else 'it'}, then "
+             f"`ap pause {name}` and take over again")
     pfile = projects.path(data, name)
     seen = set()
     _refuse_link(pfile, data, seen)
@@ -778,7 +789,8 @@ def _take_over(store: Store, name: str, folder: Path, langs: tuple, labels: Labe
                       False)
     files["skipped"] = list(dict.fromkeys(files["skipped"]))
     return {"name": name, "folder": str(folder), "cards": report, "not_imported": {"decisions": 0},
-            "take_over": {"paused": paused, "workers": working}, "files": files, "project_file": project_file}
+            "take_over": {"paused": paused, "workers": working, "handling": handling}, "files": files,
+            "project_file": project_file}
 
 
 def _project_file(cfg: dict, stop) -> tuple:

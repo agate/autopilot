@@ -1514,6 +1514,24 @@ class TakeOverTest(unittest.TestCase):
         self.assertIn("PROJ-3 pr", line)
         self.assertIn("ap worker end shop TASK ROLE", line)
 
+    def test_an_answer_v1_has_not_acted_on_yet_is_refused_with_the_resume_command(self):
+        def change(s):
+            s["decisions"][0].update(status="answered", answer="stripe", handling=True,
+                                     answered_at="2026-11-06T10:00:00Z")
+        self.edit_state("projects/shop", change)
+        line = self.refused()
+        self.assertIn("D1", line)
+        self.assertIn("not acted on", line)
+        self.assertIn("ap resume shop", line)
+        self.assertIn("ap pause shop", line)
+        report = self.take_over("--dry-run")  # a dry run reports it instead, and writes nothing
+        self.assertFalse(self.data.exists())
+        self.assertEqual(self.project_entry(report)["take_over"], {"paused": True, "workers": [], "handling": ["D1"]})
+        self.edit_state("projects/shop", lambda s: s["decisions"][0].pop("handling"))  # v1's pass acted on it
+        self.take_over()
+        record = self.by_key()["v1:shop:D1"]["source"]["record"]
+        self.assertEqual((record["answer"], record["handling"], record["action"]), ("stripe", None, None))
+
     def test_a_project_read_project_refuses_is_one_line(self):
         self.edit_state("projects/shop", lambda s: s.pop("decisions"))
         self.assertIn("decisions missing", self.refused())
@@ -1543,7 +1561,7 @@ class TakeOverTest(unittest.TestCase):
         self.assertFalse(self.data.exists())
         self.assertEqual(snapshot(self.v1), before)
         entry = self.project_entry(report)
-        self.assertEqual(entry["take_over"], {"paused": False, "workers": ["PROJ-2 implement"]})
+        self.assertEqual(entry["take_over"], {"paused": False, "workers": ["PROJ-2 implement"], "handling": []})
         self.assertEqual(set(self.actions(report).values()), {"add"})
         self.assertIn("v1/shop/state.json", entry["files"]["copied"])
         self.assertEqual(entry["project_file"], "write")
@@ -1597,8 +1615,9 @@ class TakeOverTest(unittest.TestCase):
             with self.subTest(key=key):
                 self.assertEqual((c["kind"], c["lane"], c["ask"]), ("question", "done", None))
                 self.assertTrue(c["taken_over"])
-                self.assertEqual(sorted(c["source"]["record"]), ["answer", "answered_at", "body", "created_at",
-                                                                 "kind", "links", "options", "status", "task"])
+                self.assertEqual(sorted(c["source"]["record"]), ["action", "answer", "answered_at", "body",
+                                                                 "created_at", "handling", "kind", "links",
+                                                                 "options", "status", "task"])
         self.assertEqual(got["v1:shop:D5"]["source"]["record"]["answer"], "no")
         self.assertEqual(got["v1:shop:D5"]["source"]["record"]["body"], {"en": "It still works."})
         self.assertEqual(got["v1:shop:D5"]["source"]["record"]["answered_at"], "2026-11-05T11:00:00Z")
@@ -1667,6 +1686,20 @@ class TakeOverTest(unittest.TestCase):
         self.edit_state("projects/shop", lambda s: s["tasks"][1].update(spec="/elsewhere/PROJ-2.md"))
         self.take_over()
         self.assertEqual(self.by_key()["v1:shop:PROJ-2"]["spec"], "/elsewhere/PROJ-2.md")
+
+    def test_a_spec_written_through_a_link_to_the_v1_folder_points_at_its_copy(self):
+        if not hasattr(os, "symlink"):
+            self.skipTest("no symlinks here")
+        alias = self.tmp / "alias-v1"
+        try:
+            alias.symlink_to(self.v1, target_is_directory=True)
+        except OSError as e:
+            self.skipTest(f"cannot make a symlink: {e}")
+        spec = str(alias / "projects" / "shop" / "specs" / "PROJ-2.md")
+        self.edit_state("projects/shop", lambda s: s["tasks"][1].update(spec=spec))
+        self.ok("--from", str(alias), "--take-over", "shop", source=False)
+        self.assertEqual(self.by_key()["v1:shop:PROJ-2"]["spec"],
+                         str(self.data / "v1" / "shop" / "specs" / "PROJ-2.md"))
 
     def test_a_link_on_the_v2_side_stops_the_take_over(self):
         for where in ("v1", "v1/shop", "v1/shop/runs"):

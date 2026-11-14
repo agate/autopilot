@@ -3804,10 +3804,14 @@ Calls the author made without asking (check them):
     - Refusals, one `ap2:` line, exit 1, nothing written (not even the data folder's layout): the project is not
       paused (no `paused` file in its folder and no `stopped: true` in its config.json; the line says to run
       `ap pause NAME` in v1); its state.json lists a worker (the line names each `task role` and says to run
-      `ap worker end NAME TASK ROLE` in v1, which saves the session on the task); the project does not read (as
+      `ap worker end NAME TASK ROLE` in v1, which saves the session on the task); a decision has `handling: true`
+      (the user answered it and v1 took the answer with `ap decision resolve ... --handling`, but no v1 pass has
+      acted on it yet; the line names each and says to run `ap resume NAME` in v1, let one pass act on them, then
+      `ap pause NAME` and take over again); the project does not read (as
       for the import), a task's `sessions` names a role v2 has no worker for or holds a text that is not a session
       id; a config.json value the project file would refuse (when the file is written); a link where a copy goes. `--dry-run` reports
-      `take_over: {paused, workers}` and what would be added, changed and copied instead of refusing the first two.
+      `take_over: {paused, workers, handling: [decision ids]}` and what would be added, changed and copied instead
+      of refusing the first three.
     - Live cards: every card gets `taken_over` (the time) and a live `do` (v2 works on it, v1 is paused for it).
       A task card also gets `branch` (v1's; an open task without one gets `projects.branch(project, <v1 id>,
       <slug of its title>)`, never the card key, whose colons git refuses; v1 has no id rule, so a computed branch
@@ -3821,7 +3825,8 @@ Calls the author made without asking (check them):
       Every decision gets a card: an open `ask` or `gate` an open question card; every other one (answered,
       resolved, undone, open `self` and `system`) a done question card (`ask: null`) whose `source.record` keeps
       `kind`, `task`, `status`, `answer`, `answered_at` and `created_at`; `not_imported.decisions` is 0. Every
-      decision card's `source.record` also keeps v1's `body`, `options` and `links` as given, and an open one's
+      decision card's `source.record` also keeps v1's `body`, `options`, `links`, `handling` and `action` as given
+      (null when unset), and an open one's
       `ask.text` (what v2 shows with an ask) is the body's text in the primary language when it is not blank, so
       "answer it here" shows what v1 asked; the read-only import keeps its cards as they were. A card the
       import made keeps its id, parent and audit (`action: take_over`); one not made yet is added live. Nothing goes
@@ -3840,7 +3845,9 @@ Calls the author made without asking (check them):
       (`<data>/sessions/<card>/`), where v2's workers read and write; none is when v1's `runs/` is itself a link (it
       is listed under `skipped`), and a task id that is not one plain path part (`.`, `..`, one holding a separator)
       gets no run-folder copy, so a copy never reads outside `runs/`. A `spec` inside the project folder points at its
-      copy under `<data>/v1/<name>/`; another `spec` is kept. A link (or anything not a file or folder) on the v1 side
+      copy under `<data>/v1/<name>/`, also when it is written through a link to that folder (a `--from` reached
+      through a link, `/tmp` against `/private/tmp`): the path as written and its `os.path.realpath` are both tried
+      against the project folder and its real path, and nothing is read through it; another `spec` is kept. A link (or anything not a file or folder) on the v1 side
       is never followed or copied and is listed under `skipped`; a link on the v2 side (`<data>/v1`, anything under
       it, `<data>/projects`, `<data>/sessions`, a run folder or a file in it) stops the take-over; every link check
       runs before anything is written (a card added now gets its run folder after the cards are written, under the
@@ -3862,7 +3869,9 @@ Calls the author made without asking (check them):
       card has `taken_over` and lists it under the report's `taken_over: [names]` (exit 0; the others import).
     - Choices taken (simplest reversible, v2 RULES.md line 3): refuse, not warn, when v1 is not paused (a warning
       would let v1 and v2 both work on it; the dry run lets the user look first); refuse while v1 lists a worker (a
-      live v1 session could hand back into v1's run folder after the copy; parked ones may be allowed later); copy,
+      live v1 session could hand back into v1's run folder after the copy; parked ones may be allowed later);
+      refuse while a decision has `handling: true`, not carry it as live work (a settled card would leave the answer
+      acted on by neither side; to reverse, carry it as an open card later); copy,
       not link (a link would let a v2 write reach v1, and the store refuses links); the whole folder lands in
       `<data>/v1/<name>/` as a frozen record and open tasks' run folders a second time where v2's workers look
       (undo: delete `<data>/v1/<name>/`); never overwrite, never remove, never rebuild a taken-over card; each

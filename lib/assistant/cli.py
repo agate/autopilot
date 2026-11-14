@@ -1220,7 +1220,8 @@ def _import_v1_parser(sub) -> None:
                                     "ask or gate. v1's files are only read. Prints the report as JSON; exits 1 "
                                     "after it when a project could not be read. With --take-over NAME, move that "
                                     "one project to v2 instead: it must be paused in v1 first (ap pause NAME) "
-                                    "with no v1 worker listed; its cards turn live, every decision and every file "
+                                    "with no v1 worker listed and no answer v1 has not acted on yet; its cards "
+                                    "turn live, every decision and every file "
                                     "of its folder come along, and v1's folder is only read. A project taken over "
                                     "is skipped by the plain import.")
     im.add_argument("--from", dest="from_dir", metavar="DIR",
