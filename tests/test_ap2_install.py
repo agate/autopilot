@@ -461,6 +461,8 @@ class DefaultRunnerTest(unittest.TestCase):
             self.assertEqual(install._launchctl("print", "gui/1/com.assistant.gate"), (0, "out\nerr"))
         self.assertEqual(run.call_args.args[0], ["launchctl", "print", "gui/1/com.assistant.gate"])
         self.assertEqual(run.call_args.kwargs["timeout"], 30)
+        self.assertEqual({k: run.call_args.kwargs.get(k) for k in ("capture_output", "text", "stdin")},
+                         {"capture_output": True, "text": True, "stdin": subprocess.DEVNULL})
 
     def test_a_missing_launchctl_is_127(self):
         with mock.patch.object(install.subprocess, "run", side_effect=FileNotFoundError(2, "No such file")):
