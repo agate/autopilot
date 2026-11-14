@@ -2,7 +2,7 @@
 
 - `read(name)` runs a `via: command` source's `read.run` itself (argv split with `shlex`, no shell, a timeout
   that `max_timeout` may cut shorter, the data folder as the working folder) and saves its raw stdout first, under
-  `<data>/sources/.raw/<source>/<UTC stamp>-<6 hex>.json`.
+  `<data>/sources/.raw/<source>/<UTC stamp>-<6 hex>.json`. A read stopped at that shorter cap raises `ReadCut`.
 - `read_saved(name, raw_path, records=None)` takes output saved by someone else (a scan session for `mcp`,
   `connector` and `skill`, slice 4). For `fill: ai` the scan session's records come in `records`.
 - A record missing a required field (`status` too for `brings: work`), or a field a link or key pattern names, is
@@ -55,6 +55,13 @@ ERR_TAIL = 64 * 1024
 MAX_ITEMS = 10_000
 # How many times a stop kills the command's group before it gives up on emptying it.
 STOP_TRIES = 100
+
+
+class ReadCut(SourceError):
+    """A read stopped at the `max_timeout` it was given, which was shorter than its own `read.timeout`: with more
+    time it might have ended. The gate gives such a read a second try with what is left of its time."""
+
+
 # The catchable signals whose default action ends the process and that a terminal, shell, supervisor or user may
 # send. While a read waits, those still at their default stop the command's group too (SIGINT does it through
 # KeyboardInterrupt). A missing one is skipped.
@@ -166,7 +173,8 @@ class Engine:
         """Run a `via: command` source and make its cards; with `dry_run`, save nothing and say what each item
         would become. `max_timeout` (seconds) caps the source's `read.timeout`: the gate passes what is left of its
         time for command reads, less the time it keeps for the reads still to go; None keeps the source's own
-        timeout."""
+        timeout. A read stopped at that cap (when it was shorter than the source's own timeout) raises `ReadCut`,
+        a SourceError with the same message."""
         src = self.source(name)
         if src.via != "command":
             raise SourceError(f"{src.file}: read.via is {src.via}; only a scan session can make that read. Give "
@@ -274,11 +282,12 @@ class Engine:
                 if ended == "full":
                     raise SourceError(f"{src.name}: read.run printed more than {MAX_OUTPUT} bytes; "
                                       f"stopped{saved}") from failed
+                timed_out = ReadCut if cut else SourceError  # stopped at the gate's cap, not at its own timeout
                 if code is not None:
-                    raise SourceError(f"{src.name}: read.run exited with {code}, but something it started still "
-                                      f"held its output open after {waited} seconds{cut}; stopped{saved}") \
+                    raise timed_out(f"{src.name}: read.run exited with {code}, but something it started still "
+                                    f"held its output open after {waited} seconds{cut}; stopped{saved}") \
                         from failed
-                raise SourceError(f"{src.name}: read.run took longer than {waited} seconds{cut}; stopped{saved}") \
+                raise timed_out(f"{src.name}: read.run took longer than {waited} seconds{cut}; stopped{saved}") \
                     from failed
         finally:
             # Ctrl-C last, so a new one cannot cut the others short; a failed restore never hides the read's error.

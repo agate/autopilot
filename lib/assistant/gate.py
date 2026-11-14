@@ -15,8 +15,9 @@ its key and only writes `last_slot`.
 Then (phase 2): every worker on record is checked (`Workers.check`, 8.2); the watches come from the user's own source
 files (`watch_list`); a due `via: command` watch is read here (`Engine.read`), all of them in READ_BUDGET (120)
 seconds per run (a read's timeout is cut to what is left, less READ_FLOOR (10) seconds kept for each read still to go,
-or an even share when that is more, so one hanging read cannot use the time of the others and one slow read is not
-cut by its place in the order; once it is spent a watch waits for its next due time, so one slow read cannot hold the
+or an even share when that is more, so one hanging read cannot use the time of the others; a read stopped at that
+cut is read again once each due watch had its first try, with what is left, so one slow read is not cut by its place
+in the order; once it is spent a watch waits for its next due time, so one slow read cannot hold the
 lock, and with it every later run and routine slot, for long; a long read belongs to `ap2 source read`); the due
 `mcp`, `connector` and `skill` watches share one scan session (`scan.start`), which a later run takes into cards
 when it ends (`scan.finish`); and
@@ -374,12 +375,22 @@ def _read_commands(data: Path, now: datetime, cfg, names: list, reads: list, err
     """Read each due `via: command` watch (`Engine.read`); a failed read is one error and the next still reads.
     The reads share READ_BUDGET seconds: each read's timeout is cut to what is left, less READ_FLOOR seconds kept for
     each read still to go (or to an even share of what is left, when that is more), so one hanging read cannot use
-    the time of the others and one slow read is not cut by its place in the order. Once it is spent a watch is not
-    read (one error); its time stays written, so it is read at its next due time."""
+    the time of the others. A read stopped at that cut (`engine.ReadCut`) is no error yet: once every due watch had
+    its first try, it is read again with what is left, shared the same way among the reads cut, so no read fails only
+    by its place in the order. Only that second try's failure is its one error (the first try's when nothing is left
+    by then). Once it is spent a watch is not read (one error); its time stays written, so it is read at its next due
+    time."""
     if not names:
         return
     began = monotonic()
     eng = engine.Engine(data, cfg, clock=lambda: now)
+
+    def failed(name: str, e: BaseException) -> None:
+        why = str(e) if isinstance(e, (ConfigError, CardError, OSError)) else _error_text(e)
+        errors.append({"watch": name, "error": why})
+        log(f"watch {name}: error: {why}")
+
+    cut = []  # (name, the first try's ReadCut), in order
     for i, name in enumerate(names):
         left = READ_BUDGET - (monotonic() - began)
         if left <= 0:
@@ -391,10 +402,24 @@ def _read_commands(data: Path, now: datetime, cfg, names: list, reads: list, err
         try:
             after = len(names) - i - 1  # the reads still to go after this one
             result = eng.read(name, max_timeout=max(left / (after + 1), left - READ_FLOOR * after))
+        except engine.ReadCut as e:
+            cut.append((name, e))
+            continue
         except Exception as e:  # noqa: BLE001 - one watch's failure never stops the run; a SourceError is ours
-            why = str(e) if isinstance(e, (ConfigError, CardError, OSError)) else _error_text(e)
-            errors.append({"watch": name, "error": why})
-            log(f"watch {name}: error: {why}")
+            failed(name, e)
+            continue
+        reads.append(_read_entry(name, "command", result))
+        _log_read(log, reads[-1])
+    for i, (name, first) in enumerate(cut):  # the second try, with what is left after every first try
+        left = READ_BUDGET - (monotonic() - began)
+        if left <= 0:
+            failed(name, first)
+            continue
+        try:
+            after = len(cut) - i - 1
+            result = eng.read(name, max_timeout=max(left / (after + 1), left - READ_FLOOR * after))
+        except Exception as e:  # noqa: BLE001 - as above; a second cut is its error too
+            failed(name, e)
             continue
         reads.append(_read_entry(name, "command", result))
         _log_read(log, reads[-1])

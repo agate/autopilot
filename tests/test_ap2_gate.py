@@ -1579,6 +1579,42 @@ class CommandWatchTest(LoopCase):
         self.assertEqual(out["errors"], [])
         self.assertEqual([(r["watch"], r["made"]) for r in out["reads"]], [("a1", 1), ("b2", 1), ("c3", 1), ("d4", 1)])
 
+    def test_a_read_cut_by_its_place_in_the_order_is_read_again_with_what_is_left(self):
+        names = ("a1", "b2", "c3", "d4", "e5", "f6", "g7", "h8", "i9")
+        self.command_source("a1")
+        (self.tmp / "a1.py").write_text(f"import json, time; time.sleep(1); "
+                                        f"print(json.dumps({json.dumps([item(1)])}))\n")
+        for n, name in enumerate(names[1:], start=2):
+            self.command_source(name, items=[item(n)])
+        given = []
+        real = engine.Engine.read
+
+        def read(eng, name, dry_run=False, max_timeout=None):
+            given.append((name, max_timeout))
+            return real(eng, name, dry_run=dry_run, max_timeout=max_timeout)
+
+        with mock.patch.object(gate, "READ_BUDGET", 4), mock.patch.object(gate, "READ_FLOOR", 0.5), \
+                mock.patch.object(engine.Engine, "read", read):
+            out = self.gate(self.T)  # a1's first cap is 4 / 9 seconds
+        self.assertEqual(out["errors"], [])
+        self.assertEqual(sorted(r["watch"] for r in out["reads"]), list(names))
+        self.assertEqual([n for n, _ in given], list(names) + ["a1"])
+        self.assertAlmostEqual(given[0][1], 4 / 9, places=2)
+        self.assertGreater(given[-1][1], 2)  # all that the eight others left
+        self.assertIn("a1:i1", [c["key"] for c in self.store().list()])
+
+    def test_a_read_that_fails_for_its_own_reason_is_not_read_again(self):
+        marker = self.tmp / "a1-runs"
+        self.command_source("a1")
+        (self.tmp / "a1.py").write_text(f"import sys; open({str(marker)!r}, 'a').write('ran\\n'); sys.exit(1)\n")
+        self.command_source("b2", items=[item(2)])
+        with mock.patch.object(gate, "READ_BUDGET", 4), mock.patch.object(gate, "READ_FLOOR", 0.5):
+            out = self.gate(self.T)
+        self.assertEqual([e["watch"] for e in out["errors"]], ["a1"])
+        self.assertIn("exited with 1", out["errors"][0]["error"])
+        self.assertEqual(marker.read_text(), "ran\n")
+        self.assertEqual([r["watch"] for r in out["reads"]], ["b2"])
+
     def test_a_hanging_read_is_one_error_and_does_not_use_the_time_of_the_next_watch(self):
         self.command_source("a1")
         (self.tmp / "a1.py").write_text("import time; time.sleep(30)\n")
@@ -1589,8 +1625,8 @@ class CommandWatchTest(LoopCase):
         with mock.patch.object(gate, "READ_BUDGET", 3):
             out = self.gate(self.T)
         self.assertEqual(out["watches_due"], ["a1", "b2"])
-        self.assertEqual([e["watch"] for e in out["errors"]], ["a1"])
-        self.assertIn("took longer than 1.5 seconds", out["errors"][0]["error"])
+        self.assertEqual([e["watch"] for e in out["errors"]], ["a1"])  # its second try, with what b2 left, is cut too
+        self.assertRegex(out["errors"][0]["error"], r"took longer than [0-9.]+ seconds \(its read.timeout of 60 was")
         self.assertEqual([(r["watch"], r["made"]) for r in out["reads"]], [("b2", 1)])
         self.assertTrue(marker.exists())
         self.assertEqual([c["key"] for c in self.store().list()], ["b2:i2"])

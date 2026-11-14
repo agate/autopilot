@@ -234,6 +234,25 @@ class CommandReadTest(EngineCase):
         with self.assertRaisesRegex(SourceError, r"took longer than 0.5 seconds \("):
             self.engine().read("nap", dry_run=True, max_timeout=0.5)
 
+    def test_only_a_read_stopped_at_a_shorter_cap_is_a_read_cut(self):
+        sleeper = self.tmp / "nap.py"
+        sleeper.write_text("import time; time.sleep(5)\n")
+        self.user_source("nap", f"""\
+            source: nap
+            brings: messages
+            read: {{ via: command, run: '{sys.executable} {sleeper}', timeout: 1 }}
+            fill: paths
+            form: {{ id: .id, at: .at, text: .text }}
+            link: none
+            sort: {{ all: alert }}
+            """)
+        with self.assertRaisesRegex(engine.ReadCut, r"took longer than 0.5 seconds \(its read.timeout of 1 was"):
+            self.engine().read("nap", dry_run=True, max_timeout=0.5)
+        for cap in (None, 2):  # its own timeout of 1 is what stops it
+            with self.assertRaisesRegex(SourceError, r"took longer than 1 seconds; stopped$") as caught:
+                self.engine().read("nap", dry_run=True, max_timeout=cap)
+            self.assertNotIsInstance(caught.exception, engine.ReadCut)
+
     @staticmethod
     def full(fd):
         raise OSError(errno.ENOSPC, "No space left on device")

@@ -1574,10 +1574,14 @@ Calls the author made without asking (check them):
     setting) is one error `{"watch", "error"}` and the next watch is still read. **[decided by the builder]** The
     command reads of one run share one time budget, `READ_BUDGET` (120 seconds), counted from when the reads begin. Each
     read may use what is left of it, less `READ_FLOOR` (10) seconds kept for each read still to go (or an even share
-    of what is left, when that is more). So one hanging read cannot take the others' time, and one slow read is not
-    cut by its place in the order. A source's
-    `read.timeout` (up to 600) that is longer is cut under the gate, and a read cut this way fails the usual
-    timeout way, one error that names the seconds it waited. Once
+    of what is left, when that is more). So one hanging read cannot take the others' time. A source's
+    `read.timeout` (up to 600) that is longer is cut under the gate. A read stopped at that cut is no error yet. Once
+    every due watch had its first try, each read cut this way runs again, in order, with what is left, shared the
+    same way among them (one cut read gets all of it). So one slow read is not cut by its place in the order, and a
+    hanging read only gets the time the others left. Only the second try's failure is an error, the usual timeout
+    one that names the seconds it waited; when nothing is left for a second try, the first try's error is the one.
+    A watch gets one error at most. A read that fails any other way (its own timeout, exit not 0, an unset setting)
+    is its error at once and is not tried again. Once
     the budget is spent, a due watch is not started: one error `{"watch", "error": "not read: this run's 120
     seconds for command reads were spent; it is read at its next due time"}`. Its time was already written, so it
     is not rewound; it waits for its next due time. Why: a read runs inside the gate lock, so while it hangs every
