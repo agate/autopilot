@@ -271,6 +271,31 @@ class CommandReadTest(EngineCase):
             self.engine().read("fails", dry_run=True, max_timeout=0.5)
         self.assertNotIsInstance(caught.exception, engine.ReadCut)
 
+    def test_only_an_error_of_a_read_stopped_at_the_cap_says_so_whatever_its_exit(self):
+        scripts = {"nap": "import time; time.sleep(5)\n",
+                   "held": "import subprocess, sys; subprocess.Popen(['sleep', '30']); sys.exit(1)\n",
+                   "fails": "import sys; sys.exit(1)\n"}
+        for name, body in scripts.items():
+            script = self.tmp / f"{name}.py"
+            script.write_text(body)
+            self.user_source(name, f"""\
+                source: {name}
+                brings: messages
+                read: {{ via: command, run: '{sys.executable} {script}', timeout: {1 if name == "nap" else 60} }}
+                fill: paths
+                form: {{ id: .id, at: .at, text: .text }}
+                link: none
+                sort: {{ all: alert }}
+                """)
+        for name, cap, at_cap in (("nap", 0.5, True), ("held", 0.5, True),  # a ReadCut, then a failure at the cap
+                                  ("nap", None, False), ("nap", 2, False),  # its own timeout
+                                  ("fails", 0.5, False)):  # exit 1 by itself, before the cap
+            with self.subTest(name=name, cap=cap):
+                with self.assertRaises(SourceError) as caught:
+                    self.engine().read(name, dry_run=True, max_timeout=cap)
+                self.assertIs(getattr(caught.exception, "at_cap", False), at_cap)
+                self.assertEqual(isinstance(caught.exception, engine.ReadCut), name == "nap" and at_cap)
+
     def test_a_cut_under_a_twentieth_of_a_second_is_never_named_0_seconds(self):
         self.assertEqual([engine._seconds(t) for t in (60, 37.5, 0.5, 0.04, 0.001)],
                          ["60", "37.5", "0.5", "0.04", "0.001"])

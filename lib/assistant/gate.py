@@ -18,10 +18,10 @@ seconds per run (a read's timeout is cut to what is left, less READ_FLOOR (10) s
 or an even share when that is more, so one hanging read cannot use the time of the others; a read stopped at that
 cut while it still ran, or after it exited 0, is read again once each due watch had its first try, when what is
 left gives it more time than its first try had, so one slow read is not cut by its place in the order; a watch
-whose first try was cut while it held more than an even share gets `cut_at` in watches.json and is read after the
-others next time, until a first try ends inside its share; once the budget is spent a watch waits for its next due
-time, so one slow read cannot hold the lock, and with it every later run and routine slot, for long; a long read
-belongs to `ap2 source read`); the due
+whose first try was stopped at its cap while it held more than an even share gets `cut_at` in watches.json and is
+read after the others next time (the oldest stamp first among them), until a first try ends before its cap; once
+the budget is spent a watch waits for its next due time, so one slow read cannot hold the lock, and with it every
+later run and routine slot, for long; a long read belongs to `ap2 source read`); the due
 `mcp`, `connector` and `skill` watches share one scan session (`scan.start`), which a later run takes into cards
 when it ends (`scan.finish`); and
 `<data>/pass.json` records whether a dispatcher pass is due and why (`pass_due`). The gate starts no pass: the pass calls `pass_started` when it starts.
@@ -376,17 +376,16 @@ def _log_read(log, entry: dict) -> None:
         f"unchanged, {entry['dropped']} dropped")
 
 
-def _cut_last_time(entry) -> bool:
-    """True when a watch's saved entry has a `cut_at` that is a UTC stamp; anything else (none, damaged, not text)
-    means it was not cut."""
+def _cut_last_time(entry) -> Optional[datetime]:
+    """The `cut_at` of a watch's saved entry when it is a UTC stamp; anything else (none, damaged, not text) means
+    it was not cut (None)."""
     at = entry.get("cut_at") if isinstance(entry, dict) else None
     if not isinstance(at, str):
-        return False
+        return None
     try:
-        cards.parse_stamp(at)
+        return cards.parse_stamp(at)
     except ValueError:
-        return False
-    return True
+        return None
 
 
 def _read_commands(data: Path, now: datetime, cfg, names: list, reads: list, errors: list, log) -> None:
@@ -400,17 +399,24 @@ def _read_commands(data: Path, now: datetime, cfg, names: list, reads: list, err
     read that fails any other way (exit not 0 by itself too) is its error at once. Once it is spent a watch is not
     read (one error); its time stays written, so it is read at its next due time.
 
-    The watches cut last time go last (a stable sort, so by name otherwise): a watch whose first try is cut while it
-    held more than an even share (it used time owed to the reads after it), or that was already marked, gets this
-    run's stamp as `cut_at` in watches.json; a first try that ends inside its share (read, or failed by itself)
-    removes it. A cut at no more than an even share marks nothing: that read only lost time to the ones before it.
-    The write is best effort (one error); it changes no other key."""
+    The watches cut last time go last, the oldest `cut_at` first among them (the one cut over its share most
+    recently goes last), by name otherwise: a watch whose first try is stopped at its cap while it held more than an
+    even share (it used time owed to the reads after it), whether that was a cut or a failure (exit not 0) at the
+    cap, gets this run's stamp as `cut_at` in watches.json; a first try stopped at no more than an even share keeps
+    what it had (an old stamp is not refreshed: that read only lost time to the ones before it); a first try that
+    ends before its cap (read, or failed by itself) removes it. The write is best effort (one error); it changes no
+    other key."""
     if not names:
         return
     path = data / WATCHES
     state, _ = _read_watch_state(data)  # as `due_watches` just wrote it; damaged, it was reported there
-    names = sorted(names, key=lambda n: _cut_last_time(state.get(n)))
-    marks = {}  # name -> True (cut: mark it) or False (inside its share: clear it)
+
+    def order(n: str):
+        at = _cut_last_time(state.get(n))
+        return (False,) if at is None else (True, at, n)
+
+    names = sorted(names, key=order)
+    marks = {}  # name -> True (stopped at a cap over its share: this run's stamp) or False (ended before it: clear)
     began = monotonic()
     eng = engine.Engine(data, cfg, clock=lambda: now)
 
@@ -421,6 +427,11 @@ def _read_commands(data: Path, now: datetime, cfg, names: list, reads: list, err
 
     def share(left: float, after: int) -> float:
         return max(left / (after + 1), left - READ_FLOOR * after)
+
+    def at_cap(name: str, cap: float, left: float, after: int) -> None:
+        if cap > left / (after + 1):  # it used time owed to the reads after it
+            marks[name] = True
+        # else: stopped at no more than an even share, it keeps what it had (an old stamp stays as it was)
 
     cut = []  # (name, the first try's ReadCut, the first try's cap), in order
     for i, name in enumerate(names):
@@ -437,11 +448,13 @@ def _read_commands(data: Path, now: datetime, cfg, names: list, reads: list, err
             result = eng.read(name, max_timeout=cap)
         except engine.ReadCut as e:
             cut.append((name, e, cap))
-            if cap > left / (after + 1) or _cut_last_time(state.get(name)):
-                marks[name] = True
+            at_cap(name, cap, left, after)
             continue
         except Exception as e:  # noqa: BLE001 - one watch's failure never stops the run; a SourceError is ours
-            marks[name] = False
+            if getattr(e, "at_cap", False):  # failed by itself, but only once the cap stopped it: marked as a cut
+                at_cap(name, cap, left, after)
+            else:
+                marks[name] = False
             failed(name, e)
             continue
         marks[name] = False

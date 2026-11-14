@@ -1695,9 +1695,61 @@ class CommandWatchTest(LoopCase):
         self.assertEqual(given[2:], ["b2", "a1"])
         self.assertEqual([(r["watch"], r["made"]) for r in second["reads"]], [("b2", 1)])
         self.assertEqual([e["watch"] for e in second["errors"]], ["a1"])
-        self.assertEqual(self.saved_watches(), {"a1": {"last_check_at": "2026-11-10T14:05:00Z",
-                                                       "cut_at": "2026-11-10T14:05:00Z"},
+        self.assertEqual(self.saved_watches(), {"a1": {"last_check_at": "2026-11-10T14:05:00Z",  # cut at an even
+                                                       "cut_at": "2026-11-10T14:00:00Z"},  # share: the old stamp
                                                 "b2": {"last_check_at": "2026-11-10T14:05:00Z"}})
+
+    def test_a_first_try_that_exits_not_0_at_a_cap_over_its_share_is_marked_but_not_read_again(self):
+        marker = self.tmp / "a1-runs"
+        self.command_source("a1")  # exits 1 at once, but the child it started holds its output past the cap
+        (self.tmp / "a1.py").write_text(f"import subprocess, sys; open({str(marker)!r}, 'a').write('ran\\n'); "
+                                        f"subprocess.Popen(['sleep', '30']); sys.exit(1)\n")
+        self.command_source("b2")  # needs 1 second
+        (self.tmp / "b2.py").write_text(f"import json, time; time.sleep(1); "
+                                        f"print(json.dumps({json.dumps([item(2)])}))\n")
+        given = self.reads_given()
+        with mock.patch.object(gate, "READ_BUDGET", 3), mock.patch.object(gate, "READ_FLOOR", 0.5):
+            first = self.gate(self.T)  # a1 holds 2.5 seconds, b2 gets the 0.5 left
+            self.assertEqual(given, ["a1", "b2"])
+            self.assertEqual([e["watch"] for e in first["errors"]], ["a1", "b2"])
+            self.assertIn("exited with 1, but something it started still held its output open",
+                          first["errors"][0]["error"])
+            self.assertEqual(marker.read_text(), "ran\n")  # its own failure: not read again
+            self.assertEqual(self.saved_watches(), {"a1": {"last_check_at": "2026-11-10T14:00:00Z",
+                                                           "cut_at": "2026-11-10T14:00:00Z"},
+                                                    "b2": {"last_check_at": "2026-11-10T14:00:00Z"}})
+            second = self.gate(self.T + timedelta(minutes=5))
+        self.assertEqual(given[2:], ["b2", "a1"])
+        self.assertEqual([(r["watch"], r["made"]) for r in second["reads"]], [("b2", 1)])
+        self.assertEqual([e["watch"] for e in second["errors"]], ["a1"])
+        self.assertEqual(marker.read_text(), "ran\nran\n")
+
+    def test_a_healthy_watch_that_stalled_once_behind_a_hanging_one_is_not_stuck_behind_it(self):
+        self.command_source("a1")
+        (self.tmp / "a1.py").write_text("import time; time.sleep(30)\n")
+        stall = self.tmp / "b2-stalls"
+        self.command_source("b2")  # needs 1 second, but 30 while `stall` is there
+        (self.tmp / "b2.py").write_text(f"import json, os, time; time.sleep(30 if os.path.exists({str(stall)!r}) "
+                                        f"else 1); print(json.dumps({json.dumps([item(2)])}))\n")
+        given = self.reads_given()
+        runs = []
+        with mock.patch.object(gate, "READ_BUDGET", 3), mock.patch.object(gate, "READ_FLOOR", 0.5):
+            for n in range(5):
+                if n == 1:
+                    stall.touch()
+                elif stall.exists():
+                    stall.unlink()
+                at = len(given)
+                out = self.gate(self.T + timedelta(minutes=5 * n))
+                runs.append((given[at:], [r["watch"] for r in out["reads"]],
+                             {k: v.get("cut_at") for k, v in self.saved_watches().items()}))
+        self.assertEqual(runs, [
+            (["a1", "b2"], [], {"a1": "2026-11-10T14:00:00Z", "b2": None}),
+            (["b2", "a1"], [], {"a1": "2026-11-10T14:00:00Z", "b2": "2026-11-10T14:05:00Z"}),  # b2 stalled
+            (["a1", "b2"], [], {"a1": "2026-11-10T14:10:00Z", "b2": "2026-11-10T14:05:00Z"}),  # a1's stamp is older
+            (["b2", "a1"], ["b2"], {"a1": "2026-11-10T14:10:00Z", "b2": None}),  # b2's is older: it goes first
+            (["b2", "a1"], ["b2"], {"a1": "2026-11-10T14:10:00Z", "b2": None}),
+        ])
 
     def test_a_first_try_that_ends_inside_its_share_clears_cut_at_and_keeps_the_other_keys(self):
         self.command_source("a1", items=[item(1)])

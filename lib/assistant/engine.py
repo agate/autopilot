@@ -3,7 +3,7 @@
 - `read(name)` runs a `via: command` source's `read.run` itself (argv split with `shlex`, no shell, a timeout
   that `max_timeout` may cut shorter, the data folder as the working folder) and saves its raw stdout first, under
   `<data>/sources/.raw/<source>/<UTC stamp>-<6 hex>.json`. A read stopped at that shorter cap, while it was still
-  running or after it exited 0, raises `ReadCut`.
+  running or after it exited 0, raises `ReadCut`; any read stopped at that cap raises an error with `at_cap` True.
 - `read_saved(name, raw_path, records=None)` takes output saved by someone else (a scan session for `mcp`,
   `connector` and `skill`, slice 4). For `fill: ai` the scan session's records come in `records`.
 - A record missing a required field (`status` too for `brings: work`), or a field a link or key pattern names, is
@@ -63,7 +63,10 @@ class ReadCut(SourceError):
     command was still running or after it exited 0 with something it started still holding its output open: with
     more time it might have ended. A command that exited with another code failed by itself, which is a plain
     SourceError. The gate gives a ReadCut read a second try only when it has more time for it than the first try
-    had."""
+    had. `at_cap` is True on every ReadCut, and on the plain SourceError of a read stopped at that cap after it
+    exited not 0 (the gate marks both alike); it is False or missing on every other error."""
+
+    at_cap = True
 
 
 # The catchable signals whose default action ends the process and that a terminal, shell, supervisor or user may
@@ -290,11 +293,13 @@ class Engine:
                 # Stopped at the gate's cap, not at its own timeout, and not after it failed by itself (exit not 0).
                 timed_out = ReadCut if cut and code in (None, 0) else SourceError
                 if code is not None:
-                    raise timed_out(f"{src.name}: read.run exited with {code}, but something it started still "
-                                    f"held its output open after {waited} seconds{cut}; stopped{saved}") \
-                        from failed
-                raise timed_out(f"{src.name}: read.run took longer than {waited} seconds{cut}; stopped{saved}") \
-                    from failed
+                    stop = timed_out(f"{src.name}: read.run exited with {code}, but something it started still "
+                                     f"held its output open after {waited} seconds{cut}; stopped{saved}")
+                else:
+                    stop = timed_out(f"{src.name}: read.run took longer than {waited} seconds{cut}; stopped{saved}")
+                # Stopped at the gate's cap whatever its exit: the gate marks a read that used a cap over its share.
+                stop.at_cap = bool(cut)
+                raise stop from failed
         finally:
             # Ctrl-C last, so a new one cannot cut the others short; a failed restore never hides the read's error.
             for signum, handler in reversed(list(previous.items())):
