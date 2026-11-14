@@ -3,9 +3,11 @@ end / dead / parked, no process waiting for a human, transcripts and shadow mode
 (`tests/bin/fake-claude-v2`) against temp folders and an injected clock; nothing reaches the real ~/.claude."""
 from __future__ import annotations
 
+import argparse
 import contextlib
 import errno
 import gzip
+import io
 import json
 import os
 import re
@@ -14,6 +16,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import types
 import unittest
@@ -28,9 +31,12 @@ except ImportError:  # not POSIX
     fcntl = None
 
 from tests.helpers import ROOT
-from tests.test_ap2_apistop import LIMIT_TEXT, error_line, limit_line, refused_line, reply
+from tests.test_ap2_apistop import LIMIT_TEXT, REFUSED_TEXT, error_line, limit_line, refused_line, reply
 from tests.test_ap2_store import card
-from assistant import cards, config, profiles, resources, transcripts
+from tests.test_ap2_store import plain as plain_words
+from tests import test_ap2_prreview as prr
+from assistant import cards, cli, config, prreview, profiles, resources, roles, transcripts
+from assistant.engine import Engine
 from assistant import workers as workers_mod
 from assistant.config import Config, ShadowModeError
 from assistant.resources import WorkerError
@@ -79,6 +85,15 @@ class WorkerCase(unittest.TestCase):
                                              "HOME": str(self.home)})
         patch.start()
         self.addCleanup(patch.stop)
+        # No test reads the developer's own gh config or installed v1: gh's config is looked up under the temp HOME,
+        # and the `ap` on PATH is a made-up one with no v1 package next to it.
+        for name in ("GH_CONFIG_DIR", "XDG_CONFIG_HOME"):
+            os.environ.pop(name, None)
+        no_v1 = self.tmp / "no-v1-bin"
+        no_v1.mkdir()
+        (no_v1 / "ap").write_text("#!/bin/sh\nexit 1\n")
+        (no_v1 / "ap").chmod(0o755)
+        os.environ["PATH"] = f"{no_v1}{os.pathsep}{os.environ.get('PATH', '')}"
         self.clock = Clock()
         self.wt = self.tmp / "worktree"
         self.wt.mkdir()
@@ -171,6 +186,15 @@ class PortsTest(WorkerCase):
         self.assertEqual(last["env"]["AP2_PORTS"], "7200-7209")
         self.assertIn(["stop", a["short_id"]], [c["argv"] for c in self.calls()])
         self.assertEqual(len([r for r in resources.Registry(self.data).read() if r["card"] == a["card"]]), 1)
+
+    def test_a_park_note_with_a_lone_surrogate_is_kept_escaped(self):
+        # The worker's own `ap2 worker park --note`: a byte that is not UTF-8 in its argv reads as a lone
+        # surrogate, and kept raw it would fail the worker list's write-back.
+        w = self.workers()
+        a = self.start(w)
+        parked = w.park(a["card"], "implement", "halfway \udcff", usage_file=usage_file(self.tmp / "u.json", 95))
+        self.assertEqual(parked["note"], "halfway \\udcff")
+        self.assertEqual(resources.Registry(self.data).read()[0]["parked"]["note"], "halfway \\udcff")
 
     def test_a_parked_worker_with_a_resource_at_the_cap_resumes_into_its_own_slot(self):
         w = self.workers(max_workers=2)
@@ -367,7 +391,8 @@ class ProjectSetupTest(WorkerCase):
         self.assertIn(f"Edit(/{self.data}/gate.json)", deny)
         self.assertIn(f"Edit(/{self.data}/routines/**)", deny)
         self.assertIn("Bash(gh pr comment:*)", deny)
-        self.assertEqual(settings["permissions"]["allow"], [f"Bash({ROOT / 'bin' / 'ap2'} worker park:*)"])
+        self.assertEqual(settings["permissions"]["allow"],
+                         [f"Bash({ROOT / 'bin' / 'ap2'} worker park {cid} implement:*)"])
         # The park hook runs before every tool call of the worker and its subagents (v1's `perms.park_hook` shape),
         # first; then the Bash guard (`ap2 hook-guard`) before every Bash call.
         hooks = {"PreToolUse": [
@@ -1245,6 +1270,56 @@ class NobodyWaitsTest(WorkerCase):
         with self.assertRaisesRegex(WorkerError, "no question from a worker"):
             w.answer(cid, "again")
 
+    def assert_question_text_not_read(self, body):
+        # Kept raw, text that is not a string (a list or dict holding a lone surrogate, a deep nesting, NaN) goes
+        # into the close's mark: the card refuses to save it, and the worker list's write-back then fails every
+        # check after.
+        w = self.workers()
+        a = self.start(w)
+        (transcripts.run_dir(self.data, a["card"]) / "question.json").write_text(body)
+        out = w.check()
+        self.assertEqual([(e["card"], e["did"]) for e in out], [(a["card"], "asked")])
+        fixed = "The worker asked a question but its question.json could not be read."
+        self.assertEqual(self.get(a["card"])["ask"]["text"], fixed)
+        self.assertEqual(self.get(a["card"])["sessions"]["implement"]["question"], fixed)
+        self.assertEqual(resources.Registry(self.data).read(), [])  # written back: closed as a question
+        self.assertEqual(w.check(), [])
+
+    def test_a_question_text_that_is_a_list_is_not_read(self):
+        self.assert_question_text_not_read('{"text": ["Which \\ud800 base?"]}')
+
+    def test_a_question_text_that_is_a_dict_is_not_read(self):
+        self.assert_question_text_not_read('{"text": {"q": "\\ud800"}}')
+
+    def test_a_question_file_that_is_a_list_is_not_read(self):
+        self.assert_question_text_not_read('["\\ud800"]')
+
+    def test_a_question_text_that_is_deeply_nested_is_not_read(self):
+        self.assert_question_text_not_read('{"text": ' + "[" * 5000 + "]" * 5000 + "}")
+
+    def test_a_question_text_that_is_nan_is_not_read(self):
+        self.assert_question_text_not_read('{"text": NaN}')
+
+    def test_an_empty_question_text_is_not_read(self):
+        self.assert_question_text_not_read('{"text": ""}')
+
+    def test_a_question_text_that_is_a_number_or_true_is_not_read(self):
+        for body in ('{"text": 5}', '{"text": true}'):
+            with self.subTest(body):
+                self.assert_question_text_not_read(body)
+
+    def test_a_long_question_is_kept_whole(self):
+        w = self.workers()
+        a = self.start(w)
+        text = "Some context. " * 170 + "So which base branch should the fix go on?"
+        self.assertEqual(len(text), 2422)
+        self.write_result(a["card"], "question.json", {"text": text})
+        self.assertEqual(w.check()[0]["did"], "asked")
+        self.assertEqual(self.get(a["card"])["ask"]["text"], text)
+        self.assertEqual(self.get(a["card"])["sessions"]["implement"]["question"], text)
+        w.answer(a["card"], "Main.")
+        self.assertIn(f"Your question: {text}\n", self.bg_calls()[-1]["argv"][-1])
+
     def test_blocked_at_a_permission_prompt_asks_for_attach_then_stops_after_30_minutes(self):
         w = self.workers()
         a = self.start(w)
@@ -2112,6 +2187,65 @@ class TranscriptsTest(WorkerCase):
         self.assertEqual(gzip.decompress(archive.read_bytes()), self.original(a).read_bytes())
         self.assertTrue(self.original(a).exists())  # the original stays, so the session can resume
 
+    def test_a_transcript_that_is_a_fifo_when_opened_is_not_archived_and_does_not_wait(self):
+        # A process the worker left can swap its transcript for a FIFO after `transcripts.find` saw a file: a plain
+        # open would wait for a writer forever, with the worker list's lock held by the close.
+        a = self.start()
+        cfg = Config(mode="live", keep_transcripts="always")
+        fifo = self.tmp / "swapped.jsonl"
+        os.mkfifo(fifo)
+        out = []
+
+        def archive():
+            out.append(transcripts.archive(self.data, cfg, a["card"], "implement", a["session_id"],
+                                           self.fake_home / "projects"))
+
+        opened = []
+        real_open = os.open
+
+        def record_open(path, *args, **kw):
+            fd = real_open(path, *args, **kw)
+            if Path(path) == fifo:
+                opened.append(fd)
+            return fd
+
+        with mock.patch.object(transcripts, "find", return_value=fifo), \
+                mock.patch.object(transcripts.os, "open", side_effect=record_open), \
+                mock.patch.object(transcripts.os, "close", wraps=os.close) as close:
+            t = threading.Thread(target=archive, daemon=True)
+            t.start()
+            t.join(10)
+        hung = t.is_alive()
+        if hung:  # let the stuck open go, so the test run can end
+            os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+            t.join(10)
+        self.assertFalse(hung, "the archive waited on the FIFO")
+        self.assertEqual(out, [None])
+        self.assertEqual(len(opened), 1)
+        close.assert_any_call(opened[0])  # the FIFO's descriptor is closed, not left open
+        folder = self.data / "sessions" / a["card"]
+        self.assertEqual([p.name for p in folder.iterdir() if ".jsonl" in p.name], [])  # no copy, no temp file
+        # A regular transcript is still archived.
+        got = transcripts.archive(self.data, cfg, a["card"], "implement", a["session_id"], self.fake_home / "projects")
+        self.assertEqual(gzip.decompress(got.read_bytes()), self.original(a).read_bytes())
+
+    def test_a_transcript_that_is_a_symlink_is_not_archived_and_its_target_is_untouched(self):
+        # A process the worker left can put a symlink where the transcript was: it is not followed, so no file
+        # outside the projects folder is read into the archive.
+        a = self.start()
+        cfg = Config(mode="live", keep_transcripts="always")
+        original = self.original(a)
+        outside = self.tmp / "outside.txt"
+        outside.write_text("not a transcript\n", encoding="utf-8")
+        original.unlink()
+        original.symlink_to(outside)
+        got = transcripts.archive(self.data, cfg, a["card"], "implement", a["session_id"], self.fake_home / "projects")
+        self.assertIsNone(got)
+        folder = self.data / "sessions" / a["card"]
+        self.assertEqual([p.name for p in folder.iterdir() if ".jsonl" in p.name], [])  # no copy, no temp file
+        self.assertEqual(outside.read_text(encoding="utf-8"), "not a transcript\n")
+        self.assertTrue(original.is_symlink())
+
     def test_never_keeps_only_the_summary_files(self):
         w = self.workers(cfg=Config(mode="live", keep_transcripts="never"))
         a = self.start(w)
@@ -2738,6 +2872,49 @@ class ShortIdOnRecordTest(WorkerCase):
         self.assertNotEqual(rec["short_id"], a["short_id"])
         self.assertEqual((rec["short_id"], rec["session_id"], rec["resumes"]), (self.newest_short(), "", 1))
 
+    def test_a_listed_session_id_that_is_not_a_session_id_is_not_kept(self):
+        # The listing's id for the resumed copy is not a session id (here a lone surrogate): kept raw, it would
+        # fail the worker list's write-back on every check, so the copy would never be on record.
+        w = self.workers()
+        a = self.start(w)
+        self.drop_agent(a["short_id"])
+        real = v1_sessions.list_all
+
+        def forged(claude):
+            rows = real(claude)
+            return None if rows is None else [dict(r, sessionId="\ud800") for r in rows]
+
+        with mock.patch.object(workers_mod.v1_sessions, "list_all", side_effect=forged):
+            out = w.check()
+        self.assertEqual((out[0]["state"], out[0]["did"]), ("dead", "resumed"))
+        rec = resources.Registry(self.data).read()[0]
+        self.assertEqual((rec["short_id"], rec["session_id"]), (self.newest_short(), ""))
+        with mock.patch.object(workers_mod.v1_sessions, "list_all", side_effect=forged):
+            w.check()  # nothing raised: the next check does not keep it either
+        self.assertEqual(resources.Registry(self.data).read()[0]["session_id"], "")
+
+    def test_a_session_id_a_check_fills_in_is_kept_only_when_it_is_a_session_id(self):
+        # The listing did not show the session at the start, so a check fills its id in (`_fill_session_id`). A
+        # listed id that is not a session id (a lone surrogate) kept raw would fail every later write-back.
+        w = self.workers()
+        cid = self.add_card()
+        with mock.patch("autopilot.sessions.list_all", return_value=[]):
+            w.start(cid, "implement", cwd=self.wt, prompt="Do the work.")
+        self.assertEqual(resources.Registry(self.data).read()[0]["session_id"], "")
+        real = v1_sessions.list_all
+
+        def forged(claude):
+            rows = real(claude)
+            return None if rows is None else [dict(r, sessionId="\ud800") for r in rows]
+
+        with mock.patch.object(workers_mod.v1_sessions, "list_all", side_effect=forged):
+            out = w.check()
+        self.assertNotIn("note", out[0])
+        self.assertEqual(resources.Registry(self.data).read()[0]["session_id"], "")
+        self.write_result(cid)
+        with mock.patch.object(workers_mod.v1_sessions, "list_all", side_effect=forged):
+            self.assertEqual(w.check()[0]["did"], "ended")
+
 
 class FinishRetryTest(WorkerCase):
     """`finish` remembers per role which originals `claude rm` already removed (`sessions.<role>.removed_ids`),
@@ -3001,6 +3178,22 @@ class LimitParkFromTranscriptTest(ApiStopCase):
         self.assertEqual([(o["state"], o["did"]) for o in out], [("parked", "resumed")])
         self.assertEqual(self.bg_calls()[-1]["argv"][1:3], ["--resume", a["session_id"]])
 
+    def test_a_limit_line_dated_the_skew_after_the_check_still_parks(self):
+        w = self.workers()
+        a = self.start(w)
+        self.stopped_on(a, limit_line(iso(self.clock() + timedelta(minutes=workers_mod.RUN_SKEW_MIN))))
+        self.assertEqual(w.check()[0]["did"], "parked")
+
+    def test_a_limit_line_dated_a_second_past_the_skew_does_not_park(self):
+        w = self.workers()
+        a = self.start(w)
+        at = self.clock() + timedelta(minutes=workers_mod.RUN_SKEW_MIN, seconds=1)
+        self.stopped_on(a, limit_line(iso(at)))
+        self.assertNotIn("api_stop", w.list()[0])
+        out = w.check()
+        self.assertNotEqual(out[0]["did"], "parked")
+        self.assertIsNone(self.rec()["parked"])
+
     def test_parking_needs_no_live_mode(self):
         a = self.start()
         self.stopped_on(a, limit_line(iso(self.clock())))
@@ -3137,6 +3330,31 @@ class LimitParkFromTranscriptTest(ApiStopCase):
         a = self.start(w)
         self.stopped_on(a, limit_line(iso(self.clock() - timedelta(minutes=2))))
         self.assertEqual(w.check()[0]["did"], "parked")
+
+    def test_the_reset_is_read_from_the_whole_text_not_the_cut_note(self):
+        # The note is cut at WORKER_TEXT_MAX characters; the reset named past that point is still read.
+        w = self.workers()
+        a = self.start(w)
+        self.clock.advance(1)
+        text = "x" * 2100 + " · your 5-hour limit resets 8:40pm (America/Los_Angeles)"
+        self.stopped_on(a, error_line(text, iso(self.clock()), apiErrorStatus=429))
+        self.assertEqual(w.check()[0]["did"], "parked")
+        parked = self.rec()["parked"]
+        self.assertEqual(parked["resets_at"], "2026-01-05T20:40:00-08:00")
+        self.assertTrue(parked["note"].endswith(" [cut]"), parked["note"][-40:])
+
+    def test_a_reset_at_the_last_date_parks_for_the_back_off(self):
+        # The reset plus the resume delay would be past the last date a datetime holds: the back-off is used.
+        w = self.workers()
+        a = self.start(w)
+        self.clock.advance(1)
+        self.stopped_on(a, limit_line(iso(self.clock())))
+        last = datetime.max.replace(tzinfo=timezone.utc)
+        with mock.patch.object(workers_mod.apistop, "reset_time", return_value=last):
+            self.assertEqual(w.check()[0]["did"], "parked")
+        parked = self.rec()["parked"]
+        self.assertEqual(parked["resets_at"], last.isoformat())
+        self.assertEqual(datetime.fromisoformat(parked["resume_at"]), self.clock() + timedelta(minutes=30))
 
 
 class ApiStopIgnoredTest(ApiStopCase):
@@ -3439,6 +3657,1828 @@ class InvisibleAnswerTest(WorkerCase):
                 cid = self.asked(w)
                 w.answer(cid, text)
                 self.assertIn(f"The answer: {text}", self.bg_calls()[-1]["argv"][-1])
+
+
+# -- 9. PR review cards review themselves (design 6.2 point 2) -----------------------------------------------------
+
+REVIEW_LIVE = Config(mode="live", secondary_language="zh")
+
+
+def _ap2_commands() -> list:
+    """Every `ap2` command and subcommand, as words ("card", "card show", ...), from the CLI's own parser."""
+    out = []
+
+    def walk(parser, words):
+        for action in parser._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                for name, sub in action.choices.items():
+                    out.append(" ".join(words + [name]))
+                    walk(sub, words + [name])
+
+    walk(cli._parser(), [])
+    return out
+
+
+class PrReviewCase(WorkerCase):
+    """A pr-review card made the way a source makes it (the recorded GitHub review request), the recorded gh replies
+    of tests/test_ap2_prreview.py, and the fake claude."""
+    cfg = REVIEW_LIVE
+
+    def setUp(self):
+        super().setUp()
+        self.gh = prr.Replay([])
+        # The auto-started reviewer's own empty folder (`tempfile.mkdtemp`) is made here, outside the data folder.
+        self.scratch = self.tmp / "scratch"
+        self.scratch.mkdir()
+        patch = mock.patch.object(tempfile, "tempdir", str(self.scratch))
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def workers(self, cfg=None, **kw) -> Workers:
+        kw.setdefault("gh", self.gh)
+        return super().workers(cfg, **kw)
+
+    def review_card(self) -> str:
+        """The recorded review request's card for example/widgets#42; the read's other cards are put in lane done,
+        so only this one is due."""
+        raw = self.tmp / "gh-search-prs.json"
+        shutil.copy(prr.SCAN / "gh-search-prs.json", raw)
+        result = Engine(self.data, cfg=self.cfg).read_saved("github-review-requests", raw)
+        self.assertEqual(result["dropped"], [])
+        store = Store(self.data, self.cfg, self.clock)
+        for c in store.list():
+            if c.get("key") != prr.KEY:
+                store.update(c["id"], {"lane": "done"}, by="test")
+        return next(c for c in store.list() if c.get("key") == prr.KEY)["id"]
+
+    def add_card(self, **over) -> str:
+        return super().add_card(**dict({"plain": plain_words(("en", "zh"))}, **over))
+
+    def pr_card(self, **over) -> str:
+        return self.add_card(**dict({"kind": "pr-review", "key": prr.KEY, "lane": "needs", "feed": "github"}, **over))
+
+    def review_starts(self) -> list:
+        return [c for c in self.bg_calls() if any(a.endswith("· pr-review") for a in c["argv"])]
+
+    def the_worker_reviews(self, cid, report="report-review.json", pages="graphql-head-a.json", end_turn=True):
+        """What the pr-review worker's own session does: plan the review, write its report and (with `end_turn`)
+        end its turn, so the listing shows it idle."""
+        prreview.plan(self.data, cid, "review", None, cfg=self.cfg, run=prr.Replay(prr.table(prr.fixture(pages))))
+        rep = prr.fixture(report) if isinstance(report, str) else report
+        if isinstance(rep, dict):
+            rep = dict(rep, card=cid)
+        d = transcripts.run_dir(self.data, cid)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / prreview.REPORT_FILE).write_text(json.dumps(rep) if isinstance(rep, dict) else rep)
+        rec = next((r for r in resources.Registry(self.data).read() if r["card"] == cid), None)
+        if end_turn and rec is not None:
+            self.set_agent(rec["short_id"], state="done", status="idle")
+
+    def view(self, name):
+        """The recorded `gh pr view` and `gh api user` replies of one PR state, for sync."""
+        self.gh.entries[:] = prr.table([], view=name)[-2:]
+
+
+class PrReviewRoleTest(PrReviewCase):
+    # criterion 1
+    def test_pr_review_is_a_worker_role_with_its_report_as_result_file(self):
+        self.assertEqual(workers_mod.RESULT_FILES["pr-review"], prreview.REPORT_FILE)
+        self.assertIn("pr-review", workers_mod.ROLES)
+        self.assertEqual({r: workers_mod.RESULT_FILES[r] for r in ("implement", "review", "pr")},
+                         v1_sessions.RESULT_FILES)  # the v1 roles keep theirs
+        self.assertIn("pr-review", cli._roles())
+
+    def test_a_report_newer_than_the_start_is_done_once_the_turn_ended(self):
+        w = self.workers()
+        cid = self.pr_card()
+        rec = w.start(cid, "pr-review", cwd=self.wt, prompt="Review it.")
+        self.write_result(cid, "handback.json")
+        self.assertEqual(w.list()[0]["state"], "running")
+        self.write_result(cid, prreview.REPORT_FILE)
+        # Its process checks the report after it writes it, and fixes it until the check passes: while the session
+        # still works, the report is a draft.
+        self.assertEqual(w.classify(rec, v1_sessions.list_all(FAKE)), "running")
+        self.assertEqual(w.classify(rec, None), "unknown")
+        self.set_agent(rec["short_id"], status="waiting")  # at a permission prompt, mid-turn
+        self.assertEqual(w.classify(rec, v1_sessions.list_all(FAKE)), "blocked")
+        self.set_agent(rec["short_id"], state="done", status="idle")  # its turn ended
+        self.assertEqual(w.classify(rec, v1_sessions.list_all(FAKE)), "done")
+        self.set_agent(rec["short_id"], state="failed", status="idle")
+        self.assertEqual(w.classify(rec, v1_sessions.list_all(FAKE)), "done")
+        self.drop_agent(rec["short_id"])  # the session is gone
+        self.assertEqual(w.classify(rec, v1_sessions.list_all(FAKE)), "done")
+
+    def test_check_leaves_a_worker_that_is_still_fixing_its_report(self):
+        cid = self.review_card()
+        self.workers().check()  # starts it
+        self.the_worker_reviews(cid, report={"card": cid}, end_turn=False)  # a first draft, still being checked
+        with mock.patch.object(prreview, "apply") as apply:
+            out = self.workers().check()
+        self.assertEqual([(e["card"], e["state"], e["did"]) for e in out], [(cid, "running", "nothing")])
+        apply.assert_not_called()
+        self.assertEqual([r["card"] for r in resources.Registry(self.data).read()], [cid])
+        self.assertNotIn(["stop", resources.Registry(self.data).read()[0]["short_id"]],
+                         [c["argv"] for c in self.calls()])
+        self.assertIsNone(self.get(cid).get("ask"))
+        # The fixed report, then the turn ends: now it is done, applied and synced.
+        self.the_worker_reviews(cid)
+        self.view("open_head_a")
+        out = self.workers().check()
+        self.assertEqual((out[0]["state"], out[0]["did"], out[0]["verdict"]), ("done", "ended", "changes"))
+
+    # criterion 2
+    def test_the_prompt_runs_the_roles_command_with_the_stage(self):
+        w = self.workers()
+        fresh = self.pr_card()
+        last = {"stage": "review", "head_sha": prr.A, "verdict": "approve", "at": "2026-01-05T08:00:00Z"}
+        reviewed = self.pr_card(key="example/widgets#43", reviews=[last])
+        for cid, stage in ((fresh, "review"), (reviewed, "delta")):
+            with self.subTest(stage=stage):
+                w.start(cid, "pr-review", cwd=self.wt, prompt="Review the pull request.")
+                argv = self.bg_calls()[-1]["argv"]
+                self.assertNotIn("--agent", argv)
+                prompt = argv[-1]
+                head, _, rest = prompt.partition("\n")
+                self.assertEqual(head, f"/autopilot:pr-review {cid} {stage}")
+                self.assertTrue(rest.lstrip("\n").startswith("Review the pull request."), rest)
+                self.assertIn(f"Your card: {cid}. Your role: pr-review.", prompt)
+                self.assertIn("End your round by writing prreview.json in your run directory.", prompt)
+                self.assertNotIn("/autopilot:pr-loop", prompt)
+
+    # criterion 3
+    def test_the_floor_is_read_only(self):
+        env = {"AP2_RUN_DIR": str(transcripts.run_dir(self.data, "c-20260105-090000-abcdef"))}
+        base = workers_mod.floor("implement", {"tools": ["Read"]}, self.data, env)
+        ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env)
+        self.assertEqual(roles.ROLES["pr-review"].floor, "read-only")
+        for tool in roles.READ_ONLY_DENIED:
+            self.assertIn(tool, ro["permissions"]["deny"])
+            self.assertNotIn(tool, base["permissions"]["deny"])
+        self.assertNotIn("Write", ro["permissions"]["deny"])  # its one write, the report, is held by the hook
+        # Everything the worker floor has, kept as it is.
+        self.assertLessEqual(set(base["permissions"]["deny"]), set(ro["permissions"]["deny"]))
+        self.assertEqual(ro["permissions"]["allow"], base["permissions"]["allow"])
+        self.assertEqual(ro["hooks"]["PreToolUse"][:2], base["hooks"]["PreToolUse"])
+        self.assertEqual(ro["hooks"]["PreToolUse"][2:], [{"matcher": "Write", "hooks": [
+            {"type": "command", "command": f"\"{ROOT / 'bin' / 'ap2'}\" hook-write", "timeout": 5}]}])
+        self.assertEqual(len(base["hooks"]["PreToolUse"]), 2)  # the worker roles keep their two hooks
+        # Its session holds the user's gh and git logins: the write verbs are denied by rule, not only by its prose.
+        for rule in ("Bash(gh pr merge:*)", "Bash(gh pr close:*)", "Bash(gh pr reopen:*)", "Bash(gh pr ready:*)",
+                     "Bash(gh pr edit:*)", "Bash(gh pr create:*)", "Bash(gh release:*)", "Bash(git push:*)",
+                     "Bash(git commit:*)"):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, roles.READ_ONLY_BASH_DENIED)
+                self.assertIn(rule, ro["permissions"]["deny"])
+                self.assertNotIn(rule, base["permissions"]["deny"])
+
+    def test_the_read_only_floor_denies_the_other_github_write_commands(self):
+        # One plain gh command can still write with the user's login: push a merge onto the PR's branch (which moves
+        # its head and starts another review), lock it, check it out, close an issue, run a workflow, edit the repo,
+        # its labels, secrets or variables, a gist, the cache, a ruleset, a project, an extension, an alias, the login
+        # or the gh config. Each is denied by rule; the read commands a review runs are not.
+        env = {"AP2_RUN_DIR": str(transcripts.run_dir(self.data, "c-20260105-090000-abcdef"))}
+        base = workers_mod.floor("implement", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+        ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+        for cmd in ("gh pr update-branch", "gh pr lock", "gh pr unlock", "gh pr checkout", "gh issue", "gh workflow",
+                    "gh run rerun", "gh run cancel", "gh run delete", "gh repo", "gh label", "gh secret",
+                    "gh variable", "gh gist", "gh cache", "gh ruleset", "gh project", "gh extension", "gh alias",
+                    "gh auth", "gh config"):
+            rule = f"Bash({cmd}:*)"
+            with self.subTest(rule=rule):
+                self.assertIn(rule, roles.READ_ONLY_BASH_DENIED)
+                self.assertIn(rule, ro)
+                self.assertNotIn(rule, base)
+        self.assertEqual(len(ro), len(set(ro)))  # each rule once
+        prefixes = [r[len("Bash("):-len(":*)")] for r in ro if r.startswith("Bash(") and r.endswith(":*)")]
+        for read in ("gh pr view 42", "gh pr diff 42", "gh pr checks 42", "gh api repos/o/r/pulls/42"):
+            with self.subTest(read=read):
+                self.assertEqual([p for p in prefixes if read.startswith(p)], [])
+
+    def test_the_read_only_floor_denies_every_gh_command_group_a_review_does_not_need(self):
+        # One plain gh command left open writes as the user: `gh ssh-key add` gives an attacker push to every repo
+        # the user can, and `gh gpg-key`, `gh agent-task` and `gh codespace` change the account too. So every gh
+        # command group a review does not need is denied whole, reads included, from gh's own command list; only the
+        # reads the review runs stay open.
+        env = {"AP2_RUN_DIR": str(transcripts.run_dir(self.data, "c-20260105-090000-abcdef"))}
+        base = workers_mod.floor("implement", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+        ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+        for cmd in ("gh ssh-key", "gh gpg-key", "gh agent-task", "gh codespace", "gh issue", "gh repo",
+                    "gh pr merge", "gh pr update-branch", "gh run rerun", "gh pr new"):
+            with self.subTest(rule=cmd):
+                self.assertIn(f"Bash({cmd}:*)", ro)
+        kept = {"pr", "run", "api", "search", "status", "help", "version"}
+        # The gh 2.80.0 snapshots, pinned: a name dropped from one would leave its command open.
+        self.assertEqual(set(roles.GH_COMMANDS), {
+            "auth", "browse", "codespace", "gist", "issue", "org", "pr", "project", "release", "repo", "cache", "run",
+            "workflow", "co", "agent-task", "alias", "api", "attestation", "completion", "config", "extension",
+            "gpg-key", "label", "preview", "ruleset", "search", "secret", "ssh-key", "status", "variable"})
+        # Each subcommand's ALIASES (`gh pr create --help` prints `gh pr new`) are in the snapshot too.
+        self.assertEqual(set(roles.GH_PR_COMMANDS), {
+            "create", "list", "status", "checkout", "checks", "close", "comment", "diff", "edit", "lock", "merge",
+            "ready", "reopen", "review", "unlock", "update-branch", "view", "new", "ls"})
+        self.assertEqual(set(roles.GH_RUN_COMMANDS),
+                         {"cancel", "delete", "download", "list", "rerun", "view", "watch", "ls"})
+        for cmd in roles.GH_COMMANDS:
+            with self.subTest(cmd=cmd):
+                if cmd in kept:
+                    self.assertNotIn(f"Bash(gh {cmd}:*)", ro)
+                else:
+                    self.assertIn(f"Bash(gh {cmd}:*)", ro)
+        for group, subs, keep in (("pr", roles.GH_PR_COMMANDS, {"view", "diff", "checks", "list", "status", "ls"}),
+                                  ("run", roles.GH_RUN_COMMANDS, {"view", "list", "watch", "ls"})):
+            self.assertLessEqual(keep, set(subs))
+            for sub in subs:
+                with self.subTest(sub=f"gh {group} {sub}"):
+                    if sub in keep:
+                        self.assertNotIn(f"Bash(gh {group} {sub}:*)", ro)
+                    else:
+                        self.assertIn(f"Bash(gh {group} {sub}:*)", ro)
+        self.assertEqual([r for r in roles.READ_ONLY_BASH_DENIED if r in base], [])  # the implement floor holds none
+        self.assertEqual(len(roles.READ_ONLY_BASH_DENIED), len(set(roles.READ_ONLY_BASH_DENIED)))
+        self.assertEqual(len(ro), len(set(ro)))  # each rule once
+        prefixes = [r[len("Bash("):-len(":*)")] for r in ro if r.startswith("Bash(") and r.endswith(":*)")]
+        for read in ("gh pr view 42", "gh pr diff 42", "gh pr checks 42", "gh pr list", "gh pr status",
+                     "gh pr ls", "gh run view 1", "gh run list", "gh run ls", "gh run watch 1", "gh api repos/o/r/pulls/42", "gh search prs x",
+                     "gh status", "gh help", "gh version", "gh --version"):
+            with self.subTest(read=read):
+                self.assertEqual([p for p in prefixes if (read + " ").startswith(p + " ")], [])
+
+    def _review_reads(self, cid: str) -> list:
+        """The commands a review runs (its ap2 steps in both spellings, its gh and git reads, the park): no read-only
+        rule may prefix one."""
+        ap2 = ROOT / "bin" / "ap2"
+        out = []
+        for cmd in ("ap2", str(ap2)):
+            out += [f"{cmd} card show {cid}", f"{cmd} review plan {cid} --stage review --checkout /w",
+                    f"{cmd} review check {cid}", f"{cmd} review verdict {cid}",
+                    f"{cmd} worker park {cid} pr-review --note x"]
+        return out + ["gh pr view 42", "gh pr diff 42", "gh pr checks 42", "gh api repos/o/r/pulls/42",
+                      "git show HEAD:x", "git log -1", "git cat-file -e x", "git rev-parse HEAD",
+                      "git ls-tree HEAD", "rg foo"]
+
+    def test_the_read_only_floor_denies_a_nested_claude_session_and_v1s_commands(self):
+        # One plain `claude -p ...` starts a session under the user's own settings, not this floor (every MCP server,
+        # the claude.ai pages, gh writes, no park or guard hook); v1's `ap` starts one too (`ap oneoff` runs
+        # `claude -p` with a tool allowed, after `ap decision add` and `ap decision resolve`). A review runs neither,
+        # so `claude` is denied in each spelling (bare, the path the worker was started with, the one on PATH, and
+        # where each link leads), and every v1 command in both spellings, reads included.
+        cid = "c-20260105-090000-abcdef"
+        env = {"AP2_ROLE": "pr-review", "AP2_CARD": cid, "AP2_RUN_DIR": str(transcripts.run_dir(self.data, cid))}
+        real = self.tmp / "versions" / "9.9.9"
+        real.parent.mkdir(parents=True)
+        real.write_text("")
+        link = self.tmp / "made-up-bin" / "claude"
+        link.parent.mkdir()
+        link.symlink_to(real)
+        on_path = {"claude": "/opt/made-up/bin/claude", "ap": "/opt/made-up/v1/bin/ap"}
+        with mock.patch.object(workers_mod.shutil, "which", side_effect=lambda name, *a, **k: on_path.get(name)):
+            base = workers_mod.floor("implement", {"tools": ["Read"]}, self.data, env, claude=str(link))
+            ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env, claude=str(link))
+            default = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+        base, ro = base["permissions"]["deny"], ro["permissions"]["deny"]
+        claude_rules = ["Bash(claude:*)", f"Bash({link}:*)", f"Bash({real}:*)", "Bash(/opt/made-up/bin/claude:*)"]
+        for rule in claude_rules:
+            with self.subTest(rule=rule):
+                self.assertIn(rule, ro)
+                self.assertNotIn(rule, base)
+        self.assertIn("Bash(/opt/made-up/bin/claude:*)", default)  # no path given: the one on PATH
+        # v1's command list, pinned to v1's own CLI: a command it adds fails here instead of staying open.
+        from autopilot import cli as v1_cli
+        v1_cli.load_all()
+        self.assertEqual(set(roles.V1_AP_COMMANDS), set(v1_cli.COMMANDS))
+        v1_rules = []
+        for cmd in roles.V1_AP_COMMANDS:
+            for ap in ("ap", str(ROOT / "bin" / "ap"), "/opt/made-up/v1/bin/ap"):
+                v1_rules.append(f"Bash({ap} {cmd}:*)")
+        for rule in v1_rules:
+            with self.subTest(rule=rule):
+                self.assertIn(rule, ro)
+                self.assertNotIn(rule, base)
+        for cmd in ("oneoff", "decision", "worker", "tick", "kick", "resume", "task", "perms", "evidence"):
+            self.assertIn(f"Bash(ap {cmd}:*)", ro)
+            self.assertIn(f"Bash({ROOT / 'bin' / 'ap'} {cmd}:*)", ro)
+        self.assertNotIn("Bash(ap:*)", ro)  # it would prefix every `ap2` command, the park and the review's own
+        self.assertEqual(len(ro), len(set(ro)))  # each rule once
+        prefixes = [r[len("Bash("):-len(":*)")] for r in ro if r.startswith("Bash(") and r.endswith(":*)")]
+        for read in self._review_reads(cid):
+            with self.subTest(read=read):
+                self.assertEqual([p for p in prefixes if read.startswith(p)], [])
+
+    def _fake_v1(self, cli_text, ran=None, modules=None) -> Path:
+        """A made-up installed v1 in its own temp folder: `<root>/bin/ap`, a script that would touch `ran` if it were
+        ever run, `<root>/lib/autopilot/cli.py` holding `cli_text` (bytes or text; None: no cli.py), and each of
+        `modules` ({file name: text}) next to it. Returns the `bin` folder."""
+        root = Path(tempfile.mkdtemp(prefix="made-up-v1-", dir=self.tmp))
+        (root / "bin").mkdir()
+        ap = root / "bin" / "ap"
+        ap.write_text("#!/bin/sh\n" + (f"/usr/bin/touch '{ran}'\n" if ran else "")
+                      + "echo 'commands: run-was-read' >&2\nexit 2\n")
+        ap.chmod(0o755)
+        if cli_text is not None:
+            (root / "lib" / "autopilot").mkdir(parents=True)
+            cli = root / "lib" / "autopilot" / "cli.py"
+            cli.write_bytes(cli_text) if isinstance(cli_text, bytes) else cli.write_text(cli_text)
+        for name, text in (modules or {}).items():
+            (root / "lib" / "autopilot").mkdir(parents=True, exist_ok=True)
+            f = root / "lib" / "autopilot" / name
+            f.write_bytes(text) if isinstance(text, bytes) else f.write_text(text)
+        return root / "bin"
+
+    def test_the_read_only_floor_denies_every_command_the_installed_v1_declares(self):
+        # The `ap` on PATH can be an installed v1 with more commands than the in-repo snapshot (`ap profile add
+        # --models-command ...` runs a command; `ap profile use` rewrites every v1 session's settings). The floor
+        # reads that v1's `lib/autopilot/*.py` (never runs it: a run migrates v1's data folder) and denies each
+        # plain command name its `@cli.command("...")` or `@command("...")` decorators register, and a literal
+        # COMMANDS holds, in every spelling, plus the fixed extra list; never a word that is not a plain lowercase
+        # command name.
+        cid = "c-20260105-090000-abcdef"
+        env = {"AP2_ROLE": "pr-review", "AP2_CARD": cid, "AP2_RUN_DIR": str(transcripts.run_dir(self.data, cid))}
+        ran = self.tmp / "made-up-ap-ran"
+        foo = "\n".join(["from autopilot import cli", "", "", '@cli.command("made-up-verb")', "def a(argv):",
+                         "    return 0", "", "", '@cli.command("Bad")', "def b(argv):", "    return 0", "", "",
+                         "class K:", '    @cli.command("x/y")', "    def c(self, argv):", "        return 0", ""])
+        bar = "\n".join(["from autopilot.cli import command", "", "", '@command("access")', "def d(argv):",
+                         "    return 0", ""])
+        bin_dir = self._fake_v1('COMMANDS = ("made-up-listed",)\n', ran, {"foo.py": foo, "bar.py": bar})
+        with mock.patch.dict(os.environ, {"PATH": str(bin_dir)}):
+            base = workers_mod.floor("implement", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+            ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+        self.assertFalse(ran.exists())  # read, never run
+        self.assertNotIn("Bash(ap run-was-read:*)", ro)
+        spellings = list(dict.fromkeys(["ap", str(ROOT / "bin" / "ap"), str(bin_dir / "ap"),
+                                        os.path.realpath(bin_dir / "ap")]))
+        for verb in ("made-up-verb", "access", "made-up-listed") + roles.V1_AP_EXTRA:
+            for ap in spellings:
+                with self.subTest(verb=verb, ap=ap):
+                    self.assertIn(f"Bash({ap} {verb}:*)", ro)
+                    self.assertNotIn(f"Bash({ap} {verb}:*)", base)
+        for bad in ("Bad", "x/y", ""):
+            with self.subTest(bad=bad):
+                self.assertNotIn(f"Bash(ap {bad}:*)", ro)
+        self.assertNotIn("Bash(ap:*)", ro)
+        self.assertEqual(len(ro), len(set(ro)))
+
+    def test_the_read_only_floor_never_runs_the_ap_on_path(self):
+        # Running v1's `ap` (even with no arguments) loads every v1 module and migrates a v1 data folder it has not
+        # migrated yet, so the floor only reads files: the made-up `ap` would leave a marker if it ran.
+        cid = "c-20260105-090000-abcdef"
+        env = {"AP2_ROLE": "pr-review", "AP2_CARD": cid, "AP2_RUN_DIR": str(transcripts.run_dir(self.data, cid))}
+        decorated = {"foo.py": '@cli.command("made-up-verb")\ndef a(argv):\n    return 0\n'}
+        for name, cli_text, modules in (("a literal list", 'COMMANDS = ["made-up-verb"]\n', None),
+                                        ("no cli.py", None, None), ("a decorated module", None, decorated)):
+            ran = self.tmp / f"made-up-ap-ran-{len(name)}"
+            bin_dir = self._fake_v1(cli_text, ran, modules)
+            with self.subTest(cli=name), mock.patch.dict(os.environ, {"PATH": str(bin_dir)}):
+                workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env)
+                self.assertFalse(ran.exists())
+
+    def test_the_read_only_floor_builds_when_the_installed_v1_cannot_be_read(self):
+        # A cli.py that does not parse, holds no COMMANDS, is too large, is not a regular file, or whose COMMANDS is
+        # not a literal adds nothing: the in-repo list and the fixed extra list are still denied.
+        cid = "c-20260105-090000-abcdef"
+        env = {"AP2_ROLE": "pr-review", "AP2_CARD": cid, "AP2_RUN_DIR": str(transcripts.run_dir(self.data, cid))}
+        huge = 'COMMANDS = ("made-up-verb",)\n' + "#" * (workers_mod.AP_CLI_MAX + 1) + "\n"
+        cases = (("a syntax error", 'COMMANDS = ("made-up-verb",\n'), ("no COMMANDS", "OTHER = ('made-up-verb',)\n"),
+                 ("a huge file", huge), ("not a literal", 'COMMANDS = tuple(["made-up-verb"]) + X\n'),
+                 ("not text", b"\xff\xfe COMMANDS = ('made-up-verb',)\n"), ("no cli.py", None),
+                 ("a folder", "folder"))
+        for name, cli_text in cases:
+            bin_dir = self._fake_v1(None if cli_text == "folder" else cli_text)
+            if cli_text == "folder":
+                (bin_dir.parent / "lib" / "autopilot" / "cli.py").mkdir(parents=True)
+            with self.subTest(cli=name), mock.patch.dict(os.environ, {"PATH": str(bin_dir)}):
+                ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+                for verb in roles.V1_AP_COMMANDS + roles.V1_AP_EXTRA:
+                    for ap in ("ap", str(ROOT / "bin" / "ap"), str(bin_dir / "ap")):
+                        self.assertIn(f"Bash({ap} {verb}:*)", ro)
+                # The fixed extra list, pinned: an installed v1 has these and the in-repo snapshot lacks them.
+                for verb in ("profile", "reply-kind"):
+                    self.assertIn(f"Bash(ap {verb}:*)", ro)
+                self.assertNotIn("Bash(ap made-up-verb:*)", ro)
+                self.assertNotIn("Bash(ap run-was-read:*)", ro)
+
+    def test_the_read_only_floor_takes_only_literal_command_decorators(self):
+        # Only the first argument of a `command(...)` or `<x>.command(...)` decorator call, when it is a string
+        # literal, names a command: a computed argument, another decorator, a bare `@command`, a call that is not a
+        # decorator, a literal that is not a string (`@cli.command(5)`), a module that does not parse or is too
+        # large, a link, and a file outside `lib/autopilot/` add nothing, and none of them stops the floor's build.
+        cid = "c-20260105-090000-abcdef"
+        env = {"AP2_ROLE": "pr-review", "AP2_CARD": cid, "AP2_RUN_DIR": str(transcripts.run_dir(self.data, cid))}
+        modules = {
+            "computed.py": "\n".join(['NAME = "made-up-one"', "", "", "@cli.command(NAME)", "def a(argv):",
+                                      "    return 0", "", ""])
+                           + '@cli.command("made-up-" + "two")\ndef b(argv):\n    return 0\n\n\n'
+                           '@cli.command(f"made-up-{NAME}")\ndef c(argv):\n    return 0\n',
+            "other.py": '@cli.register("made-up-three")\ndef a(argv):\n    return 0\n\n\n'
+                        '@commands("made-up-four")\ndef b(argv):\n    return 0\n\n\n'
+                        '@cli.command\ndef c(argv):\n    return 0\n\n\n'
+                        '@cli.command()\ndef d(argv):\n    return 0\n\n\n'
+                        '@cli.command(name="made-up-five")\ndef e(argv):\n    return 0\n\n\n'
+                        'cli.command("made-up-six")(print)\n\n\n'
+                        '@cli.command(5)\ndef f(argv):\n    return 0\n\n\n'
+                        '@cli.command(None)\ndef g(argv):\n    return 0\n\n\n'
+                        '@cli.command("made-up-also-kept")\ndef h(argv):\n    return 0\n',
+            "broken.py": '@cli.command("made-up-seven")\ndef a(argv:\n',
+            "huge.py": '@cli.command("made-up-eight")\ndef a(argv):\n    return 0\n'
+                       + "#" * (workers_mod.AP_CLI_MAX + 1) + "\n",
+            "binary.py": b"\xff\xfe " + b'@cli.command("made-up-nine")\n',
+            "notes.txt": '@cli.command("made-up-ten")\ndef a(argv):\n    return 0\n',
+            "good.py": '@cli.command("made-up-kept")\ndef a(argv):\n    return 0\n',
+        }
+        bin_dir = self._fake_v1(None, None, modules)
+        pkg = bin_dir.parent / "lib" / "autopilot"
+        outside = bin_dir.parent / "made-up-outside.py"
+        outside.write_text('@cli.command("made-up-linked")\ndef a(argv):\n    return 0\n')
+        (pkg / "linked.py").symlink_to(outside)
+        (pkg / "sub").mkdir()
+        (pkg / "sub" / "deep.py").write_text('@cli.command("made-up-deep")\ndef a(argv):\n    return 0\n')
+        with mock.patch.dict(os.environ, {"PATH": str(bin_dir)}):
+            ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+        self.assertIn("Bash(ap made-up-kept:*)", ro)
+        found = {r[len("Bash(ap "):-len(":*)")] for r in ro if r.startswith("Bash(ap made-up-")}
+        self.assertEqual(found, {"made-up-kept", "made-up-also-kept"})
+        for verb in roles.V1_AP_COMMANDS + roles.V1_AP_EXTRA:
+            self.assertIn(f"Bash(ap {verb}:*)", ro)
+
+    def test_the_read_only_floor_reads_at_most_ap_modules_max_v1_modules(self):
+        # The floor reads at most AP_MODULES_MAX of the installed v1's modules, in name order.
+        cid = "c-20260105-090000-abcdef"
+        env = {"AP2_ROLE": "pr-review", "AP2_CARD": cid, "AP2_RUN_DIR": str(transcripts.run_dir(self.data, cid))}
+        bin_dir = self._fake_v1(None, None, {
+            "a.py": '@cli.command("made-up-a")\ndef a(argv):\n    return 0\n',
+            "b.py": '@cli.command("made-up-b")\ndef b(argv):\n    return 0\n'})
+        with mock.patch.object(workers_mod, "AP_MODULES_MAX", 1), mock.patch.dict(os.environ, {"PATH": str(bin_dir)}):
+            ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+        self.assertIn("Bash(ap made-up-a:*)", ro)
+        self.assertNotIn("Bash(ap made-up-b:*)", ro)
+
+    def _gh_config(self, text, where="dir") -> dict:
+        """Writes a made-up gh config.yml (bytes or text; None: none at all) where gh looks for it: `dir` under
+        GH_CONFIG_DIR, `xdg` under XDG_CONFIG_HOME, `home` under the temp HOME. Returns the env to patch in."""
+        folder = Path(tempfile.mkdtemp(prefix="made-up-gh-", dir=self.tmp))
+        target = {"dir": folder, "xdg": folder / "gh", "home": self.home / ".config" / "gh"}[where]
+        target.mkdir(parents=True, exist_ok=True)
+        if text is not None:
+            f = target / "config.yml"
+            f.write_bytes(text) if isinstance(text, bytes) else f.write_text(text)
+        return {"dir": {"GH_CONFIG_DIR": str(folder)}, "xdg": {"XDG_CONFIG_HOME": str(folder)}, "home": {}}[where]
+
+    def test_the_read_only_floor_denies_the_users_gh_aliases(self):
+        # gh's own aliases (`gh alias set pm 'pr merge'`) run a gh command the snapshot rules deny under a name they
+        # do not: `gh pm 103 --squash` merges a PR as the user. The floor reads gh's config file (never runs gh) and
+        # denies each alias name; a worker role gets no such rule.
+        cid = "c-20260105-090000-abcdef"
+        env = {"AP2_ROLE": "pr-review", "AP2_CARD": cid, "AP2_RUN_DIR": str(transcripts.run_dir(self.data, cid))}
+        text = ("git_protocol: https\naliases:\n    pm: pr merge\n    co: pr checkout\n"
+                "    pr: pr merge\n    api: api -X DELETE x\n"
+                "    \"made-up-quoted\": pr close\n    x/y: pr close\n    deep: |\n        nested: pr merge\n"
+                "hosts:\n    made-up-host:\n        user: made-up\n")
+        for where in ("dir", "xdg", "home"):
+            patch = self._gh_config(text, where)
+            with self.subTest(where=where), mock.patch.dict(os.environ, patch):
+                base = workers_mod.floor("implement", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+                ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+                for alias in ("pm", "co", "made-up-quoted", "deep"):
+                    self.assertIn(f"Bash(gh {alias}:*)", ro)
+                self.assertNotIn("Bash(gh pm:*)", base)
+                for not_alias in ("x/y", "nested", "made-up-host", "user", "git_protocol", "hosts", "aliases"):
+                    self.assertNotIn(f"Bash(gh {not_alias}:*)", ro)
+                # An alias named as a gh command a review reads with (`pr`, `api`) is never run by gh, and a rule for
+                # it would shut the review's own reads.
+                for kept in ("pr", "api"):
+                    self.assertNotIn(f"Bash(gh {kept}:*)", ro)
+                prefixes = [r[len("Bash("):-len(":*)")] for r in ro if r.startswith("Bash(") and r.endswith(":*)")]
+                for read in ("gh pr view 42", "gh pr diff 42", "gh api repos/o/r/pulls/42"):
+                    self.assertEqual([p for p in prefixes if (read + " ").startswith(p + " ")], [])
+                self.assertEqual(len(ro), len(set(ro)))
+            if where == "home":
+                (self.home / ".config" / "gh" / "config.yml").unlink()
+
+    def test_the_read_only_floor_reads_gh_aliases_written_in_flow_style(self):
+        # Once every alias is deleted gh writes the map on one line (`aliases: {}`) and keeps that style when one is
+        # set again (`aliases: {pm: pr merge}`), so the floor reads a flow map too: each entry's key, quotes
+        # stripped, over more than one line, never a key of a nested map or a value.
+        cid = "c-20260105-090000-abcdef"
+        env = {"AP2_ROLE": "pr-review", "AP2_CARD": cid, "AP2_RUN_DIR": str(transcripts.run_dir(self.data, cid))}
+        cases = (("one entry", "aliases: {pm: pr merge}\n", {"pm"}),
+                 ("quoted", 'git_protocol: https\naliases: {pm: pr merge, "rv": "pr review --approve"}\n'
+                            "hosts:\n    made-up-host:\n        user: made-up\n", {"pm", "rv"}),
+                 ("two lines", "aliases: {pm: pr merge,\n    'mq': 'pr merge, then: x'}\nhosts: {}\n", {"pm", "mq"}),
+                 ("empty", "aliases: {}\nhosts:\n    made-up-host:\n        user: made-up\n", set()),
+                 ("nested", "aliases: {pm: {deep: pr merge}, x/y: z, made-up-co: pr checkout}  # made-up note\n",
+                  {"pm", "made-up-co"}))
+        for name, text, want in cases:
+            with self.subTest(config=name), mock.patch.dict(os.environ, self._gh_config(text)):
+                ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+                found = {r[len("Bash(gh "):-len(":*)")] for r in ro if r.startswith("Bash(gh ")
+                         and r[len("Bash(gh "):-len(":*)")] not in roles.GH_COMMANDS
+                         and " " not in r[len("Bash(gh "):-len(":*)")]}
+                self.assertEqual(found, want)
+                self.assertEqual(len(ro), len(set(ro)))
+
+    def test_the_read_only_floor_follows_a_linked_gh_config(self):
+        # A gh config.yml kept as a link into a dotfiles folder is normal, and gh follows it, so the floor does too;
+        # a link to a FIFO adds nothing and does not hang.
+        cid = "c-20260105-090000-abcdef"
+        env = {"AP2_ROLE": "pr-review", "AP2_CARD": cid, "AP2_RUN_DIR": str(transcripts.run_dir(self.data, cid))}
+        dotfiles = Path(tempfile.mkdtemp(prefix="made-up-dotfiles-", dir=self.tmp))
+        (dotfiles / "config.yml").write_text("aliases:\n    pm: pr merge\n")
+        os.mkfifo(dotfiles / "fifo.yml")
+        for target, want in (("config.yml", True), ("fifo.yml", False)):
+            patch = self._gh_config(None)
+            (Path(patch["GH_CONFIG_DIR"]) / "config.yml").symlink_to(dotfiles / target)
+            with self.subTest(target=target), mock.patch.dict(os.environ, patch):
+                ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+                self.assertEqual("Bash(gh pm:*)" in ro, want)
+
+    def test_the_read_only_floor_denies_the_gh_aliases_of_the_config_a_profile_points_at(self):
+        # A profile's env that sets GH_CONFIG_DIR makes the worker's gh read another config file, so its aliases are
+        # denied too, with those of the config the daemon's own env points at.
+        cid = "c-20260105-090000-abcdef"
+        env = {"AP2_ROLE": "pr-review", "AP2_CARD": cid, "AP2_RUN_DIR": str(transcripts.run_dir(self.data, cid))}
+        own = self._gh_config("aliases:\n    co: pr checkout\n")
+        other = self._gh_config("aliases:\n    pm: pr merge\n")
+        prof = dict(profiles.builtin(), env=dict(other))
+        with mock.patch.dict(os.environ, own):
+            ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env, prof)
+            plain = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env, profiles.builtin())
+        self.assertEqual(ro["env"]["GH_CONFIG_DIR"], other["GH_CONFIG_DIR"])
+        for alias in ("pm", "co"):
+            self.assertIn(f"Bash(gh {alias}:*)", ro["permissions"]["deny"])
+        self.assertIn("Bash(gh co:*)", plain["permissions"]["deny"])
+        self.assertNotIn("Bash(gh pm:*)", plain["permissions"]["deny"])
+        self.assertEqual(len(ro["permissions"]["deny"]), len(set(ro["permissions"]["deny"])))
+
+    def test_the_read_only_floor_builds_when_the_gh_config_cannot_be_read(self):
+        cid = "c-20260105-090000-abcdef"
+        env = {"AP2_ROLE": "pr-review", "AP2_CARD": cid, "AP2_RUN_DIR": str(transcripts.run_dir(self.data, cid))}
+        clean = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+        for name, text in (("missing", None), ("empty", ""), ("garbled", b"\xff\xfe\x00aliases:\n  pm: pr merge\n"),
+                           ("no aliases", "hosts:\n    pm: x\n"), ("too large", "aliases:\n    pm: pr merge\n"
+                                                                   + "#" * (workers_mod.GH_CONFIG_MAX + 1))):
+            with self.subTest(config=name), mock.patch.dict(os.environ, self._gh_config(text)):
+                ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+                self.assertEqual(ro, clean)
+                self.assertNotIn("Bash(gh pm:*)", ro)
+
+    def test_the_read_only_floor_denies_every_claude_version_next_to_the_one_it_links_to(self):
+        # The folder the claude link leads into keeps older full claude binaries; `<folder>/<old version> -p ...`
+        # starts a nested session too. A claude that lives directly in a bin folder does not deny that folder's other
+        # tools (gh, git).
+        cid = "c-20260105-090000-abcdef"
+        env = {"AP2_ROLE": "pr-review", "AP2_CARD": cid, "AP2_RUN_DIR": str(transcripts.run_dir(self.data, cid))}
+        versions = self.tmp / "made-up-share" / "versions"
+        versions.mkdir(parents=True)
+        for v in ("1.0.0", "1.0.1"):
+            (versions / v).write_text("")
+        link = self.tmp / "made-up-bin" / "claude"
+        link.parent.mkdir()
+        link.symlink_to(versions / "1.0.1")
+        plain = self.tmp / "made-up-tools"
+        plain.mkdir()
+        for name in ("claude", "gh", "git"):
+            (plain / name).write_text("")
+        on_path = {"claude": str(plain / "claude"), "gh": str(plain / "gh"), "git": str(plain / "git")}
+        # A link into another folder that holds gh and git: that folder is a bin folder, not a folder of versions.
+        linked_bin = self.tmp / "made-up-linked-bin"
+        linked_bin.mkdir()
+        for name in ("claude", "gh", "git"):
+            (linked_bin / name).write_text("")
+        link2 = self.tmp / "made-up-bin2" / "claude"
+        link2.parent.mkdir()
+        link2.symlink_to(linked_bin / "claude")
+        # A plain folder with no gh, git, ap or ap2: its claude is not a link into another folder.
+        plain2 = self.tmp / "made-up-tools2"
+        plain2.mkdir()
+        for name in ("claude", "rg"):
+            (plain2 / name).write_text("")
+        with mock.patch.object(workers_mod.shutil, "which", side_effect=lambda name, *a, **k: on_path.get(name)):
+            ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env,
+                                   claude=str(link))["permissions"]["deny"]
+            base = workers_mod.floor("implement", {"tools": ["Read"]}, self.data, env,
+                                     claude=str(link))["permissions"]["deny"]
+            ro2 = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env,
+                                    claude=str(link2))["permissions"]["deny"]
+            ro3 = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env,
+                                    claude=str(plain2 / "claude"))["permissions"]["deny"]
+        self.assertIn(f"Bash({os.path.realpath(linked_bin / 'claude')}:*)", ro2)
+        for name in ("gh", "git"):
+            with self.subTest(linked_tool=name):
+                self.assertEqual([r for r in ro2 if str(linked_bin / name) in r], [])
+        self.assertIn(f"Bash({plain2 / 'claude'}:*)", ro3)
+        self.assertEqual([r for r in ro3 if str(plain2 / "rg") in r], [])
+        for v in ("1.0.0", "1.0.1"):
+            with self.subTest(version=v):
+                self.assertIn(f"Bash({versions / v}:*)", ro)
+                self.assertNotIn(f"Bash({versions / v}:*)", base)
+        self.assertIn(f"Bash({plain / 'claude'}:*)", ro)
+        for name in ("gh", "git"):
+            with self.subTest(tool=name):
+                self.assertEqual([r for r in ro if str(plain / name) in r], [])
+        self.assertEqual(len(ro), len(set(ro)))  # each rule once
+
+    def test_a_started_read_only_worker_denies_the_claude_it_was_started_with(self):
+        cid = self.pr_card()
+        self.workers().start(cid, "pr-review", cwd=self.wt, prompt="Review it.")
+        deny = self.deny(cid, "pr-review")
+        self.assertIn("Bash(claude:*)", deny)
+        self.assertIn(f"Bash({FAKE}:*)", deny)
+        settings = json.loads((transcripts.run_dir(self.data, cid) / "settings-pr-review.json").read_text())
+        for k, v in roles.READ_ONLY_GIT_ENV.items():
+            self.assertEqual(settings["env"].get(k), v)
+
+    def test_an_in_place_resume_denies_the_claude_it_was_started_with(self):
+        # The resume rewrites the floor: it must deny the worker's own claude again, not only the one on PATH.
+        cid = self.pr_card()
+        w = self.workers()
+        a = w.start(cid, "pr-review", cwd=self.wt, prompt="Review it.")
+        f = transcripts.run_dir(self.data, cid) / "settings-pr-review.json"
+        f.unlink()  # so the settings checked below are the resume's own
+        self.drop_agent(a["short_id"])
+        self.clock.advance(5)
+        self.assertEqual(w.check()[0]["did"], "resumed")
+        self.assertEqual(self.bg_calls()[-1]["argv"][1:3], ["--resume", a["session_id"]])
+        settings = json.loads(f.read_text())
+        self.assertIn(f"Bash({FAKE}:*)", settings["permissions"]["deny"])
+        for k, v in roles.READ_ONLY_GIT_ENV.items():
+            self.assertEqual(settings["env"].get(k), v)
+
+    def test_the_read_only_floor_shuts_out_the_users_git_config(self):
+        # The user's global git config can hold aliases (`ps = push`) and a credential helper that pushes as the user,
+        # so `git ps <url> --delete <branch>` gets past the `git push` rule. A read-only session reads no global or
+        # system git config, never prompts, and is denied the git commands that set an alias or a remote or push.
+        cid = "c-20260105-090000-abcdef"
+        env = {"AP2_ROLE": "pr-review", "AP2_CARD": cid, "AP2_RUN_DIR": str(transcripts.run_dir(self.data, cid))}
+        want = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0"}
+        self.assertEqual(dict(roles.READ_ONLY_GIT_ENV), want)
+        prof = dict(profiles.builtin(), env={"GIT_CONFIG_GLOBAL": "/made/up/gitconfig"})
+        for p in (None, profiles.builtin(), prof):
+            with self.subTest(profile=p and p.get("env")):
+                ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env, p)
+                base = workers_mod.floor("implement", {"tools": ["Read"]}, self.data, env, p)
+                for k, v in want.items():
+                    self.assertEqual(ro["env"].get(k), v)  # a profile's env cannot undo them
+                self.assertEqual({k for k in base["env"] if k in want and base["env"][k] == want[k]}, set())
+                self.assertEqual({k: v for k, v in ro["env"].items() if k.startswith("AP2_")},
+                                 {k: v for k, v in base["env"].items() if k.startswith("AP2_")})
+        ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+        base = workers_mod.floor("implement", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+        for cmd in ("git push", "git commit", "git config", "git -c", "git --config-env", "git remote",
+                    "git send-pack", "git subtree"):
+            rule = f"Bash({cmd}:*)"
+            with self.subTest(rule=rule):
+                self.assertIn(rule, ro)
+                self.assertNotIn(rule, base)
+        prefixes = [r[len("Bash("):-len(":*)")] for r in ro if r.startswith("Bash(") and r.endswith(":*)")]
+        for read in self._review_reads(cid):
+            with self.subTest(read=read):
+                self.assertEqual([p for p in prefixes if read.startswith(p)], [])
+
+    def test_the_floor_allows_only_the_workers_own_park(self):
+        # Allowed by rule, the park skips the classifier: the rule names the worker's own card and role, so parking
+        # another card is judged like any other command (and `ap2 worker park` refuses it in a worker's session).
+        cid = "c-20260105-090000-abcdef"
+        env = {"AP2_ROLE": "pr-review", "AP2_CARD": cid, "AP2_RUN_DIR": str(transcripts.run_dir(self.data, cid))}
+        ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env)
+        self.assertEqual(ro["permissions"]["allow"], [f"Bash({ROOT / 'bin' / 'ap2'} worker park {cid} pr-review:*)"])
+        self.assertEqual(workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, {})["permissions"]["allow"],
+                         [])  # no card in the env: no park is allowed by rule
+
+    def test_the_floor_denies_the_ap2_commands_a_review_does_not_run(self):
+        env = {"AP2_RUN_DIR": str(transcripts.run_dir(self.data, "c-20260105-090000-abcdef"))}
+        base = workers_mod.floor("implement", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+        ro = workers_mod.floor("pr-review", {"tools": ["Read"]}, self.data, env)["permissions"]["deny"]
+        ap2 = ROOT / "bin" / "ap2"
+        for verb in ("cap", "worker start", "worker end", "worker answer", "worker finish", "worker list",
+                     "review apply", "review sync", "card add", "card list", "restore", "profile", "source", "gate",
+                     "config", "install", "uninstall", "doctor"):
+            for rule in (f"Bash(ap2 {verb}:*)", f"Bash({ap2} {verb}:*)"):
+                with self.subTest(rule=rule):
+                    self.assertIn(rule, ro)
+                    self.assertNotIn(rule, base)
+        # What the review command runs, and the park: never denied (deny wins over the park's allow).
+        for verb in ("card", "card show", "review", "review plan", "review verdict", "review check", "worker",
+                     "worker park", "hook-park", "hook-guard", "hook-write"):
+            for rule in (f"Bash(ap2 {verb}:*)", f"Bash({ap2} {verb}:*)"):
+                with self.subTest(rule=rule):
+                    self.assertNotIn(rule, ro)
+        # Every command `ap2` has is either denied or one the review runs.
+        kept = {"card show", "review plan", "review verdict", "review check", "worker park", "hook-park",
+                "hook-guard", "hook-write"}
+        for verb in _ap2_commands():
+            with self.subTest(verb=verb):
+                covered = any(verb == d or verb.startswith(d + " ") for d in roles.READ_ONLY_AP2_DENIED)
+                self.assertTrue(covered or verb in kept or any(k.startswith(verb + " ") for k in kept), verb)
+
+    def test_a_write_outside_the_run_directory_is_denied(self):
+        run = transcripts.run_dir(self.data, "c-20260105-090000-abcdef")
+        run.mkdir(parents=True)
+        env = {"AP2_ROLE": "pr-review", "AP2_RUN_DIR": str(run)}
+
+        def write(path):
+            return workers_mod.write_guard({"tool_name": "Write", "tool_input": {"file_path": str(path)}}, env)
+
+        # Only its two files, at the run directory's top level: its report and its question.
+        self.assertIsNone(write(run / "prreview.json"))
+        self.assertIsNone(write(run / "question.json"))
+        self.assertIsNone(write(run / "PRReview.json"))  # the same file on a case-insensitive disk
+        for bad in (self.data / "config.yaml", run.parent / "c-20260105-090000-ffffff" / "prreview.json",
+                    run / ".." / "c-20260105-090000-ffffff" / "x.json", self.wt / "README.md",
+                    run / "settings-pr-review.json", "relative.json", run.parent, "", run / "notes" / "x.md",
+                    run / "SETTINGS-pr-review.json", run / "settings-implement.json",
+                    run / "settings-discover-pr-review.json", run / ".claude" / "settings.json", run / "CLAUDE.md",
+                    run / ".mcp.json", run / "handback.json", run / "notes" / "prreview.json", run):
+            with self.subTest(bad=str(bad)):
+                out = write(bad)
+                self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+        # A link in the run directory that points out of it is judged where it points.
+        (run / "out").symlink_to(self.wt)
+        self.assertEqual(write(run / "out" / "x")["hookSpecificOutput"]["permissionDecision"], "deny")
+        # No run directory: fail closed. Not a v2 worker, or not a Write: no opinion.
+        self.assertEqual(workers_mod.write_guard({"tool_name": "Write",
+                                                  "tool_input": {"file_path": str(run / "prreview.json")}},
+                                                 {"AP2_ROLE": "pr-review"})["hookSpecificOutput"]["permissionDecision"],
+                         "deny")
+        # A link named like the report that points out of the run directory is judged where it points.
+        (run / "prreview.json").symlink_to(self.wt / "prreview.json")
+        self.assertEqual(write(run / "prreview.json")["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertIsNone(workers_mod.write_guard({"tool_name": "Write", "tool_input": {"file_path": "/x"}}, {}))
+        self.assertIsNone(workers_mod.write_guard({"tool_name": "Read", "tool_input": {"file_path": "/x"}}, env))
+
+    def test_a_path_that_cannot_be_resolved_is_denied(self):
+        run = transcripts.run_dir(self.data, "c-20260105-090000-abcdef")
+        run.mkdir(parents=True)
+        env = {"AP2_ROLE": "pr-review", "AP2_RUN_DIR": str(run)}
+        # A lone surrogate or a NUL makes the path's resolve raise: no file has such a name, so it is denied.
+        for bad in (f"{run}/\ud800/../prreview.json", f"{run}/x\x00/../prreview.json"):
+            with self.subTest(bad=ascii(bad)):
+                out = workers_mod.write_guard({"tool_name": "Write", "tool_input": {"file_path": bad}}, env)
+                self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_the_hook_command_answers_on_stdout(self):
+        run = transcripts.run_dir(self.data, "c-20260105-090000-abcdef")
+        run.mkdir(parents=True)
+        env = dict(os.environ, AP2_ROLE="pr-review", AP2_RUN_DIR=str(run), PYTHONIOENCODING="utf-8")
+        env.pop("AP2_DATA", None)
+
+        def hook(path):
+            payload = json.dumps({"tool_name": "Write", "tool_input": {"file_path": str(path), "content": "x"}})
+            r = subprocess.run([sys.executable, str(ROOT / "bin" / "ap2"), "hook-write"], input=payload,
+                               capture_output=True, text=True, env=env, timeout=60)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            return r.stdout.strip()
+
+        self.assertEqual(hook(run / "prreview.json"), "")
+        self.assertEqual(json.loads(hook(self.wt / "x.py"))["hookSpecificOutput"]["permissionDecision"], "deny")
+        # A payload that is not JSON is denied: the hook fails closed.
+        r = subprocess.run([sys.executable, str(ROOT / "bin" / "ap2"), "hook-write"], input="{not json",
+                           capture_output=True, text=True, env=env, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)["hookSpecificOutput"]["permissionDecision"], "deny")
+        # A path with a lone surrogate (escaped in the JSON) is denied too: any error in the hook fails closed.
+        self.assertEqual(json.loads(hook(f"{run}/\ud800/../prreview.json"))["hookSpecificOutput"]
+                         ["permissionDecision"], "deny")
+
+    def test_an_error_in_the_hook_is_a_deny(self):
+        written = []
+        with mock.patch.dict(os.environ, {"AP2_ROLE": "pr-review"}), \
+                mock.patch.object(workers_mod, "write_guard", side_effect=RuntimeError("boom")), \
+                mock.patch.object(workers_mod.os, "write", side_effect=lambda fd, b: written.append((fd, b))):
+            self.assertEqual(workers_mod.write_hook([], io.StringIO('{"tool_name":"Write"}')), 0)
+        self.assertEqual([fd for fd, _ in written], [1])
+        self.assertEqual(json.loads(written[0][1])["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_a_started_worker_gets_the_read_only_floor(self):
+        cid = self.pr_card()
+        self.workers().start(cid, "pr-review", cwd=self.wt, prompt="Review it.")
+        deny = self.deny(cid, "pr-review")
+        self.assertIn("Edit", deny)
+        self.assertIn("NotebookEdit", deny)
+
+    def test_the_read_only_floor_denies_every_mcp_tool_and_server(self):
+        # A read-only role lists no MCP tool, so every MCP tool its session loads is denied, the write ones (that
+        # v1's outward-verb list does not name) and the read ones alike, and each server is denied whole, so a tool
+        # that shows up later on a known server is covered too. The role's own built-in tools are kept. A tool
+        # name with `__` in its own part belongs to the server before the first `__` after `mcp__`.
+        env = {"AP2_RUN_DIR": str(transcripts.run_dir(self.data, "c-20260105-090000-abcdef"))}
+        mcp = ["mcp__docs__delete", "mcp__docs__update", "mcp__builds__submit", "mcp__builds__run",
+               "mcp__drive__delete_file", "mcp__docs__read_page", "mcp__chat__send_message",
+               "mcp__wiki__page__delete"]
+        builtin = ["Bash", "Read", "Glob", "Grep", "Write", "Agent"]
+        project = {"tools": builtin + mcp, "deny_servers": ["mcp__tracker"]}
+        ro = workers_mod.floor("pr-review", project, self.data, env)["permissions"]["deny"]
+        for rule in mcp + ["mcp__docs", "mcp__builds", "mcp__drive", "mcp__chat", "mcp__tracker", "mcp__wiki"]:
+            with self.subTest(rule=rule):
+                self.assertIn(rule, ro)
+        self.assertNotIn("mcp__wiki__page", ro)
+        for tool in builtin:
+            self.assertNotIn(tool, ro)
+        self.assertEqual(len(ro), len(set(ro)))  # each rule once
+        # The worker roles keep today's floor: only the outward-verb tools and the not-connected servers.
+        base = workers_mod.floor("implement", project, self.data, env)["permissions"]["deny"]
+        self.assertEqual([r for r in base if r.startswith("mcp__")], ["mcp__chat__send_message", "mcp__tracker"])
+
+    def test_the_read_only_floor_denies_every_built_in_tool_its_role_does_not_list(self):
+        # A read-only role gets only its own tools: every other built-in the session finds is denied (a scheduled
+        # cloud agent, the user's claude.ai pages, a push, a skill, the web), but the tool search and `Task` (the
+        # Agent tool's older name) stay open. A worker role keeps today's floor: none of these built-ins.
+        env = {"AP2_RUN_DIR": str(transcripts.run_dir(self.data, "c-20260105-090000-abcdef"))}
+        denied = ["RemoteTrigger", "ArtifactData", "Artifact", "Skill", "WebFetch", "CronCreate", "PushNotification",
+                  "NewBuiltinTool"]  # one the fixed list does not name: denied because discovery found it
+        self.assertNotIn("NewBuiltinTool", roles.READ_ONLY_BUILTIN_DENIED)
+        kept = ["ToolSearch", "Agent", "Bash", "Read", "Write", "Glob", "Grep", "Task"]
+        project = {"tools": denied + kept}
+        ro = workers_mod.floor("pr-review", project, self.data, env)["permissions"]["deny"]
+        for tool in denied:
+            with self.subTest(tool=tool):
+                self.assertIn(tool, ro)
+        for tool in kept:
+            with self.subTest(tool=tool):
+                self.assertNotIn(tool, ro)
+        self.assertEqual(len(ro), len(set(ro)))  # each rule once
+        base = workers_mod.floor("implement", project, self.data, env)["permissions"]["deny"]
+        for tool in denied + kept:
+            with self.subTest(implement=tool):
+                self.assertNotIn(tool, base)
+
+    def test_the_read_only_floor_denies_the_fixed_built_ins_when_discovery_lists_none(self):
+        # The fixed list (roles.READ_ONLY_BUILTIN_DENIED) is denied even when the discovered tool list is empty, as
+        # a tool the session loads later is not in it; the role's own tools and `Task` are not.
+        env = {"AP2_RUN_DIR": str(transcripts.run_dir(self.data, "c-20260105-090000-abcdef"))}
+        ro = workers_mod.floor("pr-review", {"tools": []}, self.data, env)["permissions"]["deny"]
+        for tool in ("RemoteTrigger", "ArtifactData", "Artifact", "PushNotification", "Skill", "WebFetch"):
+            with self.subTest(tool=tool):
+                self.assertIn(tool, ro)
+        for tool in roles.ROLES["pr-review"].tools + ("Task", "ToolSearch"):
+            with self.subTest(kept=tool):
+                self.assertNotIn(tool, ro)
+        self.assertEqual(len(ro), len(set(ro)))
+
+    def test_a_started_read_only_worker_denies_every_listed_server_whole(self):
+        # Every server the discovery lists is denied whole for a read-only role, a connected one with no tool in the
+        # init event as well; an implement worker keeps only the not-connected ones.
+        servers = "slack:connected,quiet:connected,tracker:pending"
+        cid = self.pr_card()
+        with mock.patch.dict(os.environ, {"FAKE_MCP_SERVERS": servers}):
+            self.workers().start(cid, "pr-review", cwd=self.wt, prompt="Review it.")
+        deny = self.deny(cid, "pr-review")
+        for rule in ("mcp__slack", "mcp__quiet", "mcp__tracker", "mcp__slack__slack_read_channel",
+                     "mcp__slack__slack_send_message"):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, deny)
+        other = self.add_card()
+        with mock.patch.dict(os.environ, {"FAKE_MCP_SERVERS": servers}):
+            self.workers().start(other, "implement", cwd=self.wt)
+        deny = self.deny(other)
+        self.assertIn("mcp__tracker", deny)
+        for rule in ("mcp__slack", "mcp__quiet", "mcp__slack__slack_read_channel"):
+            self.assertNotIn(rule, deny)
+
+
+class PrReviewAutoStartTest(PrReviewCase):
+    # criterion 4
+    def test_check_starts_one_worker_for_each_card_not_reviewed_at_its_head(self):
+        due = self.pr_card()
+        done_head = self.pr_card(key="example/widgets#43", pr={"repo": "example/widgets", "number": 43,
+                                                                "head_sha": prr.A, "reviewed_sha": prr.A})
+        closed = self.pr_card(key="example/widgets#44", lane="done")
+        other = self.add_card()  # not a PR review card
+        out = self.workers().check()
+        self.assertEqual(out, [{"card": due, "role": "pr-review", "state": "due", "did": "started"}])
+        starts = self.review_starts()
+        self.assertEqual(len(starts), 1)
+        run = transcripts.run_dir(self.data, due)
+        self.assertTrue(run.is_dir())  # the card's run directory, made for it
+        self.assertEqual(starts[0]["env"]["AP2_RUN_DIR"], str(run))  # where it writes its report
+        # It runs in a fresh, empty folder of its own outside the data folder: a relative path in its shell is never
+        # a data-folder path, and nothing it writes there is loaded as a project's settings by a later session.
+        cwd = Path(starts[0]["cwd"])
+        self.assertTrue(cwd.is_dir())
+        self.assertNotEqual(cwd, run)
+        self.assertNotIn(self.data, [cwd, *cwd.parents])
+        self.assertEqual(cwd.parent, self.scratch)
+        self.assertTrue(cwd.name.startswith("ap2-pr-review-"), cwd.name)
+        self.assertEqual(cwd.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(resources.Registry(self.data).read()[0]["cwd"], str(cwd))
+        prompt = starts[0]["argv"][-1]
+        self.assertTrue(prompt.startswith(f"/autopilot:pr-review {due} review\n"))
+        self.assertIn(f"Review the pull request on card {due} with commands/pr-review.md, read-only.", prompt)
+        self.assertEqual([r["card"] for r in resources.Registry(self.data).read()], [due])
+        for cid in (done_head, closed, other):
+            self.assertNotIn("sessions", self.get(cid))
+        # The worker is on record now: a second check acts on it and starts nothing new.
+        again = self.workers().check()
+        self.assertEqual([(e["card"], e["state"]) for e in again], [(due, "running")])
+        self.assertEqual(len(self.review_starts()), 1)
+
+    def test_a_card_with_an_open_ask_or_a_session_that_did_not_end_is_not_started(self):
+        asked = self.pr_card(ask={"type": "confirm", "text": "Review this one?"})
+        paused = self.pr_card(key="example/widgets#43", sessions={"pr-review": {"state": "paused", "id": "x"}})
+        asked_w = self.pr_card(key="example/widgets#44", sessions={"pr-review": {"state": "asked", "id": "y"}})
+        ended = self.pr_card(key="example/widgets#45", sessions={"pr-review": {"state": "ended", "id": "z",
+                                                                               "closed": "done"}},
+                             pr={"repo": "example/widgets", "number": 45, "head_sha": prr.B, "reviewed_sha": prr.A})
+        # Ended by hand (`ap2 worker end`), or ended before the close was saved (no `closed`): held until a start by
+        # hand.
+        by_hand = self.pr_card(key="example/widgets#46", sessions={"pr-review": {"state": "ended", "id": "v",
+                                                                                 "closed": "end"}})
+        older = self.pr_card(key="example/widgets#47", sessions={"pr-review": {"state": "ended", "id": "u"}})
+        out = self.workers().check()
+        self.assertEqual([(e["card"], e["did"]) for e in out], [(ended, "started")])
+        self.assertTrue(self.review_starts()[0]["argv"][-1].startswith(f"/autopilot:pr-review {ended} review\n"))
+        for cid in (asked, paused, asked_w, by_hand, older):
+            self.assertNotIn(cid, [r["card"] for r in resources.Registry(self.data).read()])
+
+    def test_a_worker_put_on_record_after_the_locked_steps_is_seen(self):
+        # Another process starts a worker on the card after check's own lines were made: the registry read in the
+        # auto-start step still sees it, so no second worker is started next to it.
+        cid = self.pr_card()
+        with resources.Registry(self.data).locked() as records:  # the card itself still says nothing of it
+            records.append({"card": cid, "role": "review", "session_name": f"{cid} · review", "short_id": "s9999",
+                            "session_id": "", "ports": [7200, 7209], "needs": [], "cwd": str(self.wt)})
+        self.assertEqual(self.workers()._start_reviews([], "test"), [])
+        self.assertEqual(self.review_starts(), [])
+
+    def test_a_start_that_is_on_record_keeps_its_folder(self):
+        # The start fails after its record was written (the listing does not answer in time): the record points at the
+        # running session and its folder, so the folder is kept.
+        cid = self.pr_card()
+        with mock.patch.object(Workers, "_session_id", side_effect=subprocess.TimeoutExpired("claude", 5)):
+            out = self.workers().check()
+        self.assertEqual([(e["card"], e["did"]) for e in out], [(cid, "nothing")])
+        rec = resources.Registry(self.data).read()[0]
+        self.assertEqual(rec["card"], cid)
+        self.assertTrue(Path(rec["cwd"]).is_dir())
+
+    def test_a_card_with_another_worker_is_not_started(self):
+        cid = self.pr_card()
+        self.workers().start(cid, "review", cwd=self.wt, prompt="Something else.")
+        out = self.workers().check()
+        self.assertEqual([(e["card"], e["role"]) for e in out], [(cid, "review")])
+        self.assertEqual(self.review_starts(), [])
+
+    # criterion 5
+    def test_at_max_workers_each_due_card_gets_a_note_and_nothing_starts(self):
+        w = self.workers(max_workers=1)
+        busy = self.start(w)  # the one slot
+        a, b = self.pr_card(), self.pr_card(key="example/widgets#43")
+        out = w.check()
+        lines = {e["card"]: e for e in out}
+        self.assertEqual(lines[busy["card"]]["state"], "running")
+        for cid in (a, b):
+            self.assertEqual((lines[cid]["role"], lines[cid]["state"], lines[cid]["did"]), ("pr-review", "due",
+                                                                                           "nothing"))
+            self.assertIn("worker", lines[cid]["note"])
+            self.assertNotIn("error", lines[cid])
+        self.assertEqual(self.review_starts(), [])
+        self.assertEqual([r["card"] for r in resources.Registry(self.data).read()], [busy["card"]])
+        self.assertEqual(list(self.scratch.iterdir()), [])  # a refused start leaves no folder behind
+
+    def test_a_refused_start_does_not_stop_the_later_cards(self):
+        a = self.pr_card()
+        self.clock.advance(1)  # cards are listed oldest first
+        b = self.pr_card(key="example/widgets#43")
+        real = Workers.start
+        seen = []
+
+        def start(self_, card_id, role, **kw):
+            seen.append(card_id)
+            if card_id == a:
+                raise profiles.ProfileError("no active profile")
+            return real(self_, card_id, role, **kw)
+
+        with mock.patch.object(Workers, "start", start):
+            out = self.workers().check()
+        self.assertEqual(seen, [a, b])
+        lines = {e["card"]: e for e in out}
+        self.assertEqual((lines[a]["did"], lines[a]["note"]), ("nothing", "no active profile"))
+        self.assertEqual(lines[b]["did"], "started")
+
+    def test_a_card_that_stops_being_due_while_an_earlier_one_starts_is_not_started(self):
+        x = self.pr_card()
+        self.clock.advance(1)  # cards are listed oldest first
+        y = self.pr_card(key="example/widgets#43")
+        real = Workers.start
+
+        def start(self_, card_id, role, **kw):
+            if card_id == x:  # its tool discovery takes a while; meanwhile Y is moved to lane done
+                Store(self.data, self.cfg, self.clock).update(y, {"lane": "done"}, by="test")
+            return real(self_, card_id, role, **kw)
+
+        with mock.patch.object(Workers, "start", start):
+            out = self.workers().check()
+        self.assertEqual([(e["card"], e["did"]) for e in out], [(x, "started")])
+        self.assertEqual(len(self.review_starts()), 1)
+        self.assertEqual([r["card"] for r in resources.Registry(self.data).read()], [x])
+
+    def test_a_card_that_stops_being_due_during_its_own_tool_discovery_is_not_started(self):
+        cid = self.pr_card()
+        real = Workers._tools
+
+        def tools(self_, *a, **kw):
+            Store(self.data, self.cfg, self.clock).update(cid, {"lane": "done"}, by="test")
+            return real(self_, *a, **kw)
+
+        with mock.patch.object(Workers, "_tools", tools):
+            out = self.workers().check()
+        self.assertEqual([(e["card"], e["did"]) for e in out], [(cid, "nothing")])
+        self.assertIn("no longer due", out[0]["note"])
+        self.assertNotIn("error", out[0])
+        self.assertEqual(self.review_starts(), [])
+        self.assertEqual(resources.Registry(self.data).read(), [])
+        self.assertEqual(list(self.scratch.iterdir()), [])
+
+    def test_a_pass_that_resumes_a_dead_worker_still_starts_the_due_reviews(self):
+        w = self.workers()
+        a = self.start(w)  # an implement worker on another card
+        self.drop_agent(a["short_id"])  # it died, with its one resume left
+        self.clock.advance(5)
+        due = self.pr_card()
+        out = w.check()
+        self.assertEqual([(e["card"], e["role"], e["did"]) for e in out],
+                         [(a["card"], "implement", "resumed"), (due, "pr-review", "started")])
+        self.assertEqual(len(self.review_starts()), 1)
+
+    def test_shadow_mode_starts_nothing_and_says_so(self):
+        cid = self.pr_card()
+        out = self.workers(cfg=Config(secondary_language="zh")).check()
+        self.assertEqual(len(out), 1)
+        self.assertEqual((out[0]["card"], out[0]["role"], out[0]["state"], out[0]["did"]),
+                         (cid, "pr-review", "due", "nothing"))
+        self.assertIn("shadow mode starts no worker", out[0]["note"])
+        self.assertEqual((self.bg_calls(), self.discovery_calls()), ([], []))
+        self.assertFalse(transcripts.run_dir(self.data, cid).exists())
+
+
+class PrReviewDonePathTest(PrReviewCase):
+    def started(self) -> str:
+        cid = self.review_card()
+        self.assertEqual([e["did"] for e in self.workers().check()], ["started"])
+        return cid
+
+    # criterion 6
+    def test_a_valid_report_is_applied_and_the_pr_synced(self):
+        cid = self.started()
+        self.the_worker_reviews(cid)
+        self.view("open_head_a")
+        out = self.workers().check()
+        self.assertEqual(len(out), 1)
+        self.assertEqual((out[0]["card"], out[0]["role"], out[0]["state"], out[0]["did"]),
+                         (cid, "pr-review", "done", "ended"))
+        self.assertEqual((out[0]["verdict"], out[0]["sync"]), ("changes", "current"))
+        self.assertNotIn("note", out[0])
+        c = self.get(cid)
+        self.assertEqual(c["verdict"]["verdict"], "changes")
+        self.assertEqual((c["pr"]["reviewed_sha"], c["pr"]["head_sha"]), (prr.A, prr.A))
+        self.assertEqual(c["sessions"]["pr-review"]["state"], "ended")
+        # A sync that finds the head unchanged writes nothing: the apply is the card's last change.
+        self.assertEqual(c["audit"][-1]["did"], f"reviewed {prr.A[:7]}: changes")
+        self.assertIsNone(c.get("ask"))
+        self.assertEqual(resources.Registry(self.data).read(), [])
+        # Reviewed at its head: the next check starts nothing.
+        self.assertEqual(self.workers().check(), [])
+        self.assertEqual(len(self.review_starts()), 1)
+
+    def test_a_report_that_fails_its_check_asks_the_user_and_is_not_started_again(self):
+        cid = self.started()
+        self.the_worker_reviews(cid, report={"card": cid, "verdict": "approve"})
+        out = self.workers().check()
+        self.assertEqual(out[0]["did"], "ended")
+        self.assertEqual(list(self.scratch.iterdir()), [])  # the round's folder goes even when the apply fails
+        self.assertNotIn("verdict", out[0])
+        self.assertNotIn("sync", out[0])  # sync runs only after an apply that worked
+        self.assertIn("the review was not applied", out[0]["note"])
+        self.assertNotIn("error", out[0])
+        self.assertEqual(self.gh.log, [])
+        ask = self.get(cid)["ask"]
+        self.assertEqual((ask["type"], ask["role"], ask["from"]), ("fix", "pr-review", "worker"))
+        self.assertIn("does not pass ap2 review check", ask["text"])
+        self.assertIn(f"run `ap2 review check {cid}`, then `ap2 review apply {cid}`", ask["text"])
+        self.assertNotIn("verdict", self.get(cid))
+        self.assertEqual(self.get(cid)["sessions"]["pr-review"]["closed"], "done")
+        # The ask holds the next auto-start back: no loop. The card is not reviewed at its head, so a check keeps
+        # the ask open, and the check after it starts no new paid review either.
+        self.assertEqual(self.workers().check(), [])
+        self.assertEqual(self.get(cid)["ask"]["reason"], workers_mod.APPLY_FAILED)
+        self.workers().check()
+        self.assertEqual(len(self.review_starts()), 1)
+        # A start by hand is the user's new try: it closes that ask, as every start closes the role's own asks.
+        self.workers().start(cid, "pr-review", cwd=transcripts.run_dir(self.data, cid), prompt="Again.")
+        self.assertIsNone(self.get(cid).get("ask"))
+
+    def test_a_report_with_a_lone_surrogate_key_still_asks_the_user(self):
+        # The check's error names the key: put raw into the ask, the card would refuse it (not valid Unicode), and
+        # with no ask and no reviewed_sha the next check would start a new paid review, again and again.
+        cid = self.started()
+        self.the_worker_reviews(cid, report={"card": cid, "\ud800": 1})
+        out = self.workers().check()
+        self.assertEqual([(e["card"], e["did"]) for e in out], [(cid, "ended")])
+        self.assertIn("\\ud800", out[0]["note"])
+        out[0]["note"].encode("utf-8")  # the line's note is valid text too
+        ask = self.get(cid)["ask"]
+        self.assertEqual((ask["type"], ask["role"], ask["reason"]), ("fix", "pr-review", workers_mod.APPLY_FAILED))
+        self.assertIn("\\ud800", ask["text"])
+        self.assertEqual(self.workers().check(), [])
+        self.assertEqual(len(self.review_starts()), 1)
+
+    def test_a_long_apply_error_is_cut_in_the_ask(self):
+        cid = self.started()
+        self.the_worker_reviews(cid, report={"card": cid, "x" * 50000: 1})
+        self.workers().check()
+        ask = self.get(cid)["ask"]
+        self.assertEqual(ask["reason"], workers_mod.APPLY_FAILED)
+        self.assertLess(len(ask["text"]), 5000)  # not the 50000-character key
+        self.assertIn("[cut]", ask["text"])
+        self.assertIn(f"`ap2 review apply {cid}`", ask["text"])
+
+    def test_an_apply_ask_the_card_refuses_is_set_again_with_a_fixed_text(self):
+        cid = self.started()
+        self.the_worker_reviews(cid, report={"card": cid, "verdict": "approve"})
+        real, texts = Workers._set_ask, []
+
+        def set_ask(self_, card_id, ask, by):
+            texts.append(ask["text"])
+            if len(texts) == 1:
+                raise workers_mod.WorkerError("text is not valid Unicode")
+            return real(self_, card_id, ask, by)
+
+        with mock.patch.object(Workers, "_set_ask", set_ask):
+            out = self.workers().check()
+        self.assertEqual(len(texts), 2)
+        self.assertIn("does not pass ap2 review check", texts[0])
+        self.assertIn("the ask could not be set: text is not valid Unicode", out[0]["note"])
+        ask = self.get(cid)["ask"]
+        self.assertEqual((ask["type"], ask["role"], ask["reason"]), ("fix", "pr-review", workers_mod.APPLY_FAILED))
+        self.assertEqual(ask["text"], texts[1])
+        self.assertNotIn("does not pass", ask["text"])  # no worker-derived text in it
+        self.assertIn(f"run `ap2 review check {cid}`, then `ap2 review apply {cid}`", ask["text"])
+        self.assertEqual(self.workers().check(), [])
+        self.assertEqual(len(self.review_starts()), 1)
+
+    def test_an_apply_ask_the_card_refuses_twice_leaves_safe_notes(self):
+        cid = self.started()
+        self.the_worker_reviews(cid, report={"card": cid, "verdict": "approve"})
+        texts = []
+
+        def set_ask(self_, card_id, ask, by):
+            texts.append(ask["text"])
+            raise workers_mod.WorkerError("refused \ud800" + "y" * 5000)
+
+        with mock.patch.object(Workers, "_set_ask", set_ask):
+            out = self.workers().check()
+        self.assertEqual(len(texts), 2)
+        self.assertIn("does not pass ap2 review check", texts[0])
+        self.assertNotIn("does not pass", texts[1])
+        self.assertEqual(out[0]["did"], "ended")
+        note = out[0]["note"]
+        self.assertIn("the review was not applied", note)
+        self.assertEqual(note.count("the ask could not be set"), 2)
+        note.encode("utf-8")  # the line's note is valid text
+        self.assertIn("\\ud800", note)
+        self.assertIn("[cut]", note)
+        self.assertIsNone(self.get(cid).get("ask"))
+
+    def test_an_apply_by_hand_closes_the_ask_on_the_next_check(self):
+        cid = self.started()
+        self.the_worker_reviews(cid, report={"card": cid})
+        self.workers().check()
+        self.assertEqual(self.get(cid)["ask"]["role"], "pr-review")
+        self.the_worker_reviews(cid)  # the user fixes the report ...
+        prreview.apply(self.data, cid, cfg=self.cfg)  # ... and applies it
+        self.assertEqual(self.workers().check(), [])
+        self.assertIsNone(self.get(cid).get("ask"))
+        self.assertEqual(len(self.review_starts()), 1)
+
+    def test_a_sync_that_fails_keeps_the_review_and_notes_it(self):
+        cid = self.started()
+        self.the_worker_reviews(cid)
+        self.gh.entries[:] = []  # gh answers nothing
+        out = self.workers().check()
+        self.assertEqual((out[0]["did"], out[0]["verdict"]), ("ended", "changes"))
+        self.assertNotIn("sync", out[0])
+        self.assertIn("the PR was not synced", out[0]["note"])
+        self.assertIn("no recorded reply", out[0]["note"])
+        self.assertNotIn("error", out[0])
+        c = self.get(cid)
+        self.assertEqual((c["verdict"]["verdict"], c["pr"]["reviewed_sha"]), ("changes", prr.A))
+        self.assertIsNone(c.get("ask"))
+        self.assertEqual(self.workers().check(), [])  # reviewed at its head
+
+    def test_an_error_that_is_not_a_review_error_is_named_and_the_pass_goes_on(self):
+        cid = self.started()
+        self.the_worker_reviews(cid)
+        with mock.patch.object(prreview, "apply", side_effect=KeyError("boom")):
+            out = self.workers().check()
+        self.assertEqual(out[0]["did"], "ended")
+        self.assertEqual(out[0]["error"], "KeyError")
+        self.assertEqual(self.get(cid)["ask"]["role"], "pr-review")
+
+    def test_a_done_close_whose_stop_lands_late_is_applied_by_the_next_check(self):
+        cid = self.started()
+        self.the_worker_reviews(cid)
+        self.view("open_head_a")
+        with StoppedLeavesTheListTest.stop_lands_late():
+            self.assertEqual(self.workers().check()[0]["error"], "TimeoutExpired")
+        self.assertEqual(resources.Registry(self.data).read()[0]["closing"]["path"], "done")
+        self.assertNotIn("verdict", self.get(cid))
+        out = self.workers().check()
+        self.assertEqual((out[0]["card"], out[0]["did"], out[0]["verdict"], out[0]["sync"]),
+                         (cid, "ended", "changes", "current"))
+        self.assertEqual(self.get(cid)["pr"]["reviewed_sha"], prr.A)
+        self.assertEqual(self.get(cid)["sessions"]["pr-review"]["closed"], "done")
+        self.assertEqual(resources.Registry(self.data).read(), [])
+
+    def test_a_question_close_whose_stop_lands_late_is_not_applied(self):
+        cid = self.started()
+        self.write_result(cid, "question.json", {"text": "Which base branch?"})
+        with StoppedLeavesTheListTest.stop_lands_late():
+            self.assertEqual(self.workers().check()[0]["error"], "TimeoutExpired")
+        self.assertEqual(resources.Registry(self.data).read()[0]["closing"]["path"], "question")
+        with mock.patch.object(prreview, "apply") as apply:
+            out = self.workers().check()
+        apply.assert_not_called()
+        self.assertEqual((out[0]["card"], out[0]["did"]), (cid, "asked"))
+        self.assertEqual(self.get(cid)["ask"]["type"], "answer")
+
+    def test_a_report_written_before_a_park_is_applied_after_the_resumed_turn_ends(self):
+        cid = self.started()
+        w = self.workers()
+        # A report that passed its check, written at the round's start time, then the worker parks itself.
+        self.the_worker_reviews(cid, end_turn=False)
+        at = self.clock().timestamp()
+        os.utime(transcripts.run_dir(self.data, cid) / prreview.REPORT_FILE, (at, at))
+        w.park(cid, "pr-review", "at the park line", usage_file=usage_file(self.tmp / "u.json", 95))
+        rec = resources.Registry(self.data).read()[0]
+        self.set_agent(rec["short_id"], state="done", status="idle")
+        self.clock.advance(4 * 60)  # past the 12:00 reset and its 5 minutes
+        fresh = usage_file(self.tmp / "fresh.json", 3, resets_at="2026-01-05T17:00:00+00:00", fetched=self.clock())
+        with mock.patch.object(prreview, "apply") as apply:
+            self.assertEqual([(e["state"], e["did"]) for e in w.check(usage_file=fresh)], [("parked", "resumed")])
+        apply.assert_not_called()
+        resumed = resources.Registry(self.data).read()[0]
+        self.assertEqual(resumed["started_at"], cards.stamp(self.clock()))
+        # The resumed turn ends without touching the report: the round's report is done, applied and synced.
+        self.set_agent(resumed["short_id"], state="done", status="idle")
+        self.view("open_head_a")
+        out = w.check(usage_file=fresh)
+        self.assertEqual((out[0]["card"], out[0]["state"], out[0]["did"], out[0]["verdict"]),
+                         (cid, "done", "ended", "changes"))
+        self.assertEqual(self.get(cid)["pr"]["reviewed_sha"], prr.A)
+
+    def test_a_report_written_before_a_park_is_applied_after_a_resume_by_hand(self):
+        cid = self.started()
+        w = self.workers()
+        self.the_worker_reviews(cid, end_turn=False)
+        at = self.clock().timestamp()
+        os.utime(transcripts.run_dir(self.data, cid) / prreview.REPORT_FILE, (at, at))
+        w.park(cid, "pr-review", "at the park line", usage_file=usage_file(self.tmp / "u.json", 95))
+        rec = resources.Registry(self.data).read()[0]
+        self.set_agent(rec["short_id"], state="done", status="idle")
+        self.clock.advance(4 * 60)
+        # Resumed by hand, not by check: the new record keeps the round's first start.
+        w.start(cid, "pr-review", prompt="Go on.", resume=True)
+        resumed = resources.Registry(self.data).read()[0]
+        self.assertEqual(resumed["started_at"], cards.stamp(self.clock()))
+        self.assertEqual(resumed["round_started_at"], rec["round_started_at"])
+        # The resumed turn ends without touching the report: the round's report is done.
+        self.set_agent(resumed["short_id"], state="done", status="idle")
+        self.view("open_head_a")
+        out = w.check()
+        self.assertEqual([(e["card"], e["state"], e["did"]) for e in out], [(cid, "done", "ended")])
+        self.assertEqual(self.get(cid)["pr"]["reviewed_sha"], prr.A)
+
+    def check_in_a_thread(self, fifo):
+        """One check, in a thread given 10 seconds: a check that hangs on `fifo` fails the test instead of hanging
+        it (the FIFO is then opened for writing and closed, so the thread's read ends)."""
+        out, err = [], []
+
+        def run():
+            try:
+                out.append(self.workers().check())
+            except BaseException as e:  # noqa: BLE001 - raised in the test's thread
+                err.append(e)
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        t.join(10)
+        if t.is_alive():
+            with contextlib.suppress(OSError):
+                os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+            t.join(10)
+            self.fail(f"check hung on {fifo}")
+        if err:
+            raise err[0]
+        return out[0]
+
+    def assert_apply_failed(self, cid, out):
+        """The pass returned, the review was not applied, and the card asks the user (`review_apply_failed`)."""
+        self.assertEqual([(e["card"], e["did"]) for e in out], [(cid, "ended")])
+        self.assertIn("not a regular file", out[0]["note"])
+        self.assertNotIn("error", out[0])
+        ask = self.get(cid)["ask"]
+        self.assertEqual((ask["type"], ask["role"], ask["reason"]), ("fix", "pr-review", workers_mod.APPLY_FAILED))
+        self.assertIn("not a regular file", ask["text"])
+        self.assertNotIn("verdict", self.get(cid))
+        self.assertEqual(self.gh.log, [])
+
+    def test_a_plan_file_that_is_not_a_regular_file_is_not_read(self):
+        cid = self.started()
+        self.the_worker_reviews(cid)
+        plan = transcripts.run_dir(self.data, cid) / prreview.PLAN_FILE
+        plan.unlink()
+        os.mkfifo(plan)  # the worker's Bash may write its run directory: opening a FIFO waits for a writer
+        self.assert_apply_failed(cid, self.check_in_a_thread(plan))
+
+    def test_a_report_that_is_not_a_regular_file_is_not_read(self):
+        cid = self.started()
+        self.the_worker_reviews(cid)
+        report = transcripts.run_dir(self.data, cid) / prreview.REPORT_FILE
+        real = Workers.classify
+
+        def classify(self_, rec, listing):
+            state = real(self_, rec, listing)
+            if report.is_file():  # swapped for a FIFO once it was seen as done
+                report.unlink()
+                os.mkfifo(report)
+            return state
+
+        with mock.patch.object(Workers, "classify", classify):
+            self.assert_apply_failed(cid, self.check_in_a_thread(report))
+
+    def test_a_report_that_is_a_link_is_not_read(self):
+        cid = self.started()
+        self.the_worker_reviews(cid)
+        report = transcripts.run_dir(self.data, cid) / prreview.REPORT_FILE
+        moved = self.tmp / "elsewhere.json"
+        report.rename(moved)
+        report.symlink_to(moved)
+        self.assert_apply_failed(cid, self.check_in_a_thread(report))
+        self.assertIn("symbolic link", self.get(cid)["ask"]["text"])
+
+    def test_a_plan_swapped_for_a_fifo_after_any_look_at_it_is_not_read(self):
+        # A process the worker left behind renames a FIFO onto the plan while the pass runs: the read itself must
+        # refuse it, whatever was seen before.
+        cid = self.started()
+        self.the_worker_reviews(cid)
+        plan = transcripts.run_dir(self.data, cid) / prreview.PLAN_FILE
+        real = prreview.pr_of  # `apply` reads the card's PR just before it reads the plan
+
+        def pr_of(card):
+            if plan.is_file():
+                plan.unlink()
+                os.mkfifo(plan)
+            return real(card)
+
+        with mock.patch.object(prreview, "pr_of", pr_of):
+            self.assert_apply_failed(cid, self.check_in_a_thread(plan))
+
+    def test_a_report_swapped_for_a_fifo_after_any_look_at_it_is_not_read(self):
+        cid = self.started()
+        self.the_worker_reviews(cid)
+        report = transcripts.run_dir(self.data, cid) / prreview.REPORT_FILE
+        real = prreview.read_plan  # `apply` reads the plan, then the report
+
+        def read_plan(*a, **kw):
+            out = real(*a, **kw)
+            if report.is_file():
+                report.unlink()
+                os.mkfifo(report)
+            return out
+
+        with mock.patch.object(prreview, "read_plan", read_plan):
+            self.assert_apply_failed(cid, self.check_in_a_thread(report))
+
+    def test_a_question_file_that_is_not_a_regular_file_is_not_read(self):
+        cid = self.started()
+        q = self.write_result(cid, "question.json", {"text": "Which base branch?"})
+        real = Workers.classify
+        held = []
+
+        def classify(self_, rec, listing):
+            state = real(self_, rec, listing)
+            if q.is_file():  # swapped for a FIFO once it was seen
+                q.unlink()
+                os.mkfifo(q)
+                # A writer holds it open with a question in it: only the regular-file check keeps it from being read.
+                held.append(os.open(q, os.O_RDWR))
+                os.write(held[-1], json.dumps({"text": "x"}).encode())
+            return state
+
+        try:
+            with mock.patch.object(Workers, "classify", classify):
+                out = self.check_in_a_thread(q)
+        finally:
+            for fd in held:
+                os.close(fd)
+        self.assertEqual([(e["card"], e["did"]) for e in out], [(cid, "asked")])
+        self.assertEqual(self.get(cid)["ask"]["text"],
+                         "The worker asked a question but its question.json could not be read.")
+
+    def test_a_question_file_that_is_a_link_is_not_read(self):
+        cid = self.started()
+        target = self.tmp / "question-elsewhere.json"
+        target.write_text(json.dumps({"text": "x"}))
+        q = transcripts.run_dir(self.data, cid) / "question.json"
+        q.symlink_to(target)
+        out = self.check_in_a_thread(q)
+        self.assertEqual([(e["card"], e["did"]) for e in out], [(cid, "asked")])
+        self.assertEqual(self.get(cid)["ask"]["text"],
+                         "The worker asked a question but its question.json could not be read.")
+
+    def test_a_question_with_a_lone_surrogate_still_asks_the_user(self):
+        cid = self.started()
+        self.write_result(cid, "question.json", {"text": "Which base \ud800 branch?"})  # `\ud800` in the JSON
+        out = self.workers().check()
+        self.assertEqual([(e["card"], e["did"]) for e in out], [(cid, "asked")])
+        ask = self.get(cid)["ask"]
+        self.assertEqual(ask["type"], "answer")
+        self.assertEqual(ask["text"], "Which base \\ud800 branch?")
+
+    def assert_too_large_question_not_read(self, size):
+        cid = self.started()
+        q = transcripts.run_dir(self.data, cid) / "question.json"
+        body = json.dumps({"text": "Which base branch?"}).encode()
+        if size <= 1 << 20:
+            q.write_bytes(body + b" " * (size - len(body)))  # valid JSON, only too long
+        else:
+            q.write_bytes(body)
+            os.truncate(q, size)  # sparse: no disk used, but a whole read takes `size` bytes of memory
+        real_read, got = workers_mod.sources.os.read, []
+
+        def counted(fd, n):
+            chunk = real_read(fd, n)
+            got.append(len(chunk))
+            return chunk
+
+        with mock.patch.object(workers_mod.sources, "read_regular_capped",
+                               wraps=workers_mod.sources.read_regular_capped) as read, \
+                mock.patch.object(workers_mod.sources.os, "read", counted):
+            out = self.check_in_a_thread(q)
+        self.assertEqual([(e["card"], e["did"]) for e in out], [(cid, "asked")])
+        self.assertEqual(self.get(cid)["ask"]["text"],
+                         "The worker asked a question but its question.json could not be read.")
+        self.assertEqual([c.args[1] for c in read.call_args_list], [workers_mod.QUESTION_MAX])
+        self.assertLessEqual(sum(got), 1 << 20)  # the cap itself stays small: never a whole huge file in memory
+        self.assertLessEqual(workers_mod.QUESTION_MAX, 1 << 20)
+        self.assertEqual(resources.Registry(self.data).read(), [])  # closed as a question
+
+    def test_a_question_file_one_byte_over_its_cap_is_not_read(self):
+        self.assert_too_large_question_not_read(workers_mod.QUESTION_MAX + 1)
+
+    def test_a_huge_sparse_question_file_is_not_read(self):
+        self.assert_too_large_question_not_read(1 << 30)
+
+    def test_an_end_by_hand_holds_the_card_until_a_start_by_hand(self):
+        cid = self.started()
+        self.the_worker_reviews(cid)
+        with mock.patch.object(prreview, "apply") as apply:
+            self.assertEqual(self.workers().end(cid, "pr-review")["did"], "ended")
+            self.assertEqual(self.workers().check(), [])
+        apply.assert_not_called()
+        self.assertEqual(len(self.review_starts()), 1)
+        self.assertEqual(self.get(cid)["sessions"]["pr-review"]["closed"], "end")
+        self.assertNotIn("verdict", self.get(cid))
+
+    @unittest.skipIf(fcntl is None, "the worker list's lock is POSIX only")
+    def test_an_overlapping_check_starts_no_second_review(self):
+        cid = self.started()
+        self.the_worker_reviews(cid)
+        self.view("open_head_a")
+        real, threads, others = prreview.apply, [], []
+
+        def overlapping():
+            others.append(self.workers().check())
+
+        def apply(*a, **kw):
+            # A second check runs while this one applies the review. With the worker list's lock free it runs now,
+            # and finds the card closed with no review on it; with the lock held it waits for it.
+            fd = os.open(str(self.data / ".workers.lock"), os.O_RDWR)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                free = True
+            except BlockingIOError:
+                free = False
+            finally:
+                os.close(fd)
+            if free:
+                overlapping()
+            else:
+                threads.append(threading.Thread(target=overlapping, daemon=True))
+                threads[-1].start()
+            return real(*a, **kw)
+
+        with mock.patch.object(prreview, "apply", apply):
+            out = self.workers().check()
+            for t in threads:
+                t.join(30)
+                self.assertFalse(t.is_alive())
+        self.assertEqual([(e["card"], e["did"], e["verdict"]) for e in out], [(cid, "ended", "changes")])
+        self.assertEqual(others, [[]])
+        self.assertEqual(len(self.review_starts()), 1)
+
+    def test_a_done_round_removes_its_empty_folder(self):
+        cid = self.started()
+        home = Path(resources.Registry(self.data).read()[0]["cwd"])
+        self.the_worker_reviews(cid)
+        self.view("open_head_a")
+        self.assertEqual(self.workers().check()[0]["did"], "ended")
+        self.assertFalse(home.exists())
+        self.assertEqual(list(self.scratch.iterdir()), [])
+
+    def test_a_done_round_keeps_a_folder_that_is_not_empty(self):
+        cid = self.started()
+        home = Path(resources.Registry(self.data).read()[0]["cwd"])
+        (home / "notes.md").write_text("kept")
+        self.the_worker_reviews(cid)
+        self.view("open_head_a")
+        self.assertEqual(self.workers().check()[0]["did"], "ended")
+        self.assertEqual((home / "notes.md").read_text(), "kept")
+
+    def test_a_done_round_whose_folder_is_a_link_to_itself_is_still_applied(self):
+        cid = self.started()
+        home = Path(resources.Registry(self.data).read()[0]["cwd"])
+        self.the_worker_reviews(cid)
+        self.view("open_head_a")
+        home.rmdir()
+        os.symlink(home.name, home)  # the worker swapped its folder for a link to itself: resolving it loops
+        out = self.workers().check()
+        self.assertEqual([(e["card"], e["did"], e.get("verdict")) for e in out], [(cid, "ended", "changes")])
+        self.assertNotIn("error", out[0])
+        self.assertEqual(self.get(cid)["pr"]["reviewed_sha"], prr.A)
+        self.assertTrue(home.is_symlink())  # left alone
+        self.assertEqual(self.workers().check(), [])  # reviewed at its head: no second, paid review
+        self.assertEqual(len(self.review_starts()), 1)
+
+    def test_a_done_round_whose_folder_is_a_link_keeps_the_folder_it_points_at(self):
+        cid = self.started()
+        home = Path(resources.Registry(self.data).read()[0]["cwd"])
+        other = self.scratch / "ap2-pr-review-other"  # another round's empty folder
+        other.mkdir()
+        self.the_worker_reviews(cid)
+        self.view("open_head_a")
+        home.rmdir()
+        home.symlink_to(other)
+        self.assertEqual(self.workers().check()[0]["did"], "ended")
+        self.assertTrue(other.is_dir())
+        self.assertTrue(home.is_symlink())
+
+    def round_by_hand_in(self, home: Path) -> None:
+        """A pr-review worker started by hand in `home`, then its done round."""
+        cid = self.review_card()
+        self.workers().start(cid, "pr-review", cwd=home, prompt="Review it.")
+        self.the_worker_reviews(cid)
+        self.view("open_head_a")
+        self.assertEqual(self.workers().check()[0]["did"], "ended")
+
+    def test_a_done_round_keeps_an_empty_folder_not_named_as_its_own(self):
+        home = self.scratch / "mine"  # directly in the temp folder, but not an `ap2-pr-review-` one
+        home.mkdir()
+        self.round_by_hand_in(home)
+        self.assertTrue(home.is_dir())
+
+    def test_a_done_round_keeps_an_empty_folder_of_its_name_outside_the_temp_folder(self):
+        home = self.tmp / "elsewhere" / "ap2-pr-review-x"
+        home.mkdir(parents=True)
+        self.round_by_hand_in(home)
+        self.assertTrue(home.is_dir())
+
+    def test_a_turn_that_ends_with_no_report_asks_the_user_and_is_not_started_again(self):
+        cid = self.started()
+        rec = resources.Registry(self.data).read()[0]
+        self.set_agent(rec["short_id"], state="done", status="idle")  # e.g. its plan failed twice: no report
+        self.assertEqual(self.workers().check()[0]["did"], "nothing")
+        self.clock.advance(workers_mod.IDLE_MIN)
+        out = self.workers().check()
+        self.assertEqual((out[0]["card"], out[0]["state"], out[0]["did"]), (cid, "idle", "paused"))
+        c = self.get(cid)
+        self.assertEqual(c["sessions"]["pr-review"]["state"], "paused")
+        ask = c["ask"]
+        self.assertEqual((ask["type"], ask["role"], ask["from"], ask["reason"]),
+                         ("fix", "pr-review", "worker", workers_mod.REVIEW_IDLE))
+        self.assertIn("no report", ask["text"])
+        self.assertIn(f"ap2 worker start {cid} pr-review --resume", ask["text"])
+        # The ask holds the next auto-start back: no loop.
+        self.assertEqual(self.workers().check(), [])
+        self.assertEqual(len(self.review_starts()), 1)
+        # A start by hand closes it, as every start closes the role's own asks.
+        self.workers().start(cid, "pr-review", prompt="Again.", resume=True)
+        self.assertIsNone(self.get(cid).get("ask"))
+
+    def test_an_idle_close_behind_the_users_ask_is_asked_once_that_ask_is_closed(self):
+        cid = self.started()
+        rec = resources.Registry(self.data).read()[0]
+        self.set_agent(rec["short_id"], state="done", status="idle")  # no report
+        self.assertEqual(self.workers().check()[0]["did"], "nothing")
+        store = Store(self.data, self.cfg, self.clock)
+        store.update(cid, {"ask": {"type": "confirm", "text": "Mine"}}, by="test")  # the user's own ask
+        self.clock.advance(workers_mod.IDLE_MIN)
+        out = self.workers().check()
+        self.assertEqual([(e["card"], e["state"], e["did"]) for e in out], [(cid, "idle", "paused")])
+        self.assertIn("the card already has an open ask", out[0]["note"])
+        self.assertEqual(self.get(cid)["ask"]["text"], "Mine")  # kept
+        self.assertEqual(self.workers().check(), [])  # the user's ask holds the card
+        store.update(cid, {"ask": None}, by="test")  # the user closes it
+        out = self.workers().check()
+        self.assertEqual(out, [{"card": cid, "role": "pr-review", "state": "paused", "did": "asked"}])
+        ask = self.get(cid)["ask"]
+        self.assertEqual((ask["type"], ask["role"], ask["from"], ask["reason"]),
+                         ("fix", "pr-review", "worker", workers_mod.REVIEW_IDLE))
+        self.assertIn(f"ap2 worker start {cid} pr-review --resume", ask["text"])
+        self.assertEqual(self.workers().check(), [])  # asked once; nothing starts
+        self.assertEqual(len(self.review_starts()), 1)
+
+    def test_an_idle_close_behind_the_users_ask_is_not_asked_once_the_card_is_done(self):
+        cid = self.started()
+        rec = resources.Registry(self.data).read()[0]
+        self.set_agent(rec["short_id"], state="done", status="idle")  # no report
+        self.assertEqual(self.workers().check()[0]["did"], "nothing")
+        store = Store(self.data, self.cfg, self.clock)
+        store.update(cid, {"ask": {"type": "confirm", "text": "Mine"}}, by="test")  # the user's own ask
+        self.clock.advance(workers_mod.IDLE_MIN)
+        self.assertEqual([e["did"] for e in self.workers().check()], ["paused"])
+        store.update(cid, {"lane": "done", "ask": None}, by="test")  # the user closes the card and its ask
+        self.assertEqual(self.workers().check(), [])
+        self.assertIsNone(self.get(cid).get("ask"))
+
+    def assert_kept_as_a_draft(self, cid, out):
+        """The worker is parked and on record; its report was neither applied nor turned into an ask."""
+        self.assertEqual([(e["card"], e["state"]) for e in out], [(cid, "parked")])
+        self.assertEqual([r["card"] for r in resources.Registry(self.data).read()], [cid])
+        c = self.get(cid)
+        self.assertNotIn("verdict", c)
+        self.assertIsNone(c.get("ask"))
+        self.assertEqual(self.gh.log, [])
+
+    def test_a_parked_worker_with_a_newer_report_is_parked_and_not_applied(self):
+        cid = self.started()
+        w = self.workers()
+        # A first draft, then the usage window reaches the park line: it parks itself and its turn ends.
+        self.the_worker_reviews(cid, report={"card": cid}, end_turn=False)
+        w.park(cid, "pr-review", "at the park line", usage_file=usage_file(self.tmp / "u.json", 95))
+        rec = resources.Registry(self.data).read()[0]
+        self.set_agent(rec["short_id"], state="done", status="idle")
+        self.assertEqual(w.classify(rec, v1_sessions.list_all(FAKE)), "parked")
+        with mock.patch.object(prreview, "apply") as apply:
+            out = w.check()
+        apply.assert_not_called()
+        self.assert_kept_as_a_draft(cid, out)
+        self.assertEqual(out[0]["did"], "nothing")
+
+    def test_a_turn_that_ended_on_a_usage_limit_parks_and_is_not_applied(self):
+        cid = self.started()
+        w = self.workers()
+        w.check()  # fills in its session id
+        rec = resources.Registry(self.data).read()[0]
+        self.the_worker_reviews(cid, report={"card": cid})  # a draft, then its turn ends on the limit
+        self.clock.advance(1)
+        say(self.fake_home, rec["session_id"], limit_line(iso(self.clock())))
+        self.assertEqual(w.list()[0]["api_stop"], "limit")
+        with mock.patch.object(prreview, "apply") as apply:
+            out = w.check()
+        apply.assert_not_called()
+        self.assert_kept_as_a_draft(cid, out)
+        self.assertEqual(out[0]["did"], "parked")
+        self.assertEqual(resources.Registry(self.data).read()[0]["parked"]["reason"], "limit")
+
+    def test_a_limit_hit_while_the_check_stalls_before_its_lock_still_parks(self):
+        # The check's clock is read at its start; the pass can then wait minutes (the key command, a blocked lock)
+        # while the worker's turn really ends on a limit. That error is dated after the start plus the skew, and
+        # must not be taken for one from the future: the draft would be applied as done.
+        cid = self.started()
+        w = self.workers()
+        w.check()  # fills in its session id
+        rec = resources.Registry(self.data).read()[0]
+        self.the_worker_reviews(cid, report={"card": cid})
+
+        def stall(self_, now):
+            self.clock.advance(5)
+            say(self.fake_home, rec["session_id"], limit_line(iso(self.clock())))
+
+        with mock.patch.object(Workers, "_warm_key", stall), mock.patch.object(prreview, "apply") as apply:
+            out = w.check()
+        apply.assert_not_called()
+        self.assertEqual([(e["state"], e["did"]) for e in out], [("parked", "parked")])
+
+    def reviewed_then_said(self, cid, line):
+        """The worker writes a valid report and ends its turn; then a process it left behind appends `line` (an
+        API error line made at that time) to its transcript, outside the data folder."""
+        w = self.workers()
+        w.check()  # fills in its session id
+        rec = resources.Registry(self.data).read()[0]
+        self.the_worker_reviews(cid)
+        self.clock.advance(1)
+        say(self.fake_home, rec["session_id"], line(iso(self.clock())))
+        return w
+
+    def test_a_limit_line_with_a_lone_surrogate_parks_with_its_note_escaped(self):
+        # Kept raw, the text would fail the worker list's write-back on every check: no review applied, no ask, no
+        # auto-start for any card.
+        cid = self.started()
+        w = self.reviewed_then_said(cid, lambda at: error_line("\ud800 usage limit reached", at, apiErrorStatus=429))
+        out = w.check()
+        self.assertEqual([(e["card"], e["state"], e["did"]) for e in out], [(cid, "parked", "parked")])
+        parked = resources.Registry(self.data).read()[0]["parked"]
+        self.assertEqual((parked["reason"], parked["note"]), ("limit", "\\ud800 usage limit reached"))
+        self.assertEqual([(e["card"], e["state"]) for e in w.check()], [(cid, "parked")])
+
+    def assert_applied_despite(self, cid, w):
+        """The line the process left behind is ignored: the list reads, the check closes the worker as done and
+        applies its report, and the next check raises nothing."""
+        self.assertEqual([(r["card"], r["state"], r.get("api_stop")) for r in w.list()], [(cid, "done", None)])
+        self.view("open_head_a")
+        out = w.check()
+        self.assertEqual([(e["card"], e["state"], e["did"], e.get("verdict")) for e in out],
+                         [(cid, "done", "ended", "changes")])
+        self.assertNotIn("error", out[0])
+        self.assertEqual(self.get(cid)["verdict"]["verdict"], "changes")
+        self.assertEqual(resources.Registry(self.data).read(), [])
+        self.assertEqual(w.list(), [])
+        self.assertEqual(w.check(), [])
+
+    def test_a_raise_while_reading_the_transcript_does_not_stop_the_apply(self):
+        cid = self.started()
+        w = self.reviewed_then_said(cid, lambda at: limit_line(at))
+        with mock.patch.object(workers_mod.apistop, "tail", side_effect=RuntimeError("unreadable")):
+            self.assert_applied_despite(cid, w)
+
+    def test_a_reply_dated_in_year_one_does_not_stop_the_apply(self):
+        cid = self.started()
+        w = self.reviewed_then_said(cid, lambda at: reply(at="0001-01-01T00:00:00"))
+        self.assert_applied_despite(cid, w)
+
+    def applied_despite_a_limit_at_the_last_date(self, reset):
+        # Dated in the future, it is ignored (no park at all), so no reset or resume time is worked out from it.
+        cid = self.started()
+        w = self.reviewed_then_said(cid, lambda at: error_line(f"usage limit reached · resets {reset}",
+                                                               "9999-12-31T23:59:59.000Z", apiErrorStatus=429))
+        self.assert_applied_despite(cid, w)
+
+    def test_a_limit_line_dated_at_the_last_date_does_not_stop_the_apply(self):
+        self.applied_despite_a_limit_at_the_last_date("1am (UTC)")
+
+    def test_a_limit_line_dated_at_the_last_date_with_a_late_reset_does_not_stop_the_apply(self):
+        self.applied_despite_a_limit_at_the_last_date("11:59pm (UTC)")
+
+    def test_a_limit_line_dated_at_the_last_date_in_a_plus_14_zone_does_not_stop_the_apply(self):
+        self.applied_despite_a_limit_at_the_last_date("1am (Pacific/Kiritimati)")
+
+    def test_a_limit_line_dated_in_the_future_does_not_park_the_worker(self):
+        cid = self.started()
+        w = self.reviewed_then_said(cid, lambda at: limit_line("2100-01-01T00:00:00.000Z"))
+        self.assert_applied_despite(cid, w)
+
+    def test_a_refusal_with_a_lone_surrogate_whose_stop_fails_keeps_an_escaped_mark(self):
+        cid = self.started()
+        text = f"{REFUSED_TEXT} \ud800"
+        w = self.reviewed_then_said(cid, lambda at: refused_line(
+            at, message={"model": "<synthetic>", "content": [{"type": "text", "text": text}]}))
+        with StoppedLeavesTheListTest.stop_times_out():
+            out = w.check()
+        self.assertEqual([(e["card"], e["error"]) for e in out], [(cid, "TimeoutExpired")])
+        mark = resources.Registry(self.data).read()[0]["closing"]
+        self.assertEqual((mark["path"], mark["note"]), ("refused", f"{REFUSED_TEXT} \\ud800"))
+        out = w.check()  # the stop works now: the pause is finished, and nothing raises
+        self.assertEqual([(e["card"], e["did"]) for e in out], [(cid, "paused")])
+        self.assertEqual(resources.Registry(self.data).read(), [])
+        self.assertEqual(self.get(cid)["ask"]["reason"], "gateway_refused")
+
+    # criterion 7
+    def test_new_commits_start_a_delta_on_the_next_check(self):
+        cid = self.started()
+        self.the_worker_reviews(cid)
+        self.view("open_head_b")
+        out = self.workers().check()
+        self.assertEqual(out[0]["sync"], "new_commits")
+        self.assertEqual(len(self.review_starts()), 1)  # not in the same pass
+        self.assertEqual(self.get(cid)["pr"]["head_sha"], prr.B)
+        self.assertEqual(self.get(cid)["sessions"]["pr-review"]["closed"], "done")
+        again = self.workers().check()
+        self.assertEqual(again, [{"card": cid, "role": "pr-review", "state": "due", "did": "started"}])
+        self.assertTrue(self.review_starts()[-1]["argv"][-1].startswith(f"/autopilot:pr-review {cid} delta\n"))
+
+    def ends_without_a_delta(self, view, state):
+        cid = self.started()
+        self.the_worker_reviews(cid)
+        self.view(view)
+        self.assertEqual(self.workers().check()[0]["sync"], state)
+        self.assertEqual(self.workers().check(), [])
+        self.assertEqual(len(self.review_starts()), 1)
+        return self.get(cid)
+
+    def test_merged_starts_nothing(self):
+        self.assertEqual(self.ends_without_a_delta("merged", "merged")["lane"], "done")
+
+    def test_closed_starts_nothing(self):
+        self.assertEqual(self.ends_without_a_delta("closed", "closed")["lane"], "done")
+
+    def test_reviewed_on_github_starts_nothing(self):
+        self.assertEqual(self.ends_without_a_delta("reviewed", "reviewed")["lane"], "done")
+
+    def test_request_removed_starts_nothing(self):
+        self.assertEqual(self.ends_without_a_delta("no_request", "request_removed")["lane"], "done")
+
+    def test_current_starts_nothing(self):
+        self.assertNotEqual(self.ends_without_a_delta("open_head_a", "current")["lane"], "done")
 
 
 if __name__ == "__main__":

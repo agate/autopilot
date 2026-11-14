@@ -533,7 +533,8 @@ to-do.
    card.
 2. **Start**: reviewing starts on its own (3.6). The `pr-review` role reads the PR, the ticket or the PR body as the
    requirement, the code around the change and CI at the head, then runs its angles (6.1) in parallel. Each
-   finding is checked against the code before it counts.
+   finding is checked against the code before it counts. It gets no MCP tool: the PR is untrusted input, so every
+   MCP tool and server the session would load is denied (the read-only floor, below).
 3. **Report**: the first line is a TL;DR that leads with the verdict, `approve`, `changes` or `question` ("Approve:
    does what the ticket asks; 1 nit."). Then background, problem, solution, and the findings in four groups:
    confirmed, out of scope, rejected (with the reason) and questions for the author. A draft review comment may be
@@ -630,7 +631,7 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   (`{"text": <reply_draft>, "sent": false}`, point 3); `pr` (`repo`, `number`, `url`, `head_sha`, `reviewed_sha`
   = the head); `reviews` (one `{stage, head_sha, verdict, at}` per apply, `at` the apply time); and `plain`. The
   same report (head and `reviewed_at`) applied twice is refused. The role never runs `apply` (its process ends
-  with `check`, as secretary's ends with `report validate`); the worker's done path will, once wired.
+  with `check`, as secretary's ends with `report validate`); the worker's done path does (below).
 - **[decided by the builder]** Plain words (point 4, 3.7): one function, `prreview.plain_for(record, card, langs)`,
   used by the source engine and by `apply`, so a re-read computes the same words. What: "<author> asked you to
   review PR #<n>: <title>" (n from the card's `key` when it is `<owner>/<repo>#<number>`, else the record's `id`,
@@ -705,9 +706,169 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   became a `question` card keyed on its thread; that card is not moved or closed. The next read keys the ask on its
   PR, so an ask still in the read window shows once more, as the PR's card, and the old `question` card is closed
   by hand.
-- Not built here: starting the `pr-review` role on its own when a card is made, and running `apply` and `sync` from
-  the worker's done path or the gate (they need the worker sessions); reopening a done PR card when a new review
-  ask arrives; and the PR loop's end (6.3).
+- **[decided by the builder]** The card reviews itself (point 2). `pr-review` is a worker role (`workers.py`): its
+  result file is `prreview.json`, and its prompt starts `/autopilot:pr-review <card id> <stage>` (the command's two
+  arguments; no `--agent`), then the template's brief and the usual worker lines. The stage is `delta` once the
+  card's `reviews` list holds one (`apply` adds one per review), else `review`. Every live `ap2 worker check`, after
+  it has acted on the workers on record, starts one `pr-review` worker for each card of kind `pr-review` that is not
+  in lane `done`, has no worker on record and no line in this pass (so a card closed in a pass starts again only on
+  the next one), has no open `ask`, whose `sessions["pr-review"].state` is absent, or `ended` by a done close, and is
+  not reviewed at its head (`pr.reviewed_sha` missing, or not `pr.head_sha`). Each card is read again just before
+  it is judged, since an earlier card's start (its tool discovery, up to 180 seconds) may run meanwhile, and the start
+  reads it once more under the worker list's lock, after its own tool discovery: a card that stopped being due
+  meanwhile (moved to lane `done`, an ask landed, its review applied) is not started; on that second read the line
+  says `did: "nothing"` with a note. Every close of a `pr-review` worker
+  saves how it was closed as `sessions["pr-review"].closed`: the close's path (`done`, `idle`, `question` and so on),
+  or `end` for `ap2 worker end`. Only `closed: done` lets the next round start on its own. A worker ended by hand
+  holds the card, like `paused`, until the user starts the role by hand; its report is not applied. A card saved
+  before `closed` was kept, with `state: ended` and no `closed`, is read as ended by hand: held, so an old hand end
+  never starts a paid review on its own. It runs in a fresh, empty folder of its own outside
+  the data folder (`tempfile.mkdtemp`, prefix `ap2-pr-review-`, mode 0700, one per start; the role reviews from
+  GitHub, so `plan` says "no checkout given"), with the brief from the card's template. Not the run directory:
+  the Bash guard judges the data-folder paths a command spells out, so from inside the data folder a relative
+  `../../config.yaml` would pass it, and the folder a session runs in is its project root, whose `.claude/`,
+  `.mcp.json` and `CLAUDE.md` a later session there would load. The run directory is still made when missing and
+  `AP2_RUN_DIR` still names it: the report goes there by its absolute path (`plan` prints it). A resume (`--resume`
+  or in place) keeps the folder on record; when it is gone, the resume says the worker's folder is gone. A refused
+  start removes its folder again, unless a record points at it (the start failed after the record was written). A
+  done close removes the folder too, after the report is applied, when it is still empty and is one of these
+  (directly in the temp folder, its name starting `ap2-pr-review-`); a folder with files in it is kept. The path
+  itself must be a folder (`os.lstat`), so a link the worker put in its place (one that points at itself, which
+  `Path.resolve` cannot resolve, or one that points at another round's empty folder) is left alone, and the removal
+  never raises: nothing the worker does to its folder keeps the report off the card (with no `reviewed_sha` the next
+  `check` would start a new, paid review). Each start is a line `{card, role: "pr-review", state: "due", did: "started"}`; a start the cap, the key,
+  a pause, `max_workers` or the profile refuses is the same line with `did: "nothing"` and a `note`, and the later
+  cards still get their try. Shadow mode starts none: each due card's line says so. The start lives in `check`, not
+  the gate, because the gate starts no process (`gate.py`).
+- **[decided by the builder]** The done path. A `pr-review` worker is done when `prreview.json` is newer than the
+  round's first start and its turn has ended (idle, done, failed or gone; 8.2 rule 1): while it still works or waits at a prompt
+  the report is a draft the role is still checking, so `check` leaves it. A turn that ended on a park or an API
+  stop leaves a draft too: the worker is parked (or paused), not done. When `check` closes it as done, it
+  runs `apply` on the card right after the close, still under the worker list's lock: an overlapping `check` waits
+  for the lock, so it never sees the card closed with no `reviewed_sha` yet and starts a second, paid review. Then,
+  once the lock is free, it runs `sync` (sync reads GitHub). Both run by `check`'s `by`; the line gets `verdict` and
+  `sync` (sync's `state`). Neither fails the pass. `apply` reads `prreview-plan.json` and `prreview.json` with
+  `sources.read_regular_capped`: each is opened without following a link and without waiting (a FIFO opens at
+  once), and the open file itself is checked (`fstat`), so one that is not a regular file (a FIFO, a device or a
+  link) is never read, also when a process the worker left behind swaps it in after any earlier look (a check made
+  before the open could not stop that, and a plain read of a FIFO waits forever with the worker list's lock held,
+  hanging every later check, start, end and park); that is a failed `apply` whose error says the file is not a
+  regular file (or is a symbolic link). A failed `apply` is a note,
+  and the card's `ask` (`type: fix`, `reason: review_apply_failed`) with the error and "run `ap2 review check
+  CARD`, then `ap2 review apply CARD`", so the card is not started again in a loop. The error comes from the
+  worker's report, so it is escaped where it is not valid Unicode and cut to 2000 characters
+  (`workers.WORKER_TEXT_MAX`; a question's text is escaped the same way but never cut, as the question is often at
+  its end); an ask the card still refuses is set again with a fixed
+  text that carries nothing from the worker, so a failed `apply` always holds the card. Other worker-derived text
+  is escaped the same way before it is kept: an API-stop transcript text (the note of a limit park or of a gateway
+  refusal's close, as a process the worker left behind can write that line), a park's note, and a listed session
+  id, which is kept only when it is a session id. `sync` runs only after an
+  `apply` that worked, and a failed one is a note (the review stays applied). That ask is the role's own worker ask
+  (8.2): any start of the role and `finish` close it, and so does a `check` that finds the card reviewed at its
+  head (the user applied it by hand). A `sync` that sees `new_commits` writes the new `pr.head_sha`, so the next
+  `check` starts a `delta`; `current` and the four done states start nothing (`not_reviewed` never follows an
+  `apply` that worked). A turn that ends with no report (the plan failed twice, say, and the command says to write
+  nothing and end) is closed as idle after 60 minutes (8.2 rule 5) and also sets the card's `ask` (`type: fix`,
+  `reason: review_idle`): its turn ended with no report, resume it with `ap2 worker start CARD pr-review
+  --resume`. Without it the card would sit `paused`, never started again and never shown to the user. Like the
+  failed-apply ask it holds the next auto-start back, and any start of the role and `finish` close it. When the
+  card already has another open ask (the user's own, say), that ask is kept, the idle ask is not set and the line's
+  `note` says so; once the card has no open ask, the next `check` raises the idle ask on a card not in lane `done`
+  whose `sessions["pr-review"]` is `paused` with `closed: idle` (a line `{card, role: "pr-review", state:
+  "paused", did: "asked"}`), so the card is never left paused with nothing shown. A pass
+  stopped between the close and the apply (Ctrl-C, a killed process) leaves the report unapplied
+  and the session `ended` (`closed: done`) with no `reviewed_sha`, so the next `check` starts a whole new review: a
+  worker run is lost, nothing on the card is. The same holds for `question.json`: `check` reads it only when it is a
+  regular file, opened without following a link and without waiting, and at most 64 KiB of it
+  (`workers.QUESTION_MAX`, with `sources.read_regular_capped`; else the question reads as "could not be read"),
+  since that read runs under the worker list's lock: a FIFO would hold the lock forever, and a huge (even sparse)
+  file would be read whole into memory under it. The Write hook denies a path it cannot resolve (a NUL
+  or a lone surrogate in it), and any error in the hook is a deny for a v2 worker, not silence.
+- **[decided by the builder]** The read-only floor (`roles.FLOORS["read-only"]`). The `pr-review` settings add
+  `Edit` and `NotebookEdit` as deny rules (`roles.READ_ONLY_DENIED`) to the worker floor, every gh command group a
+  review does not need, reads included, as Bash deny rules in v1's rule shape (`roles.READ_ONLY_BASH_DENIED`, each
+  as `Bash(<command>:*)`): every top-level gh command in `roles.GH_COMMANDS` (a snapshot of gh 2.80.0's command
+  names; a prefix rule cannot say "every gh command but these", so a command a newer gh adds is covered only once
+  added there) but `gh pr`, `gh run`, `gh api`, `gh search`, `gh status`, `gh help` and `gh version`, every `gh pr`
+  subcommand but `view`, `diff`, `checks`, `list` (and its alias `ls`) and `status` (`gh pr comment` and
+  `gh pr review` are already the worker floor's), every `gh run` subcommand but `view`, `list` (and `ls`) and
+  `watch`, each snapshot holding the subcommands' aliases too (the ALIASES line of `gh pr <sub> --help`:
+  `gh pr new` for `gh pr create`), the git commands that push, commit or
+  set an alias, a config value or a remote (`roles.READ_ONLY_GIT_DENIED`: `git push`, `git commit`, `git config`,
+  `git -c`, `git --config-env`, `git remote`, `git send-pack`, `git subtree`), and `claude` itself, as typed, as the
+  path the worker runs, as the one on PATH, where each link leads, and every other file in the folder a link leads
+  into (the installer keeps older full versions there; skipped when the link does not lead into another folder or
+  that folder holds `gh`, `git`, `ap` or `ap2`), because `claude -p ...` would start a session under the user's own
+  settings, not this floor; a
+  review reads with `gh pr view`, `gh pr diff`, `gh pr checks` and `gh api`, which no rule prefixes; one plain gh
+  command left open would change GitHub as the user (`gh ssh-key add` gives a key push to every repo the user can;
+  `gh pr update-branch` would push a merge onto the PR's branch and move its head, so the next check starts
+  another review), because the session holds the user's gh and git logins, every v1 `ap` command
+  (`roles.V1_AP_COMMANDS`, a snapshot of v1's own list, reads included: `ap oneoff` runs `claude -p` with a tool
+  allowed; `roles.V1_AP_EXTRA`, `profile` and `reply-kind`, which an installed v1 has and the snapshot lacks:
+  its `profile add --models-command` makes v1 run a command and its `profile use` rewrites every v1 session's
+  settings; and each command the `ap` on PATH declares: the floor follows its links, takes the folder above its
+  `bin` as the package, reads each `*.py` file directly in that package's `lib/autopilot/` as text (regular files
+  only, no link followed, at most 200 files and 1 MiB each), parses it, and takes the first argument of each
+  decorator that calls `command` or `<x>.command` (v1's `@cli.command("access")`) when it is a string literal,
+  and the literal value of a module-level `COMMANDS = (...)` or `[...]`; it never runs or imports that v1,
+  because a run migrates a v1 data folder it has not migrated yet, and a file that cannot be read is skipped) as
+  `Bash(ap <command>:*)`, `Bash(<package>/bin/ap <command>:*)` and the same for the `ap` on PATH, never a
+  bare `ap` rule or a whole-path one, which would prefix every `ap2` command, every `ap2` command the review
+  does not run (`roles.READ_ONLY_AP2_DENIED`) as Bash deny rules in the same shape, every MCP tool the session
+  loads that `Role.tools` does not list (no read-only role lists one) and every MCP server whole (each server those
+  tools are on and each one the tool discovery lists, connected or not, so a tool it adds later is covered too),
+  because v1's outward-verb list leaves a server's `delete`, `update`, `submit` or `merge` tool open, every
+  built-in tool `Role.tools` does not list (each one the discovery finds, and `roles.READ_ONLY_BUILTIN_DENIED`, v1's
+  `replies.DISALLOWED` without `Task` plus `Artifact`, `ArtifactData`, `TaskCreate`, `TaskUpdate` and `TodoWrite`,
+  even when it finds none), because the session starts with every built-in and some act outside the floor
+  (`RemoteTrigger` schedules a cloud agent, `Artifact` and `ArtifactData` overwrite the user's claude.ai pages), but
+  `ToolSearch` and `Task` (the Agent tool's older name) stay open (`roles.READ_ONLY_KEPT`), the git env
+  `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1` and `GIT_TERMINAL_PROMPT=0` (`roles.READ_ONLY_GIT_ENV`, set
+  after a profile's env so a profile cannot undo it), so the user's git aliases (`ps = push` would get past the
+  `git push` rule) and credential helper are not loaded; the user's own gh aliases are denied by name too
+  (`Bash(gh <alias>:*)`), since `gh pm 103` with `pm: pr merge` would merge a PR: the floor reads gh's config file
+  (`$GH_CONFIG_DIR/config.yml`, else `$XDG_CONFIG_HOME/gh/config.yml`, else `~/.config/gh/config.yml`; links
+  followed; a regular file only, at most 1 MiB) and never runs gh, both the one the daemon's env points at and the
+  one the session's env points at after a profile's env is merged in, takes each key of its top-level `aliases:`
+  map, in block style or in the flow style gh writes once every alias was deleted (`aliases: {pm: pr merge}`),
+  quotes stripped, that matches `[A-Za-z0-9][A-Za-z0-9_-]*`, but a gh command a review reads with (gh ignores an
+  alias that shadows one), and a read that fails adds nothing; a review's git reads (`git show`, `git log`, `git cat-file`,
+  `git rev-parse`, `git ls-tree`, and `ap2 review plan --checkout`) need neither, and a third PreToolUse
+  hook,
+  `{"matcher": "Write", ...: "\"<package>/bin/ap2\" hook-write"}` (`workers.write_guard`). The hook is an
+  allow-list: a Write passes only when its path (links followed) sits directly in the card's run directory
+  (`AP2_RUN_DIR`) and its name, in any case, is the role's result file (`prreview.json` for `pr-review`) or
+  `question.json`. Every other Write is denied: a settings file in any case (`SETTINGS-pr-review.json` is the same
+  file on a case-insensitive disk), `.claude/settings.json`, `.mcp.json`, `CLAUDE.md`, a subfolder. No run
+  directory, or a path that is not absolute, is denied too. A deny rule cannot do this: deny wins over allow, so no
+  rule leaves one file open. The `ap2` rules are there because the Bash guard lets `ap2` itself write the data
+  folder: without them an injected review session could run `ap2 cap resume`, `ap2 worker start <card> implement`,
+  `ap2 card add` or `ap2 restore`. Denied, at the finest level a prefix rule allows, is every command but what the
+  pr-review command runs (`card show`, `review plan`, `review verdict`, `review check`) and the park (`worker park`,
+  which the floor allows by rule; deny wins over allow, so it is not denied); the `hook-*` commands are left alone:
+  `review apply`, `review sync`, every `card` and `worker` command but those two, and every other command
+  (`config`, `search`, `restore`, `source`, `scan`, `gate`, `template`, `profile`, `spend`, `cap`, `serve`, `phone`,
+  `import-v1`, `install`, `uninstall`, `doctor`). In a worker's own session (`AP2_ROLE` set), `review plan`,
+  `review check` and `worker park` refuse
+  a card (for the park, a card and role) that is not the worker's own (`AP2_CARD`, `AP2_ROLE`), the park reads the
+  real usage file and ignores `--usage`, and the floor's park allow rule names only the worker's own card and role,
+  so an injected review cannot rewrite another card's plan or park any worker until a date it made up; a user at a
+  terminal (no `AP2_ROLE`) still runs them on any card. Each is written in two spellings, `Bash(ap2 <command>:*)`
+  and `Bash(<package>/bin/ap2 <command>:*)` (`workers.floor`). These rules, the gh, git, `claude` and `ap` ones too,
+  are best effort: they match the command's text, so a spelling such as `"$(echo ap2)" cap`, or a program that runs
+  `claude` or `git` for the worker (`python3 -c`, say), gets past them; full enforcement is the deferred sandbox
+  follow-up. The gh and git rules match the start of the command's text, so a spelling that puts an option before the
+  subcommand (`gh -R o/r pr merge`, `gh pr -R o/r merge`, `git -C . push`) gets past them too; closing that needs an
+  allow-list Bash hook that reads gh's or git's subcommand from the parsed words (guard.py's parser could be reused)
+  or the sandbox, both deferred to the sandbox follow-up. Not in the floor yet:
+  `gh api` with a field or a method (`-f`, `--input`, `-X`), and a sandbox. The hook runs through `cli.main` (not `bin/ap2`'s
+  fast path), so it loads more than the Bash guard does; the role writes one file a round.
+- **[decided by the builder]** A session archive's name starts with its role in lowercase letters only
+  (`transcripts.ROLE`), so a `pr-review` session is archived as `prreview-<session id>.jsonl.gz`.
+- Not built here: a periodic `sync` of every open PR review card, to notice new commits or a closed PR between
+  reviews (today a sync runs only after a review); reopening a done PR card when a new review ask arrives; and the
+  PR loop's end (6.3).
 
 ### 6.3 How the PR loop ends **[decided by the user, 2026-11-10]**
 
@@ -898,8 +1059,21 @@ which Claude Code labels "blocked", and v1 never stops blocked workers.
 Rules:
 
 1. **[decided, from v1]** A worker ends a round by writing its result file (`handback.json`, `review.json`,
-   `prloop.json`). The gate sees the file (newer than the worker's start) and runs `worker end`: stop the process,
-   save the session id on the card. Session state can be lost; the card cannot.
+   `prloop.json`; the `pr-review` role's is `prreview.json`, and its done path applies and syncs the review, 6.2).
+   A `prreview.json` counts from the round's first start (`round_started_at` on the worker's record, kept through
+   the in-place resumes of a parked or dead worker and through a `--resume` start of a parked one; `started_at`
+   moves with each resume), so a report that passed
+   its check before a park is still the round's when the resumed turn ends without writing it again. It counts
+   only once the worker's turn has ended (the listing shows it idle, done or failed, or the session is gone): the role checks its report after writing it and fixes it until the check passes, so while
+   the session still works or waits at a prompt the file is a draft and the worker stays running (or blocked). A
+   turn that ended because the worker parked itself, or on a usage limit or a gateway's refusal, did not
+   end on a checked report either: the worker is parked (or paused) as any other role, and the draft
+   is not applied. The gate sees the file (newer than the worker's start) and runs `worker end`: stop the process,
+   save the session id on the card. Session state can be lost; the card cannot. For a `pr-review` worker the done
+   close is saved as `closed: done` and a hand `ap2 worker end` as `closed: end`: only the done close lets the next
+   round start on its own, and a hand end holds the card until a start by hand (6.2). The done close reads the
+   run directory's plan and report only when the open file is a regular file (6.2), so a FIFO swapped in there
+   never hangs the pass.
 2. **[decided, from v1]** Dead (no session, or its process is gone, with no result file): resume once with
    "you were interrupted; check your worktree and run files first". Dead twice: stop and ask the user. A resume
    that cannot start (its worktree is gone) counts as that one resume. A parked worker whose resume cannot start
@@ -2141,7 +2315,7 @@ Calls the author made without asking (check them):
     (the permission floor: v1's outward-tool and Bash denials, plus `Edit` denials on the data folder's own files
     (including the user's `templates/**` and `sources/**`, the rules the worker floor in `roles.py` promises; every
     card's run directory stays writable except its settings files; also the gate's heartbeat `gate.json`, SQLite's
-    `index.sqlite-*` files next to the index (`-wal`, `-shm`, `-journal`), `routines/**` and `chat/**`) and the package, and one allow rule, `Bash(<package>/bin/ap2 worker park:*)`, as v1 allows its park command, and two PreToolUse hooks: first the park hook, `{"matcher": "*", "hooks": [{"type": "command", "command": "\"<package>/bin/ap2\" hook-park", "timeout": 5}]}` (v1's `perms.park_hook()` shape), so the worker and its subagents run it before each tool call, then the Bash guard, `{"matcher": "Bash", "hooks": [{"type": "command", "command": "\"<package>/bin/ap2\" hook-guard", "timeout": 5}]}`, v1's `ap hook-guard` copied into `lib/assistant/guard.py` (see the note below); the floor refuses a data folder or package path that a gitignore pattern cannot
+    `index.sqlite-*` files next to the index (`-wal`, `-shm`, `-journal`), `routines/**` and `chat/**`) and the package, and one allow rule, `Bash(<package>/bin/ap2 worker park <card> <role>:*)` (the worker's own card and role, from its env; none without a card), as v1 allows its park command, and two PreToolUse hooks: first the park hook, `{"matcher": "*", "hooks": [{"type": "command", "command": "\"<package>/bin/ap2\" hook-park", "timeout": 5}]}` (v1's `perms.park_hook()` shape), so the worker and its subagents run it before each tool call, then the Bash guard, `{"matcher": "Bash", "hooks": [{"type": "command", "command": "\"<package>/bin/ap2\" hook-guard", "timeout": 5}]}`, v1's `ap hook-guard` copied into `lib/assistant/guard.py` (see the note below); the floor refuses a data folder or package path that a gitignore pattern cannot
     name literally (one holding `[ ] * ? \ ! #` or ending in a space), before any session starts) and env `AP2_ROLE`, `AP2_DATA`, `AP2_CARD`, `AP2_PROJECT`, `AP2_RUN_DIR`, `AP2_PORTS`,
     `AP2_BRANCH`, `AP2_EXTRA_HOSTS`, `AP2_MCP_SERVERS`, `AP2_HEALTH_CHECKS` (JSON), in both the process env and the
     settings' `env`. v1's `AUTOPILOT_*` variables are dropped, so v1's park hook never takes a v2 worker for its
@@ -3314,12 +3488,14 @@ Calls the author made without asking (check them):
   1. What is read. `apistop.tail(projects, session_id)` finds the session's jsonl (`transcripts.find`) and reads its
      last 65536 bytes only (the first, cut line is dropped). It returns the API error lines after the last normal
      assistant reply, oldest first (`{at, text, error, status}`), and that reply's time (`reply_at`); None when there
-     is no transcript or it cannot be read, which is "no API error seen". An API error line is an `assistant` or
-     `system` line with `isApiErrorMessage: true`, or the model `<synthetic>`, or a non-empty string `error`; a
-     line that does not parse is skipped. `apistop.stop(tail, since)` reads the last error only, and only when it
+     is no transcript or it cannot be read, which is "no API error seen". A transcript is read (and archived)
+     only as a regular file, opened without waiting: a FIFO or a symlink there is no transcript. An API error line
+     is an `assistant` or `system` line with `isApiErrorMessage: true`, or the model `<synthetic>`, or a non-empty
+     string `error`; a line that does not parse is skipped. `apistop.stop(tail, since)` reads the last error only, and only when it
      is dated at or after `since` (the run's `started_at` less 2 minutes: a resumed copy repeats the old
-     conversation with the old times). It is `limit` for a 429, `error: rate_limit` or a text that names a limit,
-     and `gateway_refused` for a 400 (status or text) whose text says `safety guard`; anything else is none.
+     conversation with the old times). An error line dated in the future (later than now plus 2 minutes), or a
+     time that cannot be read, is ignored. It is `limit` for a 429, `error: rate_limit` or a text that names a
+     limit, and `gateway_refused` for a 400 (status or text) whose text says `safety guard`; anything else is none.
      `gateway_refused` is never a key failure: key health can test for it with this same function.
   2. When it is read. In `check`'s step 1, after the session id is filled in, for a record that is not parked and
      not closing, whose state is idle, blocked or dead, and whose session the listing does not show working or busy.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
 import textwrap
@@ -594,6 +595,70 @@ class InvisibleTextTest(SourceCase):
                 src = Loader(self.data, plugin_dir=sources.PLUGIN_DIR).load("slack-mentions")
                 self.assertIsNone(sources.unset_settings(src))
                 self.assertEqual(sources.settings(src)["org"], value.replace("\\ufeff", "\ufeff"))
+
+
+class ReadRegularCappedTest(unittest.TestCase):
+    """`read_regular_capped` reads only a regular file, checked on the open file, and at most `limit` bytes."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def test_a_regular_file_is_read_up_to_the_limit(self):
+        p = self.tmp / "a.json"
+        p.write_bytes(b"x" * 10)
+        self.assertEqual(sources.read_regular_capped(p, 10, "too large"), b"x" * 10)
+        with self.assertRaises(SourceError) as cm:
+            sources.read_regular_capped(p, 9, "too large")
+        self.assertEqual(str(cm.exception), "too large")
+        with self.assertRaises(FileNotFoundError):
+            sources.read_regular_capped(self.tmp / "gone.json", 10, "too large")
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "os.mkfifo is not available")
+    def test_a_fifo_is_refused_without_waiting(self):
+        p = self.tmp / "fifo.json"
+        os.mkfifo(p)  # no writer: a plain open would wait for one
+        with self.assertRaises(OSError) as cm:
+            sources.read_regular_capped(p, 10, "too large")
+        self.assertIn("not a regular file", str(cm.exception))
+
+    def test_a_link_is_refused(self):
+        target = self.tmp / "target.json"
+        target.write_text("{}")
+        p = self.tmp / "link.json"
+        p.symlink_to(target)
+        with self.assertRaises(OSError) as cm:
+            sources.read_regular_capped(p, 10, "too large")
+        self.assertIn("a symbolic link, not a regular file", str(cm.exception))
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "os.mkfifo is not available")
+    def test_the_file_is_closed_on_every_way_out(self):
+        p = self.tmp / "a.json"
+        p.write_bytes(b"x" * 10)
+        fifo = self.tmp / "fifo.json"
+        os.mkfifo(fifo)
+        with mock.patch.object(sources.os, "close", wraps=os.close) as close:
+            sources.read_regular_capped(p, 10, "too large")
+            self.assertEqual(close.call_count, 1)
+            with self.assertRaises(SourceError):
+                sources.read_regular_capped(p, 9, "too large")
+            self.assertEqual(close.call_count, 2)
+            with self.assertRaises(OSError):
+                sources.read_regular_capped(fifo, 10, "too large")
+            self.assertEqual(close.call_count, 3)
+
+    def test_a_short_read_is_read_on_until_the_limit(self):
+        p = self.tmp / "a.json"
+        p.write_bytes(b"0123456789")
+        real = os.read
+
+        def short(fd, n):
+            return real(fd, min(n, 3))  # at most 3 bytes a call, as a pipe or a network disk may give
+
+        with mock.patch.object(sources.os, "read", short):
+            self.assertEqual(sources.read_regular_capped(p, 10, "too large"), b"0123456789")
+            with self.assertRaises(SourceError):
+                sources.read_regular_capped(p, 9, "too large")
 
 
 if __name__ == "__main__":

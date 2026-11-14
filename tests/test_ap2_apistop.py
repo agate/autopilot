@@ -4,11 +4,14 @@ back-off for a limit with no readable reset. Every test reads temp folders only.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 from tests import helpers  # noqa: F401 - puts lib/ on the path
 from assistant import apistop
@@ -180,6 +183,36 @@ class TailTest(Case):
         except OSError:
             self.assertIsNone(self.tail())  # not when running as root, which reads it anyway
 
+    def test_a_transcript_that_is_a_fifo_when_opened_is_none_without_waiting(self):
+        # A process the worker left can swap its transcript for a FIFO after `transcripts.find` saw a file: a plain
+        # open would wait for a writer forever, with the worker list's lock held.
+        fifo = self.folder / f"{SID}.jsonl"
+        os.mkfifo(fifo)
+        out = []
+        with mock.patch.object(apistop.transcripts, "find", return_value=fifo):
+            t = threading.Thread(target=lambda: out.append(self.tail()), daemon=True)
+            t.start()
+            t.join(10)
+        hung = t.is_alive()
+        if hung:  # let the stuck open go, so the test run can end
+            os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+            t.join(10)
+        self.assertFalse(hung, "the read waited on the FIFO")
+        self.assertEqual(out, [None])
+        fifo.unlink()
+        self.transcript([limit_line()])  # a regular transcript still reads
+        self.assertEqual(len(self.tail()["errors"]), 1)
+
+    def test_a_transcript_that_is_a_symlink_is_none(self):
+        # A symlink where the transcript should be is not followed: the file it points to is not read.
+        outside = Path(tempfile.mkdtemp(prefix="ap2-apistop-outside-")).resolve()
+        self.addCleanup(shutil.rmtree, outside, True)
+        target = outside / "elsewhere.jsonl"
+        target.write_text(json.dumps(limit_line()) + "\n", encoding="utf-8")
+        (self.folder / f"{SID}.jsonl").symlink_to(target)
+        self.assertIsNone(self.tail())
+        self.assertEqual(target.read_text(encoding="utf-8"), json.dumps(limit_line()) + "\n")
+
     def test_a_line_with_a_naive_or_bad_time(self):
         self.transcript([limit_line(at="nonsense")])
         self.assertIsNone(self.tail()["errors"][0]["at"])
@@ -187,6 +220,28 @@ class TailTest(Case):
         self.assertIsNone(self.tail()["errors"][0]["at"])
         self.transcript([limit_line(at="2026-11-12T02:32:42")])
         self.assertIsNotNone(self.tail()["errors"][0]["at"].tzinfo)
+
+    def test_a_naive_time_out_of_the_local_range_is_none(self):
+        # A process the worker left can write any time: one that cannot be put in the local zone is no time.
+        self.assertIsNone(apistop._when("0001-01-01T00:00:00"))
+        apistop._when("9999-12-31T23:59:59")  # None or a time, never a raise
+        self.transcript([limit_line(), reply(at="0001-01-01T00:00:00")])
+        self.assertEqual(self.tail(), {"errors": [], "reply_at": None})
+
+    def test_a_naive_time_whose_local_zone_overflows_is_none(self):
+        # Some platforms raise OverflowError, not ValueError, when a naive time cannot be put in the local zone.
+        class Naive(datetime):
+            def astimezone(self, tz=None):
+                raise OverflowError("date value out of range")
+
+        class Parsed(datetime):
+            @classmethod
+            def fromisoformat(cls, text):
+                d = datetime.fromisoformat(text)
+                return Naive(d.year, d.month, d.day, d.hour, d.minute, d.second, d.microsecond)
+
+        with mock.patch.object(apistop, "datetime", Parsed):
+            self.assertIsNone(apistop._when("2026-01-01T00:00:00"))
 
 
 class StopTest(Case):
@@ -229,6 +284,12 @@ class StopTest(Case):
         self.assertIsNone(self.stop([limit_line(at=None)], SINCE))  # no time: cannot be told apart from history
         at = datetime(2026, 11, 12, 2, 32, 42, 322000, tzinfo=timezone.utc)
         self.assertEqual(self.stop([limit_line()], at)["kind"], "limit")  # at `since` counts
+
+    def test_an_error_dated_after_until_is_ignored(self):
+        at = datetime(2026, 11, 12, 2, 32, 42, 322000, tzinfo=timezone.utc)
+        self.assertEqual(self.stop([limit_line()]), apistop.stop(self.tail(), SINCE, until=None))  # the default
+        self.assertEqual(apistop.stop(self.tail(), SINCE, until=at)["kind"], "limit")  # at `until` counts
+        self.assertIsNone(apistop.stop(self.tail(), SINCE, until=at - timedelta(seconds=1)))
 
     def test_no_tail_or_no_errors(self):
         self.assertIsNone(apistop.stop(None, SINCE))
@@ -278,6 +339,13 @@ class ResetTimeTest(unittest.TestCase):
                     "resets 13pm (UTC)", "resets 0am (UTC)", "resets 9:61 (UTC)", "resets Foo 3, 9am (UTC)",
                     "resets Feb 30, 9am (UTC)", "resets 9am (../../etc/passwd)", "", None):
             self.assertIsNone(apistop.reset_time(txt, base), txt)
+
+
+    def test_a_reset_past_the_last_date_is_none(self):
+        last = datetime(9999, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
+        self.assertIsNone(apistop.reset_time("resets 1am (UTC)", last))  # the next day is past the last date
+        self.assertIsNone(apistop.reset_time("resets 1am (Pacific/Kiritimati)", last))  # +14: no such local time
+        self.assertIsNone(apistop.reset_time("resets Jan 2, 9am (UTC)", last))  # next year's is past it too
 
 
 class BackoffTest(unittest.TestCase):

@@ -134,7 +134,8 @@ _EMPTY_PARENS = re.compile(r"\([ \t]*\)")  # the `()` of a function definition
 _END, _VAR_END = r"(?![A-Za-z0-9_.-])", r"(?![A-Za-z0-9_])"
 MAX_STDIN = 1 << 20  # a v2 worker's Bash payload past this is denied (`main` reads no further; no command is 1 MiB)
 DEADLINE = 2.0  # seconds `main` gives one judgement before it falls back to `_fallback` (the hook's timeout is 5 s)
-ROLES = ("implement", "review", "pr")  # == workers.ROLES: the run directory's floor files are settings-<role>.json
+# == workers.ROLES: the run directory's floor files are settings-<role>.json
+ROLES = ("implement", "review", "pr", "pr-review")
 # A command past this is not split and matched (a long command of repeated `dd ` makes `_WRITE` slow, and a hook
 # past its 5 s timeout lets the call through): it is denied when it names the data folder or the package anywhere.
 MAX_COMMAND = 64 << 10

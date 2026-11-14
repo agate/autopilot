@@ -8,10 +8,12 @@ temp folder); this module only reads it. Deleting an original is `claude rm`, wh
 from __future__ import annotations
 
 import contextlib
+import errno
 import gzip
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 from datetime import datetime, timedelta
@@ -51,6 +53,26 @@ def find(projects, session_id: str) -> Optional[Path]:
     return max(hits, key=lambda p: p.stat().st_mtime) if hits else None
 
 
+def open_regular(path):
+    """`path` opened for binary reading, or None when it is not a regular file at the time it is opened (a FIFO, a
+    device, a symlink): a process the worker left can swap its transcript after `find` saw a file. It is opened
+    without waiting (a FIFO's plain open waits for a writer) and checked on the open file. Other errors raise."""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as e:
+        if e.errno == errno.ELOOP:  # a symlink, refused by O_NOFOLLOW
+            return None
+        raise
+    try:
+        if stat.S_ISREG(os.fstat(fd).st_mode):
+            return os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+    os.close(fd)
+    return None
+
+
 def _check_role(role) -> str:
     if not (isinstance(role, str) and ROLE.fullmatch(role)):
         raise ValueError(f"not a role: {role!r}")
@@ -75,10 +97,16 @@ def archive(data, cfg: config.Config, card_id: str, role: str, session_id: str, 
             out.parent.mkdir(parents=True, exist_ok=True)
             fd, tmp = tempfile.mkstemp(prefix=f".{out.name}.", suffix=".tmp", dir=str(out.parent))
             try:
-                with open(src, "rb") as f, os.fdopen(fd, "wb") as raw, \
-                        gzip.GzipFile(filename=src.name, mode="wb", fileobj=raw, mtime=0) as z:
-                    shutil.copyfileobj(f, z)
-                os.replace(tmp, out)
+                with os.fdopen(fd, "wb") as raw:
+                    f = open_regular(src)
+                    if f is not None:
+                        with f, gzip.GzipFile(filename=src.name, mode="wb", fileobj=raw, mtime=0) as z:
+                            shutil.copyfileobj(f, z)
+                if f is None:  # not a regular file when opened: nothing to copy
+                    os.unlink(tmp)
+                    out = None
+                else:
+                    os.replace(tmp, out)
             except BaseException:
                 with contextlib.suppress(FileNotFoundError):
                     os.unlink(tmp)
