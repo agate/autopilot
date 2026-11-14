@@ -3477,7 +3477,9 @@ Calls the author made without asking (check them):
     `launchctl bootout gui/<uid>/com.assistant.gate` (its result ignored: not loaded yet is fine), waits for the old
     job to go the way uninstall does (below), and runs `launchctl bootstrap gui/<uid> <plist>`. A job still loaded
     after that wait is one `ap2: launchctl bootout did not finish: com.assistant.gate is still loaded after 10
-    checks; run `ap2 install` again` line and exit 1, with no bootstrap. A failed bootstrap is one `ap2: launchctl
+    checks (<bootout's output>); run `ap2 install` again` line and exit 1, with no bootstrap. A `print` that cannot
+    ask launchctl at all is one `ap2: cannot confirm com.assistant.gate is gone: ...` line and exit 1, with no
+    bootstrap, as in uninstall. A failed bootstrap is one `ap2: launchctl
     bootstrap failed: ...; run `ap2 install` again` line and exit 1. It prints `{label, plist, program, interval,
     data_dir, mode, tools, note}` as JSON. Install writes only on this Mac, never Jira, Slack or GitHub, so it does
     not call `require_live`. A second install gives the same plist and the same calls.
@@ -3492,7 +3494,7 @@ Calls the author made without asking (check them):
     output>); run `ap2 uninstall` again` line and exit 1, with no file removed. A `print` that cannot ask launchctl
     at all (a missing `launchctl` or a timeout) does not count as gone: it is one `ap2: cannot confirm
     com.assistant.gate is gone: ...` line and exit 1, with no file removed, so a machine without `launchctl` gets
-    that error from uninstall. Then it removes the plist and the launcher (a missing
+    that error from install and from uninstall. Then it removes the plist and the launcher (a missing
     one is fine; one that cannot be removed is one `ap2: cannot remove ...` line and exit 1) and prints `{label,
     removed}`. The data folder and the err log are kept.
   - The label is `com.assistant.gate`, never v1's `com.autopilot.gate` or secretary's `com.secretary.gate`: it

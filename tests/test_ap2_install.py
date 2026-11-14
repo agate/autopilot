@@ -71,6 +71,11 @@ class HomeTest(unittest.TestCase):
             patch = mock.patch.object(v1_install, name, path)
             patch.start()
             self.addCleanup(patch.stop)
+        # A call that drops its fake runner falls back to `_launchctl`; this makes that a failure, not a real call.
+        # A test that wants a runner by default (NoRealLaunchctlTest) patches `_launchctl` again after this.
+        patch = mock.patch.object(install, "_launchctl", lambda *a: self.fail(f"the real launchctl was run: {a}"))
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def files(self, root=None) -> dict:
         root = Path(root or self.home)
@@ -265,7 +270,8 @@ class InstallTest(HomeTest):
     def test_a_missing_tool_is_null_and_left_off_path(self):
         fake = FakeLaunchctl()
         out = install.install(self.data, agents_dir=self.agents, home=self.lhome, launchctl=fake,
-                              which=lambda t: None if t == "gh" else f"/opt/{t}/bin/{t}", build=lambda a, d: None)
+                              which=lambda t: None if t == "gh" else f"/opt/{t}/bin/{t}", build=lambda a, d: None,
+                              sleep=self.fail)
         self.assertIsNone(out["tools"]["gh"])
         path = plistlib.loads((self.agents / "com.assistant.gate.plist").read_bytes())["EnvironmentVariables"]["PATH"]
         self.assertNotIn("/opt/gh/bin", path.split(":"))
@@ -295,14 +301,25 @@ class InstallTest(HomeTest):
         self.assertEqual(out["label"], "com.assistant.gate")
 
     def test_a_job_still_loaded_after_bootout_stops_install_before_bootstrap(self):
-        fake = FakeLaunchctl(fail={"bootout": (0, "")}, loaded=True)  # bootout says yes, the job stays
+        fake = FakeLaunchctl(fail={"bootout": (5, "Boot-out failed: 5:\n Input/output error")}, loaded=True)
         sleeps = []
         with self.assertRaises(install.InstallError) as cm:
             self.do_install(fake=fake, sleep=sleeps.append)
         self.assertEqual(str(cm.exception), "launchctl bootout did not finish: com.assistant.gate is still loaded "
-                                            "after 10 checks; run `ap2 install` again")
+                                            "after 10 checks (Boot-out failed: 5: Input/output error); run "
+                                            "`ap2 install` again")
         self.assertEqual([c[0] for c in fake.calls], ["bootout"] + ["print"] * install.UNLOAD_TRIES)
         self.assertEqual(sleeps, [install.UNLOAD_WAIT] * (install.UNLOAD_TRIES - 1))
+
+    def test_a_print_that_cannot_ask_launchctl_stops_install_before_bootstrap(self):
+        fake = FakeLaunchctl(fail={"bootout": (127, "cannot run launchctl: no such file"),
+                                   "print": (127, "cannot run launchctl:\n no such file")}, loaded=True)
+        with self.assertRaises(install.InstallError) as cm:
+            self.do_install(fake=fake)
+        self.assertEqual(str(cm.exception), "cannot confirm com.assistant.gate is gone: cannot run launchctl: no such "
+                                            "file")
+        self.assertEqual([c[0] for c in fake.calls], ["bootout", "print"])
+        self.assertEqual(fake.bootstrapped, [])
 
     def test_a_bad_config_yaml_is_refused_before_the_job_is_written(self):
         self.data.mkdir(parents=True)
@@ -310,7 +327,7 @@ class InstallTest(HomeTest):
         fake = FakeLaunchctl()
         with self.assertRaises(install.ConfigError):
             install.install(self.data, agents_dir=self.agents, home=self.lhome, launchctl=fake,
-                            which=fake_which(self.tools), build=lambda a, d: None)
+                            which=fake_which(self.tools), build=lambda a, d: None, sleep=self.fail)
         self.assertEqual(fake.calls, [])
         self.assertFalse(self.agents.exists())
 
@@ -318,14 +335,14 @@ class InstallTest(HomeTest):
         fake = FakeLaunchctl()
         with self.assertRaises(install.ConfigError):
             install.install(str(self.home / ".claude" / "data"), agents_dir=self.agents, home=self.lhome,
-                            launchctl=fake, which=fake_which(self.tools), build=lambda a, d: None)
+                            launchctl=fake, which=fake_which(self.tools), build=lambda a, d: None, sleep=self.fail)
         self.assertEqual(fake.calls, [])
         self.assertFalse((self.home / ".claude").exists())
 
     @unittest.skipUnless(shutil.which("clang"), "needs clang")
     def test_the_default_build_compiles_v1s_launcher_to_v2s_path(self):
         out = install.install(self.data, agents_dir=self.agents, home=self.lhome, launchctl=FakeLaunchctl(),
-                              which=fake_which(self.tools))
+                              which=fake_which(self.tools), sleep=self.fail)
         launcher = install.launcher_path(self.lhome)
         self.assertFalse(self.v1_sentinel.exists())  # nothing fell back to v1's own launcher path
         self.assertEqual(out["program"], [str(launcher)])
@@ -335,7 +352,7 @@ class InstallTest(HomeTest):
 class UninstallTest(HomeTest):
     def test_removes_the_plist_and_launcher_and_keeps_the_data_folder(self):
         install.install(self.data, agents_dir=self.agents, home=self.lhome, launchctl=FakeLaunchctl(),
-                        which=fake_which(self.tools),
+                        which=fake_which(self.tools), sleep=self.fail,
                         build=lambda a, d: (Path(d).parent.mkdir(parents=True, exist_ok=True),
                                             Path(d).write_text("x"), Path(d))[2])
         (self.data / "gate.json").write_text('{"last_run_at": "2026-11-13T00:00:00Z"}')
@@ -346,7 +363,7 @@ class UninstallTest(HomeTest):
         plist, launcher = install.plist_path(self.agents), install.launcher_path(self.lhome)
         self.assertTrue(plist.exists() and launcher.exists())
         fake = FakeLaunchctl(loaded=True)
-        out = install.uninstall(agents_dir=self.agents, home=self.lhome, launchctl=fake)
+        out = install.uninstall(agents_dir=self.agents, home=self.lhome, launchctl=fake, sleep=self.fail)
         self.assertFalse(plist.exists())
         self.assertFalse(launcher.exists())
         self.assertEqual(self.files(self.data), data_before)
@@ -358,7 +375,7 @@ class UninstallTest(HomeTest):
 
     def test_nothing_installed_is_fine(self):
         fake = FakeLaunchctl(fail={"bootout": (113, "Could not find service")})
-        out = install.uninstall(agents_dir=self.agents, home=self.lhome, launchctl=fake)
+        out = install.uninstall(agents_dir=self.agents, home=self.lhome, launchctl=fake, sleep=self.fail)
         self.assertEqual(out["removed"], [])
         self.assertEqual([c[0] for c in fake.calls], ["bootout", "print"])
 

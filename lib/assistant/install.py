@@ -175,11 +175,13 @@ def install(data=None, agents_dir=None, home=None, launchctl=None, which=None, b
     except OSError as e:
         raise InstallError(f"cannot create {err_log.parent}: {_one_line(e)}") from e
     _write_atomic(plist, render_plist(argv, folder, dirs, err_log))
-    run("bootout", target())  # not loaded yet is fine; `print` below says whether it is gone
-    rc, _ = _wait_gone(run, sleep)
+    _, out = run("bootout", target())  # not loaded yet is fine; `print` below says whether it is gone
+    rc, msg = _wait_gone(run, sleep)
+    if rc == 127:  # launchctl could not be asked: that is not "gone"
+        raise InstallError(f"cannot confirm {LABEL} is gone: {_one_line(msg)}")
     if rc == 0:  # bootstrapping now would fail with "Input/output error" and leave no job loaded
-        raise InstallError(f"launchctl bootout did not finish: {LABEL} is still loaded after {UNLOAD_TRIES} checks; "
-                           "run `ap2 install` again")
+        raise InstallError(f"launchctl bootout did not finish: {LABEL} is still loaded after {UNLOAD_TRIES} checks "
+                           f"({_one_line(out)}); run `ap2 install` again")
     rc, msg = run("bootstrap", domain(), str(plist))
     if rc != 0:
         raise InstallError(f"launchctl bootstrap failed: {_one_line(msg)}; run `ap2 install` again")
