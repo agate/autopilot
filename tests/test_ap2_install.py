@@ -19,6 +19,9 @@ from autopilot import install as v1_install
 
 V1_LABEL = "com.autopilot.gate"
 SECRETARY_LABEL = "com.secretary.gate"
+# v1 works these out at import, in the real home. HomeTest points them at sentinels in the temp home, so a call that
+# falls back to v1's defaults (`build_launcher` without its `dest`) writes there and a test sees it.
+V1_PLIST, V1_LAUNCHER = v1_install.PLIST, v1_install.LAUNCHER
 
 
 class FakeLaunchctl:
@@ -29,12 +32,17 @@ class FakeLaunchctl:
         self.calls = []
         self.fail = dict(fail or {})
         self.loaded = loaded
+        self.bootstrapped = []  # the plist's bytes as bootstrap found them on disk
 
     def __call__(self, *args):
         self.calls.append(list(args))
         if args[0] in self.fail:
             return self.fail[args[0]]
         if args[0] == "bootstrap":
+            plist = Path(args[2])
+            if not plist.is_file():
+                raise AssertionError(f"bootstrap was asked to load {plist}, which is not on disk")
+            self.bootstrapped.append(plist.read_bytes())
             self.loaded = True
         elif args[0] == "bootout":
             self.loaded = False
@@ -57,6 +65,12 @@ class HomeTest(unittest.TestCase):
         self.data = self.home / "data"
         self.lhome = self.home / "h"  # the `home` argument: the launcher and the err log go under it
         self.tools = self.home / "opt" / "tools" / "bin"
+        self.v1_sentinel = self.home / "v1-must-not-exist"
+        for name, path in (("LAUNCHER", self.v1_sentinel / V1_LAUNCHER.name),
+                           ("PLIST", self.v1_sentinel / V1_PLIST.name)):
+            patch = mock.patch.object(v1_install, name, path)
+            patch.start()
+            self.addCleanup(patch.stop)
 
     def files(self, root=None) -> dict:
         root = Path(root or self.home)
@@ -71,8 +85,9 @@ class LabelAndPathsTest(HomeTest):
             self.assertNotEqual(install.LABEL, other)
 
     def test_paths_differ_from_v1s_and_default_into_the_home(self):
-        self.assertNotEqual(install.plist_path().name, v1_install.PLIST.name)
-        self.assertNotEqual(install.launcher_path(), v1_install.LAUNCHER)
+        self.assertNotEqual(install.plist_path().name, V1_PLIST.name)
+        self.assertNotEqual(install.launcher_path(), V1_LAUNCHER)
+        self.assertNotEqual(install.launcher_path().name, V1_LAUNCHER.name)
         self.assertEqual(install.plist_path(), self.home / "Library" / "LaunchAgents" / "com.assistant.gate.plist")
         self.assertEqual(install.launcher_path(),
                          self.home / "Library" / "Application Support" / "assistant" / "assistant-gate")
@@ -114,8 +129,8 @@ class PlistTest(unittest.TestCase):
 
 
 class InstallTest(HomeTest):
-    def do_install(self, launcher="built", fail=None, data="self"):
-        fake = FakeLaunchctl(fail)
+    def do_install(self, launcher="built", fail=None, data="self", fake=None, sleep=None):
+        fake = fake or FakeLaunchctl(fail)
         built = []
 
         def build(ap, dest):
@@ -127,16 +142,18 @@ class InstallTest(HomeTest):
             return Path(dest)
 
         out = install.install(self.data if data == "self" else data, agents_dir=self.agents, home=self.lhome,
-                              launchctl=fake, which=fake_which(self.tools), build=build)
+                              launchctl=fake, which=fake_which(self.tools), build=build, sleep=sleep or self.fail)
         return out, fake, built
 
-    def test_writes_the_plist_under_the_agents_folder_then_bootout_and_bootstrap(self):
+    def test_writes_the_plist_under_the_agents_folder_then_bootout_print_and_bootstrap(self):
         out, fake, built = self.do_install()
         plist = self.agents / "com.assistant.gate.plist"
         self.assertTrue(plist.is_file())
         uid = os.getuid()
         self.assertEqual(fake.calls, [["bootout", f"gui/{uid}/com.assistant.gate"],
+                                      ["print", f"gui/{uid}/com.assistant.gate"],
                                       ["bootstrap", f"gui/{uid}", str(plist)]])
+        self.assertEqual(fake.bootstrapped, [plist.read_bytes()])  # the final plist was on disk before bootstrap
         pl = plistlib.loads(plist.read_bytes())
         launcher = install.launcher_path(self.lhome)
         self.assertEqual(pl["ProgramArguments"], [str(launcher)])
@@ -257,8 +274,35 @@ class InstallTest(HomeTest):
     def test_a_failed_bootstrap_raises_install_error(self):
         with self.assertRaises(install.InstallError) as cm:
             self.do_install(fail={"bootstrap": (5, "Bootstrap failed: 5:\n Input/output error")})
-        self.assertEqual(str(cm.exception), "launchctl bootstrap failed: Bootstrap failed: 5: Input/output error")
+        self.assertEqual(str(cm.exception), "launchctl bootstrap failed: Bootstrap failed: 5: Input/output error; "
+                                            "run `ap2 install` again")
         self.assertIsInstance(cm.exception, install.ConfigError)
+
+    def test_a_running_job_that_takes_a_moment_to_go_is_waited_for_before_bootstrap(self):
+        calls = []
+        real = FakeLaunchctl(loaded=True)
+
+        def slow(*args):  # bootout returns at once; `print` still finds the old job twice while the gate exits
+            calls.append(args[0])
+            if args[0] == "print":
+                return (0, "") if calls.count("print") <= 2 else (113, "Could not find service")
+            return real(*args)
+
+        sleeps = []
+        out, _, _ = self.do_install(fake=slow, sleep=sleeps.append)
+        self.assertEqual(calls, ["bootout", "print", "print", "print", "bootstrap"])
+        self.assertEqual(sleeps, [install.UNLOAD_WAIT] * 2)
+        self.assertEqual(out["label"], "com.assistant.gate")
+
+    def test_a_job_still_loaded_after_bootout_stops_install_before_bootstrap(self):
+        fake = FakeLaunchctl(fail={"bootout": (0, "")}, loaded=True)  # bootout says yes, the job stays
+        sleeps = []
+        with self.assertRaises(install.InstallError) as cm:
+            self.do_install(fake=fake, sleep=sleeps.append)
+        self.assertEqual(str(cm.exception), "launchctl bootout did not finish: com.assistant.gate is still loaded "
+                                            "after 10 checks; run `ap2 install` again")
+        self.assertEqual([c[0] for c in fake.calls], ["bootout"] + ["print"] * install.UNLOAD_TRIES)
+        self.assertEqual(sleeps, [install.UNLOAD_WAIT] * (install.UNLOAD_TRIES - 1))
 
     def test_a_bad_config_yaml_is_refused_before_the_job_is_written(self):
         self.data.mkdir(parents=True)
@@ -283,6 +327,7 @@ class InstallTest(HomeTest):
         out = install.install(self.data, agents_dir=self.agents, home=self.lhome, launchctl=FakeLaunchctl(),
                               which=fake_which(self.tools))
         launcher = install.launcher_path(self.lhome)
+        self.assertFalse(self.v1_sentinel.exists())  # nothing fell back to v1's own launcher path
         self.assertEqual(out["program"], [str(launcher)])
         self.assertTrue(os.access(launcher, os.X_OK))
 
@@ -326,12 +371,35 @@ class UninstallTest(HomeTest):
         sleeps = []
         with self.assertRaises(install.InstallError) as cm:
             install.uninstall(agents_dir=self.agents, home=self.lhome, launchctl=fake, sleep=sleeps.append)
-        self.assertEqual(str(cm.exception), "launchctl bootout failed: Boot-out failed: 5: Input/output error")
+        self.assertEqual(str(cm.exception), "launchctl bootout failed: com.assistant.gate is still loaded after 10 "
+                                            "checks (Boot-out failed: 5: Input/output error); run `ap2 uninstall` "
+                                            "again")
         self.assertTrue(plist.exists() and launcher.exists())
         self.assertEqual(install.UNLOAD_TRIES, 10)
         self.assertEqual([c[0] for c in fake.calls], ["bootout"] + ["print"] * install.UNLOAD_TRIES)
         self.assertEqual(sleeps, [install.UNLOAD_WAIT] * (install.UNLOAD_TRIES - 1))
         self.assertEqual(install.UNLOAD_WAIT, 0.5)
+
+    def test_a_quiet_bootout_with_the_job_still_loaded_says_so_not_no_output(self):
+        fake = FakeLaunchctl(fail={"bootout": (0, "")}, loaded=True)
+        with self.assertRaises(install.InstallError) as cm:
+            install.uninstall(agents_dir=self.agents, home=self.lhome, launchctl=fake, sleep=lambda s: None)
+        self.assertEqual(str(cm.exception), "launchctl bootout failed: com.assistant.gate is still loaded after 10 "
+                                            "checks (no output); run `ap2 uninstall` again")
+
+    def test_a_print_that_cannot_ask_launchctl_is_an_error_and_keeps_the_files(self):
+        plist, launcher = install.plist_path(self.agents), install.launcher_path(self.lhome)
+        for f in (plist, launcher):
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text("x")
+        fake = FakeLaunchctl(fail={"bootout": (127, "cannot run launchctl: no such file"),
+                                   "print": (127, "cannot run launchctl:\n no such file")}, loaded=True)
+        with self.assertRaises(install.InstallError) as cm:
+            install.uninstall(agents_dir=self.agents, home=self.lhome, launchctl=fake, sleep=self.fail)
+        self.assertEqual(str(cm.exception), "cannot confirm com.assistant.gate is gone: cannot run launchctl: no such "
+                                            "file")
+        self.assertTrue(plist.exists() and launcher.exists())
+        self.assertEqual([c[0] for c in fake.calls], ["bootout", "print"])
 
     def test_a_job_that_takes_a_moment_to_go_is_waited_for(self):
         plist, launcher = install.plist_path(self.agents), install.launcher_path(self.lhome)
@@ -449,7 +517,7 @@ class NoRealLaunchctlTest(HomeTest):
         self.assertFalse(plist.exists())
         self.assertTrue(err_log.parent.is_dir())
         verbs = [c[0] for c in self.fake.calls]
-        self.assertEqual(verbs, ["bootout", "bootstrap", "print", "bootout", "print"])
+        self.assertEqual(verbs, ["bootout", "print", "bootstrap", "print", "bootout", "print"])
         targets = [a for c in self.fake.calls for a in c[1:] if a.startswith("gui/")]
         for t in targets:
             if t.count("/") == 2:
@@ -464,7 +532,8 @@ class NoRealLaunchctlTest(HomeTest):
         code, out, err = self.main(["install", "--data", str(self.data)])
         self.assertEqual(code, 1)
         self.assertEqual(out, "")
-        self.assertEqual(err, "ap2: launchctl bootstrap failed: Bootstrap failed: 5: Input/output error\n")
+        self.assertEqual(err, "ap2: launchctl bootstrap failed: Bootstrap failed: 5: Input/output error; run "
+                              "`ap2 install` again\n")
 
     def test_a_launcher_that_cannot_be_built_is_one_line_and_writes_no_job(self):
         blocker = self.home / "Library" / "Application Support" / "assistant"

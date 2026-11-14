@@ -112,13 +112,25 @@ class DoctorTest(unittest.TestCase):
         self.assertIn(str(self.home / "other"), c["detail"])
         self.assertIn(f"ap2 install --data {shlex.quote(str(self.data))}", c["fix"])
 
+    def test_another_data_folder_offers_checking_the_jobs_folder_too(self):
+        other = datadir.ensure(self.home / "job's data")
+        self.write_plist(data=other)
+        c = self.checks(data_flag=str(self.data))["launchd job"]
+        self.assertFalse(c["ok"])
+        cmds = c["fix"].split("`")[1::2]
+        self.assertEqual([shlex.split(cmd) for cmd in cmds],
+                         [["ap2", "doctor", "--data", str(other)], ["ap2", "install", "--data", str(self.data)]])
+        self.assertEqual(c["fix"], f"run `ap2 doctor --data {shlex.quote(str(other))}` to check the job's folder, or "
+                                   f"run `ap2 install --data {shlex.quote(str(self.data))}` to point the job at this "
+                                   f"one")
+
     def test_the_install_fix_quotes_a_data_folder_with_a_space(self):
         spaced = datadir.ensure(self.home / "my data")
         self.write_plist(data=self.home / "other")
         c = self.checks(data_flag=str(spaced))["launchd job"]
         self.assertFalse(c["ok"])
         self.assertIn(f"ap2 install --data '{spaced}'", c["fix"])
-        cmd = c["fix"].split("`")[1]
+        cmd = next(cmd for cmd in c["fix"].split("`")[1::2] if cmd.startswith("ap2 install"))
         self.assertEqual(shlex.split(cmd), ["ap2", "install", "--data", str(spaced)])
 
     def test_job_passes_when_the_plist_names_the_same_folder_another_way(self):
@@ -369,6 +381,8 @@ class DoctorCommandTest(unittest.TestCase):
         self.assertEqual(self.tree(), before)
         self.assertFalse((self.home / "Documents").exists())
         self.assertIn("FAIL data folder:", out)
+        self.assertIn("fix: run `ap2 install` (it creates the folder)", out)
+        self.assertNotIn("--data", out)
 
     def test_printout_is_v1s_shape(self):
         data = datadir.ensure(self.home / "Documents" / "Assistant")

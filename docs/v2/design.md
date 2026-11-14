@@ -3474,14 +3474,25 @@ Calls the author made without asking (check them):
     where its folder goes, is one `ap2: cannot build the launcher at ...` line and exit 1, with no plist written and
     no launchctl call), creates the err log's folder `~/Library/Logs/assistant` (a folder that cannot be made is one
     `ap2: cannot create ...` line and exit 1, with no plist written), writes the plist through a temp file, then runs
-    `launchctl bootout gui/<uid>/com.assistant.gate` (its result ignored) and `launchctl bootstrap gui/<uid> <plist>`.
-    A failed bootstrap is one `ap2: launchctl bootstrap failed: ...` line and exit 1. It prints `{label, plist,
-    program, interval, data_dir, mode, tools, note}` as JSON. Install writes only on this Mac, never Jira, Slack or
-    GitHub, so it does not call `require_live`. A second install gives the same plist and the same calls.
+    `launchctl bootout gui/<uid>/com.assistant.gate` (its result ignored: not loaded yet is fine), waits for the old
+    job to go the way uninstall does (below), and runs `launchctl bootstrap gui/<uid> <plist>`. A job still loaded
+    after that wait is one `ap2: launchctl bootout did not finish: com.assistant.gate is still loaded after 10
+    checks; run `ap2 install` again` line and exit 1, with no bootstrap. A failed bootstrap is one `ap2: launchctl
+    bootstrap failed: ...; run `ap2 install` again` line and exit 1. It prints `{label, plist, program, interval,
+    data_dir, mode, tools, note}` as JSON. Install writes only on this Mac, never Jira, Slack or GitHub, so it does
+    not call `require_live`. A second install gives the same plist and the same calls.
+  - **[decided by the builder]** The install calls are bootout, `print` (once, or until the job is gone), then
+    bootstrap; the spec asked for exactly bootout then bootstrap. A re-install while the gate is running would
+    otherwise bootstrap before the old job is gone, which launchd refuses ("Bootstrap failed: 5: Input/output
+    error"), leaving no job loaded. Reverse: drop the wait in `install` and call bootstrap right after bootout.
   - `ap2 uninstall` runs `launchctl bootout gui/<uid>/com.assistant.gate`, then `launchctl print` on the same target
     to confirm it is gone. bootout can return while a running gate is still exiting, so `print` is asked up to 10
-    times, 0.5 s apart (about 5 s), until it says the job is gone; a job still loaded after that is one `ap2: launchctl
-    bootout failed: ...` line and exit 1, with no file removed. Then it removes the plist and the launcher (a missing
+    times, with 9 waits of 0.5 s between them (about 4.5 s), until it says the job is gone; a job still loaded after
+    that is one `ap2: launchctl bootout failed: com.assistant.gate is still loaded after 10 checks (<bootout's
+    output>); run `ap2 uninstall` again` line and exit 1, with no file removed. A `print` that cannot ask launchctl
+    at all (a missing `launchctl` or a timeout) does not count as gone: it is one `ap2: cannot confirm
+    com.assistant.gate is gone: ...` line and exit 1, with no file removed, so a machine without `launchctl` gets
+    that error from uninstall. Then it removes the plist and the launcher (a missing
     one is fine; one that cannot be removed is one `ap2: cannot remove ...` line and exit 1) and prints `{label,
     removed}`. The data folder and the err log are kept.
   - The label is `com.assistant.gate`, never v1's `com.autopilot.gate` or secretary's `com.secretary.gate`: it
@@ -3514,7 +3525,9 @@ Calls the author made without asking (check them):
     It prints v1's lines, `ok   <name>: <detail>` or `FAIL <name>: <detail>` then `     fix: ...`, and exits 1 when a
     check fails, 0 otherwise. A check that breaks is a failed line, never a traceback. The checks: `launchd job` (the
     plist reads, its `Label` is v2's, `launchctl print gui/<uid>/com.assistant.gate` exits 0, its `AP2_DATA` is this
-    data folder, the same text or the same folder by `os.path.samefile`; fix: `ap2 install` with the same `--data`;
+    data folder, the same text or the same folder by `os.path.samefile`; fix: `ap2 install` with the same `--data`,
+    and when the job names another data folder, first `ap2 doctor --data <the job's folder>` to check that one, since
+    reinstalling here would move the job to this folder;
     `launchctl print` runs only when the plist reads and names v2's label), `gate ran recently` (`gate.json`
     `last_run_at` under 3 minutes old, 7.4; fix: look at `<data>/gate.log` and the err log the plist's
     `StandardErrorPath` names, else `~/Library/Logs/assistant/gate.err.log`), `data folder` (accepted by the lookup,

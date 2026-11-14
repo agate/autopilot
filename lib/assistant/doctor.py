@@ -86,6 +86,9 @@ def _job(pl, why, data, data_flag, run, plist) -> dict:
                   + (f": {first[0]}" if first else "") + ")", fix)
     job_data = _env(pl).get(datadir.ENV)
     if data is None or not _same_folder(job_data, data):
+        if job_data:  # the job may be fine on its own folder: reinstalling here would move it to this one
+            fix = (f"run `ap2 doctor --data {shlex.quote(str(job_data))}` to check the job's folder, or run "
+                   f"{_install_cmd(data_flag)} to point the job at this one")
         return _c("launchd job", False, f"the job uses the data folder {job_data or 'none'}, not "
                   f"{data or 'this one'}", fix)
     return _c("launchd job", True, f"{install.LABEL} loaded, {plist}")

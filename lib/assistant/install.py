@@ -22,7 +22,7 @@ TOOLS = ("claude", "gh", "git", "python3")
 ERR_LOG = "gate.err.log"  # launchd's own stderr for the job: Python errors and the `ap2: ...` line
 LAUNCHCTL_TIMEOUT = 30  # seconds
 UNLOAD_TRIES = 10  # `launchctl print` checks after bootout: a running gate can take a moment to exit
-UNLOAD_WAIT = 0.5  # seconds between those checks, so uninstall waits about 5 s for the job to go
+UNLOAD_WAIT = 0.5  # seconds between those checks, so install and uninstall wait about 4.5 s for the job to go
 NO_COMPILER = ("no C compiler, so the gate runs bin/ap2 directly: macOS refuses that when the package is in a "
                "cloud-synced folder (install Xcode command line tools, then run `ap2 install` again)")
 PRIVACY = ("macOS will ask to let assistant-gate into {folder}, and the gate cannot run until it is allowed "
@@ -117,6 +117,20 @@ def _build(ap, dest):
     return build_launcher(ap, dest)
 
 
+def _wait_gone(run, sleep) -> tuple:
+    """After bootout, ask `print` up to UNLOAD_TRIES times, UNLOAD_WAIT apart, until the job is gone: bootout can
+    return while a running gate is still exiting. Returns the last `print` result: 0 means still loaded; non-zero
+    means gone, except 127, which means launchctl could not be asked."""
+    rc, msg = 0, ""
+    for n in range(UNLOAD_TRIES):
+        rc, msg = run("print", target())
+        if rc != 0:
+            break
+        if n + 1 < UNLOAD_TRIES:
+            sleep(UNLOAD_WAIT)
+    return rc, msg
+
+
 def _one_line(text) -> str:
     return " ".join(str(text).split()) or "no output"
 
@@ -135,11 +149,13 @@ def _write_atomic(path: Path, payload: bytes) -> None:
         raise InstallError(f"cannot write {path}: {e}") from e
 
 
-def install(data=None, agents_dir=None, home=None, launchctl=None, which=None, build=None) -> dict:
+def install(data=None, agents_dir=None, home=None, launchctl=None, which=None, build=None, sleep=None) -> dict:
     """Write v2's plist and load it. `data` is the --data flag (None: AP2_DATA, else the default folder). The data
     folder is set up with `datadir.ensure`, so a new config.yaml says `mode: shadow`; an existing one is kept as it
-    is. Raises ConfigError (InstallError when launchctl refuses the job)."""
+    is. An old job is booted out and waited for (as in uninstall) before the new one is bootstrapped. Raises
+    ConfigError (InstallError when launchctl refuses the job)."""
     run = launchctl or _launchctl
+    sleep = sleep or time.sleep
     which = which or shutil.which
     build = build or _build
     folder = datadir.ensure(datadir.resolve(None if data is None else str(data)))
@@ -159,10 +175,14 @@ def install(data=None, agents_dir=None, home=None, launchctl=None, which=None, b
     except OSError as e:
         raise InstallError(f"cannot create {err_log.parent}: {_one_line(e)}") from e
     _write_atomic(plist, render_plist(argv, folder, dirs, err_log))
-    run("bootout", target())  # not loaded yet is fine
+    run("bootout", target())  # not loaded yet is fine; `print` below says whether it is gone
+    rc, _ = _wait_gone(run, sleep)
+    if rc == 0:  # bootstrapping now would fail with "Input/output error" and leave no job loaded
+        raise InstallError(f"launchctl bootout did not finish: {LABEL} is still loaded after {UNLOAD_TRIES} checks; "
+                           "run `ap2 install` again")
     rc, msg = run("bootstrap", domain(), str(plist))
     if rc != 0:
-        raise InstallError(f"launchctl bootstrap failed: {_one_line(msg)}")
+        raise InstallError(f"launchctl bootstrap failed: {_one_line(msg)}; run `ap2 install` again")
     notes = [] if launcher else [NO_COMPILER]
     if _protected(folder):
         notes.append(PRIVACY.format(folder=folder))
@@ -172,18 +192,17 @@ def install(data=None, agents_dir=None, home=None, launchctl=None, which=None, b
 
 def uninstall(agents_dir=None, home=None, launchctl=None, sleep=None) -> dict:
     """Unload v2's job and remove its plist and launcher. The data folder and the err log are not touched. bootout
-    can return while the gate is still exiting, so `print` is asked up to UNLOAD_TRIES times, UNLOAD_WAIT apart."""
+    can return while the gate is still exiting, so `print` is asked up to UNLOAD_TRIES times, UNLOAD_WAIT apart. No
+    file is removed unless `print` says the job is gone; one that cannot be asked (127) is an error, not "gone"."""
     run = launchctl or _launchctl
     sleep = sleep or time.sleep
     _, out = run("bootout", target())  # not loaded is fine; `print` below says whether it is gone
-    for n in range(UNLOAD_TRIES):
-        rc, _ = run("print", target())
-        if rc != 0:
-            break
-        if n + 1 < UNLOAD_TRIES:
-            sleep(UNLOAD_WAIT)
-    else:
-        raise InstallError(f"launchctl bootout failed: {_one_line(out)}")
+    rc, msg = _wait_gone(run, sleep)
+    if rc == 127:
+        raise InstallError(f"cannot confirm {LABEL} is gone: {_one_line(msg)}")
+    if rc == 0:
+        raise InstallError(f"launchctl bootout failed: {LABEL} is still loaded after {UNLOAD_TRIES} checks "
+                           f"({_one_line(out)}); run `ap2 uninstall` again")
     removed = []
     for f in (plist_path(agents_dir), launcher_path(home)):
         try:
