@@ -59,7 +59,9 @@ class WorkerProfileLaunchTest(WorkerCase):
         gw = self.start()
         a, b = (self.settings_of(c) for c in self.bg_calls())
         self.assertEqual(a["permissions"]["deny"], b["permissions"]["deny"])
-        self.assertEqual(a["permissions"]["allow"], b["permissions"]["allow"])
+        # The park allow rule names each worker's own card; the same rule but for that.
+        self.assertEqual([r.replace(sub["card"], gw["card"]) for r in a["permissions"]["allow"]],
+                         b["permissions"]["allow"])
         self.assertEqual(a["hooks"], b["hooks"])
         self.assertEqual(b["env"]["ANTHROPIC_BASE_URL"], URL)
         self.assertEqual(b["apiKeyHelper"], "echo k")

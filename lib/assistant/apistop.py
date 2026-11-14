@@ -36,14 +36,15 @@ _MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct",
 
 
 def _when(text) -> Optional[datetime]:
-    """A transcript line's `timestamp`, or None. One with no zone is read as local time."""
+    """A transcript line's `timestamp`, or None. One with no zone is read as local time; one that cannot be put in
+    the local zone (year 1, say) is None."""
     if not isinstance(text, str) or not text:
         return None
     try:
         at = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
+        return at if at.tzinfo else at.astimezone()
+    except (ValueError, OverflowError):
         return None
-    return at if at.tzinfo else at.astimezone()
 
 
 def _error(e: dict) -> Optional[dict]:
@@ -73,7 +74,10 @@ def tail(projects, session_id) -> Optional[dict]:
         path = transcripts.find(projects, session_id) if session_id else None
         if path is None:
             return None
-        with open(path, "rb") as h:
+        h = transcripts.open_regular(path)  # never waits: a FIFO swapped in after `find` is no transcript
+        if h is None:
+            return None
+        with h:
             h.seek(0, 2)
             start = max(0, h.tell() - TAIL_BYTES)
             h.seek(start)
@@ -98,16 +102,17 @@ def tail(projects, session_id) -> Optional[dict]:
     return {"errors": errors, "reply_at": reply_at}
 
 
-def stop(t: Optional[dict], since: datetime) -> Optional[dict]:
+def stop(t: Optional[dict], since: datetime, until: Optional[datetime] = None) -> Optional[dict]:
     """What the API error a transcript ends on means: {"kind": "limit" (a usage or spend limit: wait for the reset)
     or "gateway_refused" (a gateway's safety guard refuses this conversation), "text", "at"}, or None. `t` is
     `tail()`. Only the last error counts, and only when it is dated at or after `since`: a resumed copy repeats the
-    old conversation, its last error included, with the old times."""
+    old conversation, its last error included, with the old times. With `until`, one dated after it is ignored too:
+    an error from the future is not a real one (a process the worker left can write any time)."""
     errors = (t or {}).get("errors") or []
     if not errors:
         return None
     e = errors[-1]
-    if e["at"] is None or e["at"] < since:
+    if e["at"] is None or e["at"] < since or (until is not None and e["at"] > until):
         return None
     if e["status"] == 429 or e["error"] == "rate_limit" or _LIMIT_TEXT.search(e["text"]):
         kind = "limit"
@@ -121,7 +126,7 @@ def stop(t: Optional[dict], since: datetime) -> Optional[dict]:
 def reset_time(text, after: datetime) -> Optional[datetime]:
     """The reset a limit message names ("resets 8:40pm (America/Los_Angeles)", "resets Nov 14, 9am (UTC)"): the
     first such wall time in that zone after `after` (a dated one already a day past is next year's), or None when
-    the text names no time and zone it can read."""
+    the text names no time and zone it can read, or the reset would be past the last date a datetime holds."""
     m = _RESET.search(text if isinstance(text, str) else "")
     if not m:
         return None
@@ -136,8 +141,8 @@ def reset_time(text, after: datetime) -> Optional[datetime]:
         h = h % 12 + (12 if m["ap"][0].lower() == "p" else 0)
     if h > 23 or mi > 59:
         return None
-    base = after.astimezone(zone)
     try:
+        base = after.astimezone(zone)
         if m["mon"]:
             mon = m["mon"][:3].lower()
             if mon not in _MONTHS:
@@ -153,7 +158,7 @@ def reset_time(text, after: datetime) -> Optional[datetime]:
             day += timedelta(days=1)
             at = datetime(day.year, day.month, day.day, h, mi, tzinfo=zone)
         return at
-    except ValueError:  # no such day (Feb 30)
+    except (ValueError, OverflowError):  # no such day (Feb 30), or past the last date
         return None
 
 

@@ -1,8 +1,8 @@
 """Workers: one `claude --bg -n "<card> · <role>"` session per card and role (design 8.1, 8.2).
 
 A worker ends a round by writing its result file in the card's run directory (`<data>/sessions/<card>/`):
-`handback.json` (implement), `review.json` (review) or `prloop.json` (pr). `check()` looks at every worker and
-acts on what it sees, so no process ever waits for a human:
+`handback.json` (implement), `review.json` (review), `prloop.json` (pr) or `prreview.json` (pr-review). `check()`
+looks at every worker and acts on what it sees, so no process ever waits for a human:
 
 - done (the result file is newer than the start): stop it, save the session on the card, archive the transcript.
 - question (`question.json` is newer than the start): the same, and the question becomes the card's `ask`
@@ -47,19 +47,53 @@ nothing falls back to the subscription. Every close of a gateway worker whose se
 401 or 403) runs the refresh command once (`keys.note_session_end`); a second rejection within 10 minutes of that
 refresh holds new work instead, and an error older than the last refresh does nothing.
 
+PR review cards review themselves (design 6.2 point 2). After acting on the workers on record, a live `check` starts
+one `pr-review` worker for each card of kind `pr-review` that is not in lane `done`, has no worker on record and no
+line in this pass, has no open ask, whose `sessions["pr-review"].state` is absent, or `ended` by a done close
+(`closed: done`; an `ap2 worker end`, saved as `closed: end`, or an `ended` with no `closed` waits for a start by
+hand), and is not reviewed at its head (`pr.reviewed_sha` missing or not `pr.head_sha`), judged on the card read again
+just before (an earlier card's start may have run meanwhile) and once more under the worker list's lock after the
+start's tool discovery (`start(due=...)`; a card no longer due there is a note): in a fresh, empty folder of
+its own outside the data folder (`tempfile.mkdtemp`, one per start; AP2_RUN_DIR still names the card's run
+directory, where its report goes), with the template's brief, behind `/autopilot:pr-review <card> <stage>` (`delta`
+once the card's `reviews` list holds one, else `review`). A refused start (the cap, the key, a pause, `max_workers`,
+the profile) is a note on that card's line; shadow mode starts none and says so. Such a worker is done when
+`prreview.json` is newer than the round's first start (`round_started_at`, kept through every resume of the round)
+and its turn has ended (idle, done, failed or gone; while it works or waits at a prompt it is still checking a draft).
+Then, still under the worker list's lock (so an overlapping check cannot see the card closed and not yet reviewed),
+`check` runs `prreview.apply` on its card, which reads the run directory's plan and report only when the open file
+is a regular file (`sources.read_regular_capped`: no link followed, no wait, checked on the open file, so a FIFO
+swapped in after any earlier look never hangs the pass), then removes the round's folder when it is an empty folder
+(not a link to one); with the lock free it then runs `prreview.sync`. An apply that fails sets the card's `ask`
+(`fix`), which holds the next auto-start back, and a sync that fails is a note. `question.json` too is read only
+when it is a regular file, and at most QUESTION_MAX bytes of it. A turn that ends with no report is closed idle
+after IDLE_MIN minutes with the card's `ask` (`fix`, `review_idle`), which holds the auto-start back as well; when
+another ask is open then, the line's note says so, and a later `check` raises the idle ask once the card has none
+(`paused`, `closed: idle`). Its floor is read-only: no Edit or NotebookEdit, no gh command group the review does not
+need, no git command that pushes, commits or sets an alias, a config value or a remote, and no `claude`, which would
+start a session outside the floor (`roles.READ_ONLY_BASH_DENIED`, and the worker's own claude path), no v1 `ap`
+command (`roles.V1_AP_COMMANDS`, `roles.V1_AP_EXTRA`, and each one the `ap` on PATH declares in its modules, read
+and never run), no gh alias of the user's (read from gh's config file), no `ap2` command the review does not run
+(`roles.READ_ONLY_AP2_DENIED`), all best effort, no global or system git config in its env
+(`roles.READ_ONLY_GIT_ENV`), and a Write hook (`ap2 hook-write`, `write_guard`) allows a Write only to its report or
+`question.json` in the card's run directory; a path it cannot resolve, and any error in the hook, is denied.
+
 Starting (or resuming) a session can make branches and PRs, so it needs live mode; listing, classifying, ending
 and archiving work in shadow mode. v1 is reused by import (`lib/autopilot/workers.py`, `sessions.py`,
 `budget.py`, `park.py`, `perms.py`) and never changed.
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
+import tempfile
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -72,7 +106,8 @@ from autopilot import perms as v1_perms
 from autopilot import sessions as v1_sessions
 from autopilot import workers as v1_workers
 
-from assistant import apistop, cap, cards, config, keys, profiles, projects, spend, transcripts
+from assistant import apistop, cap, cards, config, keys, prreview, profiles, projects, roles, sources, spend, templates
+from assistant import transcripts
 from assistant.cards import CardError
 from assistant.resources import MAX_WORKERS, PORT_BASE, Registry, WorkerError, check_start, next_ports
 from assistant.store import Store, write_json
@@ -82,10 +117,21 @@ try:
 except ImportError:  # not POSIX: one cap pause at a time is then the caller's job, as for the registry's lock
     fcntl = None
 
-RESULT_FILES = dict(v1_sessions.RESULT_FILES)  # implement: handback.json, review: review.json, pr: prloop.json
+REVIEW_ROLE = prreview.KIND  # the role that reviews a PR review card (design 6.2), named as its card kind
+# implement: handback.json, review: review.json, pr: prloop.json (v1's), pr-review: prreview.json
+RESULT_FILES = dict(v1_sessions.RESULT_FILES, **{REVIEW_ROLE: prreview.REPORT_FILE})
 ROLES = tuple(RESULT_FILES)
-AGENTS = dict(v1_workers.AGENTS)  # the pr role runs the PR loop command instead of an agent
+AGENTS = dict(v1_workers.AGENTS)  # the pr role runs the PR loop command instead of an agent, pr-review its own
 PR_COMMAND = "/autopilot:pr-loop "
+REVIEW_COMMAND = "/autopilot:pr-review "  # then the card id and the stage, the command's two arguments
+APPLY_FAILED = "review_apply_failed"  # the `reason` of the ask a pr-review report that could not be applied raises
+REVIEW_IDLE = "review_idle"  # the `reason` of the ask a pr-review worker closed idle with no report raises
+REVIEW_DIR = "ap2-pr-review-"  # the prefix of the empty folder an auto-started pr-review worker runs in
+QUESTION_MAX = 64 * 1024  # the most of question.json `check` reads (under the worker list's lock)
+WORKER_TEXT_MAX = 2000  # the most characters of worker-derived text (`_safe_text`) in a failed apply's ask or a note
+SHADOW_REVIEW = "shadow mode starts no worker; this card waits for its review in live mode"
+WRITE_DENIED = ("a read-only v2 worker writes only its result file or question.json, at the top of its own run "
+                "directory (AP2_RUN_DIR)")
 QUESTION = "question.json"
 PERMISSION_MODE = "auto"  # v1's default `permission_mode`
 EFFORT = "xhigh"  # v1's default `worker_effort`: the built-in subscription profile's effort (`profiles.builtin`)
@@ -118,7 +164,10 @@ RUN_SKEW_MIN = 2  # an API error this many minutes before a run's start may stil
 #              question path stops the session first and then raises it.
 #   refused  - stopped because a gateway's safety guard refuses its conversation: resume it on the subscription.
 #              Closed by every start and finish, like the paused hint.
-WORKER_ASKS = ("attach", "paused", "question", "refused")
+#   apply    - a pr-review report that could not be put on the card (`prreview.apply` failed). Closed by every
+#              start and finish, and by a check that finds the card reviewed at its head (applied by hand).
+#   idle     - a pr-review worker closed idle with no report: resume it. Closed by every start and finish.
+WORKER_ASKS = ("attach", "paused", "question", "refused", "apply", "idle")
 # Every way a worker is closed (`Workers._finish_close`): path -> (the state saved on the card, the line's `did`,
 # drop_on_error). drop_on_error drops the record when a step after the stop fails, where a kept record would be
 # misread as dead and resumed (end and both pauses); the other paths keep it, so the next check closes it again.
@@ -146,6 +195,12 @@ def package_root() -> Path:
 
 def session_name(card_id: str, role: str) -> str:
     return f"{card_id} · {role}"
+
+
+def review_stage(card: dict) -> str:
+    """The pr-review stage of a card: `delta` once its `reviews` list holds one (`prreview.apply` adds one per
+    review), else `review`."""
+    return "delta" if isinstance(card.get("reviews"), list) and card["reviews"] else "review"
 
 
 def _slug(text, words: int = 3) -> str:
@@ -188,6 +243,22 @@ def _not_connected(event: dict) -> list:
     return list(dict.fromkeys(rules))
 
 
+def _listed(event: dict) -> list:
+    """The server-level deny rule (`_server_rule`) of every MCP server the init event lists, connected or not: the
+    read-only floor denies each whole, so a tool that shows up later on a known server is denied as well."""
+    servers = event.get("mcp_servers")
+    rules = [_server_rule(str(s["name"])) for s in (servers if isinstance(servers, list) else [])
+             if isinstance(s, dict) and s.get("name")]
+    return list(dict.fromkeys(rules))
+
+
+def _mcp_server(tool: str) -> str:
+    """The server-level rule an MCP tool name `mcp__<server>__<tool>` belongs to (`mcp__<server>`), or "" for a
+    tool that is not an MCP tool."""
+    server, sep, _ = tool[len("mcp__"):].partition("__") if tool.startswith("mcp__") else ("", "", "")
+    return f"mcp__{server}" if server and sep else ""
+
+
 # Characters a gitignore pattern reads as syntax. Claude Code matches Read/Edit rules as gitignore patterns, so a
 # path holding one (or ending in a space, which gitignore strips) would make the floor's Edit denials match nothing.
 PATTERN_CHARS = "[]*?\\!#"
@@ -203,13 +274,250 @@ def require_literal(data: Path) -> None:
                               "edits in it; use a folder name without those characters")
 
 
-def floor(role: str, project: dict, data: Path, env: dict, profile: Optional[dict] = None) -> dict:
+def _spellings(name: str, *paths: Optional[str]) -> list:
+    """`name`, each of `paths` that is set, and where each such path leads (links followed), each once: the ways a
+    command can be typed (`claude`, `/usr/local/bin/claude`, the version it links to)."""
+    out = [name]
+    for p in paths:
+        if p:
+            out.append(str(p))
+            if os.sep in str(p):
+                out.append(os.path.realpath(p))
+    return list(dict.fromkeys(out))
+
+
+# The tools a bin folder holds next to `claude`: a folder that holds one is not a folder of claude versions.
+_BIN_TOOLS = ("gh", "git", "ap", "ap2")
+
+
+def _versions(*paths: Optional[str]) -> list:
+    """Every regular file in the folder each claude path in `paths` leads into (links followed): the claude installer
+    keeps older full versions there, and each one starts a session too. A folder is skipped when the path is not a
+    link into another folder (a claude that lives in a bin folder) or when it holds another tool (`_BIN_TOOLS`), so
+    a bin folder's gh or git is never denied."""
+    out = []
+    for p in paths:
+        if not p or os.sep not in str(p):
+            continue
+        folder = os.path.dirname(os.path.realpath(p))
+        if folder == os.path.dirname(os.path.abspath(p)) or any(
+                os.path.lexists(os.path.join(folder, t)) for t in _BIN_TOOLS):
+            continue
+        try:
+            names = sorted(os.listdir(folder))
+        except OSError:
+            continue
+        out += [os.path.join(folder, n) for n in names if os.path.isfile(os.path.join(folder, n))]
+    return list(dict.fromkeys(out))
+
+
+# The most files of an installed v1's `lib/autopilot/` the read-only floor reads (`_ap_commands`), and the most
+# bytes of each.
+AP_MODULES_MAX = 200
+AP_CLI_MAX = 1 << 20
+# A plain v1 command name: lowercase words joined by dashes.
+_AP_COMMAND = re.compile(r"[a-z]+(?:-[a-z]+)*")
+
+
+def _ap_commands(path: Optional[str]) -> list:
+    """The commands the installed v1 `ap` at `path` declares, read and never run (a run loads every v1 module and
+    migrates a v1 data folder it has not migrated yet): `path`'s links are followed, the folder above its `bin` is
+    the package, and each `*.py` file directly in its `lib/autopilot/` (in name order, at most AP_MODULES_MAX of
+    them) is read and parsed, never imported (`_declared`). Only plain lowercase names with dashes count. No path or
+    no such folder gives an empty list; a file that cannot be read or parsed, or fails in any other way, is
+    skipped."""
+    if not path:
+        return []
+    pkg = Path(os.path.realpath(path)).parent.parent / "lib" / "autopilot"
+    try:
+        names = sorted(n for n in os.listdir(pkg) if n.endswith(".py"))[:AP_MODULES_MAX]
+    except OSError:
+        return []
+    found = []
+    for name in names:
+        try:
+            found += [n for n in _declared(pkg / name) if _AP_COMMAND.fullmatch(n)]
+        except Exception:  # noqa: BLE001 - one odd module must never stop the floor's build
+            continue
+    return list(dict.fromkeys(found))
+
+
+def _is_command(func) -> bool:
+    """Whether a decorator call's callee is `command` or `<x>.command` (v1's `@cli.command("name")`)."""
+    return (isinstance(func, ast.Name) and func.id == "command") or (
+        isinstance(func, ast.Attribute) and func.attr == "command")
+
+
+def _declared(path: Path) -> list:
+    """The command names one v1 module declares, read from its text (a regular file only, no link followed, at most
+    AP_CLI_MAX bytes) and parsed, never run: the first argument of each decorator that calls `command` or
+    `<x>.command`, when it is a string literal, and the literal value of a module-level `COMMANDS = (...)` or
+    `[...]`. A file that cannot be read, decoded or parsed gives an empty list."""
+    try:
+        tree = ast.parse(sources.read_regular_capped(path, AP_CLI_MAX, "too large").decode("utf-8"))
+    except (OSError, sources.SourceError, UnicodeDecodeError, SyntaxError, ValueError, RecursionError,
+            MemoryError):
+        return []
+    out = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            for dec in node.decorator_list:
+                if isinstance(dec, ast.Call) and _is_command(dec.func) and dec.args and isinstance(
+                        dec.args[0], ast.Constant) and isinstance(dec.args[0].value, str):
+                    out.append(dec.args[0].value)
+    value = None
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "COMMANDS" for t in node.targets):
+            value = node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == "COMMANDS":
+            value = node.value
+    if isinstance(value, (ast.Tuple, ast.List)):
+        try:
+            out += [n for n in ast.literal_eval(value) if isinstance(n, str)]
+        except (ValueError, TypeError, SyntaxError, RecursionError, MemoryError):
+            pass
+    return out
+
+
+# The most bytes of gh's config file the read-only floor reads (`_gh_aliases`).
+GH_CONFIG_MAX = 1 << 20
+# A gh alias name the floor writes a rule for.
+_GH_ALIAS = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
+
+
+def _gh_config(environ) -> Path:
+    """gh's config file, where gh run with the env `environ` looks for it: `$GH_CONFIG_DIR/config.yml`, else
+    `$XDG_CONFIG_HOME/gh/config.yml`, else `$HOME/.config/gh/config.yml` (an empty value counts as unset)."""
+    if environ.get("GH_CONFIG_DIR"):
+        return Path(environ["GH_CONFIG_DIR"]) / "config.yml"
+    if environ.get("XDG_CONFIG_HOME"):
+        return Path(environ["XDG_CONFIG_HOME"]) / "gh" / "config.yml"
+    return Path(environ.get("HOME") or os.path.expanduser("~")) / ".config" / "gh" / "config.yml"
+
+
+def _unquote(text: str) -> str:
+    text = text.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        return text[1:-1]
+    return text
+
+
+def _flow_entries(text: str) -> tuple:
+    """The top-level entries of the YAML flow map `text` starts with (`{pm: pr merge, "rv": "pr review"}`, which may
+    span lines), as raw text, and how many characters of `text` it took: commas inside quotes or a nested `{}` or
+    `[]` do not split, and a `#` after a space outside quotes starts a comment. No closing brace: the entries up to
+    the end of `text` (which the file's cap bounds)."""
+    entries, entry, depth, quote, fresh, i = [], [], 0, None, True, 0
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            entry.append(ch)
+            if quote == '"' and ch == "\\":
+                entry.append(text[i + 1:i + 2])
+                i += 2
+                continue
+            if ch == quote:
+                if quote == "'" and text[i + 1:i + 2] == "'":
+                    entry.append("'")
+                    i += 2
+                    continue
+                quote = None
+        elif ch == "#" and (i == 0 or text[i - 1].isspace()):
+            j = text.find("\n", i)
+            i = len(text) if j < 0 else j
+            continue
+        elif ch in "{[":
+            depth += 1
+            if depth > 1:
+                entry.append(ch)
+            fresh = True
+        elif ch in "}]":
+            depth -= 1
+            if depth <= 0:
+                entries.append("".join(entry))
+                return entries, i + 1
+            entry.append(ch)
+        elif ch == "," and depth == 1:
+            entries.append("".join(entry))
+            entry, fresh = [], True
+        else:
+            if ch in "\"'" and fresh:  # a quote opens a quoted scalar only where a scalar starts
+                quote = ch
+            entry.append(ch)
+            if ch == ":" or ch == ",":
+                fresh = True
+            elif not ch.isspace():
+                fresh = False
+        i += 1
+    entries.append("".join(entry))
+    return entries, len(text)
+
+
+def _flow_key(entry: str) -> str:
+    """One flow map entry's key: the quoted text when it starts with a quote, else the text before its first `:`."""
+    entry = entry.strip()
+    if entry[:1] in ("\"", "'"):
+        end = entry.find(entry[0], 1)
+        return entry[1:end] if end > 0 else ""
+    return entry.split(":", 1)[0].strip()
+
+
+def _gh_aliases(path: Path) -> list:
+    """The names of the user's own gh aliases (`gh alias set pm 'pr merge'`), read from gh's config file at `path`
+    (`_gh_config`; links followed, as gh follows them, then a regular file only, at most GH_CONFIG_MAX bytes) and
+    never by running gh: the keys of its top-level `aliases:` map, quotes stripped. In block style these are the
+    lines indented one level under an `aliases:` line at column 0, up to the next column-0 key; in flow style, which
+    gh writes once every alias was deleted (`aliases: {}`, then `aliases: {pm: pr merge}`), the keys of the `{...}`
+    map on that line, over more lines when it runs on (`_flow_entries`). Only names gh's own pattern allows count.
+    Any failure (no file, too large, not text) gives an empty list."""
+    try:
+        text = sources.read_regular_capped(os.path.realpath(path), GH_CONFIG_MAX, "too large").decode("utf-8")
+    except (OSError, sources.SourceError, UnicodeDecodeError, ValueError):
+        return []
+    found, inside, indent = [], False, None
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        i += 1
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line[0].isspace():
+            head, colon, rest = line.partition(":")
+            if colon and _unquote(head) == "aliases" and rest.lstrip().startswith("{"):
+                flow = "\n".join([rest.lstrip()] + lines[i:])
+                entries, used = _flow_entries(flow)
+                found += [k for k in (_unquote(_flow_key(e)) for e in entries) if _GH_ALIAS.fullmatch(k)]
+                i += flow[:used].count("\n")
+                inside, indent = False, None
+                continue
+            key = line.split("#", 1)[0].rstrip()
+            inside, indent = key.endswith(":") and _unquote(key[:-1]) == "aliases", None
+            continue
+        if not inside:
+            continue
+        depth = len(line) - len(line.lstrip())
+        indent = depth if indent is None else indent
+        if depth != indent or ":" not in line:
+            continue
+        name = _unquote(line.strip().split(":", 1)[0])
+        if _GH_ALIAS.fullmatch(name):
+            found.append(name)
+    return list(dict.fromkeys(found))
+
+
+def floor(role: str, project: dict, data: Path, env: dict, profile: Optional[dict] = None,
+          claude: Optional[str] = None) -> dict:
     """The worker's permission floor (`--settings`): v1's outward-tool denials (`perms.denied_tools`, from the
     project's `tools`; `Workers._tools` fills them in when it lists none, with `deny_servers`, the whole-server
     rules) and Bash denials, the data folder's own files and the package, the park and Bash guard hooks, and the
-    worker's env. With `profile`, its overlay is merged under it (`profiles.merge`): the deny and allow lists, the
-    hooks and the AP2_* env stay exactly as they are. Refused for a path a gitignore pattern cannot name literally
-    (`require_literal`)."""
+    worker's env. A read-only role also denies every tool in `tools` (built-in or MCP) that its `Role.tools` does
+    not list but `roles.READ_ONLY_KEPT`, the same for `roles.READ_ONLY_BUILTIN_DENIED`, and every MCP server whole:
+    each one those tools are on and each one `_tools` found listed (`listed_servers`).
+    With `profile`, its overlay is merged under it (`profiles.merge`): the deny and allow lists, the hooks and the
+    AP2_* env stay exactly as they are. `claude` is the claude CLI the worker runs (`Workers.claude`; default the
+    one on PATH): a read-only role is denied running it, in every spelling. Refused for a path a gitignore pattern
+    cannot name literally (`require_literal`)."""
     if role not in ROLES:
         raise WorkerError(f"role must be one of {', '.join(ROLES)}, not {role!r}")
     require_literal(data)
@@ -218,8 +526,10 @@ def floor(role: str, project: dict, data: Path, env: dict, profile: Optional[dic
     deny += [f"Edit(/{data}/{name})" for name in PROTECTED]
     deny += [f"Edit(/{package_root()}/**)"] + list(v1_perms.BASH_DENY)
     # The park command is the one step a parking worker takes; the auto-mode classifier must not judge it (v1 does
-    # the same for `ap worker park`).
-    allow = [f"Bash({package_root() / 'bin' / 'ap2'} worker park:*)"]
+    # the same for `ap worker park`). Only the worker's own park (its card, `AP2_CARD` in `env`, and role): parking
+    # another card is judged like any other command. No card in `env`: no park is allowed by rule.
+    card = env.get("AP2_CARD")
+    allow = [f"Bash({package_root() / 'bin' / 'ap2'} worker park {card} {role}:*)"] if card else []
     # The park hook (`ap2 hook-park`, parkhook.py) runs before every tool call of the worker and its subagents and
     # denies all but that command while usage is at the park line (v1's `perms.park_hook` shape). Then the Bash
     # guard (`ap2 hook-guard`, guard.py) denies a shell write into the data folder (but the worker's own run
@@ -228,16 +538,126 @@ def floor(role: str, project: dict, data: Path, env: dict, profile: Optional[dic
     hooks = {"PreToolUse": [
         {"matcher": "*", "hooks": [{"type": "command", "command": f"\"{ap2}\" hook-park", "timeout": 5}]},
         {"matcher": "Bash", "hooks": [{"type": "command", "command": f"\"{ap2}\" hook-guard", "timeout": 5}]}]}
+    if role in roles.ROLES and roles.ROLES[role].floor == "read-only":
+        # The read-only floor (roles.FLOORS): no Edit or NotebookEdit at all, no gh command group a review does not
+        # need and no git write command, no `ap2` command a review does not run (in both spellings, best effort),
+        # and its one write, the result file (or its question), in its run directory only. A deny rule cannot leave
+        # one file open (deny wins over allow), so a Write hook (`ap2 hook-write`, `write_guard`) refuses every other
+        # Write.
+        deny += list(roles.READ_ONLY_DENIED) + list(roles.READ_ONLY_BASH_DENIED)
+        deny += [f"Bash({cmd} {verb}:*)" for verb in roles.READ_ONLY_AP2_DENIED for cmd in ("ap2", ap2)]
+        # No nested session: `claude -p ...` would run under the user's own settings, not this floor, so `claude` is
+        # denied as typed, as the worker's own path and the one on PATH, where each link leads, and every other
+        # version in the folder a link leads into (`_versions`). No v1 command either (`ap oneoff` runs
+        # `claude -p`): bare, at `<package>/bin/ap`, and the `ap` on PATH. The commands are the in-repo list, the
+        # fixed extra list (V1_AP_EXTRA), and each one the `ap` on PATH declares (`_ap_commands`: it can be an
+        # installed v1 with commands the in-repo one lacks; its modules are read, never run). Best effort.
+        found = shutil.which("claude")
+        nested = [f"Bash({c}:*)" for c in _spellings("claude", claude or found or "claude", found)]
+        nested += [f"Bash({c}:*)" for c in _versions(claude, found)]
+        ap_on_path = shutil.which("ap")
+        v1_ap = _spellings("ap", str(package_root() / "bin" / "ap"), ap_on_path)
+        verbs = dict.fromkeys(roles.V1_AP_COMMANDS + roles.V1_AP_EXTRA + tuple(_ap_commands(ap_on_path)))
+        nested += [f"Bash({cmd} {verb}:*)" for verb in verbs for cmd in v1_ap]
+        deny += [r for r in dict.fromkeys(nested) if r not in deny]
+        # No tool its role does not list, MCP or built-in, but the tool search and `Task` (READ_ONLY_KEPT): v1's
+        # outward-verb list leaves an MCP server's delete, update, submit or merge tool open, the session loads
+        # every server the user's sessions do, and it starts with every built-in tool (a scheduled cloud agent, the
+        # user's claude.ai pages). The fixed built-in list is denied even when discovery did not list it. Each
+        # server is denied whole as well, so a tool it adds later is covered; a server the role takes a tool from
+        # is not.
+        own = set(roles.ROLES[role].tools)
+        keep = own | set(roles.READ_ONLY_KEPT)
+        tools = [t for t in project.get("tools") or [] if isinstance(t, str)]
+        kept = {_mcp_server(t) for t in own} - {""}
+        servers = [_mcp_server(t) for t in tools] + list(project.get("listed_servers") or [])
+        servers += list(project.get("deny_servers") or [])
+        extra = [t for t in tools if t not in keep]
+        extra += [t for t in roles.READ_ONLY_BUILTIN_DENIED if t not in keep]
+        extra += [s for s in servers if s and s not in kept]
+        deny += [r for r in dict.fromkeys(extra) if r not in deny]
+        hooks["PreToolUse"].append(
+            {"matcher": "Write", "hooks": [{"type": "command", "command": f"\"{ap2}\" hook-write", "timeout": 5}]})
     out = {"permissions": {"deny": deny, "allow": allow}, "env": dict(env), "hooks": hooks}
-    return profiles.merge(out, profiles.overlay(profile)) if profile is not None else out
+    out = profiles.merge(out, profiles.overlay(profile)) if profile is not None else out
+    if role in roles.ROLES and roles.ROLES[role].floor == "read-only":
+        # Set after the profile's env, so a profile cannot undo it: no global or system git config (the user's
+        # aliases, such as `ps = push`, and the credential helper that pushes with their login), and no prompt.
+        out["env"].update(roles.READ_ONLY_GIT_ENV)
+        # The user's own gh aliases (`pm: pr merge` in gh's config file, `_gh_aliases`) run a gh command these rules
+        # deny under a name they do not, so each alias name is denied too; a review uses none. Both the config the
+        # daemon's env points at and the one the session's merged env does (a profile can set GH_CONFIG_DIR,
+        # XDG_CONFIG_HOME or HOME), so this comes after the merge. But a name a review's own reads start with
+        # (READ_ONLY_GH_KEPT): gh ignores an alias that shadows its own command. Best effort.
+        configs = dict.fromkeys([_gh_config(os.environ), _gh_config({**os.environ, **out["env"]})])
+        aliases = [a for c in configs for a in _gh_aliases(c) if a not in roles.READ_ONLY_GH_KEPT]
+        deny = out["permissions"]["deny"]
+        out["permissions"]["deny"] = deny + [r for r in dict.fromkeys(f"Bash(gh {a}:*)" for a in aliases)
+                                             if r not in deny]
+    return out
+
+
+def write_guard(payload, env) -> Optional[dict]:
+    """The Write hook's verdict on one tool call (`ap2 hook-write`, wired by the read-only floor): an allow-list. A
+    v2 worker's (`AP2_ROLE` set) Write is let through (None, no opinion) only when its `file_path`, every link
+    followed, sits directly in its run directory (`AP2_RUN_DIR`) and is named, in any case, as the role's result file
+    (`RESULT_FILES`) or QUESTION; any other Write is a PreToolUse deny. None for any other tool and outside a v2
+    worker. No run directory, or a path that is not absolute text: denied."""
+    if not env.get("AP2_ROLE") or not isinstance(payload, dict) or payload.get("tool_name") != "Write":
+        return None
+    tool_input = payload.get("tool_input")
+    path = tool_input.get("file_path") if isinstance(tool_input, dict) else None
+    run = env.get("AP2_RUN_DIR") or ""
+    names = {QUESTION.casefold()}
+    if RESULT_FILES.get(env.get("AP2_ROLE")):
+        names.add(RESULT_FILES[env["AP2_ROLE"]].casefold())
+    ok = False
+    if isinstance(path, str) and os.path.isabs(path) and os.path.isabs(run):
+        try:
+            real, home = os.path.realpath(path), os.path.realpath(run)
+        except (ValueError, OSError):  # a NUL or a lone surrogate: no file has that name, so it stays denied
+            real = home = None
+        ok = real is not None and os.path.dirname(real) == home and os.path.basename(real).casefold() in names
+    if ok:
+        return None
+    return _write_deny()
+
+
+def _write_deny() -> dict:
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                   "permissionDecisionReason": WRITE_DENIED}}
+
+
+def write_hook(argv: list, stdin=None) -> int:
+    """`ap2 hook-write`: the payload on stdin, the deny JSON (or nothing) on stdout, exit 0 always. Any argument is
+    no opinion. A payload that cannot be read, or any error, is denied for a v2 worker: the hook fails closed."""
+    try:
+        if argv or not os.environ.get("AP2_ROLE") or stdin is None:
+            return 0
+        raw = getattr(stdin, "buffer", stdin).read(1 << 22)
+        try:
+            payload = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+        except (ValueError, RecursionError):
+            payload = {"tool_name": "Write", "tool_input": None}
+        out = write_guard(payload, os.environ)
+        if out:
+            os.write(1, (json.dumps(out) + "\n").encode())
+    except Exception:  # noqa: BLE001 - a hook must never break the session
+        try:
+            if os.environ.get("AP2_ROLE"):
+                os.write(1, (json.dumps(_write_deny()) + "\n").encode())
+        except Exception:  # noqa: BLE001 - nothing more a hook can do
+            pass
+    return 0
 
 
 class Workers:
     def __init__(self, data, cfg: Optional[config.Config] = None, claude: Optional[str] = None, transcripts_dir=None,
                  clock: Callable[[], datetime] = cards.now_utc, max_workers: int = MAX_WORKERS,
-                 port_base: int = PORT_BASE, store: Optional[Store] = None):
+                 port_base: int = PORT_BASE, store: Optional[Store] = None, gh: Optional[Callable] = None):
         """`data` is the data folder; `claude` the claude CLI (default: the one on PATH); `transcripts_dir` the
-        folder Claude Code keeps conversations in (default `~/.claude/projects`, read only); `clock()` the time."""
+        folder Claude Code keeps conversations in (default `~/.claude/projects`, read only); `clock()` the time;
+        `gh(argv)` the runner `prreview.sync` reads GitHub with (default: gh on PATH; tests pass recorded replies)."""
         self.data = Path(data)
         self.cfg = cfg if cfg is not None else config.load(self.data)
         self.claude = claude or shutil.which("claude") or "claude"
@@ -247,6 +667,7 @@ class Workers:
         self.port_base = port_base
         self.store = store or Store(self.data, self.cfg, clock)
         self.registry = Registry(self.data)
+        self.gh = gh
 
     # -- helpers ---------------------------------------------------------------------------------------------------
 
@@ -537,10 +958,12 @@ class Workers:
         lines.append(f"At the usage limit, park: {package_root() / 'bin' / 'ap2'} worker park {card['id']} {role} "
                      '--note "<where you are and the next step>", then end your turn.')
         text = "\n".join(lines)
+        if role == REVIEW_ROLE:
+            return f"{REVIEW_COMMAND}{card['id']} {review_stage(card)}\n\n{text}"
         return PR_COMMAND + text if role not in AGENTS else text
 
     def _discover(self, cwd: str, env: dict, settings: Path) -> tuple:
-        """(tools, whole-server deny rules) of a session in `cwd` with `env` and the `settings` file (a profile's
+        """(tools, whole-server deny rules of the servers not connected, of every server listed) of a session in `cwd` with `env` and the `settings` file (a profile's
         overlay, no floor): one `claude -p ... --output-format stream-json`, read line by line and killed at its
         first init event, before the model runs, so nothing in the folder can make it call a tool. It runs in its
         own process group, and every kill ends the whole group. Raises RuntimeError (no init event, also past
@@ -570,7 +993,7 @@ class Workers:
                 if isinstance(event, dict) and event.get("type") == "system" and event.get("subtype") == "init":
                     _kill_group(proc)  # stopped at its init event: no model reply, so no tool call, ever happens
                     proc.wait()
-                    return list(v1_perms.parse_discovery(line)), _not_connected(event)
+                    return list(v1_perms.parse_discovery(line)), _not_connected(event), _listed(event)
             code = proc.wait()
             if late.is_set():
                 raise RuntimeError(f"no init event within {timeout} s")
@@ -586,7 +1009,8 @@ class Workers:
         tools the project file lists (`projects/**` is Edit-denied) are used as they are, always first. Otherwise
         they are found on every floor written, in the worker's own folder `cwd` with its env (so the folder's
         local-scope and `.mcp.json` servers and the plugins are seen), by a session killed at its init event
-        (`_discover`), with `deny_servers`: every MCP server not connected at that init event, denied whole. Never
+        (`_discover`), with `deny_servers`: every MCP server not connected at that init event, denied whole, and
+        `listed_servers`: every MCP server it lists, which only the read-only floor denies whole. Never
         from a card. A worker never starts without its outward tools denied: no list, no start.
 
         The probe runs with the worker's `profile` (`settings-discover-<role>.json` in the run directory: its overlay
@@ -603,17 +1027,18 @@ class Workers:
         page = profiles.page_profile(self.data)
         if page["name"] != profile["name"]:
             probes.append((run / f"settings-discover-{role}-page.json", page))
-        tools, servers = [], []
+        tools, servers, listed = [], [], []
         try:
             for settings, prof in probes:
                 write_json(settings, profiles.overlay(prof))
-                found, off = self._discover(cwd, env, settings)
+                found, off, *more = self._discover(cwd, env, settings)
                 tools += [t for t in found if t not in tools]
                 servers += [s for s in off if s not in servers]
+                listed += [s for s in (more[0] if more else []) if s not in listed]
         except (OSError, RuntimeError, subprocess.SubprocessError) as e:
             raise WorkerError(f"cannot list the session's tools for the permission floor: {e}; {ask}list them in "
                               f"{where}") from e
-        return dict(project, tools=tools, deny_servers=servers)
+        return dict(project, tools=tools, deny_servers=servers, listed_servers=listed)
 
     def _launch(self, argv: list, cwd: str, env: dict) -> str:
         """Run `claude --bg ...`; return its short id. The caller puts it on record before it asks the listing for
@@ -625,7 +1050,14 @@ class Workers:
 
     def _session_id(self, short: str) -> str:
         """The session id of the session with this short id, or "" when the listing does not show it yet."""
-        return (v1_sessions.find_by_id(short, v1_sessions.list_all(self.claude)) or {}).get("sessionId") or ""
+        return self._listed_id(v1_sessions.find_by_id(short, v1_sessions.list_all(self.claude)))
+
+    @staticmethod
+    def _listed_id(s) -> str:
+        """A listed session's `sessionId` when it is a session id (`transcripts.SESSION_ID`), else "": anything
+        else (a lone surrogate, say) kept on the worker list or the card would fail its write."""
+        sid = (s or {}).get("sessionId")
+        return sid if isinstance(sid, str) and transcripts.SESSION_ID.match(sid) else ""
 
     def _argv(self, role: str, name: str, settings: Path, prompt: str, profile: dict, resume_id: str = "") -> list:
         """The `claude --bg` command. A fresh start takes the profile's model (`--model`, when it has one) and effort
@@ -691,6 +1123,10 @@ class Workers:
             return "paused" if ask.get("stage") == "paused" else "attach"
         if ask.get("type") == "fix" and ask.get("reason") == REFUSED:
             return "refused"
+        if ask.get("type") == "fix" and ask.get("reason") == APPLY_FAILED:
+            return "apply"
+        if ask.get("type") == "fix" and ask.get("reason") == REVIEW_IDLE:
+            return "idle"
         return None
 
     def _close_worker_asks(self, card_id: str, role: str, by: str, kinds=WORKER_ASKS) -> None:
@@ -710,7 +1146,10 @@ class Workers:
     def _archive(self, card_id: str, role: str, session_id: str):
         if not session_id:
             return None
-        p = transcripts.archive(self.data, self.cfg, card_id, role, session_id, self.transcripts_dir, self.clock())
+        # An archive's name starts with its role in lowercase letters only (`transcripts.ROLE`): `pr-review`'s
+        # sessions are kept as `prreview-<session id>.jsonl.gz`.
+        name = re.sub(r"[^a-z]", "", role)
+        p = transcripts.archive(self.data, self.cfg, card_id, name, session_id, self.transcripts_dir, self.clock())
         return str(p) if p else None
 
     # -- start -----------------------------------------------------------------------------------------------------
@@ -746,14 +1185,16 @@ class Workers:
                 "branch": branch, "env": self._env(card, role, project, port_range, branch, profile)}
 
     def start(self, card_id: str, role: str, cwd=None, prompt: str = "", needs=None, resume: bool = False,
-              by: str = BY) -> dict:
+              by: str = BY, due: Optional[Callable[[dict], bool]] = None) -> dict:
         """Start a worker on a card, or with `resume` continue its saved session (a parked worker keeps its ports;
         otherwise the card's saved session for the role, e.g. after an answer or a pause). Live mode only.
         Raises ShadowModeError, WorkerError or ConfigError; nothing starts when it raises.
 
         The tool discovery (one `claude -p`, up to DISCOVER_TIMEOUT seconds) runs before the worker list's lock is
         taken, so no other start, end or check waits on it; under the lock every check is made again on the list
-        as it is then, and the floor is written with the ports picked there."""
+        as it is then, and the floor is written with the ports picked there. With `due` (the auto-start's
+        `_review_is_due`), the card is read again under the lock and nothing starts unless `due(card)` still holds.
+        """
         config.require_live(self.cfg, f"start a {role} worker on card {card_id}")
         if role not in ROLES:
             raise WorkerError(f"role must be one of {', '.join(ROLES)}, not {role!r}")
@@ -776,6 +1217,9 @@ class Workers:
             if pz is not None:
                 raise cap.CapError(cap.refusal({"reason": "paused", "paused": pz}))
             plan = self._plan_start(records, card, role, project, saved, cwd, needs, resume, prof)
+            if due is not None and not due(self._card(card_id)):
+                # The card changed while the tools were listed (moved to lane done, an ask, a review applied).
+                raise WorkerError(f"card {card_id} is no longer due for a review; nothing started")
             if plan["cwd"] != planned["cwd"]:
                 # The tools were found in another folder (the parked record changed meanwhile): they may not be
                 # the ones this session loads.
@@ -787,7 +1231,7 @@ class Workers:
             settings = self.run_dir(card_id) / f"settings-{role}.json"
             argv = self._argv(role, name, settings, self._prompt(prompt, card, role, project, port_range, branch),
                               prof, sid)
-            write_json(settings, floor(role, found, self.data, env, prof))
+            write_json(settings, floor(role, found, self.data, env, prof, claude=self.claude))
             if parked:
                 # The parked session sits idle; the copy takes its place.
                 self._stop(card_id, role, parked.get("short_id"), by, parked.get("session_id"))
@@ -801,7 +1245,10 @@ class Workers:
             rec = {"card": card_id, "role": role, "project": project.get("name"), "session_name": name,
                    "session_id": "", "short_id": short, "ports": port_range, "needs": needs, "cwd": cwd,
                    "branch": branch, "profile": prof["name"], "started_at": cards.stamp(now), "resumes": 0,
-                   "parked": None, "idle_since": None, "blocked_since": None}
+                   "parked": None, "idle_since": None, "blocked_since": None,
+                   # The round's first start: a pr-review report newer than it is the round's own, through every
+                   # resume of a parked worker (`classify`). `started_at` moves with each resume.
+                   "round_started_at": (parked or {}).get("round_started_at") or cards.stamp(now)}
             if parked and parked.get("limit_parks"):
                 rec["limit_parks"] = parked["limit_parks"]  # the limit parks in a row go on through the resume
             # On record before the listing is asked for its id: a Ctrl-C or an error there still leaves a record
@@ -838,11 +1285,14 @@ class Workers:
         self._kill(rec.get("short_id"), sid)  # outside the try: a stop that raised keeps the record on every path
         self._note_key(sid, rec.get("profile"))
         saved = False
+        # A pr-review session says how it was closed (`closed`: the mark's path, or `end` for an end by hand): only
+        # a done close lets the next round start on its own (`_review_is_due`).
+        how = {"closed": mark.get("closed") or mark["path"]} if rec["role"] == REVIEW_ROLE else {}
         try:
             self._close_worker_asks(rec["card"], rec["role"], by, kinds=("attach",))
             self._save_session(rec["card"], rec["role"], by, id=sid, cwd=rec.get("cwd"),
                                needs=rec.get("needs") or [], state=mark["state"], why=mark["why"],
-                               **(mark.get("extra") or {}))
+                               **(mark.get("extra") or {}), **how)
             saved = True
         finally:
             if saved or mark["drop_on_error"]:
@@ -859,9 +1309,11 @@ class Workers:
         """Close the worker for `mark` (`_mark`) and do that close's follow-up; return the fields for its line.
         Each close lives here only: its first try and the retry of a close that was started (the record's
         `closing`) both run it. Follow-ups: the question's `answer` ask, the `fix` ask of a worker that died twice
-        or cannot resume after parking, the blocked pause's resume hint and the gateway refusal's resume hint."""
+        or cannot resume after parking, the blocked pause's resume hint, the gateway refusal's resume hint and the
+        resume hint of a pr-review worker closed idle with no report (nothing else would start it again)."""
         card_id, role, path = rec["card"], rec["role"], mark["path"]
-        if path in ("blocked", "refused"):
+        if path in ("blocked", "refused") or (path == "idle" and role == REVIEW_ROLE):
+            ask, set_ = self._pause_ask(rec, path), True
             try:
                 closed = self._close(rec, records, mark, by)
             finally:
@@ -869,8 +1321,13 @@ class Workers:
                 # to is gone: say how to go on instead, also when saving it failed. A stop that raised keeps the
                 # record, its mark and the attach ask: the next check finishes this pause.
                 if not any(r is rec for r in records):
-                    self._set_ask(card_id, self._pause_ask(rec, path), by)
-            return dict(closed, did=CLOSES[path][1], **({"note": mark["note"]} if mark.get("note") else {}))
+                    set_ = self._set_ask(card_id, ask, by)
+            out = dict(closed, did=CLOSES[path][1], **({"note": mark["note"]} if mark.get("note") else {}))
+            if not set_:
+                # The user's own ask (or another one) is open: say so on the line. A pr-review card's idle ask is
+                # raised again once the card has none (`_start_reviews`).
+                self._add_note(out, f"the card already has an open ask, so this is not on it: {ask['text']}")
+            return out
         closed = self._close(rec, records, mark, by)
         if path == "question":
             text = (mark.get("extra") or {}).get("question")
@@ -889,9 +1346,14 @@ class Workers:
     @staticmethod
     def _pause_ask(rec: dict, path: str) -> dict:
         """The `fix` ask a pause leaves on the card: how to go on once the worker was stopped (`blocked`: after
-        BLOCKED_MIN minutes at a permission prompt; `refused`: a gateway's safety guard refuses its conversation)."""
+        BLOCKED_MIN minutes at a permission prompt; `refused`: a gateway's safety guard refuses its conversation;
+        `idle`: a pr-review worker's turn ended with no report)."""
         card_id, role = rec["card"], rec["role"]
         resume = f"ap2 worker start {card_id} {role} --resume"
+        if path == "idle":
+            return {"type": "fix", "role": role, "reason": REVIEW_IDLE,
+                    "text": f"Stopped after {IDLE_MIN} minutes idle: its turn ended with no report, so the review is "
+                            f"not on the card and does not start again on its own. Resume it with `{resume}`."}
         if path == "blocked":
             return {"type": "fix", "role": role, "reason": ATTACH, "stage": "paused",
                     "text": f"Stopped after {BLOCKED_MIN} minutes at a permission prompt. Resume it with `{resume}`."}
@@ -908,7 +1370,8 @@ class Workers:
         return {"type": "fix", "role": role, "reason": REFUSED, "text": text}
 
     def end(self, card_id: str, role: str, by: str = BY) -> dict:
-        """Stop a worker and keep its session on the card, so a later round can resume it. Works in shadow mode."""
+        """Stop a worker and keep its session on the card, so a later round can resume it. Works in shadow mode.
+        A pr-review session ended here is saved as `closed: end`, so its card waits for a start by hand."""
         failed = None
         with self.registry.locked() as records:
             rec = self._find(records, card_id, role)
@@ -919,7 +1382,7 @@ class Workers:
                 # Either way end's own drop rule applies: once the stop returned, the record leaves the list, so a
                 # save that keeps failing cannot hold the worker's slot and ports forever.
                 mark = rec.get("closing") or self._mark("end")
-                out = self._finish_close(rec, records, dict(mark, drop_on_error=True), by)
+                out = self._finish_close(rec, records, dict(mark, drop_on_error=True, closed="end"), by)
             except Exception as e:  # noqa: BLE001 - raised below, once the list without the record is written back
                 failed = e
         if failed is not None:
@@ -940,7 +1403,9 @@ class Workers:
         p = v1_budget.parking(b, {"budget": PARK_RULES})
         if p is None:
             raise WorkerError("usage is under the park line (or unknown): keep working, do not park")
-        rec = dict(p, reason="quota", note=note, parked_at=cards.stamp(now))
+        # The worker's own note: a byte that is not UTF-8 in its argv reads as a lone surrogate (`_safe_text`).
+        rec = dict(p, reason="quota", note=self._safe_text(note) if isinstance(note, str) else "",
+                   parked_at=cards.stamp(now))
         with self.registry.locked() as records:
             w = self._find(records, card_id, role)
             if w is None:
@@ -964,16 +1429,35 @@ class Workers:
 
     def classify(self, rec: dict, listing) -> str:
         """done | question | parked | unknown | dead | blocked | idle | running. `listing` is
-        `claude agents --json --all` (None when it failed: unknown, not empty)."""
+        `claude agents --json --all` (None when it failed: unknown, not empty). A pr-review report is done only once
+        the session's turn has ended (idle, done, failed or gone): its process checks the report after writing it
+        and fixes it until the check passes, so while the session works (or waits at a prompt) it is a draft. A
+        parked pr-review worker stopped itself before that check could pass, so its report is a draft too: parked.
+        A pr-review report counts from the round's first start (`round_started_at`), not the last resume's: a report
+        that passed its check before a park is still the round's once the resumed turn ends."""
         run = self.run_dir(rec["card"])
-        if self._newer(run / RESULT_FILES[rec["role"]], rec):
-            return "done"
+        since = dict(rec, started_at=rec.get("round_started_at") or rec.get("started_at")) \
+            if rec["role"] == REVIEW_ROLE else rec
+        if self._newer(run / RESULT_FILES[rec["role"]], since):
+            if rec["role"] != REVIEW_ROLE:
+                return "done"
+            if rec.get("parked"):
+                return "parked"  # its turn ended on a usage limit, not on a report that passed its check
+            if listing is None:
+                return "unknown"
+            seen = self._listed_state(rec, listing)
+            return seen if seen in ("running", "blocked") else "done"
         if self._newer(run / QUESTION, rec):
             return "question"
         if rec.get("parked"):
             return "parked"  # it stopped itself on purpose: not died, not done, never resumed early
         if listing is None:
             return "unknown"
+        return self._listed_state(rec, listing)
+
+    @staticmethod
+    def _listed_state(rec: dict, listing: list) -> str:
+        """dead | blocked | idle | running: what the listing shows of the worker's session."""
         s = v1_sessions.find_by_id(rec.get("short_id"), listing) or v1_sessions.find(rec["session_name"], listing)
         if s is None or (s.get("pid") is not None and not v1_sessions.pid_alive(s.get("pid"))):
             return "dead"
@@ -993,7 +1477,7 @@ class Workers:
         for r in self.registry.read():
             row = dict(r, state=self.classify(r, listing))
             seen = self._api_tail(r, row["state"], listing)
-            stop = apistop.stop(*seen) if seen is not None else None
+            stop = apistop.stop(*seen, until=self._until(self.clock())) if seen is not None else None
             if stop is not None:
                 row["api_stop"] = stop["kind"]
             out.append(row)
@@ -1011,6 +1495,13 @@ class Workers:
         except (TypeError, ValueError):
             return datetime.max.replace(tzinfo=timezone.utc)
 
+    @staticmethod
+    def _until(now: datetime) -> datetime:
+        """The latest time an API error in a worker's transcript can be its own: now, plus RUN_SKEW_MIN minutes. One
+        dated later is ignored: a process the worker left can write any time, and a park until then would hold the
+        worker's slot with no ask."""
+        return now + timedelta(minutes=RUN_SKEW_MIN)
+
     def _listed_session(self, session_id: str) -> Optional[dict]:
         """The listing's session with this id (`sessionId`), unless it is marked `state: stopped`; None when it is not
         listed or the listing failed."""
@@ -1020,15 +1511,21 @@ class Workers:
                      if s.get("sessionId") == session_id and s.get("id") and s.get("state") != "stopped"), None)
 
     def _api_tail(self, rec: dict, state: str, listing) -> Optional[tuple]:
-        """(the transcript's tail, `_since`) for a worker whose turn stopped (idle, blocked or dead), or None: a
-        parked or closing worker, a session the listing shows working or busy, and a transcript that is missing or
-        cannot be read are not read."""
-        if state not in ("idle", "blocked", "dead") or rec.get("parked") or rec.get("closing"):
+        """(the transcript's tail, `_since`) for a worker whose turn stopped (idle, blocked or dead, or a pr-review
+        worker's done: its report may be a draft its turn never got to check), or None: a parked or closing worker,
+        a session the listing shows working or busy, and a transcript that is missing or cannot be read are not
+        read. A raise while reading it is None too: the transcript is outside the data folder, and a raise would hold
+        back the worker's close (and its report's apply) on every check and fail the whole worker list."""
+        stopped = ("idle", "blocked", "dead", "done") if rec["role"] == REVIEW_ROLE else ("idle", "blocked", "dead")
+        if state not in stopped or rec.get("parked") or rec.get("closing"):
             return None
         s = v1_sessions.find_by_id(rec.get("short_id"), listing) or v1_sessions.find(rec["session_name"], listing)
         if s is not None and (s.get("state") == "working" or s.get("status") == "busy"):
             return None
-        t = apistop.tail(self.transcripts_dir, rec.get("session_id") or (s or {}).get("sessionId"))
+        try:
+            t = apistop.tail(self.transcripts_dir, rec.get("session_id") or (s or {}).get("sessionId"))
+        except Exception:  # noqa: BLE001 - no API error seen, as for a transcript that cannot be read
+            return None
         return (t, self._since(rec)) if t is not None else None
 
     def _api_act(self, rec: dict, state: str, listing, records: list, entry: dict, by: str, now: datetime) -> bool:
@@ -1043,12 +1540,14 @@ class Workers:
         if replied and not t["errors"]:
             rec.pop("limit_parks", None)
             return False
-        stop = apistop.stop(t, since)
+        stop = apistop.stop(t, since, until=self._until(self.clock()))  # the pass may have waited since `now`
         if stop is None:
             return False
+        # The transcript is outside the data folder: a process the worker left behind can write its last line.
+        note = self._safe_text(stop["text"])
         if stop["kind"] == "gateway_refused":
             why = "a gateway's safety guard refused this conversation; paused, resume it on the subscription"
-            entry.update(self._finish_close(rec, records, self._mark("refused", why, note=stop["text"]), by))
+            entry.update(self._finish_close(rec, records, self._mark("refused", why, note=note), by))
             return True
         try:
             before = 0 if replied else max(int(rec.get("limit_parks") or 0), 0)  # a reply in this run: count again
@@ -1056,13 +1555,15 @@ class Workers:
             before = 0
         n = before + 1
         reset = apistop.reset_time(stop["text"], stop["at"])
-        if reset is not None:
-            resume_at = reset + timedelta(minutes=PARK_RULES["resume_after_min"])
-        else:
+        try:
+            resume_at = reset + timedelta(minutes=PARK_RULES["resume_after_min"]) if reset is not None else None
+        except OverflowError:  # a reset at the last date a datetime holds
+            resume_at = None
+        if resume_at is None:
             resume_at = now + apistop.backoff(n)
         if rec.get("blocked_since"):
             self._close_worker_asks(rec["card"], rec["role"], by, kinds=("attach",))  # parked: no prompt to answer
-        rec.update(parked={"reason": "limit", "note": stop["text"], "resets_at": reset.isoformat() if reset else None,
+        rec.update(parked={"reason": "limit", "note": note, "resets_at": reset.isoformat() if reset else None,
                            "resume_at": resume_at.isoformat(), "parked_at": cards.stamp(now), "kind": None,
                            "model": None, "percent": None},
                    limit_parks=n, idle_since=None, blocked_since=None)
@@ -1075,13 +1576,30 @@ class Workers:
         except (TypeError, ValueError):
             return 0.0
 
+    @staticmethod
+    def _safe_text(text: str, limit: Optional[int] = WORKER_TEXT_MAX) -> str:
+        """Worker-derived text made fit for a card, the worker list and a line: what is not valid Unicode (a lone
+        surrogate, from a `\\ud800` escape in a file the worker wrote) is escaped, as a card refuses it and the
+        ask would never be set, and it is cut to `limit` characters (none: not cut)."""
+        text = text.encode("utf-8", "backslashreplace").decode("utf-8")
+        return text if limit is None or len(text) <= limit else text[:limit] + " [cut]"
+
     def _read_question(self, card_id: str):
+        """The question's text. Only a regular file is read (`sources.read_regular_capped`: opened without following
+        a link and without waiting, as a FIFO the worker put there would hold the worker list's lock forever), and
+        at most QUESTION_MAX bytes of it (a huge file would be read whole into memory under that lock), so anything
+        else reads as none. Only a text that is a non-empty string is kept (anything else, a list, a dict or NaN,
+        say, reads as none: kept raw, the card would refuse it), escaped where it is not valid Unicode but never
+        cut, as the question is often at its end (QUESTION_MAX already bounds it)."""
         try:
-            q = json.loads((self.run_dir(card_id) / QUESTION).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            q = json.loads(sources.read_regular_capped(self.run_dir(card_id) / QUESTION, QUESTION_MAX,
+                                                       "too large").decode("utf-8"))
+        except (OSError, ValueError, sources.SourceError):
             q = None
         text = q.get("text") if isinstance(q, dict) else q
-        return text if text else "The worker asked a question but its question.json could not be read."
+        if isinstance(text, str) and text:
+            return self._safe_text(text, limit=None)
+        return "The worker asked a question but its question.json could not be read."
 
     # An in-place resume (a dead worker's, or a parked one's whose window reset) runs in three steps, so its tool
     # discovery (up to DISCOVER_TIMEOUT seconds) never holds the worker list's lock: `_plan_resume` under the lock
@@ -1164,7 +1682,8 @@ class Workers:
         process): the copy that continues takes its place, as in `start()`. `by` (the check's caller) is the name
         on the card's audit."""
         settings = self.run_dir(rec["card"]) / f"settings-{rec['role']}.json"
-        write_json(settings, floor(rec["role"], found, self.data, plan["env"], plan["profile"]))
+        write_json(settings, floor(rec["role"], found, self.data, plan["env"], plan["profile"],
+                                   claude=self.claude))
         argv = self._argv(rec["role"], rec["session_name"], settings, plan["prompt"], plan["profile"],
                           rec["session_id"] or rec["short_id"])
         # Whatever its state (parked, failed with its process alive, or gone: a stop of a gone session is harmless),
@@ -1236,7 +1755,7 @@ class Workers:
             retry = {(f["card"], f["role"]): f["note"] for f in self.cap_stop(by, blocking=False)["failed"]}
         self._warm_key(now)
         allow = self._pass_allowance(now)  # one allowance (one `spend.totals`) per pass, only when a resume asks
-        out, planned = [], []
+        out, planned, reviews = [], [], []
         stopped = None
         with self.registry.locked() as records:
             # Under the lock: a start that lands before it would otherwise be judged against a listing taken
@@ -1257,7 +1776,7 @@ class Workers:
                         self._fill_session_id(rec, listing, by)
                     # A turn that stopped on an API error: parked or closed here, and not acted on again this pass.
                     done = self._api_act(rec, state, listing, records, entry, by, now)
-                    plan = None if done else self._act(rec, state, records, entry, by, b, now, allow)
+                    plan = None if done else self._act(rec, state, records, entry, by, b, now, allow, reviews)
                     if plan is not None:
                         planned.append(dict(plan, entry=entry))
                 except Exception as e:  # noqa: BLE001 - one worker's error must not cost the others their changes
@@ -1272,8 +1791,10 @@ class Workers:
                 out.append(entry)
         if stopped is not None:
             raise stopped
+        for entry in reviews:  # applied under the lock (`_review_due`); with the lock free: sync reads GitHub
+            self._review_sync(entry, by)
         if not planned:
-            return out
+            return self._start_reviews(out, by)
         # Step 2, with the lock free: a failure is kept for step 3, where the record is checked first. A Ctrl-C
         # here leaves the pass: no resume starts, and step 1's changes are already written back.
         for plan in planned:
@@ -1311,7 +1832,7 @@ class Workers:
                     break
         if stopped is not None:
             raise stopped
-        return out
+        return self._start_reviews(out, by)
 
     def _pass_allowance(self, now: datetime) -> Callable:
         """`allow(prof)`: the daily cap's allowance for `prof`, computed at most once per profile (one
@@ -1334,21 +1855,25 @@ class Workers:
     def _fill_session_id(self, rec: dict, listing, by: str) -> None:
         """The listing did not show the worker's session when it started: take its id from this listing, on the
         record and the card, so a later stop saves and archives it and a later resume continues it."""
-        sid = (v1_sessions.find_by_id(rec.get("short_id"), listing) or {}).get("sessionId") or ""
+        sid = self._listed_id(v1_sessions.find_by_id(rec.get("short_id"), listing))
         if sid:
             self._save_session(rec["card"], rec["role"], by, id=sid)
             rec["session_id"] = sid
 
     def _act(self, rec: dict, state: str, records: list, entry: dict, by: str, b, now: datetime,
-             allow: Optional[Callable] = None) -> Optional[dict]:
+             allow: Optional[Callable] = None, reviews: Optional[list] = None) -> Optional[dict]:
         """Act on one worker's state under the lock (`check`'s step 1). An in-place resume is only planned: its
-        plan (`_plan_resume`) is returned, and `check` runs it once its tools are listed; otherwise None."""
+        plan (`_plan_resume`) is returned, and `check` runs it once its tools are listed; otherwise None. A
+        pr-review worker closed as done has its report applied here, under the lock (`_review_due`), and an applied
+        one puts its line on `reviews`, for `check` to sync once the lock is free (`_review_sync`)."""
         card_id, role = rec["card"], rec["role"]
         allow = allow or self._pass_allowance(now)
         if rec.get("closing"):
             # A close that was started is finished before anything else: its stop may have landed after it timed
             # out, so the session's state now (dead, most likely) says nothing about what to do.
-            entry.update(self._finish_close(rec, records, rec["closing"], by))
+            mark = rec["closing"]
+            entry.update(self._finish_close(rec, records, mark, by))
+            self._review_due(rec, records, mark, entry, reviews, by)
             return
         # Each clock runs only while its state is seen without a break; "unknown" (the listing failed) says nothing,
         # so it keeps them. A prompt that is gone takes its attach ask with it.
@@ -1358,7 +1883,9 @@ class Workers:
         if state not in ("idle", "unknown"):
             rec["idle_since"] = None
         if state == "done":
-            entry.update(self._finish_close(rec, records, self._mark("done"), by))
+            mark = self._mark("done")
+            entry.update(self._finish_close(rec, records, mark, by))
+            self._review_due(rec, records, mark, entry, reviews, by)
         elif state == "question":
             # Kept on the card too, so `answer` works even when the ask cannot be raised (the user's own ask is
             # open).
@@ -1402,6 +1929,205 @@ class Workers:
                 return self._resume_step(rec, "parked", records, entry, by,
                                          lambda: self._plan_resume(rec, "parked", prompt, allow))
         return None
+
+    # -- PR review cards review themselves (design 6.2 point 2) ---------------------------------------------------
+
+    def _review_due(self, rec: dict, records: list, mark: dict, entry: dict, reviews: Optional[list],
+                    by: str) -> None:
+        """A pr-review worker's done close went through (its record left the list). Still under the worker list's
+        lock, so no other check sees the card closed with its review not yet on it (and starts a second one): its
+        report is applied (`_review_apply`), then the empty folder it ran in is removed (`_drop_round_dir`, after
+        the apply, so nothing the worker did to its folder keeps the report off the card). An applied one goes on
+        `reviews`, for `check` to sync once the lock is free."""
+        if (reviews is None or rec["role"] != REVIEW_ROLE or mark.get("path") != "done"
+                or any(r is rec for r in records)):
+            return
+        try:
+            if self._review_apply(entry, by):
+                reviews.append(entry)
+        finally:
+            self._drop_round_dir(rec.get("cwd"))
+
+    @staticmethod
+    def _drop_round_dir(cwd) -> None:
+        """Remove the folder a done pr-review round ran in when `_start_reviews` made it (directly in the temp
+        folder, its name starting with REVIEW_DIR) and it is empty (`os.rmdir` removes only an empty one). No link
+        is followed for the folder itself: it must be a folder (`lstat`), so a link the worker put in its place (to
+        itself, or to another round's folder) is left alone; only its parent is resolved (macOS's /var is a link to
+        /private/var). It never raises."""
+        try:
+            path = os.path.abspath(os.fspath(cwd))
+            if (stat.S_ISDIR(os.lstat(path).st_mode)
+                    and os.path.realpath(os.path.dirname(path)) == os.path.realpath(tempfile.gettempdir())
+                    and os.path.basename(path).startswith(REVIEW_DIR)):
+                os.rmdir(path)
+        except Exception:  # noqa: BLE001 - a folder left behind never fails the pass
+            pass
+
+    @staticmethod
+    def _add_note(entry: dict, text: str) -> None:
+        entry["note"] = f"{entry['note']}; {text}" if entry.get("note") else text
+
+    def _review_apply(self, entry: dict, by: str) -> bool:
+        """`prreview.apply` puts the worker's report on the card; its verdict goes on the worker's line (`verdict`).
+        It never fails the pass: `apply` reads the plan and the report only when the open file is a regular file
+        (`sources.read_regular_capped`: a FIFO the worker put there, even after any earlier look, never hangs the
+        pass), and a failed apply is a note and the card's `fix` ask (so the card is not started again). True when it
+        was applied."""
+        cid = entry["card"]
+        try:
+            card = prreview.apply(self.data, cid, by=by, cfg=self.cfg)
+        except Exception as e:  # noqa: BLE001 - a broken report never fails the pass
+            self._apply_failed(entry, cid, str(e) or type(e).__name__, by,
+                               None if isinstance(e, (config.ConfigError, CardError)) else type(e).__name__)
+            return False
+        entry["verdict"] = (card.get("verdict") or {}).get("verdict")
+        return True
+
+    def _apply_failed(self, entry: dict, cid: str, why: str, by: str, error: Optional[str] = None) -> None:
+        """A failed apply always leaves the card's hold, so it is not started again in a loop: `why` (built from
+        the worker's report) is made safe first (`_safe_text`), and an ask the card still refuses is set again with
+        a fixed text that carries nothing from the worker."""
+        why = self._safe_text(why)
+        self._add_note(entry, f"the review was not applied: {why}")
+        if error:
+            entry["error"] = error
+        steps = f"run `ap2 review check {cid}`, then `ap2 review apply {cid}`."
+        texts = (f"The PR review finished, but its report could not be put on the card: {why}. To go on, {steps}",
+                 f"The PR review finished, but its report could not be put on the card. To see why and go on, "
+                 f"{steps}")
+        for i, text in enumerate(texts):
+            try:
+                if not self._set_ask(cid, {"type": "fix", "role": REVIEW_ROLE, "reason": APPLY_FAILED,
+                                           "text": text}, by):
+                    self._add_note(entry, "the card already has an open ask, so this one is not on it")
+                elif i:
+                    self._add_note(entry, "the ask was set with a fixed text")
+                return
+            except Exception as e2:  # noqa: BLE001 - the note above already says what failed
+                self._add_note(entry, f"the ask could not be set: {self._safe_text(str(e2) or type(e2).__name__)}")
+
+    def _review_sync(self, entry: dict, by: str) -> None:
+        """After an apply that worked, with the worker list's lock free: `prreview.sync` asks GitHub where the PR
+        stands; its state goes on the worker's line (`sync`). A failed sync is a note: the review stays applied."""
+        cid = entry["card"]
+        try:
+            entry["sync"] = prreview.sync(self.data, cid, by=by, cfg=self.cfg, run=self.gh)["state"]
+        except Exception as e:  # noqa: BLE001 - the review stays applied
+            self._add_note(entry, f"the PR was not synced: {str(e) or type(e).__name__}")
+            if not isinstance(e, (config.ConfigError, CardError)):
+                entry["error"] = type(e).__name__
+
+    def _start_reviews(self, out: list, by: str) -> list:
+        """`check`'s last step: start one pr-review worker for each PR review card that is due (`_review_is_due`)
+        and has no line in `out` yet; add one line per card to `out` and return it. Shadow mode starts none."""
+        try:
+            due = self.store.list(kind=prreview.KIND)
+            busy = {r["card"] for r in self.registry.read()} | {e["card"] for e in out}
+        except Exception as e:  # noqa: BLE001 - the workers' own lines are kept
+            entry = {"card": None, "role": REVIEW_ROLE, "state": "unknown", "did": "nothing"}
+            self._note_error(entry, e)
+            entry["note"] = f"the PR review cards could not be read: {entry['note']}"
+            return out + [entry]
+        catalog = None
+        for card in due:
+            if card["id"] in busy:
+                continue
+            try:
+                # Read again: an earlier card's start (its tool discovery, up to DISCOVER_TIMEOUT seconds) may have
+                # run since the list was read, and this card may have stopped being due meanwhile.
+                card = self.store.get(card["id"])
+                if self._close_applied_ask(card, by):
+                    continue
+                if self._idle_unasked(card):
+                    # Closed idle while another ask was open: the idle ask was not set. Raise it now the card has room.
+                    if self._set_ask(card["id"], self._pause_ask({"card": card["id"], "role": REVIEW_ROLE}, "idle"),
+                                     by):
+                        out.append({"card": card["id"], "role": REVIEW_ROLE, "state": "paused", "did": "asked"})
+                    continue
+                if not self._review_is_due(card):
+                    continue
+            except Exception as e:  # noqa: BLE001 - one card's error must not cost the others their try
+                entry = {"card": card["id"], "role": REVIEW_ROLE, "state": "unknown", "did": "nothing"}
+                self._note_error(entry, e)
+                out.append(entry)
+                continue
+            entry = {"card": card["id"], "role": REVIEW_ROLE, "state": "due", "did": "nothing"}
+            out.append(entry)
+            if self.cfg.mode != "live":
+                entry["note"] = SHADOW_REVIEW
+                continue
+            try:
+                if catalog is None:
+                    catalog = templates.catalog(self.data)
+                run = self.run_dir(card["id"])
+                brief = self._review_brief(catalog, card)
+                run.mkdir(parents=True, exist_ok=True)
+                # Its own fresh, empty folder (0700) outside the data folder, not the run directory: the Bash guard
+                # judges the data-folder paths a command names, so a relative `../../config.yaml` from inside the data
+                # folder would pass it, and the folder is the session's project root, whose `.claude/`, `.mcp.json`
+                # and `CLAUDE.md` a later session there would load. Its report still goes to AP2_RUN_DIR. A refused
+                # start removes the folder again (when no record points at it), so a pass at the cap leaves none.
+                home = tempfile.mkdtemp(prefix=REVIEW_DIR)
+                try:
+                    self.start(card["id"], REVIEW_ROLE, cwd=home, prompt=brief, by=by, due=self._review_is_due)
+                except Exception:
+                    self._drop_review_dir(home)
+                    raise
+                entry["did"] = "started"
+            except Exception as e:  # noqa: BLE001 - the cap, the key, a pause, max_workers, the profile: a note
+                self._note_error(entry, e)
+        return out
+
+    def _drop_review_dir(self, home: str) -> None:
+        """Remove the empty folder made for a pr-review start that was refused, unless a record points at it."""
+        try:
+            if not any(r.get("cwd") == str(Path(home).resolve()) for r in self.registry.read()):
+                os.rmdir(home)
+        except Exception:  # noqa: BLE001 - the start's own error is the one raised
+            pass
+
+    @staticmethod
+    def _review_is_due(card: dict) -> bool:
+        """Not in lane done, no open ask, the role's session absent or ended by a done close (`closed: done`; one
+        ended by hand, or saved before `closed` was kept, waits for a start by hand), and not reviewed at its head."""
+        if card.get("lane") == "done" or card.get("ask") is not None:
+            return False
+        sessions = card.get("sessions") if isinstance(card.get("sessions"), dict) else {}
+        saved = sessions.get(REVIEW_ROLE) if isinstance(sessions.get(REVIEW_ROLE), dict) else {}
+        if saved.get("state") is not None and not (saved.get("state") == "ended" and saved.get("closed") == "done"):
+            return False
+        pr = card.get("pr") if isinstance(card.get("pr"), dict) else {}
+        return not pr.get("reviewed_sha") or pr.get("reviewed_sha") != pr.get("head_sha")
+
+    @staticmethod
+    def _idle_unasked(card: dict) -> bool:
+        """A pr-review card, not in lane done, with no open ask, whose session was closed idle with no report
+        (`paused`, `closed: idle`): its idle ask could not be set then (another ask was open)."""
+        if card.get("lane") == "done" or card.get("ask") is not None:
+            return False
+        sessions = card.get("sessions") if isinstance(card.get("sessions"), dict) else {}
+        saved = sessions.get(REVIEW_ROLE) if isinstance(sessions.get(REVIEW_ROLE), dict) else {}
+        return saved.get("state") == "paused" and saved.get("closed") == "idle"
+
+    def _close_applied_ask(self, card: dict, by: str) -> bool:
+        """The card's failed-apply ask is open but the card is reviewed at its head now (the user ran `ap2 review
+        apply`): close it. True when the card had that ask."""
+        if self._worker_ask_kind(card.get("ask"), REVIEW_ROLE) != "apply":
+            return False
+        pr = card.get("pr") if isinstance(card.get("pr"), dict) else {}
+        if pr.get("reviewed_sha") and pr.get("reviewed_sha") == pr.get("head_sha"):
+            self._close_worker_asks(card["id"], REVIEW_ROLE, by, kinds=("apply",))
+        return True
+
+    def _review_brief(self, catalog: dict, card: dict) -> str:
+        """The pr-review role's brief from the card's template, filled from the card."""
+        t = catalog.get(card.get("kind"))
+        runs = t.runs(card, primary=self.cfg.primary_language) if t is not None else []
+        run = next((r for r in runs if r["role"] == REVIEW_ROLE), None)
+        if run is None:
+            raise WorkerError(f"the {card.get('kind')} template names no {REVIEW_ROLE} role, so no review starts")
+        return run["brief"]
 
     # -- answer, finish ------------------------------------------------------------------------------------------
 
