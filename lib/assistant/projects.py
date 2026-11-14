@@ -90,5 +90,5 @@ def branch(project: dict, task: str, short: str) -> str:
         pattern = pattern.replace("{prefix}.", "").replace("{prefix}", "")
     try:
         return pattern.format(prefix=prefix or "", task=task, short=short)
-    except (KeyError, IndexError, ValueError) as e:
+    except (KeyError, IndexError, ValueError, AttributeError, TypeError) as e:
         raise ConfigError(f"branch_pattern {pattern!r}: {e}") from e

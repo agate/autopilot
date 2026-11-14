@@ -1322,14 +1322,22 @@ COMMANDS["phone"] = cmd_phone
 # v1's folder is only read; cards are written in the data folder only, so this runs in shadow mode.
 
 def _import_v1_parser(sub) -> None:
-    im = sub.add_parser("import-v1", help="copy v1 projects into cards, read-only",
+    im = sub.add_parser("import-v1", help="copy v1 projects into cards, read-only, or take one over",
                         description="Read each v1 project (its config.json and state.json) and make or update its "
                                     "cards: one project card, one code card per task, one question card per open "
                                     "ask or gate. v1's files are only read. Prints the report as JSON; exits 1 "
-                                    "after it when a project could not be read.")
+                                    "after it when a project could not be read. With --take-over NAME, move that "
+                                    "one project to v2 instead: it must be paused in v1 first (ap pause NAME) "
+                                    "with no v1 worker listed and no answer v1 has not acted on yet; its cards "
+                                    "turn live, every decision and every file "
+                                    "of its folder come along, and v1's folder is only read. A project taken over "
+                                    "is skipped by the plain import.")
     im.add_argument("--from", dest="from_dir", metavar="DIR",
                     help="v1's data folder, read only (default: $AUTOPILOT_DATA, else ~/.claude/autopilot-data)")
-    im.add_argument("--project", action="append", metavar="NAME", help="import only this project (repeatable)")
+    one = im.add_mutually_exclusive_group()
+    one.add_argument("--project", action="append", metavar="NAME", help="import only this project (repeatable)")
+    one.add_argument("--take-over", metavar="NAME",
+                     help="move this one project to v2: paused in v1 first, v1's folder is only read")
     im.add_argument("--dry-run", action="store_true", help="show what each card would become; write nothing")
     im.add_argument("--data", metavar="PATH", help=DATA_HELP)
 
@@ -1337,7 +1345,8 @@ def _import_v1_parser(sub) -> None:
 def cmd_import_v1(args) -> int:
     from assistant import importv1
 
-    out = importv1.run(datadir.resolve(args.data), args.from_dir, args.project, dry_run=args.dry_run)
+    out = importv1.run(datadir.resolve(args.data), args.from_dir, args.project, dry_run=args.dry_run,
+                       take_over=args.take_over)
     _print_json(out)
     if out["refused"]:
         names = ", ".join(r["name"] for r in out["refused"])

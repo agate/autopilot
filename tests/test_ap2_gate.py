@@ -2230,6 +2230,37 @@ class PassDueTest(LoopCase):
         self.assertIs(out["pass_due"], False)
         self.assertEqual(self.pass_file()["seen"]["ready"], [])
 
+    def test_a_taken_over_v1_card_is_ready_and_a_plain_imported_copy_is_not(self):
+        self.add_card(feed="v1-import")
+        cid = self.add_card(feed="v1-import", taken_over="2026-11-10T12:00:00Z")
+        out = self.gate(self.T)
+        self.assertIs(out["pass_due"], True)
+        self.assertEqual(self.pass_file()["why"], [{"why": "ready", "card": cid}])  # the plain copy is not ready
+        self.assertEqual(gate._present(self.data, self.store())["ready"], [cid])
+
+    def taken_over_running(self, why="taken over from v1", **over) -> str:
+        """A card as a take-over writes an in-progress v1 task: Running, a saved session the take-over wrote."""
+        sid = "11111111-2222-3333-4444-555555555555"
+        return self.add_card(**{"feed": "v1-import", "lane": "running", "taken_over": "2026-11-10T12:00:00Z",
+                                "sessions": {"implement": {"id": sid, "ids": [sid], "cwd": "", "needs": [],
+                                                           "state": "ended", "why": why,
+                                                           "at": "2026-11-10T12:00:00Z"}}, **over})
+
+    def test_a_taken_over_in_progress_v1_task_is_ready(self):
+        cid = self.taken_over_running()
+        out = self.gate(self.T)
+        self.assertIs(out["pass_due"], True)
+        self.assertEqual(self.pass_file()["why"], [{"why": "ready", "card": cid}])
+        gate.pass_started(self.data, self.T)
+        self.assertIs(self.gate(self.T + timedelta(minutes=1))["pass_due"], False)  # one wake-up, not every minute
+
+    def test_a_taken_over_task_v2_already_handled_and_a_taken_over_project_are_not_ready(self):
+        self.taken_over_running(why="stopped by the user")
+        self.taken_over_running(kind="project")
+        out = self.gate(self.T)
+        self.assertIs(out["pass_due"], False)
+        self.assertEqual(self.pass_file()["seen"]["ready"], [])
+
     def test_a_routine_run_card_with_no_worker_is_ready(self):
         self.put(last_slot="2026-11-09T09:00")
         out = self.gate(utc(2026, 11, 10, 9, 1))
