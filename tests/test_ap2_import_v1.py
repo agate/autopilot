@@ -1781,7 +1781,7 @@ class TakeOverTest(unittest.TestCase):
         # A temp file an interrupted run left (here a link out of the data folder) is replaced, never followed.
         outside = self.tmp / "outside-part"
         outside.write_text("mine\n")
-        (self.data / "v1" / "shop" / ".state.json.ap2-part").symlink_to(outside)
+        importv1._temp(self.data / "v1" / "shop" / "state.json").symlink_to(outside)
         files = self.project_entry(self.take_over())["files"]
         self.assertIn("v1/shop/state.json", files["copied"])
         self.assertEqual((self.data / "v1" / "shop" / "state.json").read_bytes(),
@@ -1789,6 +1789,30 @@ class TakeOverTest(unittest.TestCase):
         self.assertEqual(outside.read_text(), "mine\n")
         self.assertEqual(list(self.data.rglob("*.ap2-part")), [])
         self.assertFalse([f for each in files.values() for f in each if "ap2-part" in f])
+
+    def test_a_v1_file_name_of_250_bytes_is_copied(self):
+        name = "a" * 250  # fits a file system's 255 bytes, but not with `.` and `.ap2-part` around it
+        src = self.shop / "runs" / "PROJ-2" / name
+        src.write_bytes(b"long name\n")
+        files = self.project_entry(self.take_over())["files"]
+        run2 = transcripts_run_dir(self.data, self.by_key()["v1:shop:PROJ-2"]["id"])
+        for dst in (self.data / "v1" / "shop" / "runs" / "PROJ-2" / name, run2 / name):
+            self.assertEqual(dst.read_bytes(), b"long name\n")
+            self.assertIn(str(dst.relative_to(self.data)), files["copied"])
+        self.assertEqual(list(self.data.rglob("*.ap2-part")), [])
+
+    def test_a_temp_file_left_next_to_a_copied_destination_is_removed(self):
+        self.take_over()
+        run2 = transcripts_run_dir(self.data, self.by_key()["v1:shop:PROJ-2"]["id"])
+        record = self.data / "v1" / "shop" / "state.json"
+        # A run killed after `os.link` and before the temp file's unlink leaves both names.
+        for dst in (record, run2 / "journal.md", projects.path(self.data, "shop")):
+            os.link(dst, importv1._temp(dst))
+        files = self.project_entry(self.take_over())["files"]
+        self.assertIn("v1/shop/state.json", files["same"])
+        self.assertIn(str((run2 / "journal.md").relative_to(self.data)), files["same"])
+        self.assertEqual(list(self.data.rglob("*.ap2-part")), [])
+        self.assertEqual(record.read_bytes(), (self.shop / "state.json").read_bytes())
 
     def test_a_v1_file_with_the_temp_files_name_is_skipped(self):
         (self.shop / ".state.json.ap2-part").write_text("v1's own\n")

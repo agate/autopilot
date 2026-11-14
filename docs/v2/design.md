@@ -3828,10 +3828,12 @@ Calls the author made without asking (check them):
       to `workers.json` and no worker starts: the dispatcher pass starts what comes next.
     - Files: the whole project folder is copied to `<data>/v1/<name>/` with the same relative paths (same bytes,
       mode and mtime, so an old `handback.json` never looks newer than a v2 start), leaving out only v1's
-      `state.lock`. Each copy, and the project file, is written to a temp file next to it (`.<name>.ap2-part`) and
-      put in place with `os.link`, so a write cut short (a full disk, Ctrl-C) leaves nothing at the final name and
-      the next run writes it whole; the temp file is removed in every case, and one a killed run left is replaced
-      (unlinked, never written through). A destination made meanwhile is never overwritten: `os.link` refuses it
+      `state.lock`. Each copy, and the project file, is written to a temp file next to it and put in place with
+      `os.link`, so a write cut short (a full disk, Ctrl-C) leaves nothing at the final name and the next run writes
+      it whole. The temp file's name is short and fixed (`.` + the first 16 hex digits of the SHA-256 of the file's
+      name + `.ap2-part`), so a v1 file name of up to 255 bytes is still copied. The temp file is removed in every
+      case; one a killed run left is replaced (unlinked, never written through), and one left next to a destination
+      that exists (a run killed just after the link) is removed by the next run, never followed. A destination made meanwhile is never overwritten: `os.link` refuses it
       and the take-over stops with one line. A v1 file whose name ends in `.ap2-part` is listed under `skipped`, so
       it never meets a temp name. Each open task's `runs/<task>/` is also copied into its card's run folder
       (`<data>/sessions/<card>/`), where v2's workers read and write; none is when v1's `runs/` is itself a link (it
@@ -3853,7 +3855,7 @@ Calls the author made without asking (check them):
     - Second run: a card with `taken_over` is never rebuilt from v1 (`unchanged`), so what v2 changed since stays;
       a copy whose destination exists is never written (`same`, or `kept` when its bytes differ; a copy cut short
       left no destination, so it is copied again); a file removed
-      on the v2 side since is copied again (with v1's mtime), nothing else is; nothing is removed. A task or decision new in v1 since is added live. The plain import skips a project whose project
+      on the v2 side since is copied again (with v1's mtime), nothing else is; nothing is removed (but a temp file a killed run left). A task or decision new in v1 since is added live. A take-over that stopped part-way (a full disk, Ctrl-C, a store error) is finished by running it again; the plain import already skips the project. The plain import skips a project whose project
       card has `taken_over` and lists it under the report's `taken_over: [names]` (exit 0; the others import).
     - Choices taken (simplest reversible, v2 RULES.md line 3): refuse, not warn, when v1 is not paused (a warning
       would let v1 and v2 both work on it; the dry run lets the user look first); refuse while v1 lists a worker (a

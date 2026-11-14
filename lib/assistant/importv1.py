@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import copy
 import filecmp
+import hashlib
 import io
 import json
 import os
@@ -67,8 +68,8 @@ TAKEN_OVER = "taken over from v1"
 # a control character, `:`, `~`, `^`, `?`, `*`, `[`, `\`, `..` and `@{`; a leading `-`, `/` or `.`; a trailing `/`
 # or `.`; `//`; a part starting with `.` (`/.`); a part ending in `.lock`.
 BAD_BRANCH = re.compile(r"[\s\x00-\x1f\x7f:~^?*\[\\]|\.\.|@\{|^[-/.]|[/.]$|//|/\.|\.lock(/|$)")
-# The temp file a copy or the project file is written to first, next to it (`.<name>.ap2-part`), then linked in
-# place: a write cut short never leaves a part file at the final name.
+# The temp file a copy or the project file is written to first, next to it, then linked in place: a write cut short
+# never leaves a part file at the final name. Its name is short and fixed (`_temp`), so a long v1 name still fits.
 PART = ".ap2-part"
 # The longest text a v1 label may give, in characters: a template longer than this is shown as its key (before it
 # is parsed), and a label that would fill longer is shown as written. v1's own labels are about 100 characters.
@@ -749,6 +750,11 @@ def _take_over(store: Store, name: str, folder: Path, langs: tuple, labels: Labe
         datadir.ensure(data)
     _copy(ops, folder, data, files, dry_run)
     project_file = "kept" if has_file else "write" if dry_run else "written"
+    if has_file and not dry_run:
+        try:
+            _clear_temp(pfile)  # one a run killed after its link left
+        except OSError as e:
+            raise V1ImportError(f"cannot remove {_temp(pfile)}: {e}") from e
     if project_file == "written":
         try:
             pfile.parent.mkdir(exist_ok=True)
@@ -856,6 +862,8 @@ def _copy(ops: list, folder: Path, data: Path, files: dict, dry_run: bool) -> No
                 if not dry_run:
                     dst.mkdir(parents=True, exist_ok=True)
             elif os.path.lexists(dst):
+                if not dry_run:
+                    _clear_temp(dst)  # one a run killed after its link left
                 same = dst.is_file() and not dst.is_symlink() and filecmp.cmp(src, dst, shallow=False)
                 files["same" if same else "kept"].append(str(dst.relative_to(data)))
             else:
@@ -868,15 +876,29 @@ def _copy(ops: list, folder: Path, data: Path, files: dict, dry_run: bool) -> No
             raise V1ImportError(f"cannot copy {src or ''} to {dst}: {e}") from e
 
 
-def _place(dst: Path, source, like: Optional[Path] = None) -> None:
-    """Write the bytes of the open file `source` to `dst`, which must not exist: into the temp file `.<name>` + PART
-    next to it, then `os.link` puts it at `dst` (FileExistsError when `dst` was made meanwhile: never overwritten).
-    With `like`, the temp takes `like`'s mode and mtime first (`shutil.copystat`). The temp file is removed in every
-    case, so a write cut short (a full disk, Ctrl-C) leaves nothing at `dst`; one a killed run left is replaced, never
-    written through (it is unlinked, then made new with O_EXCL)."""
-    tmp = dst.with_name(f".{dst.name}{PART}")
+def _temp(dst: Path) -> Path:
+    """The temp file of `dst`, next to it: `.` + the first 16 hex digits of the SHA-256 of its name + PART, 26 bytes
+    whatever the name's length (a name of up to 255 bytes, the most a file system takes, would not fit with PART
+    added). Ending in PART, it is never copied from v1 (`_walk`)."""
+    return dst.with_name("." + hashlib.sha256(os.fsencode(dst.name)).hexdigest()[:16] + PART)
+
+
+def _clear_temp(dst: Path) -> None:
+    """Remove the temp file of `dst` when it is there (unlinked, a link never followed)."""
+    tmp = _temp(dst)
     if os.path.lexists(tmp):
         os.unlink(tmp)
+
+
+def _place(dst: Path, source, like: Optional[Path] = None) -> None:
+    """Write the bytes of the open file `source` to `dst`, which must not exist: into its temp file (`_temp`) next
+    to it, then `os.link` puts it at `dst` (FileExistsError when `dst` was made meanwhile: never overwritten).
+    With `like`, the temp takes `like`'s mode and mtime first (`shutil.copystat`). The temp file is removed in every
+    case, so a write cut short (a full disk, Ctrl-C) leaves nothing at `dst`; one a killed run left is replaced, never
+    written through (it is unlinked, then made new with O_EXCL). One left next to a `dst` that exists (a run killed
+    after the link) is removed by the next run (`_clear_temp`)."""
+    _clear_temp(dst)
+    tmp = _temp(dst)
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o666)
     try:
         with os.fdopen(fd, "wb") as f:
