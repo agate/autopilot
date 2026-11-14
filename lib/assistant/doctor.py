@@ -5,6 +5,7 @@ check is `{name, ok, detail, fix}` (v1's shape) with a fix line on every failure
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
 import plistlib
@@ -30,13 +31,17 @@ def _install_cmd(data_flag) -> str:
 
 
 def _blocked(e) -> bool:
-    """Did reading config.yaml fail because macOS (or the file's mode) refused access, not because of its text?
-    `config.load` raises its ConfigError from the OSError."""
-    return isinstance(e.__cause__, PermissionError)
+    """Did macOS's privacy control refuse to let us read config.yaml? That refusal is EPERM; a file mode that refuses
+    it is EACCES, which System Settings cannot fix. `config.load` raises its ConfigError from the OSError."""
+    return getattr(e.__cause__, "errno", None) == errno.EPERM
 
 
 def _config_fix(e, data, other) -> str:
-    return PRIVACY_FIX.format(folder=data) if _blocked(e) else other
+    if _blocked(e):
+        return PRIVACY_FIX.format(folder=data)
+    if isinstance(e.__cause__, PermissionError):
+        return f"make {data / config.FILE} readable for this user (chmod u+r, or chown it back)"
+    return other
 
 
 def _same_folder(job_data, data) -> bool:

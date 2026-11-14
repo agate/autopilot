@@ -3479,9 +3479,11 @@ Calls the author made without asking (check them):
     program, interval, data_dir, mode, tools, note}` as JSON. Install writes only on this Mac, never Jira, Slack or
     GitHub, so it does not call `require_live`. A second install gives the same plist and the same calls.
   - `ap2 uninstall` runs `launchctl bootout gui/<uid>/com.assistant.gate`, then `launchctl print` on the same target
-    to confirm it is gone; a job still loaded is one `ap2: launchctl bootout failed: ...` line and exit 1, with no file
-    removed. Then it removes the plist and the launcher (a missing one is fine) and prints `{label, removed}`. The
-    data folder and the err log are kept.
+    to confirm it is gone. bootout can return while a running gate is still exiting, so `print` is asked up to 10
+    times, 0.5 s apart (about 5 s), until it says the job is gone; a job still loaded after that is one `ap2: launchctl
+    bootout failed: ...` line and exit 1, with no file removed. Then it removes the plist and the launcher (a missing
+    one is fine; one that cannot be removed is one `ap2: cannot remove ...` line and exit 1) and prints `{label,
+    removed}`. The data folder and the err log are kept.
   - The label is `com.assistant.gate`, never v1's `com.autopilot.gate` or secretary's `com.secretary.gate`: it
     matches the package (`lib/assistant/`) and the data folder (`~/Documents/Assistant`). The plist is
     `~/Library/LaunchAgents/com.assistant.gate.plist`; the launcher is
@@ -3501,7 +3503,8 @@ Calls the author made without asking (check them):
     `StandardErrorPath` itself before the program runs, so an err log inside the data folder could stop the job from
     starting and would be unreadable where doctor points. So the err log is `~/Library/Logs/assistant/gate.err.log`,
     outside the data folder; install creates its folder and uninstall keeps the log, like the data folder. When the
-    data folder is inside `~/Documents`, `~/Desktop` or `~/Library/Mobile Documents`, install's `note` adds that macOS
+    data folder is inside `~/Documents`, `~/Desktop`, `~/Downloads` or `~/Library/Mobile Documents` (letter case
+    ignored, as on the default case-insensitive disk), install's `note` adds that macOS
     will ask to let `assistant-gate` into it and the gate cannot run until it is allowed (after the no-compiler note,
     joined with `; `, when both apply). Reverse: point `StandardErrorPath` back at `<data>/gate.err.log` and drop the
     note.
@@ -3515,15 +3518,16 @@ Calls the author made without asking (check them):
     `launchctl print` runs only when the plist reads and names v2's label), `gate ran recently` (`gate.json`
     `last_run_at` under 3 minutes old, 7.4; fix: look at `<data>/gate.log` and the err log the plist's
     `StandardErrorPath` names, else `~/Library/Logs/assistant/gate.err.log`), `data folder` (accepted by the lookup,
-    there, a folder, writable, `config.yaml` reads; when macOS or the file's mode refuses to let doctor read
-    `config.yaml`, the fix says to allow access in System Settings > Privacy & Security > Files and Folders, or Full
-    Disk Access, for `assistant-gate` and for the terminal running doctor, not to fix the file),
+    there, a folder, writable, `config.yaml` reads; when macOS's privacy control refuses to let doctor read
+    `config.yaml` (`EPERM`), the fix says to allow access in System Settings > Privacy & Security > Files and Folders,
+    or Full Disk Access, for `assistant-gate` and for the terminal running doctor, not to fix the file; when the
+    file's mode or owner refuses it (`EACCES`), the fix says to make `<data>/config.yaml` readable for this user),
     `tool claude`, `tool gh`, `tool git`, `tool python3` (found on the PATH written in the plist, the one launchd
     gives the job; on the current PATH, said so, when there is no plist; `clang` is not checked, since only install
     needs it and it has a fallback), `active profile` (`profiles.active` loads; no key or models command runs; fix:
     `profiles.FIX`) and `mode` (`shadow` or `live`, reported, not judged: it fails only when `config.yaml` cannot be
-    read, with the same privacy fix when access is refused). A fix that says to run `ap2 install` again (the launchd
-    job, the data folder, the tools) carries the same `--data`.
+    read, with the same privacy or file mode fix when access is refused). A fix that says to run `ap2 install` again
+    (the launchd job, the data folder, the tools) carries the same `--data`.
 - How the local server pushes updates to an open page (polling is fine).
   - **[decided by the builder]** Polling: the page asks `/api/state` every 10 seconds and redraws the top bar,
     the rail and the open list, so the heartbeat and new cards show without a reload.

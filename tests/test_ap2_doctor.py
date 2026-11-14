@@ -112,6 +112,15 @@ class DoctorTest(unittest.TestCase):
         self.assertIn(str(self.home / "other"), c["detail"])
         self.assertIn(f"ap2 install --data {shlex.quote(str(self.data))}", c["fix"])
 
+    def test_the_install_fix_quotes_a_data_folder_with_a_space(self):
+        spaced = datadir.ensure(self.home / "my data")
+        self.write_plist(data=self.home / "other")
+        c = self.checks(data_flag=str(spaced))["launchd job"]
+        self.assertFalse(c["ok"])
+        self.assertIn(f"ap2 install --data '{spaced}'", c["fix"])
+        cmd = c["fix"].split("`")[1]
+        self.assertEqual(shlex.split(cmd), ["ap2", "install", "--data", str(spaced)])
+
     def test_job_passes_when_the_plist_names_the_same_folder_another_way(self):
         link = self.home / "link"
         link.symlink_to(self.data, target_is_directory=True)
@@ -158,6 +167,16 @@ class DoctorTest(unittest.TestCase):
         self.assertFalse(c["ok"])
         self.assertIn(f"look at {self.data / 'gate.log'} and {err_log}", c["fix"])
 
+    def test_gate_ten_minutes_in_the_future_fails_and_four_passes(self):
+        self.write_gate(-10)
+        c = self.checks()["gate ran recently"]
+        self.assertFalse(c["ok"], c)
+        self.assertIn("later than now", c["detail"])
+        self.write_gate(-4)
+        c = self.checks()["gate ran recently"]
+        self.assertTrue(c["ok"], c)
+        self.assertIn("0 s ago", c["detail"])
+
     def test_gate_never_ran_fails(self):
         c = self.checks()["gate ran recently"]
         self.assertFalse(c["ok"])
@@ -177,6 +196,7 @@ class DoctorTest(unittest.TestCase):
         self.assertEqual(c["detail"], str(self.data))
 
     def test_data_folder_inside_claude_fails(self):
+        self.write_plist()
         res = self.checks(data_flag=str(self.home / ".claude" / "assistant"))
         c = res["data folder"]
         self.assertFalse(c["ok"])
@@ -184,6 +204,7 @@ class DoctorTest(unittest.TestCase):
         self.assertIn("outside ~/.claude", c["fix"])
         self.assertFalse(res["mode"]["ok"])
         self.assertFalse(res["active profile"]["ok"])
+        self.assertFalse(res["launchd job"]["ok"])
 
     def test_data_folder_missing_fails_with_install(self):
         c = self.checks(data_flag=str(self.home / "nowhere"))["data folder"]
@@ -225,11 +246,14 @@ class DoctorTest(unittest.TestCase):
             self.assert_privacy_fix(self.checks())
 
     @unittest.skipIf(os.geteuid() == 0, "root can read anywhere")
-    def test_an_unreadable_config_yaml_gives_the_privacy_fix(self):
+    def test_a_config_yaml_whose_mode_refuses_us_gives_the_file_mode_fix(self):
         f = self.data / "config.yaml"
         f.chmod(0o000)
         self.addCleanup(f.chmod, 0o644)
-        self.assert_privacy_fix(self.checks())
+        res = self.checks()
+        for name in ("data folder", "mode"):
+            self.assertFalse(res[name]["ok"], res[name])
+            self.assertEqual(res[name]["fix"], f"make {f} readable for this user (chmod u+r, or chown it back)")
 
     def test_bad_config_yaml_fails_data_folder_and_mode(self):
         (self.data / "config.yaml").write_text("mode: loud\n")

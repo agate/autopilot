@@ -181,6 +181,27 @@ class InstallTest(HomeTest):
         self.assertIn("no C compiler", out["note"])
         self.assertIn("macOS will ask", out["note"])
 
+    def test_downloads_and_another_letter_case_get_the_privacy_note(self):
+        for folder in (self.home / "documents" / "x", self.home / "Downloads" / "x", self.home / "DESKTOP" / "y"):
+            with self.subTest(folder):
+                out, _, _ = self.do_install(data=str(folder))
+                self.assertIn("macOS will ask to let assistant-gate into", out["note"])
+        out, _, _ = self.do_install(data=str(self.home / "data"))
+        self.assertEqual(out["note"], "")
+
+    @unittest.skipIf(os.geteuid() == 0, "root can write anywhere")
+    def test_a_plist_that_cannot_be_written_is_one_line_and_leaves_no_temp_file(self):
+        self.agents.mkdir(parents=True)
+        self.agents.chmod(0o555)
+        self.addCleanup(self.agents.chmod, 0o755)
+        with self.assertRaises(install.InstallError) as cm:
+            self.do_install()
+        plist = self.agents / "com.assistant.gate.plist"
+        self.assertTrue(str(cm.exception).startswith(f"cannot write {plist}: "), cm.exception)
+        self.assertEqual(len(str(cm.exception).splitlines()), 1)
+        self.assertFalse(plist.exists())
+        self.assertEqual(list(self.agents.glob("*.new")), [])
+
     def test_a_data_folder_elsewhere_has_no_privacy_note(self):
         for folder in (self.data, self.home / "Documents2", self.home / "Library" / "Other"):
             with self.subTest(folder):
@@ -302,10 +323,50 @@ class UninstallTest(HomeTest):
             f.parent.mkdir(parents=True, exist_ok=True)
             f.write_text("x")
         fake = FakeLaunchctl(fail={"bootout": (5, "Boot-out failed: 5:\n Input/output error")}, loaded=True)
+        sleeps = []
         with self.assertRaises(install.InstallError) as cm:
-            install.uninstall(agents_dir=self.agents, home=self.lhome, launchctl=fake)
+            install.uninstall(agents_dir=self.agents, home=self.lhome, launchctl=fake, sleep=sleeps.append)
         self.assertEqual(str(cm.exception), "launchctl bootout failed: Boot-out failed: 5: Input/output error")
         self.assertTrue(plist.exists() and launcher.exists())
+        self.assertEqual(install.UNLOAD_TRIES, 10)
+        self.assertEqual([c[0] for c in fake.calls], ["bootout"] + ["print"] * install.UNLOAD_TRIES)
+        self.assertEqual(sleeps, [install.UNLOAD_WAIT] * (install.UNLOAD_TRIES - 1))
+        self.assertEqual(install.UNLOAD_WAIT, 0.5)
+
+    def test_a_job_that_takes_a_moment_to_go_is_waited_for(self):
+        plist, launcher = install.plist_path(self.agents), install.launcher_path(self.lhome)
+        for f in (plist, launcher):
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text("x")
+        calls = []
+
+        def slow(*args):  # bootout returns at once; `print` still finds the job twice while the gate exits
+            calls.append(args[0])
+            if args[0] == "print":
+                return (0, "") if calls.count("print") <= 2 else (113, "Could not find service")
+            return 0, ""
+
+        sleeps = []
+        out = install.uninstall(agents_dir=self.agents, home=self.lhome, launchctl=slow, sleep=sleeps.append)
+        self.assertEqual(calls, ["bootout", "print", "print", "print"])
+        self.assertEqual(sleeps, [install.UNLOAD_WAIT] * 2)
+        self.assertFalse(plist.exists() or launcher.exists())
+        self.assertEqual(out["removed"], [str(plist), str(launcher)])
+
+    @unittest.skipIf(os.geteuid() == 0, "root can remove anything")
+    def test_a_file_that_cannot_be_removed_is_one_line(self):
+        plist, launcher = install.plist_path(self.agents), install.launcher_path(self.lhome)
+        for f in (plist, launcher):
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text("x")
+        launcher.parent.chmod(0o555)
+        self.addCleanup(launcher.parent.chmod, 0o755)
+        fake = FakeLaunchctl()  # not loaded: `print` exits non-zero, so uninstall gets to the files
+        with self.assertRaises(install.InstallError) as cm:
+            install.uninstall(agents_dir=self.agents, home=self.lhome, launchctl=fake, sleep=self.fail)
+        self.assertTrue(str(cm.exception).startswith(f"cannot remove {launcher}: "), cm.exception)
+        self.assertEqual(len(str(cm.exception).splitlines()), 1)
+        self.assertTrue(launcher.exists())
 
 
 class DefaultRunnerTest(unittest.TestCase):

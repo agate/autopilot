@@ -10,6 +10,7 @@ import os
 import plistlib
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 from assistant import config, datadir
@@ -20,11 +21,14 @@ INTERVAL = 60  # seconds between gate runs (design 7.1)
 TOOLS = ("claude", "gh", "git", "python3")
 ERR_LOG = "gate.err.log"  # launchd's own stderr for the job: Python errors and the `ap2: ...` line
 LAUNCHCTL_TIMEOUT = 30  # seconds
+UNLOAD_TRIES = 10  # `launchctl print` checks after bootout: a running gate can take a moment to exit
+UNLOAD_WAIT = 0.5  # seconds between those checks, so uninstall waits about 5 s for the job to go
 NO_COMPILER = ("no C compiler, so the gate runs bin/ap2 directly: macOS refuses that when the package is in a "
                "cloud-synced folder (install Xcode command line tools, then run `ap2 install` again)")
 PRIVACY = ("macOS will ask to let assistant-gate into {folder}, and the gate cannot run until it is allowed "
            "(System Settings > Privacy & Security > Files and Folders)")
-PROTECTED = (("Documents",), ("Desktop",), ("Library", "Mobile Documents"))  # macOS asks before a program reads these
+# macOS asks before a program reads these (System Settings > Privacy & Security > Files and Folders)
+PROTECTED = (("Documents",), ("Desktop",), ("Downloads",), ("Library", "Mobile Documents"))
 
 
 class InstallError(ConfigError):
@@ -52,10 +56,11 @@ def err_log_path(home=None) -> Path:
 
 
 def _protected(folder: Path) -> bool:
-    """Is the folder inside one macOS asks about before a program may read it (Documents, Desktop, iCloud Drive)?"""
+    """Is the folder inside one macOS asks about before a program may read it (Documents, Desktop, Downloads, iCloud
+    Drive)? Letter case is ignored, as the default disk does (~/documents is ~/Documents there)."""
     home = Path.home().resolve()
     folder = Path(folder).resolve()
-    return any(folder.is_relative_to(home.joinpath(*parts)) for parts in PROTECTED)
+    return any(datadir._inside(folder, home.joinpath(*parts)) for parts in PROTECTED)
 
 
 def ap2_program() -> Path:
@@ -165,12 +170,19 @@ def install(data=None, agents_dir=None, home=None, launchctl=None, which=None, b
             "mode": mode, "tools": tools, "note": "; ".join(notes)}
 
 
-def uninstall(agents_dir=None, home=None, launchctl=None) -> dict:
-    """Unload v2's job and remove its plist and launcher. The data folder and the err log are not touched."""
+def uninstall(agents_dir=None, home=None, launchctl=None, sleep=None) -> dict:
+    """Unload v2's job and remove its plist and launcher. The data folder and the err log are not touched. bootout
+    can return while the gate is still exiting, so `print` is asked up to UNLOAD_TRIES times, UNLOAD_WAIT apart."""
     run = launchctl or _launchctl
+    sleep = sleep or time.sleep
     _, out = run("bootout", target())  # not loaded is fine; `print` below says whether it is gone
-    rc, _ = run("print", target())
-    if rc == 0:
+    for n in range(UNLOAD_TRIES):
+        rc, _ = run("print", target())
+        if rc != 0:
+            break
+        if n + 1 < UNLOAD_TRIES:
+            sleep(UNLOAD_WAIT)
+    else:
         raise InstallError(f"launchctl bootout failed: {_one_line(out)}")
     removed = []
     for f in (plist_path(agents_dir), launcher_path(home)):
