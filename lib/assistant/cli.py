@@ -78,6 +78,7 @@ def _parser() -> argparse.ArgumentParser:
     _source_parser(sub)
     _scan_parser(sub)
     _gate_parser(sub)
+    _install_parsers(sub)
     _template_parser(sub)
     _review_parser(sub)
     _worker_parser(sub)
@@ -808,6 +809,55 @@ def cmd_gate(args) -> int:
 
 
 COMMANDS["gate"] = cmd_gate
+
+
+# -- ap2 install, uninstall and doctor (v2's own launchd job; design section 12, "Install") ------------------------
+
+INSTALL_DESCRIPTION = ("Write and load v2's own launchd job, com.assistant.gate, which runs `ap2 gate` every 60 "
+                       "seconds (plist in ~/Library/LaunchAgents, launcher in ~/Library/Application Support/"
+                       "assistant). It never touches v1's or secretary's job. Only the user runs it, never a worker. "
+                       "Sets up the data folder (a new config.yaml says mode: shadow; an existing one is kept as it "
+                       "is) and prints what it wrote as JSON.")
+
+
+def _install_parsers(sub) -> None:
+    i = sub.add_parser("install", help="write and load v2's own launchd job (com.assistant.gate)",
+                       description=INSTALL_DESCRIPTION)
+    i.add_argument("--data", metavar="PATH", help=DATA_HELP)
+    sub.add_parser("uninstall", help="unload and remove v2's launchd job; the data folder is kept",
+                   description="Unload v2's own launchd job, com.assistant.gate, and remove its plist and launcher. "
+                               "It never touches v1's or secretary's job, and the data folder is kept. Only the user "
+                               "runs it. Prints what it removed as JSON.")
+    d = sub.add_parser("doctor", help="check v2's launchd job, data folder, tools, profile and mode",
+                       description="Check v2's launchd job, whether the gate ran in the last 3 minutes, the data "
+                                   "folder, the tools on the job's PATH (claude, gh, git, python3), the active "
+                                   "profile and the mode, with a fix line under each failure. Read-only: creates "
+                                   "nothing. Exits 1 when a check fails.")
+    d.add_argument("--data", metavar="PATH", help=DATA_HELP)
+
+
+def cmd_install(args) -> int:
+    from assistant import install
+    _print_json(install.install(args.data))
+    return 0
+
+
+def cmd_uninstall(args) -> int:
+    from assistant import install
+    _print_json(install.uninstall())
+    return 0
+
+
+def cmd_doctor(args) -> int:
+    from assistant import doctor
+    res = doctor.checks(args.data)
+    _write_out("\n".join(doctor.lines(res)))
+    return 0 if all(c["ok"] for c in res) else 1
+
+
+COMMANDS["install"] = cmd_install
+COMMANDS["uninstall"] = cmd_uninstall
+COMMANDS["doctor"] = cmd_doctor
 
 
 # --- ap2 template (design 6) ---------------------------------------------------------------------------------

@@ -412,7 +412,8 @@ class HelpAndUsageInProcessTest(unittest.TestCase):
     def test_serve_help_names_every_write_and_what_it_may_run(self):
         out = io.StringIO()
         # A wide fixed width: argparse wraps at the terminal's width and may break "Read-only" at its hyphen.
-        with mock.patch.dict(os.environ, {"COLUMNS": "1000"}), contextlib.redirect_stdout(out):
+        with mock.patch.dict(os.environ, {"COLUMNS": "1000", "PYTHON_COLORS": "0"}), \
+                    contextlib.redirect_stdout(out):
             self.assert_exits(["serve", "--help"], 0)
         words = " ".join(out.getvalue().split())
         for want in ("Read-only, but for saving a question on a card, answering today's cap card and switching the "
@@ -421,6 +422,32 @@ class HelpAndUsageInProcessTest(unittest.TestCase):
                      "and in both modes a switch to a gateway profile may run its models command."):
             with self.subTest(want):
                 self.assertIn(want, words)
+
+    def test_install_help_names_v2s_own_job_and_who_runs_it(self):
+        def words(argv):
+            out = io.StringIO()
+            with mock.patch.dict(os.environ, {"COLUMNS": "1000", "PYTHON_COLORS": "0"}), \
+                    contextlib.redirect_stdout(out):
+                self.assert_exits(argv, 0)
+            return " ".join(out.getvalue().split())
+
+        install_help = words(["install", "--help"])
+        for want in ("Write and load v2's own launchd job, com.assistant.gate, which runs `ap2 gate` every 60 seconds",
+                     "It never touches v1's or secretary's job.", "Only the user runs it, never a worker.",
+                     "a new config.yaml says mode: shadow"):
+            with self.subTest(want):
+                self.assertIn(want, install_help)
+        uninstall_help = words(["uninstall", "--help"])
+        for want in ("com.assistant.gate", "never touches v1's or secretary's job", "the data folder is kept",
+                     "Only the user runs it."):
+            with self.subTest(want):
+                self.assertIn(want, uninstall_help)
+        self.assertIn("Read-only: creates nothing.", words(["doctor", "--help"]))
+        listing = words(["--help"])
+        for command in ("install", "uninstall", "doctor"):
+            with self.subTest(command):
+                self.assertIn(command, cli.COMMANDS)
+                self.assertRegex(listing, rf"\b{command} \w")
 
     def test_help_with_both_streams_closed_exits_0(self):
         with mock.patch.object(sys, "stdout", None), mock.patch.object(sys, "stderr", None):
