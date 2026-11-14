@@ -655,6 +655,17 @@ class WatchTest(GateCase):
                 self.assertIn(f"watches: error: {path}", (self.data / "gate.log").read_text())
                 self.assertEqual(json.loads(path.read_text()), {"slack": {"last_check_at": "2026-11-10T14:00:00Z"}})
 
+    def test_a_watches_file_nested_too_deep_is_a_damaged_file(self):
+        path = self.data / "watches.json"
+        path.write_text("[" * 100_000 + "]" * 100_000, encoding="utf-8")
+        out = self.gate(self.T, watches=[{"name": "slack", "every": "5m"}])
+        self.assertEqual(out["watches_due"], ["slack"])
+        self.assertEqual([e.get("watches") for e in out["errors"]], [str(path)])
+        self.assertIn("recursion", out["errors"][0]["error"])
+        self.assertEqual(json.loads((self.data / "gate.json").read_text(encoding="utf-8")), out)
+        self.assertIn(f"watches: error: {path}", (self.data / "gate.log").read_text())
+        self.assertEqual(json.loads(path.read_text()), {"slack": {"last_check_at": "2026-11-10T14:00:00Z"}})
+
     def test_a_lone_surrogate_in_watches_json_is_a_damaged_file(self):
         path = self.data / "watches.json"
         path.write_text('{"\\ud800": {"last_check_at": null}}', encoding="utf-8")
@@ -1509,9 +1520,9 @@ class CommandWatchTest(LoopCase):
         self.assertIn("b2", json.loads((self.data / "watches.json").read_text()))  # its time stays written
         self.assertEqual(self.gate(self.T + timedelta(minutes=4))["watches_due"], [])
 
-    def test_each_read_is_given_its_share_of_what_is_left_of_the_budget(self):
-        self.command_source("a1")
-        self.command_source("b2")
+    def test_each_read_may_use_what_is_left_less_a_floor_for_each_read_still_to_go(self):
+        for name in ("a1", "b2", "c3", "d4"):
+            self.command_source(name)
         given = []
         real = engine.Engine.read
 
@@ -1519,11 +1530,40 @@ class CommandWatchTest(LoopCase):
             given.append(max_timeout)
             return real(eng, name, dry_run=dry_run, max_timeout=max_timeout)
 
-        clock = iter([0.0, 0.0, 30.0])  # the start, before a1, before b2 (a1 took 30 of its 60)
+        # the start, then before each read: a1 took 35, b2 took 50, c3 took 30 (115 of 120 used)
+        clock = iter([0.0, 0.0, 35.0, 85.0, 115.0])
         with mock.patch("assistant.gate.monotonic", lambda: next(clock)), \
                 mock.patch.object(engine.Engine, "read", read):
             self.gate(self.T)
-        self.assertEqual(given, [gate.READ_BUDGET / 2, gate.READ_BUDGET - 30.0])
+        self.assertEqual(gate.READ_FLOOR, 10)
+        self.assertEqual(given, [120 - 3 * 10, 85 - 2 * 10, 35 - 10, 5])
+
+    def test_when_the_floors_are_more_than_what_is_left_each_read_gets_an_even_share(self):
+        for name in ("a1", "b2", "c3"):
+            self.command_source(name)
+        given = []
+        real = engine.Engine.read
+
+        def read(eng, name, dry_run=False, max_timeout=None):
+            given.append(max_timeout)
+            return real(eng, name, dry_run=dry_run, max_timeout=max_timeout)
+
+        clock = iter([0.0, 0.0, 0.0, 0.0])  # nothing used
+        with mock.patch("assistant.gate.monotonic", lambda: next(clock)), \
+                mock.patch.object(gate, "READ_BUDGET", 12), mock.patch.object(engine.Engine, "read", read):
+            self.gate(self.T)
+        self.assertEqual(given, [4.0, 6.0, 12.0])  # 12 - 20 is less than 12 / 3, then 12 - 10 is less than 12 / 2
+
+    def test_a_slow_first_read_is_not_cut_by_its_place_in_the_order(self):
+        self.command_source("a1")
+        (self.tmp / "a1.py").write_text(f"import json, time; time.sleep(1.5); "
+                                        f"print(json.dumps({json.dumps([item(1)])}))\n")
+        for n, name in enumerate(("b2", "c3", "d4"), start=2):
+            self.command_source(name, items=[item(n)])
+        with mock.patch.object(gate, "READ_BUDGET", 4), mock.patch.object(gate, "READ_FLOOR", 0.5):
+            out = self.gate(self.T)  # an even split would cut a1 at 1 second
+        self.assertEqual(out["errors"], [])
+        self.assertEqual([(r["watch"], r["made"]) for r in out["reads"]], [("a1", 1), ("b2", 1), ("c3", 1), ("d4", 1)])
 
     def test_a_hanging_read_is_one_error_and_does_not_use_the_time_of_the_next_watch(self):
         self.command_source("a1")
@@ -1575,6 +1615,13 @@ class ScanWatchTest(LoopCase):
         launches = [json.loads(line) for line in (self.data / "spend" / "launches.jsonl").read_text().splitlines()]
         self.assertEqual([(r["short"], r["kind"]) for r in launches], [("s0001", "scan")])
         self.assertIn("scan: started s0001 for vendor-a, vendor-b", self.gate_log())
+
+    def test_a_spend_launch_row_that_was_not_written_is_one_scan_error(self):
+        with mock.patch("assistant.spend.record_launch", side_effect=OSError("disk full")):
+            out = self.gate(self.T)
+        self.assertEqual(out["errors"], [{"scan": True, "error": "the spend launch row was not written: disk full"}])
+        self.assertEqual(self.scan_record()["short_id"], "s0001")  # the session still runs, on record
+        self.assertIn("scan: the spend launch row was not written: disk full", self.gate_log())
 
     def test_a_second_run_while_it_is_open_starts_none_and_writes_no_watch_time(self):
         self.gate(self.T)
@@ -1870,6 +1917,16 @@ class PassDueTest(LoopCase):
         self.put(last_slot="2026-11-09T09:00")
         out = self.gate(utc(2026, 11, 10, 9, 1))
         self.assertEqual(self.pass_file()["why"], [{"why": "ready", "card": out["routines"][0]["card"]}])
+
+    def test_a_workers_file_nested_too_deep_is_one_pass_error_and_the_run_completes(self):
+        (self.data / "workers.json").write_text('{"workers": ' + "[" * 100_000 + "]" * 100_000 + "}")
+        out = self.gate(self.T)
+        self.assertEqual([e for e in out["errors"] if "pass" in e],
+                         [{"pass": True, "error": out["errors"][-1]["error"]}])
+        self.assertIn("recursion", out["errors"][-1]["error"])
+        self.assertIs(out["pass_due"], False)
+        self.assertEqual(json.loads((self.data / "gate.json").read_text(encoding="utf-8")), out)
+        self.assertIn("pass: error:", self.gate_log())
 
     def test_a_damaged_pass_file_is_one_error(self):
         cid = self.add_card()

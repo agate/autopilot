@@ -14,8 +14,9 @@ its key and only writes `last_slot`.
 
 Then (phase 2): every worker on record is checked (`Workers.check`, 8.2); the watches come from the user's own source
 files (`watch_list`); a due `via: command` watch is read here (`Engine.read`), all of them in READ_BUDGET (120)
-seconds per run (a read's timeout is cut to what is left divided by the reads still to go, so one hanging read cannot
-use the time of the others; once it is spent a watch waits for its next due time, so one slow read cannot hold the
+seconds per run (a read's timeout is cut to what is left, less READ_FLOOR (10) seconds kept for each read still to go,
+or an even share when that is more, so one hanging read cannot use the time of the others and one slow read is not
+cut by its place in the order; once it is spent a watch waits for its next due time, so one slow read cannot hold the
 lock, and with it every later run and routine slot, for long; a long read belongs to `ap2 source read`); the due
 `mcp`, `connector` and `skill` watches share one scan session (`scan.start`), which a later run takes into cards
 when it ends (`scan.finish`); and
@@ -61,6 +62,9 @@ WENT_BACK = routines.WENT_BACK
 # Seconds one run gives all its command reads together, well under routines.GRACE: a read holds the gate lock, and
 # every later run waits on it, so a routine slot that came due meanwhile could be found past the grace and missed.
 READ_BUDGET = 120
+# Seconds of READ_BUDGET kept for each read still to go while one read runs (unless an even share is more), so one
+# read may use most of what is left but never the time owed to the later ones.
+READ_FLOOR = 10
 
 
 @contextlib.contextmanager
@@ -204,7 +208,7 @@ def _read_watch_state(data: Path):
         state = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {}, None
-    except (OSError, ValueError) as e:  # UnicodeDecodeError is a ValueError
+    except (OSError, ValueError, RecursionError) as e:  # UnicodeDecodeError is a ValueError; too deep is damaged
         return {}, {"watches": str(path), "error": f"{path}: cannot read the watch times: {e}"}
     if not isinstance(state, dict):
         return {}, {"watches": str(path),
@@ -368,10 +372,10 @@ def _log_read(log, entry: dict) -> None:
 
 def _read_commands(data: Path, now: datetime, cfg, names: list, reads: list, errors: list, log) -> None:
     """Read each due `via: command` watch (`Engine.read`); a failed read is one error and the next still reads.
-    The reads share READ_BUDGET seconds: each read's timeout is cut to what is left divided by the reads still to go
-    (this one included), so one hanging read cannot use the time of the others, and time a fast read leaves unused
-    goes to the later ones. Once it is spent a watch is not read (one error); its time stays written, so it is read
-    at its next due time."""
+    The reads share READ_BUDGET seconds: each read's timeout is cut to what is left, less READ_FLOOR seconds kept for
+    each read still to go (or to an even share of what is left, when that is more), so one hanging read cannot use
+    the time of the others and one slow read is not cut by its place in the order. Once it is spent a watch is not
+    read (one error); its time stays written, so it is read at its next due time."""
     if not names:
         return
     began = monotonic()
@@ -385,7 +389,8 @@ def _read_commands(data: Path, now: datetime, cfg, names: list, reads: list, err
             log(f"watch {name}: error: {why}")
             continue
         try:
-            result = eng.read(name, max_timeout=left / (len(names) - i))
+            after = len(names) - i - 1  # the reads still to go after this one
+            result = eng.read(name, max_timeout=max(left / (after + 1), left - READ_FLOOR * after))
         except Exception as e:  # noqa: BLE001 - one watch's failure never stops the run; a SourceError is ours
             why = str(e) if isinstance(e, (ConfigError, CardError, OSError)) else _error_text(e)
             errors.append({"watch": name, "error": why})
@@ -418,6 +423,9 @@ def _start_scan(data: Path, now: datetime, cfg, store: Store, claude, transcript
         log(f"scan: not started: {e}")
         return
     log(f"scan: started {rec['short_id']} for {', '.join(c['source'] for c in p['calls'])}")
+    if rec.get("note"):  # e.g. the spend launch row was not written, so the cap would undercount
+        errors.append({"scan": True, "error": rec["note"]})
+        log(f"scan: {rec['note']}")
 
 
 def _finish_scan(data: Path, now: datetime, cfg, claude, transcripts_dir, reads: list, errors: list, log) -> bool:
@@ -515,7 +523,7 @@ def _pass_due(data: Path, now: datetime, store: Store, errors: list, log) -> boo
         log(f"pass: error: {damaged}")
     try:
         present = _present(data, store)
-    except (CardError, WorkerError, OSError) as e:
+    except (CardError, WorkerError, OSError, RecursionError) as e:  # RecursionError: a workers.json nested too deep
         errors.append({"pass": True, "error": str(e)})
         log(f"pass: error: {e}")
         return False

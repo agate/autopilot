@@ -1477,8 +1477,9 @@ Calls the author made without asking (check them):
     `WebSearch` denied as well; the active profile's overlay merged under them as the worker floor merges it), then
     starts `claude --bg -n "ap2 scan · <scan>" --model <small model> --settings <file> <brief>` in the scan folder
     with the profile's env, and writes `<data>/scan-session.json` `{plan, short_id, session_id, started_at,
-    profile}` and a spend launch row of kind `scan`. The record goes on file right after the launch, with
-    `session_id` empty, before the listing (up to 60 seconds) is asked for the session id; then it is written again
+    profile}` and a spend launch row of kind `scan`. A launch row that cannot be written does not stop the session:
+    the start returns a `note`, and the gate reports it as one error `{"scan": true, "error"}`. The record goes on
+    file right after the launch, with `session_id` empty, before the listing (up to 60 seconds) is asked for the session id; then it is written again
     with the id. So an error or a Ctrl-C during the listing still leaves a record, and the next run stops and takes
     that session. If that second write fails, the first record stays (`finish` works with an empty id). If the
     first write fails, the session is stopped (`claude stop <short>`, errors ignored) and the start raises an error
@@ -1567,8 +1568,9 @@ Calls the author made without asking (check them):
     `{watch, via, made, updated, unchanged, dropped}` per read, a failed read (exit not 0, a timeout, an unset
     setting) is one error `{"watch", "error"}` and the next watch is still read. **[decided by the builder]** The
     command reads of one run share one time budget, `READ_BUDGET` (120 seconds), counted from when the reads begin. Each
-    read's timeout is cut to what is left of it divided by the reads still to go (this one included), so one hanging
-    read cannot use the time of the others; time a fast read leaves unused goes to the later ones. A source's
+    read may use what is left of it, less `READ_FLOOR` (10) seconds kept for each read still to go (or an even share
+    of what is left, when that is more). So one hanging read cannot take the others' time, and one slow read is not
+    cut by its place in the order. A source's
     `read.timeout` (up to 600) that is longer is cut under the gate, and a read cut this way fails the usual
     timeout way, one error that names the seconds it waited. Once
     the budget is spent, a due watch is not started: one error `{"watch", "error": "not read: this run's 120
@@ -1609,7 +1611,8 @@ Calls the author made without asking (check them):
     "ready" | "result" | "answered", "card", "file"?}` for each ready card or result entry not in `seen`, and each ask
     in `seen` that is no longer open the same way; `due` is `bool(why)`; `since` is kept from the first run that found
     it due and reset when it is not due. gate.log gets `pass due: <n> reason(s)` when due. A damaged `pass.json` is
-    one error and the run goes on from an empty `seen`. The gate starts no pass. The choices: a change since the
+    one error and the run goes on from an empty `seen`. A `workers.json` that cannot be read (nested too deep
+    included) is one error `{"pass": true, "error"}`, and no `pass.json` is written that run. The gate starts no pass. The choices: a change since the
     last pass makes a pass due, a standing state does not (as v1's `fingerprint` and `should_dispatch` do), so a
     pass that could start nothing is not due again every minute; reverse: delete the file, the next run rebuilds it.
     Only `gate.pass_started(data, now)` updates `seen` (it copies the present state and clears `due`); the pass
