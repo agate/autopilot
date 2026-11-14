@@ -4351,7 +4351,7 @@ class PrReviewRoleTest(PrReviewCase):
         ap2 = ROOT / "bin" / "ap2"
         for verb in ("cap", "worker start", "worker end", "worker answer", "worker finish", "worker list",
                      "review apply", "review sync", "card add", "card list", "restore", "profile", "source", "gate",
-                     "config"):
+                     "config", "install", "uninstall", "doctor"):
             for rule in (f"Bash(ap2 {verb}:*)", f"Bash({ap2} {verb}:*)"):
                 with self.subTest(rule=rule):
                     self.assertIn(rule, ro)

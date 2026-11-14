@@ -135,9 +135,9 @@ READ_ONLY_KEPT = ("ToolSearch", "Task")
 # rule allows. The hooks (`hook-*`) are left alone. `workers.floor` writes each in two spellings: `ap2 <command>` and
 # `<package>/bin/ap2 <command>`. Best effort: they match the command's text, as v1's rules do.
 READ_ONLY_AP2_DENIED = ("config", "search", "restore", "source", "scan", "gate", "template", "profile", "spend", "cap",
-                        "serve", "phone", "import-v1", "card add", "card list", "review apply", "review sync",
-                        "worker list", "worker start", "worker end", "worker check", "worker answer",
-                        "worker finish")
+                        "serve", "phone", "import-v1", "install", "uninstall", "doctor", "card add", "card list",
+                        "review apply", "review sync", "worker list", "worker start", "worker end", "worker check",
+                        "worker answer", "worker finish")
 
 
 @dataclass(frozen=True)
