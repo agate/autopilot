@@ -615,6 +615,17 @@ class HideTest(PhoneCase):
             self.assertEqual(sorted(rec), ["answered_at", "created_at", "handling", "kind", "status", "task"])
         self.assertEqual(full["card"]["ask"], {"type": "approve", "from": "v1"})
 
+    def test_a_hidden_card_keeps_a_v2_question_on_the_phone(self):
+        # Only v1's own ask carries quoted words; a question v2 asks about a hidden card still shows, scrubbed.
+        card = self.pr42()
+        ask = {"type": "answer", "from": "prloop", "role": "loop", "reason": "max_rounds",
+               "text": f"The PR loop stopped after round 3 in {self.data}/runs. What should it do?"}
+        Store(self.data, cfg=self.cfg).update(card["id"], {"ask": ask}, by="test")
+        data = self.build(phone_hide_quotes=True)
+        self.assertNotIn(MARKER, json.dumps(data, ensure_ascii=False))
+        self.assertEqual(data["full"][card["id"]]["card"]["ask"],
+                         {**ask, "text": "The PR loop stopped after round 3 in <data>/runs. What should it do?"})
+
     def test_a_hidden_project_title_is_hidden_in_the_projects_list(self):
         card = self.add(kind="project", title=f"{MARKER} project",
                         source={"name": "gh-mine", "link": None, "record": {"text": MARKER, "author": "Ana"}})

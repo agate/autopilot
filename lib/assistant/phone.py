@@ -211,7 +211,7 @@ def build(data, cfg: Optional[config.Config] = None, now: Optional[datetime] = N
             card["source"]["record"] = record
             out["source_block"]["text"] = None
             out["source_block"]["record"] = copy.deepcopy(record)
-            if isinstance(card.get("ask"), dict):
+            if isinstance(card.get("ask"), dict) and card["ask"].get("from") == "v1":
                 card["ask"].pop("text", None)  # a taken-over v1 question's ask carries its body
         if "template_error" in out:
             out["template_error"] = scrub(out["template_error"])
