@@ -132,6 +132,11 @@ class CardAskTest(Ap2Case):
         self.assertIn("imported v1 copy", line)
         self.assertEqual(self.ok("card", "show", v1), before)
 
+    def test_a_taken_over_v1_card_takes_an_ask(self):
+        cid = self.add(feed=V1_FEED, taken_over="2026-11-10T12:00:00Z")
+        out = self.ok("card", "ask", cid, "--type", "fix", "--text-file", self.text())
+        self.assertEqual((out["ask"]["type"], out["lane"]), ("fix", "needs"))
+
     def test_a_bad_card_id_type_or_text_is_refused(self):
         self.assertIn("not a card id", self.fails("card", "ask", "nope", "--type", "fix", "--text-file", self.text()))
         self.assertFalse(self.data.exists())  # refused before the data folder is touched
@@ -163,6 +168,10 @@ class CardLaneTest(Ap2Case):
         v1 = self.add(feed=V1_FEED)
         self.assertIn("imported v1 copy", self.fails("card", "lane", v1, "done"))
         self.assertEqual(self.ok("card", "show", v1)["lane"], "planned")
+
+    def test_a_taken_over_v1_card_moves(self):
+        cid = self.add(feed=V1_FEED, taken_over="2026-11-10T12:00:00Z")
+        self.assertEqual(self.ok("card", "lane", cid, "running")["lane"], "running")
 
 
 # -- criterion 5: the runbook names only ap2 commands that exist ---------------------------------------------------

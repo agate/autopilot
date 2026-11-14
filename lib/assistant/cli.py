@@ -75,8 +75,8 @@ def _parser() -> argparse.ArgumentParser:
     ak.add_argument("--by", default="ap2", help=BY_HELP)
     ak.add_argument("--data", metavar="PATH", help=DATA_HELP)
     ln = card_sub.add_parser("lane", help="move a card to another lane and print it",
-                             description="Move CARD to LANE and print the card. An imported v1 copy is refused. "
-                                         "Writes only inside the data folder.")
+                             description="Move CARD to LANE and print the card. An imported v1 copy is refused "
+                                         "unless it is taken over. Writes only inside the data folder.")
     ln.add_argument("id", metavar="CARD")
     ln.add_argument("lane", metavar="LANE", choices=LANES)
     ln.add_argument("--by", default="ap2", help=BY_HELP)
@@ -321,7 +321,7 @@ def _card_ask(args) -> dict:
     store = _store(args)
 
     def room(card):
-        if card.get("feed") == V1_FEED:
+        if card.get("feed") == V1_FEED and not card.get("taken_over"):
             raise CardError(f"{card['id']} is an imported v1 copy; v1 asks for it")
         cur = card.get("ask")
         if cur is not None:
@@ -339,7 +339,7 @@ def _card_lane(args) -> dict:
     store = _store(args)
 
     def movable(card):
-        if card.get("feed") == V1_FEED:
+        if card.get("feed") == V1_FEED and not card.get("taken_over"):
             raise CardError(f"{card['id']} is an imported v1 copy; v1 moves it")
         return f"lane {card.get('lane')} -> {args.lane}"
 

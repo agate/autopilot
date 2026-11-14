@@ -17,7 +17,8 @@ Run each `ap2` command as a command of its own, written out in full.
 - **Live mode.** You may run the outward steps below, and only those, only for the cards of your group.
 - Never edit a card file, `pass.json`, `dispatch.json` or `config.yaml` by hand: use the `ap2` commands.
 - Never post a PR comment or review, never open an issue, never add a reviewer (denied in every mode).
-- A card whose `feed` is `v1-import` is v1's copy: read it, never change it.
+- A card whose `feed` is `v1-import` is v1's copy unless it has `taken_over`: read it, never change it. With
+  `taken_over` it is live and v2 works on it, like any other card.
 
 ## 1. Begin
 

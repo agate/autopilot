@@ -1,8 +1,9 @@
 """The dispatcher pass (design 8.0; section 12, "Dispatcher pass"): one short `claude --bg` session per repo group,
 driven by the v2 runbook (`builtin/RUNBOOK.md`), that decides what happens next for the cards of that group.
 
-- `groups(data, store)`: the groups a pass may serve, one per distinct `repo` of the projects live cards name, plus
-  the group None (cards with no project, and projects with no repo), which runs in the data folder.
+- `groups(data, store)`: the groups a pass may serve, one per distinct `repo` of the projects live cards name (a
+  taken-over v1 card is live, a plain imported v1 copy is not), plus the group None (cards with no project, and
+  projects with no repo), which runs in the data folder.
 - `settings(data, profile, projects, mode)`: the pass's `--settings`, built like the worker floor.
 - `start(data, group, queue, profile, now, mode, why)`: start one pass and record it in `<data>/dispatch.json`
   `{group, projects, short_id, session_id, started_at, profile, queue, why, token, looks, seen_busy}`, with a spend
@@ -81,12 +82,15 @@ class LaunchError(DispatchError):
 # -- groups ---------------------------------------------------------------------------------------------------------
 
 def _live(c: dict) -> bool:
-    return c.get("lane") != "done" and c.get("feed") != V1_FEED
+    """Not done, and not an imported v1 copy: a v1 card with `taken_over` is live (v2 works on it), as in the
+    gate's ready rule (`gate._present`)."""
+    return c.get("lane") != "done" and not (c.get("feed") == V1_FEED and not c.get("taken_over"))
 
 
 def groups(data, store: Store) -> tuple:
     """The groups a pass may serve, as `(groups, errors)`: each group `{group, projects}` is one distinct `repo`
-    of the projects named by live cards (not done, not an imported v1 copy), with those project names sorted;
+    of the projects named by live cards (not done, not an imported v1 copy that is not taken over), with those
+    project names sorted;
     the group None holds live cards with no project and projects with no repo, and comes last. A project that does
     not load is one error `{"project", "error"}` and is left out. Raises CardError or OSError when the store does not
     read."""

@@ -1922,7 +1922,8 @@ Calls the author made without asking (check them):
 - **[decided by the builder]** Dispatcher pass (design 8.0, phase 2 slice 2). Module: `lib/assistant/dispatch.py`;
   the runbook is `lib/assistant/builtin/RUNBOOK.md`, written for cards.
   - Groups: `dispatch.groups(data, store)` gives one group per distinct `repo` of the projects (`projects.load`)
-    named by live cards (not `done`, not an imported v1 copy), with the project names sorted, and last the group
+    named by live cards (not `done`, not an imported v1 copy without `taken_over`: a taken-over v1 card is live,
+    and the take-over writes its `projects/<name>.yaml` when it is missing), with the project names sorted, and last the group
     None: live cards with no `project`, and projects with no `repo`. That pass runs in the data folder. A project
     that does not load is one error `{"project", "error"}` (`project <name>: refused: ...` in gate.log) and is left
     out; the others still group.
@@ -1984,8 +1985,9 @@ Calls the author made without asking (check them):
     is refused the same way and ends nothing: a pass stopped at a prompt and resumed by the user later cannot end
     another group's pass. Without `AP2_PASS` (a person at a terminal) it ends the open pass. `ap2 card ask CARD
     --type T --text-file F [--from dispatch]` sets the ask `{type, from, text}` and the lane `needs` through
-    `Store.update_checked`, refused while the card has an open ask and for an imported v1 copy; `ap2 card lane
-    CARD LANE` moves a card, refusing an imported v1 copy. A bad id is exit 1, a bad type, lane or `--from` exit 2.
+    `Store.update_checked`, refused while the card has an open ask and for an imported v1 copy that is not taken
+    over; `ap2 card lane CARD LANE` moves a card, refusing such a copy too (a taken-over card is v2's to move). A
+    bad id is exit 1, a bad type, lane or `--from` exit 2.
     They write only inside the data folder, so they run in shadow mode.
   - The choices (each reversible):
     - The gate does not wait. v1's `dispatch.run` polls the pass inside the gate for up to `dispatch_timeout_s`;

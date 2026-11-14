@@ -67,6 +67,16 @@ class GroupsTest(DispatchCase):
         self.add_card(feed=V1_FEED)
         self.assertEqual(dispatch.groups(self.data, self.store()), ([], []))
 
+    def test_a_taken_over_v1_card_is_live_and_a_plain_v1_copy_is_not(self):
+        other = self.tmp / "other"
+        other.mkdir()
+        project_file(self.data, "moved", self.repo)
+        project_file(self.data, "still-v1", other)
+        self.add_card(project="moved", feed=V1_FEED, taken_over="2026-11-10T12:00:00Z")
+        self.add_card(project="still-v1", feed=V1_FEED)
+        self.assertEqual(dispatch.groups(self.data, self.store()),
+                         ([{"group": str(self.repo), "projects": ["moved"]}], []))
+
     def test_a_project_with_no_repo_joins_the_none_group(self):
         project_file(self.data, "notes")
         self.add_card(project="notes")
