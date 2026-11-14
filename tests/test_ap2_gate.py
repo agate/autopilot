@@ -2223,6 +2223,14 @@ class PassDueTest(LoopCase):
         self.assertIs(out["pass_due"], False)
         self.assertEqual(self.pass_file()["seen"]["ready"], [])
 
+    def test_a_taken_over_v1_card_is_ready_and_a_plain_imported_copy_is_not(self):
+        self.add_card(feed="v1-import")
+        cid = self.add_card(feed="v1-import", taken_over="2026-11-10T12:00:00Z")
+        out = self.gate(self.T)
+        self.assertIs(out["pass_due"], True)
+        self.assertEqual(self.pass_file()["why"], [{"why": "ready", "card": cid}])  # the plain copy is not ready
+        self.assertEqual(gate._present(self.data, self.store())["ready"], [cid])
+
     def test_a_routine_run_card_with_no_worker_is_ready(self):
         self.put(last_slot="2026-11-09T09:00")
         out = self.gate(utc(2026, 11, 10, 9, 1))

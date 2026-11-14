@@ -15,7 +15,7 @@ from unittest import mock
 from tests.helpers import ROOT
 from tests.test_ap2_cli import temp_inside_the_accounts_claude
 from tests.test_ap2_store import card as store_card
-from assistant import cards, cli, datadir, importv1, projects
+from assistant import cards, cli, datadir, gate, importv1, projects
 from assistant.config import load as config_load
 from assistant.transcripts import run_dir as transcripts_run_dir
 from assistant.store import Store
@@ -1595,6 +1595,13 @@ class TakeOverTest(unittest.TestCase):
         self.assertEqual(two["parent"], got["v1:shop"]["id"])
         self.assertEqual(three["source"]["record"]["pr"], "https://github.com/org/repo/pull/7")
         self.assertEqual(three["branch"], "dev.PROJ-3.receipt")
+
+    def test_a_taken_over_planned_card_is_ready_for_a_pass(self):
+        self.ok("--project", "shop")
+        one = self.by_key()["v1:shop:PROJ-1"]["id"]
+        self.assertNotIn(one, gate._present(self.data, Store(self.data))["ready"])  # a read-only copy
+        self.take_over()
+        self.assertIn(one, gate._present(self.data, Store(self.data))["ready"])
 
     def test_a_take_over_with_no_earlier_import_adds_live_cards(self):
         report = self.take_over()

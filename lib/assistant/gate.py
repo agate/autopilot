@@ -552,14 +552,14 @@ def _present(data: Path, store: Store) -> dict:
     """What a pass would look at now: the ready card ids, the result files with their whole-second mtime, and each
     open ask as `card -> type/from/reason/role`. Ready is a cheap wake-up, not the start plan: a planned card with
     no ask and no worker on record, or a routine run card in Running with no worker and no sessions; never an
-    imported v1 copy. Raises CardError, WorkerError or OSError."""
+    imported v1 copy that is not taken over. Raises CardError, WorkerError or OSError."""
     on_record = {r.get("card") for r in Registry(data).read()}
     ready, asks = [], {}
     for c in store.list():
         cid, ask = c["id"], c.get("ask")
         if isinstance(ask, dict):
             asks[cid] = "/".join(str(ask.get(k) or "") for k in ("type", "from", "reason", "role"))
-        if ask is not None or cid in on_record or c.get("feed") == V1_FEED:
+        if ask is not None or cid in on_record or (c.get("feed") == V1_FEED and not c.get("taken_over")):
             continue
         if c.get("lane") == "planned" or (c.get("kind") == "routine" and c.get("lane") == "running"
                                           and not c.get("sessions")):

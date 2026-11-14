@@ -1835,8 +1835,9 @@ Calls the author made without asking (check them):
   - Pass due **[decided by the builder]**: every run ends (before the heartbeat) by writing `<data>/pass.json`
     atomically, `{"due", "since", "why", "seen", "checked_at"}`, and gate.json `pass_due`. It compares what is
     there now with `seen`, what was there when the last pass started: the ready card ids (a `planned` card with no
-    ask, no worker on record and a `feed` other than `v1-import`; or a `routine` card in Running with no worker and
-    no `sessions`), the result files `<data>/sessions/<card>/<handback|review|prloop>.json` with their whole-second
+    ask, no worker on record and a `feed` other than `v1-import` unless the card has `taken_over`; or a `routine`
+    card in Running with no worker and no `sessions`), the result files
+    `<data>/sessions/<card>/<handback|review|prloop>.json` with their whole-second
     mtime (as v1's `fingerprint` does), and each open ask as `card -> type/from/reason/role`. `why` lists `{"why":
     "ready" | "result" | "answered", "card", "file"?}` for each ready card or result entry not in `seen`, and each ask
     in `seen` that is no longer open the same way; `due` is `bool(why)`; `since` is kept from the first run that found
@@ -1849,9 +1850,9 @@ Calls the author made without asking (check them):
     Only `gate.pass_started(data, now)` updates `seen` (it copies the present state and clears `due`); the pass
     calls it when it starts, so until there is a pass a due pass stays due. Ready is a cheap wake-up, not the start
     plan: the gate does not resolve `depends_on` or check `max_workers` or resources (the pass does,
-    `resources.plan`), and an imported v1 copy is never ready. "Answered" means an ask that closed: the store has no
-    answer field on an ask, so an ask that was open at the last pass and is not open now counts; at worst this wakes
-    one extra pass.
+    `resources.plan`), and an imported v1 copy is never ready unless it is taken over. "Answered" means an ask that
+    closed: the store has no answer field on an ask, so an ask that was open at the last pass and is not open now
+    counts; at worst this wakes one extra pass.
   - Heartbeat: every run writes `<data>/gate.json` atomically: `{"last_run_at": <UTC>, "routines": [{routine,
     slot, key, action (run, late, skip, exists or start), card, late_minutes}], "workers": [the check's entries],
     "watches_due": [...], "reads": [...], "pruned": [point ids], "pass_due": true | false, "errors": [...]}`; text in `errors` that UTF-8 cannot write (a file name that is not UTF-8) is written with
@@ -3821,7 +3822,8 @@ Calls the author made without asking (check them):
       `{task.id}` or `{task[a]}`), `worktree` (v1's, when set), `needs`,
       `spec`, and `sessions` from v1's `{role: session id}` as `{role: {id, ids, cwd: <worktree or "">, needs,
       state: ended, why: "taken over from v1", at}}`, the shape `Workers._save_session` writes, so
-      `start(..., resume=True)` continues it in its worktree. `lane` and `status` are mapped as by the import.
+      `start(..., resume=True)` continues it in its worktree. `lane` and `status` are mapped as by the import. The gate
+      counts a taken-over planned card as ready (its feed stays `v1-import`), so a pass comes for it.
       Every decision gets a card: an open `ask` or `gate` an open question card; every other one (answered,
       resolved, undone, open `self` and `system`) a done question card (`ask: null`) whose `source.record` keeps
       `kind`, `task`, `status`, `answer`, `answered_at` and `created_at`; `not_imported.decisions` is 0. Every
