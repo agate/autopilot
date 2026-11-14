@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from datetime import timedelta
 from pathlib import Path
 from unittest import mock
@@ -148,12 +149,21 @@ class FloorTest(DispatchCase):
 
     def test_shadow_mode_also_denies_the_outward_writes(self):
         deny = self.floor("shadow")["permissions"]["deny"]
-        for rule in ("Bash(gh pr ready:*)", "Bash(gh pr merge:*)", "Bash(gh pr create:*)", "Bash(git push:*)",
-                     "Bash(git -C:*)", "Bash(git -c:*)", "Bash(git --git-dir:*)", "Bash(git --work-tree:*)",
-                     "Bash(gh api:*)", "mcp__slack__slack_send_message", "mcp__jira__transitionJiraIssue"):
+        self.assertEqual(dispatch.SHADOW_DENY, ("Bash(git:*)", "Bash(gh:*)"))
+        for rule in ("Bash(git:*)", "Bash(gh:*)", "mcp__slack__slack_send_message", "mcp__jira__transitionJiraIssue"):
             self.assertIn(rule, deny)
         for tool in ("mcp__slack__slack_read_channel", "mcp__jira__getJiraIssue"):
             self.assertNotIn(tool, deny)
+
+    def test_git_and_gh_are_denied_whole_however_an_option_comes_before_the_verb(self):
+        """Claude Code's `:*` rule matches the command itself or the command and a space; a rule per verb missed
+        each of these."""
+        deny = [r[len("Bash("):-len(":*)")] for r in self.floor("shadow")["permissions"]["deny"]
+                if r.startswith("Bash(") and r.endswith(":*)")]
+        for command in ("git --git-dir=/r/.git push", "git -P push", "git --no-pager push", "git push",
+                        "gh -R o/r pr merge 5", "gh --repo=o/r pr ready 5", "gh pr create", "gh api x", "git", "gh"):
+            with self.subTest(command=command):
+                self.assertTrue(any(command == p or command.startswith(p + " ") for p in deny), command)
 
     def test_live_mode_allows_the_outward_writes(self):
         deny = self.floor("live")["permissions"]["deny"]
@@ -196,6 +206,8 @@ class StartTest(DispatchCase):
                                                                  "settings-dispatcher.json"))
         self.assertEqual(argv[argv.index("--permission-mode") + 1], "auto")
         self.assertNotIn("--model", argv)  # the subscription: the default model
+        self.assertIn("--strict-mcp-config", argv[:-1])  # shadow mode: no MCP server; the prompt stays last
+        self.assertNotIn("--mcp-config", argv)
         self.assertIn(str(dispatch.RUNBOOK), argv[-1])
         self.assertIn("shop", argv[-1])
         ap2 = workers.package_root() / "bin" / "ap2"
@@ -204,9 +216,15 @@ class StartTest(DispatchCase):
         self.assertEqual(call["cwd"], str(self.repo))
         self.assertEqual(call["env"]["AP2_ROLE"], "dispatcher")
         rec = self.record()
-        self.assertEqual({k: rec[k] for k in ("group", "projects", "short_id", "started_at", "profile", "queue")},
+        self.assertEqual({k: rec[k] for k in ("group", "projects", "short_id", "started_at", "profile", "queue",
+                                              "why")},
                          {"group": str(self.repo), "projects": ["shop"], "short_id": "s0001",
-                          "started_at": "2026-11-10T14:00:00Z", "profile": "subscription", "queue": []})
+                          "started_at": "2026-11-10T14:00:00Z", "profile": "subscription", "queue": [],
+                          "why": [{"why": "ready", "card": cid}]})
+        self.assertRegex(rec["token"], r"\A[0-9a-f]{16}\Z")
+        self.assertEqual(call["env"]["AP2_PASS"], rec["token"])  # the pass's own token, in its launch env
+        settings_file = json.loads((self.data / "sessions" / "dispatch" / "settings-dispatcher.json").read_text())
+        self.assertNotIn("AP2_PASS", settings_file["env"])  # never in the shared settings file
         self.assertTrue(rec["session_id"])
         self.assertEqual(out["dispatch"], [{"did": "started", "short_id": "s0001", "group": str(self.repo),
                                             "projects": ["shop"]}])
@@ -243,6 +261,16 @@ class StartTest(DispatchCase):
         dispatch.start(self.data, group, [], dict(prof, dispatcher_model=None), self.T, "shadow", claude=FAKE)
         argv = self.dispatch_calls()[1]["argv"]
         self.assertEqual(argv[argv.index("--model") + 1], "claude-y")
+
+    def test_live_mode_loads_the_mcp_servers_and_each_pass_gets_its_own_token(self):
+        group = {"group": None, "projects": []}
+        first = dispatch.start(self.data, group, [], profiles.builtin(), self.T, "live", claude=FAKE)
+        (self.data / dispatch.DISPATCH).unlink()
+        second = dispatch.start(self.data, group, [], profiles.builtin(), self.T, "shadow", claude=FAKE)
+        live, shadow = (c["argv"] for c in self.dispatch_calls())
+        self.assertNotIn("--strict-mcp-config", live)
+        self.assertEqual(shadow[-2], "--strict-mcp-config")
+        self.assertNotEqual(first["token"], second["token"])
 
     def test_nothing_due_starts_nothing(self):
         self.add_card()
@@ -351,6 +379,48 @@ class RoundTest(DispatchCase):
         third = self.gate(self.T + timedelta(minutes=3))
         self.assertEqual([e["did"] for e in third["dispatch"]], ["ended", "started"])  # the next round
         self.assertEqual(third["dispatch"][1]["group"], str(self.repo))
+
+    def test_every_group_of_the_round_reads_the_rounds_why(self):
+        """pass_started empties pass.json's `why` as the round starts; each pass reads its record's instead."""
+        self.gate(self.T)
+        why = self.record()["why"]
+        self.assertEqual(sorted(w["why"] for w in why), ["ready", "ready"])
+        self.assertEqual(self.pass_file()["why"], [])
+        dispatch.end(self.data, self.T + timedelta(minutes=1))
+        self.gate(self.T + timedelta(minutes=1))
+        rec = self.record()
+        self.assertEqual((rec["short_id"], rec["group"], rec["why"]), ("s0002", None, why))  # `ap2 pass status`
+
+    def test_a_record_without_why_or_token_still_reads(self):
+        (self.data / dispatch.DISPATCH).write_text(json.dumps({"queue": [{"group": None, "projects": []}]}))
+        self.assertEqual(dispatch.read_record(self.data), {"queue": [{"group": None, "projects": []}]})
+        for bad in ({"why": "x"}, {"why": ["x"]}, {"token": 7}):
+            with self.subTest(bad=bad):
+                (self.data / dispatch.DISPATCH).write_text(json.dumps(dict({"queue": []}, **bad)))
+                with self.assertRaises(ValueError):
+                    dispatch.read_record(self.data)
+
+    def test_a_launch_that_fails_is_tried_once_per_run_not_once_per_group(self):
+        with mock.patch.object(dispatch.v1_workers, "_launch",
+                               side_effect=subprocess.TimeoutExpired("claude", 120)) as launch:
+            out = self.gate(self.T)
+        self.assertEqual(launch.call_count, 1)
+        [err] = [e for e in out["errors"] if e.get("dispatch")]
+        self.assertIn("cannot start the dispatcher pass for shop", err["error"])
+        self.assertIn("no other group is tried this run", self.gate_log())
+        self.assertIs(self.pass_file()["due"], True)
+        self.assertFalse((self.data / dispatch.DISPATCH).exists())
+        # In a round already under way the queue is kept from the group that could not launch.
+        self.gate(self.T + timedelta(minutes=1))
+        why = self.record()["why"]
+        dispatch.end(self.data, self.T + timedelta(minutes=1))
+        with mock.patch.object(dispatch.v1_workers, "_launch", side_effect=RuntimeError("no")) as launch:
+            out = self.gate(self.T + timedelta(minutes=2))
+        self.assertEqual(launch.call_count, 1)
+        self.assertEqual(self.record(), {"queue": [{"group": None, "projects": []}], "why": why})
+        out = self.gate(self.T + timedelta(minutes=3))
+        self.assertEqual(out["dispatch"][0]["did"], "started")
+        self.assertIsNone(out["dispatch"][0]["group"])
 
     def test_a_group_that_cannot_start_is_one_error_and_the_next_group_starts(self):
         self.repo.rmdir()
@@ -508,6 +578,30 @@ class EndTest(DispatchCase):
         self.gate(self.T)
         marker = dispatch.end(self.data, self.T + timedelta(minutes=3))
         self.assertEqual(marker, {"short_id": "s0001", "started_at": "2026-11-10T14:00:00Z",
-                                  "ended_at": "2026-11-10T14:03:00Z"})
+                                  "ended_at": "2026-11-10T14:03:00Z", "token": self.record()["token"]})
         self.assertEqual(json.loads((self.data / dispatch.END).read_text()), marker)
         self.assertNotIn("ended_at", self.record())
+
+    def test_end_from_another_pass_is_refused_and_from_this_pass_or_a_terminal_ends_it(self):
+        self.add_card()
+        self.gate(self.T)
+        token = self.record()["token"]
+        with mock.patch.dict(os.environ, {"AP2_PASS": "0" * 16}):
+            with self.assertRaisesRegex(dispatch.DispatchError, "not the open dispatcher pass"):
+                dispatch.end(self.data, self.T)
+        self.assertFalse((self.data / dispatch.END).exists())
+        with mock.patch.dict(os.environ, {"AP2_PASS": token}):
+            self.assertEqual(dispatch.end(self.data, self.T)["token"], token)
+        (self.data / dispatch.END).unlink()
+        with mock.patch.dict(os.environ):
+            os.environ.pop("AP2_PASS", None)
+            self.assertEqual(dispatch.end(self.data, self.T)["token"], token)
+
+    def test_a_marker_with_another_token_does_not_end_the_pass(self):
+        self.add_card()
+        self.gate(self.T)
+        marker = dispatch.end(self.data, self.T)
+        (self.data / dispatch.END).write_text(json.dumps(dict(marker, token="0" * 16)))
+        out = self.gate(self.T + timedelta(minutes=1))
+        self.assertEqual([e for e in out["dispatch"] if e["did"] != "started"], [])
+        self.assertEqual(self.record()["short_id"], "s0001")

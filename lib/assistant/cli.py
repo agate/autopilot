@@ -309,6 +309,7 @@ def _read_card_file(name: str):
 
 def _card_ask(args) -> dict:
     from assistant import cards
+    from assistant.importv1 import FEED as V1_FEED
     try:
         text = Path(args.text_file).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as e:
@@ -320,6 +321,8 @@ def _card_ask(args) -> dict:
     store = _store(args)
 
     def room(card):
+        if card.get("feed") == V1_FEED:
+            raise CardError(f"{card['id']} is an imported v1 copy; v1 asks for it")
         cur = card.get("ask")
         if cur is not None:
             raise CardError(f"{card['id']} already has an open ask ({(cur or {}).get('type')} from "

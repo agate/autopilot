@@ -32,9 +32,10 @@ class Ap2Case(unittest.TestCase):
         self.home.mkdir()
         self.data = self.tmp / "data"
 
-    def run_ap2(self, *args):
-        env = {k: v for k, v in os.environ.items() if k not in ("AP2_DATA", "LC_ALL")}
+    def run_ap2(self, *args, extra=None):
+        env = {k: v for k, v in os.environ.items() if k not in ("AP2_DATA", "AP2_PASS", "LC_ALL")}
         env.update(HOME=str(self.home), AP2_DATA=str(self.data), PYTHONIOENCODING="utf-8", PYTHON_COLORS="0")
+        env.update(extra or {})
         return subprocess.run([sys.executable, str(AP2), *args], capture_output=True, text=True, env=env,
                               encoding="utf-8", errors="replace", timeout=30)
 
@@ -44,8 +45,8 @@ class Ap2Case(unittest.TestCase):
         self.assertEqual(r.stderr, "")
         return json.loads(r.stdout)
 
-    def fails(self, *args, code=1) -> str:
-        r = self.run_ap2(*args)
+    def fails(self, *args, code=1, extra=None) -> str:
+        r = self.run_ap2(*args, extra=extra)
         self.assertEqual(r.returncode, code, r.stdout + r.stderr)
         self.assertEqual(r.stdout, "")
         if code == 1:
@@ -90,6 +91,21 @@ class PassCommandTest(Ap2Case):
         self.assertEqual((out["short_id"], out["started_at"]), ("s0007", "2026-11-10T14:00:00Z"))
         self.assertEqual(json.loads((self.data / dispatch.END).read_text()), out)
 
+    def test_end_from_a_session_that_is_not_the_open_pass_ends_nothing(self):
+        self.ok("config")
+        rec = {"group": None, "projects": [], "short_id": "s0007", "session_id": "", "profile": "subscription",
+               "started_at": "2026-11-10T14:00:00Z", "queue": [], "why": [], "token": "ab" * 8}
+        (self.data / dispatch.DISPATCH).write_text(json.dumps(rec))
+        for other in ("cd" * 8, "x"):
+            with self.subTest(token=other):
+                line = self.fails("pass", "end", extra={"AP2_PASS": other})
+                self.assertEqual(line, "ap2: this session is not the open dispatcher pass (s0007); it ends nothing\n")
+                self.assertFalse((self.data / dispatch.END).exists())
+        r = self.run_ap2("pass", "end", extra={"AP2_PASS": "ab" * 8})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)["token"], "ab" * 8)
+        self.assertEqual(json.loads((self.data / dispatch.END).read_text())["token"], "ab" * 8)
+
     def test_a_bad_pass_command_is_a_usage_error(self):
         self.fails("pass", "start", code=2)
 
@@ -108,6 +124,13 @@ class CardAskTest(Ap2Case):
         line = self.fails("card", "ask", cid, "--type", "fix", "--text-file", self.text())
         self.assertIn("already has an open ask (answer from worker)", line)
         self.assertEqual(self.ok("card", "show", cid)["ask"], {"type": "answer", "from": "worker"})
+
+    def test_a_v1_copy_is_refused_and_left_as_it_is(self):
+        v1 = self.add(feed=V1_FEED)
+        before = self.ok("card", "show", v1)
+        line = self.fails("card", "ask", v1, "--type", "fix", "--text-file", self.text())
+        self.assertIn("imported v1 copy", line)
+        self.assertEqual(self.ok("card", "show", v1), before)
 
     def test_a_bad_card_id_type_or_text_is_refused(self):
         self.assertIn("not a card id", self.fails("card", "ask", "nope", "--type", "fix", "--text-file", self.text()))
@@ -177,12 +200,14 @@ class RunbookTest(Ap2Case):
 
     def test_the_runbook_covers_its_steps(self):
         text = " ".join(RUNBOOK.read_text(encoding="utf-8").split())
-        for words in ("`ap2 cap --json`", "`mode`", "pass.why", "handback.json", "review.json", "prloop.json",
+        for words in ("`ap2 cap --json`", "`mode`", "dispatch.why", "handback.json", "review.json", "prloop.json",
                       "`ap2 template show <kind>`", "`ap2 worker start", "round-robin", "`confirm`", "`approve`",
                       "`answer`", "`fix`", "plain words", "Run `ap2 pass end`", "Shadow mode", "gh pr merge"):
             self.assertIn(words, text)
         self.assertEqual(dispatch.RUNBOOK, RUNBOOK)
         self.assertNotIn("folder above this file", text)
+        self.assertNotIn("pass.why", text)  # pass_started empties it as the round starts: the pass reads its record
+        self.assertIn("**`prreview.json`.** The gate already applied it (`ap2 worker check`); leave it.", text)
         self.assertIn("the absolute `ap2` path your prompt names", text)
 
 

@@ -2063,6 +2063,13 @@ class DecideTest(unittest.TestCase):
     def test_the_roles_are_the_ones_workers_has(self):
         self.assertEqual(guard.ROLES, workers_mod.ROLES)
 
+    def test_a_glob_that_matches_the_dispatcher_passs_floor_file_is_denied(self):
+        from assistant import dispatch
+        self.assertEqual(guard.FLOOR_FILES, (dispatch.SETTINGS,))
+        self.check(["cp /tmp/x $AP2_RUN_DIR/settings-d*", "cp /tmp/x $AP2_RUN_DIR/settings-dispatch?r.json",
+                    "cp /tmp/x $AP2_RUN_DIR/*-dispatcher.json"], deny=True)
+        self.check(["cp /tmp/x $AP2_RUN_DIR/media/settings-d*"], deny=False)
+
     def test_an_ap2_segment_may_name_the_data_folder_but_not_redirect_into_it(self):
         self.check([f"ap2 evidence add C1 {DATA}/sessions/C1/a.png", f"ap2 card show C1 --data {DATA}",
                     "ap2 card list > $AP2_RUN_DIR/cards.txt",

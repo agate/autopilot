@@ -12,7 +12,8 @@ Run each `ap2` command as a command of its own, written out in full.
 
 - **Shadow mode** (the default). You read, open asks and record what you would do; you write nothing outside the
   data folder. No `gh pr ready`, `gh pr merge`, `gh pr create`, `git push`, no worktree, no Jira or Slack write.
-  `ap2 worker start` refuses in shadow mode: do not try it. Your settings deny the outward writes anyway.
+  `ap2 worker start` refuses in shadow mode: do not try it. Your settings deny the outward writes anyway
+  (all of `git` and `gh`), and no MCP server is loaded.
 - **Live mode.** You may run the outward steps below, and only those, only for the cards of your group.
 - Never edit a card file, `pass.json`, `dispatch.json` or `config.yaml` by hand: use the `ap2` commands.
 - Never post a PR comment or review, never open an issue, never add a reviewer (denied in every mode).
@@ -20,8 +21,9 @@ Run each `ap2` command as a command of its own, written out in full.
 
 ## 1. Begin
 
-1. Run `ap2 pass status`. Note `mode` (`shadow` or `live`) and `pass.why`: each entry is a card that became ready
-   (`ready`), a result file that is new (`result`, with its `file`), or an ask that closed (`answered`).
+1. Run `ap2 pass status`. Note `mode` (`shadow` or `live`) and `dispatch.why`, this round's reasons (the gate keeps
+   them on your pass's record): each entry is a card that became ready (`ready`), a result file that is new
+   (`result`, with its `file`), or an ask that closed (`answered`).
 2. Run `ap2 cap --json`. When `paused` is true, or `limit` is a number and `spent_today` has reached it, start and
    resume no worker this pass; everything else still runs.
 3. Run `ap2 worker list` and `ap2 card list`. Keep only the cards of your group: their `project` is one of your
@@ -29,8 +31,8 @@ Run each `ap2` command as a command of its own, written out in full.
 
 ## 2. Result files
 
-For each `result` in `pass.why`, read `$AP2_DATA/sessions/<card>/<file>` and act. The gate already stopped the worker
-that wrote it.
+For each `result` in `dispatch.why`, read `$AP2_DATA/sessions/<card>/<file>` and act. The gate already stopped the
+worker that wrote it.
 
 - **`handback.json` (implement handed back).** Answer its `open_questions` from the card, its template and the
   repo's rules when you can. Write the review brief (step 3) and start the review role on the same worktree.
@@ -45,10 +47,11 @@ that wrote it.
   done, `git -C <repo> worktree remove <worktree>`, and `ap2 card lane <card> done`. Without that approval, open an
   `approve` ask with the PR link.
 - **`question.json`.** The gate already made it the card's ask; leave it.
+- **`prreview.json`.** The gate already applied it (`ap2 worker check`); leave it.
 
 ## 3. Start the next role of each ready card
 
-For each `ready` card in `pass.why` of your group (live mode only, and only while step 1 allows starts):
+For each `ready` card in `dispatch.why` of your group (live mode only, and only while step 1 allows starts):
 
 1. Run `ap2 template show <kind>`: its `roles` are the card's steps in order, each with its `brief` and `when`.
    The next role is the first one whose `when` holds and that has not run (the card's `sessions` say which ran).

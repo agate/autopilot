@@ -4,13 +4,15 @@ driven by the v2 runbook (`builtin/RUNBOOK.md`), that decides what happens next 
 - `groups(data, store)`: the groups a pass may serve, one per distinct `repo` of the projects live cards name, plus
   the group None (cards with no project, and projects with no repo), which runs in the data folder.
 - `settings(data, profile, projects, mode)`: the pass's `--settings`, built like the worker floor.
-- `start(data, group, queue, profile, now, mode)`: start one pass and record it in `<data>/dispatch.json`
-  `{group, projects, short_id, session_id, started_at, profile, queue, looks, seen_busy}`, with a spend launch row
-  (kind `dispatcher`). `queue` holds the groups of this round still to serve.
+- `start(data, group, queue, profile, now, mode, why)`: start one pass and record it in `<data>/dispatch.json`
+  `{group, projects, short_id, session_id, started_at, profile, queue, why, token, looks, seen_busy}`, with a spend
+  launch row (kind `dispatcher`). `queue` holds the groups of this round still to serve, `why` the round's reasons
+  (pass.json's `why` when the round started), and `token` the pass's own (`AP2_PASS` in its env).
 - `finish(data, now)`: a later gate run ends the pass: its turn ended, it was stopped or is gone, it ran past
   DISPATCH_MAX_MIN minutes, or it said `ap2 pass end` (`end`, which writes `<data>/dispatch-end.json`). Waiting at
   a permission prompt opens one `ask` card (`fix`, from `dispatch`) and keeps the stopped session for `claude
-  attach`. Then the record is removed, or keeps only the queue, so the next run starts the next group.
+  attach`. Then the record is removed, or keeps only the queue and the round's `why`, so the next run starts the
+  next group.
 
 The gate calls `finish` early in a run and starts a pass after the pass-due check (`gate._start_dispatch`); it never
 waits for a pass, and one pass is open at a time for the whole data folder.
@@ -20,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -52,13 +55,12 @@ NO_PROJECT = "cards with no project"  # the label of the group None
 HOW = {"ended": "it ran ap2 pass end", "turn": "its turn ended", "gone": "its session is gone",
        "late": "it ran too long, or the clock went back", "blocked": "it waits at a permission prompt"}
 RUNBOOK = Path(__file__).resolve().parent / "builtin" / "RUNBOOK.md"
-# The outward writes the runbook lists, denied in shadow mode (the projects' outward MCP tools are added to them).
-# `git push` is a prefix rule, so the git forms that put an option before the verb (`git -C <repo> push`, `git -c k=v
-# push`, `git --git-dir=... push`) and `gh api` (which can ready or merge a PR) are denied whole: in shadow mode the
-# runbook runs none of them (worktrees, fetches and merges are live only).
-SHADOW_DENY = ("Bash(gh pr ready:*)", "Bash(gh pr merge:*)", "Bash(gh pr create:*)", "Bash(git push:*)",
-               "Bash(git -C:*)", "Bash(git -c:*)", "Bash(git --git-dir:*)", "Bash(git --work-tree:*)",
-               "Bash(gh api:*)")
+# The outward writes, denied in shadow mode (the projects' outward MCP tools are added to them). git and gh are denied
+# whole: a prefix rule matches only the command itself or the command and a space, so a rule per verb misses each
+# form that puts an option before the verb (`git -P push`, `git --git-dir=/r/.git push`, `gh -R o/r pr merge 5`,
+# `gh --repo=o/r pr ready 5`). In shadow mode the runbook runs no git or gh at all (worktrees, fetches, pushes and
+# merges are live only). Best effort, as every text rule: `/usr/bin/git` or `env git` gets past it.
+SHADOW_DENY = ("Bash(git:*)", "Bash(gh:*)")
 # Exactly the ap2 steps the runbook runs, allowed by rule so the auto-mode classifier never judges them: `:*` rules
 # for the steps that take words after them, exact rules for `ap2 cap` (so `ap2 cap answer|resume`, `ap2 worker
 # answer|end|park|finish` and `ap2 card add` are never allowed by rule).
@@ -70,6 +72,10 @@ _SHORT = re.compile(r"[A-Za-z0-9_]+\Z")
 
 class DispatchError(ConfigError):
     """A pass cannot start, or a dispatcher record is not usable. Printed by ap2 as one `ap2: ...` line."""
+
+
+class LaunchError(DispatchError):
+    """`claude --bg` itself failed (or hung until its timeout): no other group of the round would start either."""
 
 
 # -- groups ---------------------------------------------------------------------------------------------------------
@@ -117,8 +123,9 @@ def settings(data, profile: dict, projects: list, mode: str) -> dict:
     (with pass.json, dispatch.json and its end marker) and the package denied for Edit, v1's dispatcher denials
     (`settings/dispatcher.json`: `perms.BASH_DENY`), the park and Bash guard hooks, `AP2_ROLE=dispatcher` in its env,
     and the profile's overlay merged under it (`profiles.merge`). In any mode but live it also denies the outward
-    writes: SHADOW_DENY and the outward MCP tools of `projects`' `tools` (v1's `denied_tools`, and its ticket-status
-    tools). Refused (WorkerError) for a path a permission rule cannot name literally (`workers.require_literal`)."""
+    writes: SHADOW_DENY (git and gh whole) and the outward MCP tools of `projects`' `tools` (v1's `denied_tools`,
+    and its ticket-status tools); `start` also loads no MCP server then (`--strict-mcp-config`). Refused
+    (WorkerError) for a path a permission rule cannot name literally (`workers.require_literal`)."""
     data = Path(data)
     workers_module.require_literal(data)
     pkg = workers_module.package_root()
@@ -167,12 +174,15 @@ def prompt(data, group: dict) -> str:
 
 
 def start(data, group: dict, queue: list, profile: dict, now: datetime, mode: str,
-          claude: Optional[str] = None) -> dict:
+          claude: Optional[str] = None, why: Optional[list] = None) -> dict:
     """Start one pass for `group` on `profile`, in the group's repo (the data folder for the group None), and record
-    it in `<data>/dispatch.json` with the rest of the round in `queue`. The record is written right after the launch
-    (a record that cannot be written stops the session again), then with the session id once the listing shows it
-    (best effort); a spend launch row (kind `dispatcher`) follows, and a failure there is the record's `note`.
-    Raises DispatchError (or ConfigError, WorkerError) when nothing started."""
+    it in `<data>/dispatch.json` with the rest of the round in `queue` and the round's reasons in `why` (the pass
+    reads them with `ap2 pass status`). The pass gets a token of its own, `AP2_PASS` in its env and `token` on the
+    record, so `ap2 pass end` from another pass ends nothing. In any mode but live it loads no MCP server
+    (`--strict-mcp-config`, no `--mcp-config`). The record is written right after the launch (a record that cannot
+    be written stops the session again), then with the session id once the listing shows it (best effort); a spend
+    launch row (kind `dispatcher`) follows, and a failure there is the record's `note`. Raises LaunchError when
+    `claude --bg` fails, DispatchError (or ConfigError, WorkerError) for this group, when nothing started."""
     data, claude = Path(data), _claude(claude)
     projs = [projects_module.load(data, n) for n in group.get("projects") or []]
     cwd = Path(group["group"]) if group.get("group") else data
@@ -190,16 +200,20 @@ def start(data, group: dict, queue: list, profile: dict, now: datetime, mode: st
     model = profile.get("dispatcher_model") or profile.get("model")
     if model:
         argv += ["--model", model]
+    if mode != "live":
+        argv.append("--strict-mcp-config")  # no `--mcp-config`: the user's MCP servers and connectors stay unloaded
     argv.append(prompt(data, group))
+    token = secrets.token_hex(8)
     env = {k: v for k, v in os.environ.items() if not k.startswith(("AUTOPILOT_", "AP2_"))}
     env.update(s["env"])
+    env["AP2_PASS"] = token  # the launch env only: the shared settings file never holds a newer pass's token
     try:
         short = v1_workers._launch(argv, str(cwd), env)
     except (OSError, RuntimeError, subprocess.SubprocessError) as e:
-        raise DispatchError(f"cannot start the dispatcher pass for {label(group)}: {e}") from e
+        raise LaunchError(f"cannot start the dispatcher pass for {label(group)}: {e}") from e
     rec = {"group": group.get("group"), "projects": list(group.get("projects") or []), "short_id": short,
            "session_id": "", "started_at": cards.stamp(now), "profile": profile["name"], "queue": list(queue),
-           "looks": 0, "seen_busy": False}
+           "why": list(why or []), "token": token, "looks": 0, "seen_busy": False}
     try:
         write_json(data / DISPATCH, rec)
     except OSError as e:
@@ -231,15 +245,20 @@ def _group_ok(g) -> bool:
 
 def read_record(data) -> Optional[dict]:
     """`<data>/dispatch.json`, or None when there is none. A record with a `short_id` is an open pass; one without
-    holds only the round's `queue`. Raises ValueError (or OSError) when it is not one of these."""
+    holds only the round's `queue` and `why`. `why` (a list of objects) and `token` may be missing (a record written
+    before they were). Raises ValueError (or OSError) when it is not one of these."""
     path = Path(data) / DISPATCH
     try:
         rec = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return None
-    shape = "not a dispatcher record ({group, projects, short_id, session_id, started_at, profile, queue})"
+    shape = "not a dispatcher record ({group, projects, short_id, session_id, started_at, profile, queue, why})"
     queue = rec.get("queue", []) if isinstance(rec, dict) else None
     if not (isinstance(queue, list) and all(map(_group_ok, queue))):
+        raise ValueError(shape)
+    why = rec.get("why", [])
+    if not (isinstance(why, list) and all(isinstance(w, dict) for w in why)
+            and isinstance(rec.get("token", ""), str)):
         raise ValueError(shape)
     if "short_id" in rec:
         looks = rec.get("looks")
@@ -255,7 +274,9 @@ def read_record(data) -> Optional[dict]:
 def end(data, now: datetime) -> dict:
     """`ap2 pass end`: mark the open pass ended at `now`, so the next gate run ends its session at once. The marker is
     its own file (`dispatch-end.json`), since the gate rewrites `dispatch.json` on its runs. Raises DispatchError
-    when no pass is open."""
+    when no pass is open, or when `AP2_PASS` is set (a pass runs it) and is not the open pass's token: an older pass
+    (one stopped at a prompt and resumed by the user) ends nothing. Without `AP2_PASS` (a person at a terminal) it
+    ends the open pass."""
     data = Path(data)
     try:
         rec = read_record(data)
@@ -263,7 +284,12 @@ def end(data, now: datetime) -> dict:
         raise DispatchError(f"{data / DISPATCH}: cannot read the dispatcher record: {e}") from e
     if not rec or "short_id" not in rec:
         raise DispatchError("no dispatcher pass is open")
+    mine = os.environ.get("AP2_PASS")
+    if mine and mine != rec.get("token"):
+        raise DispatchError(f"this session is not the open dispatcher pass ({rec['short_id']}); it ends nothing")
     marker = {"short_id": rec["short_id"], "started_at": rec["started_at"], "ended_at": cards.stamp(now)}
+    if rec.get("token"):
+        marker["token"] = rec["token"]
     try:
         write_json(data / END, marker)
     except OSError as e:
@@ -276,7 +302,8 @@ def _ended(data: Path, rec: dict) -> bool:
         m = json.loads((data / END).read_text(encoding="utf-8"))
     except (OSError, ValueError, RecursionError):
         return False
-    return isinstance(m, dict) and m.get("short_id") == rec["short_id"] and m.get("started_at") == rec["started_at"]
+    return (isinstance(m, dict) and m.get("short_id") == rec["short_id"] and m.get("started_at") == rec["started_at"]
+            and m.get("token") == rec.get("token"))
 
 
 # -- finish ---------------------------------------------------------------------------------------------------------
@@ -322,7 +349,8 @@ def finish(data, now: datetime, claude: Optional[str] = None, transcripts_dir=No
     (`claude rm`). Waiting at a permission prompt (state blocked, status waiting) opens one ask card instead and is
     stopped but not removed, for `claude attach`. Any end but `ap2 pass end` and the prompt is one error. Then the
     record keeps only the round's queue, or goes. A failed listing waits for the next run (one error once the pass is
-    late). Returns `{open, ended, how, short_id, group, projects, card?, errors}`."""
+    late). The kept queue carries the round's `why`, for each next group's record. Returns `{open, ended, how,
+    short_id, group, projects, card?, errors}`."""
     data, claude = Path(data), _claude(claude)
     path = data / DISPATCH
     try:
@@ -411,7 +439,7 @@ def finish(data, now: datetime, claude: Optional[str] = None, transcripts_dir=No
     (data / END).unlink(missing_ok=True)
     queue = rec.get("queue") or []
     if queue:
-        write_json(path, {"queue": queue})
+        write_json(path, {"queue": queue, "why": rec.get("why") or []})
     else:
         path.unlink(missing_ok=True)
     out.update(open=False, ended=True, how=how)

@@ -1919,27 +1919,37 @@ Calls the author made without asking (check them):
     `<data>/dispatch.json`'s `queue`, or, when a pass is due, the first group of a new round, and then calls
     `gate.pass_started`. The start is `claude --bg -n "ap2 dispatch · <projects, or cards with no project>"
     --permission-mode auto --settings <data>/sessions/dispatch/settings-dispatcher.json [--model <model>]
-    <prompt>` in the group's repo, the prompt naming the runbook's absolute path, the projects and the data
-    folder. `dispatch.json` is `{group, projects, short_id, session_id, started_at, profile, queue, looks,
-    seen_busy}`. The profile and the cap are asked first (`dispatch.launch_profile`): a refusal starts nothing and
+    [--strict-mcp-config] <prompt>` in the group's repo, the prompt naming the runbook's absolute path, the
+    projects and the data folder. `dispatch.json` is `{group, projects, short_id, session_id, started_at, profile,
+    queue, why, token, looks, seen_busy}`. `why` is the round's reasons, frozen when the round starts: the gate
+    reads the `why` the pass-due check just wrote to `pass.json` before `pass_started` empties it, puts it on the
+    record, and the queue-only record `{queue, why}` carries it to each next group's record; the pass reads it as
+    `dispatch.why` from `ap2 pass status` (a record without it, written before it was, reads as no reasons).
+    `token` is the pass's own random token, also `AP2_PASS` in its launch env (not in the shared settings file).
+    The profile and the cap are asked first (`dispatch.launch_profile`): a refusal starts nothing and
     is one error `{"dispatch": true, "error"}`, the queue is kept and a due pass stays due. A group whose start
-    fails (its repo is not a folder, the launch fails) is one error, and the next group of the round is tried in
-    the same run; a new round where none starts stays due. A round with nothing live to serve (and no project
+    fails for that group (its repo is not a folder, its settings are refused) is one error, and the next group of
+    the round is tried in the same run. When `claude --bg` itself fails (`dispatch.LaunchError`, also a launch that
+    hangs to its 120-second timeout), every other group would fail the same way: it is one error, no other group
+    is tried that run, and the queue is kept from that group on, so the next run tries again. A new round where
+    none starts stays due. A round with nothing live to serve (and no project
     error) calls `pass_started`, so the same change does not make a pass due every run. Each start is one
     gate.log line and one gate.json `dispatch` entry `{"did": "started", ...}`.
   - End: early in each run `dispatch.finish` looks the pass up in `claude agents`. It ends when `ap2 pass end`
-    marked it (`<data>/dispatch-end.json` `{short_id, started_at, ended_at}`, its own file because the gate
-    rewrites `dispatch.json`; how `ended`), when its turn ended (state done or failed, or status idle, once a run
-    saw it busy, the start's listing included, or after LOOKS (3) runs saw it so; `turn`), when it was stopped or
-    is gone (`gone`), or past DISPATCH_MAX_MIN (30) minutes (`late`). It is stopped (`claude stop`), its spend
-    settled, and removed (`claude rm`). Waiting at a permission prompt (state blocked, status waiting; `blocked`)
+    marked it (`<data>/dispatch-end.json` `{short_id, started_at, ended_at, token}`, its own file because the gate
+    rewrites `dispatch.json`; a marker counts only when its `short_id`, `started_at` and `token` match the record;
+    how `ended`), when its turn ended (state done or failed, or status idle, once a run saw it busy, the start's
+    listing included, or after LOOKS (3) runs saw it so; `turn`), when it was stopped or is gone (`gone`), or
+    past DISPATCH_MAX_MIN (30) minutes (`late`). It is stopped (`claude stop`), its spend settled, and removed
+    (`claude rm`). Waiting at a permission prompt (state blocked, status waiting; `blocked`)
     opens one card (kind and feed `dispatch`, lane needs, keyed `dispatch:<short id>`) whose ask is `fix`, from
     `dispatch`, telling the user to `claude attach <id>`, and the session is stopped but not removed. Each end but
     `ended` and `blocked` is one error. A start more than the 5-minute grace after now is `late` with an error that
     ends with "the clock may have gone back", as the scan session's. A failed listing waits (one error once the
     pass is late); a damaged record (also one whose `looks` is not a whole number or whose `seen_busy` is not true
-    or false) is removed with one error, so it never holds later passes back. Then the record keeps only `{queue}` (so the same
-    run starts the next group) or goes. Each end is one gate.log line and one gate.json `dispatch` entry.
+    or false) is removed with one error, so it never holds later passes back. Then the record keeps only `{queue,
+    why}` (so the same run starts the next group) or goes. Each end is one gate.log line and one gate.json
+    `dispatch` entry.
   - Floor: the pass's settings are built like the worker floor: the data folder's protected files (and
     `pass.json`, `dispatch.json`, `dispatch-end.json`) and the package denied for Edit, v1's dispatcher Bash
     denials (`perms.BASH_DENY`: no `gh pr comment`, `gh pr review`, `gh issue comment|create`, `gh pr edit
@@ -1949,17 +1959,23 @@ Calls the author made without asking (check them):
     path): `pass status`, `pass end`, `card list`, `card show`, `card ask`, `card lane`, `worker list`, `worker
     start`, `template show` and `search` as prefix rules, and `cap` and `cap --json` as exact rules, so `ap2 cap
     answer|resume`, `ap2 worker answer|end|park|finish` and `ap2 card add` are never allowed by rule; and the
-    profile's overlay merged under it. In any mode but live it also denies `gh pr ready`, `gh pr merge`, `gh pr
-    create`, `git push`, the git forms that put an option before the verb (`git -C`, `git -c`, `git --git-dir`,
-    `git --work-tree`: a prefix rule on `git push` does not cover `git -C <repo> push`), `gh api` (it can ready or
-    merge a PR), and the outward MCP tools of the group's projects' `tools` (v1's `denied_tools` and its
-    ticket-status tools); in shadow mode the runbook runs none of those (worktrees, fetches and merges are live
-    only). Its spend launch row is kind `dispatcher`.
+    profile's overlay merged under it. In any mode but live it also denies `git` and `gh` whole (`Bash(git:*)`,
+    `Bash(gh:*)`): a prefix rule matches only the command or the command and a space, so a rule per verb misses
+    every form that puts an option before the verb (`git -P push`, `git --git-dir=/r/.git push`, `gh -R o/r pr
+    merge 5`, `gh --repo=o/r pr ready 5`); in shadow mode the runbook runs no git or gh at all (worktrees, fetches,
+    pushes and merges are live only). Best effort, as every text rule: `/usr/bin/git` or `env git` gets past it.
+    It also denies the outward MCP tools of the group's projects' `tools` (v1's `denied_tools` and its
+    ticket-status tools), and the pass starts with `--strict-mcp-config` and no `--mcp-config`, so it loads no MCP
+    server or connector at all (a project with no `tools`, the default, and the no-project group name none to
+    deny); v1 isolates its page sessions the same way. Its spend launch row is kind `dispatcher`.
   - Commands: `ap2 pass status` prints `{pass, dispatch, mode}`; `ap2 pass end` writes the end marker (no open
-    pass: one `ap2: ...` line, exit 1); `ap2 card ask CARD --type T --text-file F [--from dispatch]` sets the ask
-    `{type, from, text}` and the lane `needs` through `Store.update_checked`, refused while the card has an open
-    ask; `ap2 card lane CARD LANE` moves a card, refusing an imported v1 copy. A bad id is exit 1, a bad type, lane
-    or `--from` exit 2. They write only inside the data folder, so they run in shadow mode.
+    pass: one `ap2: ...` line, exit 1). Run with `AP2_PASS` set (by a pass) that is not the open pass's token, it
+    is refused the same way and ends nothing: a pass stopped at a prompt and resumed by the user later cannot end
+    another group's pass. Without `AP2_PASS` (a person at a terminal) it ends the open pass. `ap2 card ask CARD
+    --type T --text-file F [--from dispatch]` sets the ask `{type, from, text}` and the lane `needs` through
+    `Store.update_checked`, refused while the card has an open ask and for an imported v1 copy; `ap2 card lane
+    CARD LANE` moves a card, refusing an imported v1 copy. A bad id is exit 1, a bad type, lane or `--from` exit 2.
+    They write only inside the data folder, so they run in shadow mode.
   - The choices (each reversible):
     - The gate does not wait. v1's `dispatch.run` polls the pass inside the gate for up to `dispatch_timeout_s`;
       v2's gate is short and holds one lock, so it starts the pass and a later run ends it, as the scan session.

@@ -136,6 +136,8 @@ MAX_STDIN = 1 << 20  # a v2 worker's Bash payload past this is denied (`main` re
 DEADLINE = 2.0  # seconds `main` gives one judgement before it falls back to `_fallback` (the hook's timeout is 5 s)
 # == workers.ROLES: the run directory's floor files are settings-<role>.json
 ROLES = ("implement", "review", "pr", "pr-review")
+# == (dispatch.SETTINGS,): the floor files of a run directory that are not a worker role's
+FLOOR_FILES = ("settings-dispatcher.json",)
 # A command past this is not split and matched (a long command of repeated `dd ` makes `_WRITE` slow, and a hook
 # past its 5 s timeout lets the call through): it is denied when it names the data folder or the package anywhere.
 MAX_COMMAND = 64 << 10
@@ -202,10 +204,10 @@ _NAME_GOES_ON = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_-/")
 def _bad_part(part: str, top: bool, mask=None) -> bool:
     """A path part under the run directory that leaves it or names the floor: `..`, a glob that can match `..` (bash
     3.2 matches `.*` to it), a `settings-*.json`, or, at the top level (`top`), where the floor's
-    `settings-<role>.json` files live, a part with a `[` (fnmatch reads `[^x]` and `[[:lower:]]` otherwise than
-    bash; no floor-file write needs one) or a glob that matches one (`*`, `settings*`). `mask` is `part` with each
-    quoted glob or bracket character as `_HIDE` (`_Word`): only an unquoted one globs, while `..` and a
-    `settings-*.json` name count however they are quoted."""
+    `settings-<role>.json` files (and FLOOR_FILES) live, a part with a `[` (fnmatch reads `[^x]` and `[[:lower:]]`
+    otherwise than bash; no floor-file write needs one) or a glob that matches one (`*`, `settings*`). `mask` is
+    `part` with each quoted glob or bracket character as `_HIDE` (`_Word`): only an unquoted one globs, while `..`
+    and a `settings-*.json` name count however they are quoted."""
     mask = part if mask is None else mask
     if part == ".." or (part.startswith(".") and any(c in mask for c in "*?[")):
         return True
@@ -213,7 +215,8 @@ def _bad_part(part: str, top: bool, mask=None) -> bool:
         return True
     if top and len(mask) > 64 and any(c in mask for c in "*?["):
         return True  # fnmatch reads a pattern in quadratic time (many `[`); no floor file name is that long
-    return top and any(fnmatch.fnmatchcase(f"settings-{role}.json", mask) for role in ROLES)
+    return top and any(fnmatch.fnmatchcase(name, mask)
+                       for name in tuple(f"settings-{role}.json" for role in ROLES) + FLOOR_FILES)
 
 
 class _Marks:

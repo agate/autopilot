@@ -682,9 +682,12 @@ def _finish_dispatch(data: Path, now: datetime, store: Store, claude, transcript
 def _start_dispatch(data: Path, now: datetime, store: Store, due: bool, claude, transcripts_dir, entries: list,
                     errors: list, log) -> None:
     """Start at most one pass, never while one is open: the next group of the round's queue, or, when a pass is
-    due, the first group of a new round, and then `pass_started` moves `seen` (once per round). The profile and the
-    cap are asked first: a refusal starts nothing and keeps the queue, and a due pass stays due. A group whose start
-    fails is one error and the next group of the round is tried in the same run; a new round where none starts
+    due, the first group of a new round, and then `pass_started` moves `seen` (once per round). A new round freezes
+    pass.json's `why` (written by `_pass_due` in this run, before `pass_started` clears it) on the pass's record, and
+    the queue carries it to each next group. The profile and the cap are asked first: a refusal starts nothing and
+    keeps the queue, and a due pass stays due. A group whose start fails is one error and the next group of the
+    round is tried in the same run, except when `claude --bg` itself fails (`dispatch.LaunchError`): that is one
+    error, no other group is tried this run and the queue is kept from that group on. A new round where none starts
     stays due."""
     try:
         rec = dispatch.read_record(data)
@@ -693,10 +696,13 @@ def _start_dispatch(data: Path, now: datetime, store: Store, due: bool, claude, 
     if rec is not None and "short_id" in rec:
         return  # one pass at a time
     queue = list((rec or {}).get("queue") or [])
+    why = list((rec or {}).get("why") or [])
     new_round = not queue
     if new_round:
         if not due:
             return
+        saved, _ = _read_pass(data / PASS)
+        why = saved.get("why") if isinstance(saved.get("why"), list) else []
         try:
             queue, bad = dispatch.groups(data, store)
         except (CardError, OSError, RecursionError) as e:
@@ -720,17 +726,30 @@ def _start_dispatch(data: Path, now: datetime, store: Store, due: bool, claude, 
         errors.append({"dispatch": True, "error": str(e) or type(e).__name__})
         log(f"dispatch: not started: {e}")
         return
-    started = None
+    started, stopped = None, None
     for i, group in enumerate(queue):
         try:
-            started = dispatch.start(data, group, queue[i + 1:], prof, now, store.cfg.mode, claude=claude)
+            started = dispatch.start(data, group, queue[i + 1:], prof, now, store.cfg.mode, claude=claude, why=why)
+            break
+        except dispatch.LaunchError as e:  # claude --bg failed (or hung 120 s): every other group would too
+            errors.append({"dispatch": True, "error": str(e)})
+            log(f"dispatch: not started: {e}; no other group is tried this run")
+            stopped = i
             break
         except Exception as e:  # noqa: BLE001 - one error per group; the next group of the round is tried
             errors.append({"dispatch": True, "error": str(e) or type(e).__name__})
             log(f"dispatch: not started: {e}")
     if started is None:
-        if not new_round:  # every group left in the round failed: the round is over
-            (data / dispatch.DISPATCH).unlink(missing_ok=True)
+        if new_round:
+            return
+        try:
+            if stopped is None:  # every group left in the round failed: the round is over
+                (data / dispatch.DISPATCH).unlink(missing_ok=True)
+            else:  # the next run tries again from the group that could not launch
+                write_json(data / dispatch.DISPATCH, {"queue": queue[stopped:], "why": why})
+        except OSError as e:
+            errors.append({"dispatch": True, "error": str(e)})
+            log(f"dispatch: error: {e}")
         return
     entries.append({"did": "started", "short_id": started["short_id"], "group": started["group"],
                     "projects": started["projects"]})
