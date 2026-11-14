@@ -761,7 +761,7 @@ def _take_over(store: Store, name: str, folder: Path, langs: tuple, labels: Labe
     for t in tasks if not os.path.islink(folder / "runs") else ():
         src = folder / "runs" / t["id"]
         if (t["status"] not in FINISHED and t["id"] not in (".", "..") and Path(t["id"]).name == t["id"]
-                and src.is_dir() and not src.is_symlink()):
+                and os.path.isdir(src) and not os.path.islink(src)):
             runs.append((f"v1:{name}:{t['id']}", src))
     for key, src in runs:
         if key in existing:  # a card made later has no run folder yet: it is checked when it is copied

@@ -1667,6 +1667,33 @@ class TakeOverTest(unittest.TestCase):
         self.assertTrue((record / "runs" / "PROJ-5" / "handback.json").is_file())
         self.assertEqual(got["v1:shop:PROJ-2"]["spec"], str(record / "specs" / "PROJ-2.md"))
 
+    def test_an_open_task_whose_id_is_too_long_for_a_file_name_has_no_run_folder_to_copy(self):
+        long_id = "P" * 256  # v1 takes any id; no folder can have this name
+        self.edit_state("projects/shop", lambda s: s["tasks"][2].update(id=long_id))  # PROJ-3: nothing points at it
+        for args in (("--dry-run",), ()):
+            with self.subTest(args=args):
+                report = self.take_over(*args)
+                self.assertNotIn(f"runs/{long_id}", " ".join(self.project_entry(report)["files"]["copied"]))
+        card = self.by_key()[f"v1:shop:{long_id}"]
+        self.assertTrue(card["taken_over"])
+        self.assertFalse(transcripts_run_dir(self.data, card["id"]).exists())
+        self.assertEqual([p.name for p in (self.data / "sessions").iterdir()],
+                         [self.by_key()["v1:shop:PROJ-2"]["id"]])
+
+    def test_a_runs_folder_that_cannot_be_searched_has_no_run_folder_to_copy(self):
+        if os.geteuid() == 0:
+            self.skipTest("root searches a folder whatever its mode")
+        runs = self.shop / "runs"
+        shutil.rmtree(runs)
+        runs.mkdir()
+        os.chmod(runs, 0o444)  # its names can be listed (there are none), but nothing in it can be looked up
+        self.addCleanup(os.chmod, runs, 0o755)
+        for args in (("--dry-run",), ()):
+            with self.subTest(args=args):
+                files = self.project_entry(self.take_over(*args))["files"]
+                self.assertEqual([f for f in files["copied"] if "/runs/" in f], [])
+        self.assertFalse((self.data / "sessions").exists() and any((self.data / "sessions").iterdir()))
+
     def test_a_live_question_card_shows_v1s_body(self):
         self.take_over()
         got = self.by_key()
