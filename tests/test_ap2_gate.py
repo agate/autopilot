@@ -1509,8 +1509,9 @@ class CommandWatchTest(LoopCase):
         self.assertIn("b2", json.loads((self.data / "watches.json").read_text()))  # its time stays written
         self.assertEqual(self.gate(self.T + timedelta(minutes=4))["watches_due"], [])
 
-    def test_each_read_is_given_what_is_left_of_the_budget(self):
+    def test_each_read_is_given_its_share_of_what_is_left_of_the_budget(self):
         self.command_source("a1")
+        self.command_source("b2")
         given = []
         real = engine.Engine.read
 
@@ -1518,11 +1519,27 @@ class CommandWatchTest(LoopCase):
             given.append(max_timeout)
             return real(eng, name, dry_run=dry_run, max_timeout=max_timeout)
 
-        clock = iter([0.0, 30.0])
+        clock = iter([0.0, 0.0, 30.0])  # the start, before a1, before b2 (a1 took 30 of its 60)
         with mock.patch("assistant.gate.monotonic", lambda: next(clock)), \
                 mock.patch.object(engine.Engine, "read", read):
             self.gate(self.T)
-        self.assertEqual(given, [gate.READ_BUDGET - 30.0])
+        self.assertEqual(given, [gate.READ_BUDGET / 2, gate.READ_BUDGET - 30.0])
+
+    def test_a_hanging_read_is_one_error_and_does_not_use_the_time_of_the_next_watch(self):
+        self.command_source("a1")
+        (self.tmp / "a1.py").write_text("import time; time.sleep(30)\n")
+        self.command_source("b2", items=[item(2)])
+        marker = self.tmp / "b2-ran"
+        (self.tmp / "b2.py").write_text(f"import json; open({str(marker)!r}, 'w').close(); "
+                                        f"print(json.dumps({json.dumps([item(2)])}))\n")
+        with mock.patch.object(gate, "READ_BUDGET", 3):
+            out = self.gate(self.T)
+        self.assertEqual(out["watches_due"], ["a1", "b2"])
+        self.assertEqual([e["watch"] for e in out["errors"]], ["a1"])
+        self.assertIn("took longer than 1.5 seconds", out["errors"][0]["error"])
+        self.assertEqual([(r["watch"], r["made"]) for r in out["reads"]], [("b2", 1)])
+        self.assertTrue(marker.exists())
+        self.assertEqual([c["key"] for c in self.store().list()], ["b2:i2"])
 
 
 class ScanWatchTest(LoopCase):
@@ -1746,6 +1763,38 @@ class ScanFinishTest(LoopCase):
         self.assertNotEqual(self.scan_record()["short_id"], "s0001")  # taken; the due watch started a new scan
         self.assertEqual([r["made"] for r in again["reads"] if r["watch"] == "vendor-a"], [1])
         self.assertEqual([c["key"] for c in self.store().list()], ["vendor-a:i1"])
+
+    def list_as_stopped(self, short):
+        """The CLI keeps a stopped session on its listing with no pid and no status."""
+        f = self.fake_home / "agents.json"
+        rows = [a for a in json.loads(f.read_text()) if a["id"] != short]
+        f.write_text(json.dumps(rows + [{"id": short, "state": "stopped"}]))
+
+    def test_a_session_the_listing_shows_stopped_is_taken_with_no_late_error(self):
+        hook = {"tool_name": "mcp__vendor__list_incidents", "tool_input": {},
+                "tool_response": json.dumps([item(1)])}
+        scan.save_raw(self.rec["plan"], json.dumps(hook).encode())
+        self.list_as_stopped("s0001")
+        out = self.gate(self.T + timedelta(minutes=3))
+        self.assertFalse((self.data / "scan-session.json").exists())
+        self.assertEqual([(r["watch"], r["made"]) for r in out["reads"]], [("vendor-a", 1)])
+        self.assertEqual([c["key"] for c in self.store().list()], ["vendor-a:i1"])
+        self.assertEqual(out["errors"], [])
+
+    def test_after_a_failed_take_a_session_listed_stopped_is_taken_on_the_next_run(self):
+        hook = {"tool_name": "mcp__vendor__list_incidents", "tool_input": {},
+                "tool_response": json.dumps([item(1)])}
+        scan.save_raw(self.rec["plan"], json.dumps(hook).encode())
+        self.set_agent("s0001", state="done", status="idle")
+        with mock.patch("assistant.scan.take", side_effect=cards.CardError("the store is broken")):
+            first = self.gate(self.T + timedelta(minutes=2))
+        self.assertIn("the store is broken", first["errors"][0]["error"])
+        self.assertEqual(self.scan_record(), self.rec)
+        self.list_as_stopped("s0001")  # the first run stopped it; the CLI still lists it
+        out = self.gate(self.T + timedelta(minutes=3))  # well before SCAN_MAX_MIN
+        self.assertFalse((self.data / "scan-session.json").exists())
+        self.assertEqual([(r["watch"], r["made"]) for r in out["reads"]], [("vendor-a", 1)])
+        self.assertEqual(out["errors"], [])
 
     def test_a_session_that_is_gone_is_taken(self):
         (self.fake_home / "agents.json").write_text("[]")

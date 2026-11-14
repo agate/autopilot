@@ -164,8 +164,8 @@ class Engine:
 
     def read(self, name: str, dry_run: bool = False, max_timeout: Optional[float] = None) -> dict:
         """Run a `via: command` source and make its cards; with `dry_run`, save nothing and say what each item
-        would become. `max_timeout` (seconds) caps the source's `read.timeout`: the gate passes what is left of its
-        time for command reads; None keeps the source's own timeout."""
+        would become. `max_timeout` (seconds) caps the source's `read.timeout`: the gate passes this read's share of
+        what is left of its time for command reads; None keeps the source's own timeout."""
         src = self.source(name)
         if src.via != "command":
             raise SourceError(f"{src.file}: read.via is {src.via}; only a scan session can make that read. Give "

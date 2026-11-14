@@ -804,7 +804,8 @@ def _read_session(path: Path) -> dict:
 def finish(data, now: datetime, claude: Optional[str] = None, transcripts_dir=None,
            cfg: Optional[config.Config] = None) -> Optional[dict]:
     """Look at the open scan session (`<data>/scan-session.json`); None when there is none. Its turn ended (`state`
-    done, blocked or failed, or `status` idle), it is gone, its process is dead, or it ran past SCAN_MAX_MIN minutes
+    done, blocked or failed, or `status` idle), it was stopped (`state` stopped: the CLI keeps a stopped session on
+    its listing, no pid and no status), it is gone, its process is dead, or it ran past SCAN_MAX_MIN minutes
     (one more error), or it started more than `routines.GRACE` after now (one error that ends with
     `routines.WENT_BACK`): it is stopped (`claude stop`, its spend settled), taken (`take`) and the record removed.
     A failed listing, or a session still working inside the time, waits for the next run; a failed listing once the
@@ -840,7 +841,7 @@ def finish(data, now: datetime, claude: Optional[str] = None, transcripts_dir=No
         return out
     s = v1_sessions.find_by_id(short, listing)
     ended = (s is None or (s.get("pid") is not None and not v1_sessions.pid_alive(s.get("pid")))
-             or s.get("state") in ("done", "blocked", "failed") or s.get("status") == "idle")
+             or s.get("state") in ("done", "blocked", "failed", "stopped") or s.get("status") == "idle")
     late = not ended and over
     if not (ended or late):
         return out

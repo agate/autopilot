@@ -1492,8 +1492,10 @@ Calls the author made without asking (check them):
     denied with a reason, and so is any call it cannot decide (a bad plan or payload): it fails closed, never with
     no opinion. It runs before every tool call, so `ap2` takes it before the argument parser, as it does
     `hook-park`. `scan.finish` looks the session up in `claude agents --json --all`: its turn ended (`state` done,
-    blocked or failed, or `status` idle), it is gone, or its pid is dead; then it is stopped (`claude stop`, its
-    spend settled first, as a worker's stop is), taken (`scan.take`) and the record removed. Stop first, then take:
+    blocked or failed, or `status` idle), it was stopped (`state` stopped: the CLI keeps a stopped session on its
+    listing, with no pid and no status, so one a retry or `claude stop` stopped is not waited on), it is gone, or its
+    pid is dead; then it is stopped (`claude stop`, its spend settled first, as a worker's stop is), taken
+    (`scan.take`) and the record removed. Stop first, then take:
     a stop that fails keeps the record (the next run tries again, so no session is left running with no record), and
     a session that ran too long logs nothing more while it is taken. A take that fails on the store (a `CardError`
     or an `OSError`) keeps the record too: the gate reports one `{"scan": true}` error, the next run stops and takes
@@ -1565,8 +1567,10 @@ Calls the author made without asking (check them):
     `{watch, via, made, updated, unchanged, dropped}` per read, a failed read (exit not 0, a timeout, an unset
     setting) is one error `{"watch", "error"}` and the next watch is still read. **[decided by the builder]** The
     command reads of one run share one time budget, `READ_BUDGET` (120 seconds), counted from when the reads begin. Each
-    read's timeout is cut to what is left of it: a source's `read.timeout` (up to 600) that is longer is cut under
-    the gate, and a read cut this way fails the usual timeout way, one error that names the seconds it waited. Once
+    read's timeout is cut to what is left of it divided by the reads still to go (this one included), so one hanging
+    read cannot use the time of the others; time a fast read leaves unused goes to the later ones. A source's
+    `read.timeout` (up to 600) that is longer is cut under the gate, and a read cut this way fails the usual
+    timeout way, one error that names the seconds it waited. Once
     the budget is spent, a due watch is not started: one error `{"watch", "error": "not read: this run's 120
     seconds for command reads were spent; it is read at its next due time"}`. Its time was already written, so it
     is not rewound; it waits for its next due time. Why: a read runs inside the gate lock, so while it hangs every

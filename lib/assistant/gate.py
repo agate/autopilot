@@ -14,10 +14,11 @@ its key and only writes `last_slot`.
 
 Then (phase 2): every worker on record is checked (`Workers.check`, 8.2); the watches come from the user's own source
 files (`watch_list`); a due `via: command` watch is read here (`Engine.read`), all of them in READ_BUDGET (120)
-seconds per run (a read's timeout is cut to what is left; once it is spent a watch waits for its next due time, so
-one slow read cannot hold the lock, and with it every later run and routine slot, for long; a long read belongs to
-`ap2 source read`); the due `mcp`, `connector` and `skill`
-watches share one scan session (`scan.start`), which a later run takes into cards when it ends (`scan.finish`); and
+seconds per run (a read's timeout is cut to what is left divided by the reads still to go, so one hanging read cannot
+use the time of the others; once it is spent a watch waits for its next due time, so one slow read cannot hold the
+lock, and with it every later run and routine slot, for long; a long read belongs to `ap2 source read`); the due
+`mcp`, `connector` and `skill` watches share one scan session (`scan.start`), which a later run takes into cards
+when it ends (`scan.finish`); and
 `<data>/pass.json` records whether a dispatcher pass is due and why (`pass_due`). The gate starts no pass: the pass calls `pass_started` when it starts.
 """
 from __future__ import annotations
@@ -367,13 +368,15 @@ def _log_read(log, entry: dict) -> None:
 
 def _read_commands(data: Path, now: datetime, cfg, names: list, reads: list, errors: list, log) -> None:
     """Read each due `via: command` watch (`Engine.read`); a failed read is one error and the next still reads.
-    The reads share READ_BUDGET seconds: each read's timeout is cut to what is left, and once it is spent a watch is
-    not read (one error); its time stays written, so it is read at its next due time."""
+    The reads share READ_BUDGET seconds: each read's timeout is cut to what is left divided by the reads still to go
+    (this one included), so one hanging read cannot use the time of the others, and time a fast read leaves unused
+    goes to the later ones. Once it is spent a watch is not read (one error); its time stays written, so it is read
+    at its next due time."""
     if not names:
         return
     began = monotonic()
     eng = engine.Engine(data, cfg, clock=lambda: now)
-    for name in names:
+    for i, name in enumerate(names):
         left = READ_BUDGET - (monotonic() - began)
         if left <= 0:
             why = (f"not read: this run's {READ_BUDGET} seconds for command reads were spent; it is read at its next "
@@ -382,7 +385,7 @@ def _read_commands(data: Path, now: datetime, cfg, names: list, reads: list, err
             log(f"watch {name}: error: {why}")
             continue
         try:
-            result = eng.read(name, max_timeout=left)
+            result = eng.read(name, max_timeout=left / (len(names) - i))
         except Exception as e:  # noqa: BLE001 - one watch's failure never stops the run; a SourceError is ours
             why = str(e) if isinstance(e, (ConfigError, CardError, OSError)) else _error_text(e)
             errors.append({"watch": name, "error": why})
