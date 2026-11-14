@@ -38,7 +38,7 @@ from autopilot import perms as v1_perms
 from autopilot import sessions as v1_sessions
 from autopilot import workers as v1_workers
 
-from assistant import cards, profiles, projects as projects_module, routines, spend, transcripts
+from assistant import cards, datadir, profiles, projects as projects_module, routines, spend, transcripts
 from assistant import workers as workers_module
 from assistant.cards import CardError
 from assistant.config import ConfigError
@@ -244,13 +244,19 @@ def start(data, group: dict, queue: list, profile: dict, now: datetime, mode: st
     (`--strict-mcp-config`, no `--mcp-config`). The record is written right after the launch (a record that cannot be
     written stops the session again), then with the session id once the listing shows it (best effort); a spend launch
     row (kind `dispatcher`) follows, and a failure there is the record's `note`. Raises LaunchError when `claude --bg`
-    fails, DispatchError (or ConfigError, WorkerError) for this group, when nothing started: also when the launch cannot
-    enter the group's repo (an OSError naming it), so the next group is still tried."""
+    fails, DispatchError (or ConfigError, WorkerError) for this group, when nothing started: also for a repo that is
+    the data folder or inside it (`datadir.within`), and when the launch cannot enter the group's repo (an OSError
+    naming it), so the next group is still tried."""
     data, claude = Path(data), _claude(claude)
     projs = [projects_module.load(data, n) for n in group.get("projects") or []]
     cwd = Path(group["group"]) if group.get("group") else None
     if cwd is not None and not cwd.is_dir():
         raise DispatchError(f"no dispatcher pass started for {label(group)}: the repo {cwd} is not a folder")
+    if cwd is not None and datadir.within(cwd, data):
+        # A data folder kept in git (`repo: <data>`): there a relative write passes the Bash guard, and the data folder
+        # would be the session's project root, as for the group None (OWN_PREFIX).
+        raise DispatchError(f"no dispatcher pass started for {label(group)}: the repo {cwd} is the data folder or "
+                            f"inside it; a pass never runs there")
     s = settings(data, profile, projs, mode, claude=claude)
     run = data / RUN_DIR
     try:

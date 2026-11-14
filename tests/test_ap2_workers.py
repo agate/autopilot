@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1256,6 +1257,116 @@ class LifecycleTest(WorkerCase):
         with self.assertRaisesRegex(WorkerError, r"\(none given\) is not a folder; pass --cwd"):
             self.workers().start(cid, "implement", prompt="Do the work.")
         self.assertEqual(self.bg_calls(), [])
+
+    def scratch(self) -> Path:
+        """The temp folder `tempfile.mkdtemp` makes a worker's own folder in, for this test."""
+        scratch = self.tmp / "scratch"
+        scratch.mkdir()
+        patch = mock.patch.object(tempfile, "tempdir", str(scratch))
+        patch.start()
+        self.addCleanup(patch.stop)
+        return scratch
+
+    def test_a_worker_folder_of_its_own_that_is_gone_is_made_again_at_the_same_path(self):
+        """The system's temp cleaner or a reboot removes it: a fresh start and a `--resume` still run there."""
+        self.scratch()
+        for resume in (False, True):
+            with self.subTest(resume=resume):
+                w = self.workers()
+                cid = self.add_card()
+                first = w.start(cid, "implement", prompt="Do the work.")
+                w.end(cid, "implement")
+                shutil.rmtree(first["cwd"])
+                rec = w.start(cid, "implement", prompt="Go on.", resume=resume)
+                self.assertEqual(rec["cwd"], first["cwd"])
+                self.assertTrue(Path(rec["cwd"]).is_dir())
+                self.assertEqual(stat.S_IMODE(os.stat(rec["cwd"]).st_mode) & 0o077, 0)
+                call = self.bg_calls()[-1]
+                self.assertEqual(call["cwd"], first["cwd"])
+                self.assertEqual("--resume" in call["argv"], resume)
+                if resume:
+                    self.assertEqual(call["argv"][call["argv"].index("--resume") + 1], first["session_id"])
+
+    def test_a_gone_folder_that_is_not_one_of_its_own_is_not_made_again(self):
+        gone = self.tmp / "gone-worktree"
+        cid = self.add_card(sessions={"implement": {"id": "s-1", "ids": ["s-1"], "cwd": str(gone)}})
+        with self.assertRaisesRegex(WorkerError, "is not a folder; pass --cwd"):
+            self.workers().start(cid, "implement", prompt="Go on.", resume=True)
+        self.assertFalse(gone.exists())
+
+    def test_an_in_place_resume_makes_a_gone_folder_of_its_own_again(self):
+        own = self.tmp / f"{workers_mod.OWN_DIR}gone"
+        w = self.workers()
+        plan = {"cwd": str(own), "project": {}, "env": {}, "profile": {}, "card": "c1", "role": "implement"}
+        with mock.patch.object(w, "_tools", return_value=["found"]) as tools:
+            self.assertEqual(w._resume_tools(plan), ["found"])
+        self.assertTrue(own.is_dir())
+        self.assertEqual(tools.call_args.args[1], str(own))
+        other = self.tmp / "gone-worktree"
+        with self.assertRaisesRegex(WorkerError, "is gone"):
+            w._resume_tools(dict(plan, cwd=str(other)))
+        self.assertFalse(other.exists())
+        inside = self.data / f"{workers_mod.OWN_DIR}x"
+        with self.assertRaisesRegex(WorkerError, "is in the data folder"):
+            w._resume_tools(dict(plan, cwd=str(inside)))
+        self.assertFalse(inside.exists())
+
+    def test_a_saved_folder_in_the_data_folder_is_refused_with_advice_that_helps(self):
+        inside = self.data / f"{workers_mod.OWN_DIR}x"
+        cid = self.add_card(sessions={"implement": {"id": "s-1", "ids": ["s-1"], "cwd": str(inside)}})
+        with self.assertRaises(WorkerError) as e:
+            self.workers().start(cid, "implement", prompt="Go on.", resume=True)
+        self.assertIn("is in the data folder", str(e.exception))
+        self.assertIn("saved implement session's folder); pass --cwd <another folder>", str(e.exception))
+        self.assertNotIn("needs no --cwd", str(e.exception))
+        self.assertFalse(inside.exists())  # never made again there
+        self.assertEqual((self.bg_calls(), self.discovery_calls()), ([], []))
+
+    def test_another_spelling_of_the_data_folder_is_refused(self):
+        upper = self.data.parent / self.data.name.upper()
+        if not upper.exists() or upper.name == self.data.name:
+            self.skipTest("the test file system tells letter case apart")
+        cid = self.add_card()
+        with self.assertRaisesRegex(WorkerError, "is in the data folder"):
+            self.workers().start(cid, "implement", cwd=upper)
+        self.assertEqual((self.bg_calls(), self.discovery_calls()), ([], []))
+
+    def test_a_temp_folder_inside_the_data_folder_is_refused_before_discovery(self):
+        tmp = self.data / "tmp"
+        tmp.mkdir()
+        patch = mock.patch.object(tempfile, "tempdir", str(tmp))
+        patch.start()
+        self.addCleanup(patch.stop)
+        cid = self.add_card()
+        with self.assertRaisesRegex(WorkerError, "empty folder .* is in the data folder"):
+            self.workers().start(cid, "implement", prompt="Do the work.")
+        self.assertEqual((self.bg_calls(), self.discovery_calls()), ([], []))
+        self.assertEqual(list(tmp.iterdir()), [])  # the folder it made is gone again
+
+    def test_a_start_that_fails_after_making_its_folder_removes_it(self):
+        scratch = self.scratch()
+        cid = self.add_card()
+        with mock.patch.dict(os.environ, {"FAKE_BG_FAIL": "1"}):
+            with self.assertRaisesRegex(WorkerError, "cannot start the session"):
+                self.workers().start(cid, "implement", prompt="Do the work.")
+        self.assertEqual(list(scratch.iterdir()), [])
+        with mock.patch.object(Workers, "_tools", side_effect=WorkerError("no tools")):
+            with self.assertRaisesRegex(WorkerError, "no tools"):
+                self.workers().start(cid, "implement", prompt="Do the work.")
+        self.assertEqual(list(scratch.iterdir()), [])
+        self.assertEqual(resources.Registry(self.data).read(), [])
+
+    def test_a_failed_start_leaves_a_folder_of_its_own_made_again(self):
+        self.scratch()
+        w = self.workers()
+        cid = self.add_card()
+        first = w.start(cid, "implement", prompt="Do the work.")
+        w.end(cid, "implement")
+        shutil.rmtree(first["cwd"])
+        with mock.patch.dict(os.environ, {"FAKE_BG_FAIL": "1"}):
+            with self.assertRaisesRegex(WorkerError, "cannot start the session"):
+                w.start(cid, "implement", prompt="Go on.", resume=True)
+        self.assertTrue(Path(first["cwd"]).is_dir())  # empty, and saved on the card: left for the next start
 
 
 # -- 5. no process waits for a human -------------------------------------------------------------------------------

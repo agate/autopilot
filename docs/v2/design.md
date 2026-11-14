@@ -398,7 +398,8 @@ roles:
 
 A user template, or one Claude drafts, can combine roles and write briefs. It cannot add tools or permissions: each
 role keeps the tools and permission floor it ships with. Which folder a role runs in comes from the card (its repo
-worktree, or, for a card with no repo, a new empty folder of its own; never the data folder).
+worktree, or, for a card with no repo, a new empty folder of its own, made again at the same path when the system's
+temp cleaner removed it; never the data folder, under any spelling of its path).
 
 ### 6.1 Review angles **[decided]**
 
@@ -2056,7 +2057,11 @@ Calls the author made without asking (check them):
       session, and keeps it with a pass kept for `claude attach`. The workers it starts stay out of the data folder
       too: the runbook starts a card with no repo without `--cwd`, so `Workers.start` gives it a new empty folder of
       its own (prefix `ap2-worker-`, left in the temp folder), and refuses a `--cwd` that is the data folder or inside
-      it. Reverse: run it in the data folder.
+      it. A group whose `repo` is the data folder or inside it (a data folder kept in git) starts no pass either: one
+      `DispatchError` line for that group, which is dropped from the round as any group that does not start. Every
+      one of these checks is `datadir.within`: symlinks followed, letter case ignored (macOS file systems are
+      case-insensitive) and a same-folder check along the parents (macOS firmlinks such as
+      `/System/Volumes/Data/...`). Reverse: run it in the data folder.
     - Answered asks: the runbook acts on each `answered` entry of its group (an ask that closed). `ap2 card show`
       gives the card; the closed ask itself is in the restore point the closing `audit` entry names
       (`<data>/restore/<id>.json`, `card.ask`), since the card's `ask` no longer holds it. Only an ask from
@@ -3050,12 +3055,21 @@ Calls the author made without asking (check them):
     The resume id comes from the card or the worker list, so it is checked first: letters, digits and `-`, not
     starting with `-`. Anything else is refused before claude runs, so it can never become a flag. `--cwd` is
     saved absolute, so a later check run from another folder still finds it. A folder that is the data folder or
-    inside it is refused (one `WorkerError` line), whether given, parked or saved: there a relative write passes the
-    Bash guard, and the data folder would be the session's project root. A card with no repo (no project, or a
-    project with no `repo`) started with no folder (none given, parked or saved) runs in a new empty folder
-    (`tempfile.mkdtemp`, prefix `ap2-worker-`), saved as the role's `cwd`, so `--resume` reuses it; these folders
-    are left in the temp folder (nothing removes them). A card with a repo and no folder is still refused ("pass
-    --cwd").
+    inside it is refused (one `WorkerError` line), whether given, parked or saved, under any spelling of its path
+    (`datadir.within`: symlinks followed, letter case ignored, a same-folder check along the parents for macOS
+    firmlinks): there a relative write passes the Bash guard, and the data folder would be the session's project
+    root. The line says where the folder came from: a given one, that a card with no repo needs no `--cwd`; a
+    parked or saved one, to pass `--cwd <another folder>`. A card with no repo (no project, or a project with no
+    `repo`) started with no folder (none given, parked or saved) runs in a new empty folder (`tempfile.mkdtemp`,
+    prefix `ap2-worker-`, mode 0700), saved as the role's `cwd`, so `--resume` reuses it. That new folder is checked
+    the same way before the tool discovery (a `TMPDIR` inside the data folder is refused and the folder removed), and
+    a start that fails before its launch (discovery, a pause, the second plan, `due`, the launch) removes it again.
+    Started folders are left in the temp folder; the system's temp cleaner (on macOS, items older than 3 days) or a
+    reboot may remove one, so a parked or saved folder of its own (`ap2-worker-` name) that is gone is made again at
+    the same path (mode 0700) by the next start, `--resume` or in-place resume, after the data-folder check: the same
+    path keeps `--resume` working, since claude finds a saved session by its project folder. A failed start leaves
+    such a re-made folder (empty, and saved on the card). Any other folder that is gone is still refused. A card with
+    a repo and no folder is still refused ("pass --cwd").
   - `check()` classifies each worker: done (its result file newer than its start), question (`question.json`
     newer than its start), parked, unknown (the listing failed: nothing is done), dead (no session, its process
     gone, or state failed), blocked (status waiting), idle (state blocked or done, or status idle), running. Done:

@@ -107,7 +107,7 @@ from autopilot import sessions as v1_sessions
 from autopilot import workers as v1_workers
 
 from assistant import apistop, cap, cards, config, keys, prreview, profiles, projects, roles, sources, spend, templates
-from assistant import transcripts
+from assistant import datadir, transcripts
 from assistant.cards import CardError
 from assistant.resources import MAX_WORKERS, PORT_BASE, Registry, WorkerError, check_start, next_ports
 from assistant.store import Store, write_json
@@ -1170,9 +1170,11 @@ class Workers:
                     resume: bool, profile: dict) -> dict:
         """Everything a start decides from the worker list: no other worker on the card, the slot and `needs`, the
         ports, the session to resume and the folder. Raises WorkerError when the start may not go ahead (also for a
-        folder that is the data folder or inside it). A card with no repo and no folder (given, parked or saved) gets
-        `cwd` "": `start()` then makes it an empty folder of its own. `start()` runs it on a read of the list before
-        the tool discovery, and again under the lock (with that folder) before it launches."""
+        folder that is the data folder or inside it, under any spelling: `datadir.within`). A card with no repo and no
+        folder (given, parked or saved) gets `cwd` "": `start()` then makes it an empty folder of its own. A parked or
+        saved folder of its own (OWN_DIR) that is gone is made again at the same path (`_remake_own_dir`). `start()`
+        runs it on a read of the list before the tool discovery, and again under the lock (with that folder) before it
+        launches."""
         card_id = card["id"]
         old = self._find(records, card_id, role)
         other = next((r for r in records if r["card"] == card_id and r is not old), None)
@@ -1188,11 +1190,18 @@ class Workers:
         sid = ((parked or {}).get("session_id") or saved.get("id") or "") if resume else ""
         if resume and not sid:
             raise WorkerError(f"card {card_id}: no saved {role} session to resume")
+        source = ("given" if cwd else "parked" if (parked or {}).get("cwd") else "saved" if saved.get("cwd")
+                  else "")
         cwd = cwd or (parked or {}).get("cwd") or saved.get("cwd") or ""
         cwd = str(Path(cwd).resolve()) if cwd else ""  # absolute, so later checks from any folder find it
-        if cwd and Path(cwd).is_relative_to(self.data.resolve()):
+        if cwd and self._in_data(cwd):
+            whose = "the parked worker" if source == "parked" else f"the card's saved {role} session"
+            hint = ("(a card with no repo needs no --cwd)" if source == "given" else
+                    f"(it is {whose}'s folder); pass --cwd <another folder>")
             raise WorkerError(f"the worker's folder {cwd} is in the data folder {self.data}; a worker never runs "
-                              f"there (a card with no repo needs no --cwd)")
+                              f"there {hint}")
+        if source in ("parked", "saved"):
+            self._remake_own_dir(cwd)
         if (cwd or project.get("repo")) and not (cwd and Path(cwd).is_dir()):
             raise WorkerError(f"the worker's folder {cwd or '(none given)'} is not a folder; pass --cwd")
         primary = self.cfg.primary_language
@@ -1200,6 +1209,23 @@ class Workers:
                                                        _slug(cards.title_for(card, primary, primary)))
         return {"old": old, "parked": parked, "needs": needs, "ports": port_range, "sid": sid, "cwd": cwd,
                 "branch": branch, "env": self._env(card, role, project, port_range, branch, profile)}
+
+    def _in_data(self, path) -> bool:
+        """`path` is the data folder or inside it, under any spelling (`datadir.within`)."""
+        return datadir.within(path, self.data)
+
+    @staticmethod
+    def _remake_own_dir(cwd: str) -> None:
+        """Make a worker's own empty folder (a name that starts with OWN_DIR) again, at the same path, when it is gone:
+        the system's temp cleaner (on macOS, items older than 3 days) or a reboot removes it, and without it the role
+        could never start again. The same path keeps `--resume` working (claude finds a saved session by its project
+        folder). Any other folder that is gone is left alone. Raises WorkerError."""
+        if not (cwd and Path(cwd).name.startswith(OWN_DIR)) or os.path.lexists(cwd):
+            return
+        try:
+            os.makedirs(cwd, mode=0o700, exist_ok=True)
+        except OSError as e:
+            raise WorkerError(f"cannot make the worker's folder {cwd} again: {e}") from None
 
     def start(self, card_id: str, role: str, cwd=None, prompt: str = "", needs=None, resume: bool = False,
               by: str = BY, due: Optional[Callable[[dict], bool]] = None) -> dict:
@@ -1211,8 +1237,9 @@ class Workers:
         taken, so no other start, end or check waits on it; under the lock every check is made again on the list
         as it is then, and the floor is written with the ports picked there. With `due` (the auto-start's
         `_review_is_due`), the card is read again under the lock and nothing starts unless `due(card)` still holds.
-        A card with no repo and no folder runs in a new empty folder of its own (`tempfile.mkdtemp`, OWN_DIR); no
-        worker runs in the data folder or under it.
+        A card with no repo and no folder runs in a new empty folder of its own (`tempfile.mkdtemp`, OWN_DIR), which
+        is refused (and removed) when the temp folder is inside the data folder, and removed again when the start
+        fails before its launch; no worker runs in the data folder or under it.
         """
         config.require_live(self.cfg, f"start a {role} worker on card {card_id}")
         if role not in ROLES:
@@ -1227,62 +1254,76 @@ class Workers:
         self._refuse_at_cap(self._allowance(prof, now))
         # A start the list already refuses fails here, before any discovery runs.
         planned = self._plan_start(self.registry.read(), card, role, project, saved, cwd, needs, resume, prof)
+        made = ""  # the empty folder this call makes, removed again when the start fails before its launch
         if not planned["cwd"]:  # no repo and no folder: an empty one of its own, saved as the role's `cwd`, which
             try:  # `--resume` reuses (it is left in the temp folder)
-                cwd = str(Path(tempfile.mkdtemp(prefix=OWN_DIR)).resolve())
+                made = cwd = str(Path(tempfile.mkdtemp(prefix=OWN_DIR)).resolve())
             except OSError as e:
                 raise WorkerError(f"cannot make an empty folder for the worker: {e}") from None
             planned = dict(planned, cwd=cwd)
-        require_literal(self.data)  # before the tool discovery runs a session
-        found = self._tools(project, planned["cwd"], planned["env"], prof, card_id, role)
-        with self.registry.locked() as records:
-            # A pause written while the tools were listed: `cap_stop` reads the list under this lock after it writes
-            # paused.json, so a launch that commits here either sees the pause or is on the list it stops.
-            pz = cap.paused(self.data)
-            if pz is not None:
-                raise cap.CapError(cap.refusal({"reason": "paused", "paused": pz}))
-            plan = self._plan_start(records, card, role, project, saved, cwd, needs, resume, prof)
-            if due is not None and not due(self._card(card_id)):
-                # The card changed while the tools were listed (moved to lane done, an ask, a review applied).
-                raise WorkerError(f"card {card_id} is no longer due for a review; nothing started")
-            if plan["cwd"] != planned["cwd"]:
-                # The tools were found in another folder (the parked record changed meanwhile): they may not be
-                # the ones this session loads.
-                raise WorkerError(f"the worker's folder changed from {planned['cwd']} to {plan['cwd']} while its "
-                                  "tools were listed; start it again")
-            old, parked, port_range, env = plan["old"], plan["parked"], plan["ports"], plan["env"]
-            cwd, needs, sid, branch = plan["cwd"], plan["needs"], plan["sid"], plan["branch"]
-            name = session_name(card_id, role)
-            settings = self.run_dir(card_id) / f"settings-{role}.json"
-            argv = self._argv(role, name, settings, self._prompt(prompt, card, role, project, port_range, branch),
-                              prof, sid)
-            write_json(settings, floor(role, found, self.data, env, prof, claude=self.claude))
-            if parked:
-                # The parked session sits idle; the copy takes its place.
-                self._stop(card_id, role, parked.get("short_id"), by, parked.get("session_id"))
-            elif resume:
-                # The card's saved session (after a pause or an answer) may still be listed, idle: the copy takes
-                # its place, so it is stopped first (its spend settled) rather than left running next to it.
-                replaced = self._listed_session(sid)
-                if replaced is not None:
-                    self._stop(card_id, role, replaced["id"], by, sid)
-            short = self._launch(argv, cwd, env)
-            rec = {"card": card_id, "role": role, "project": project.get("name"), "session_name": name,
-                   "session_id": "", "short_id": short, "ports": port_range, "needs": needs, "cwd": cwd,
-                   "branch": branch, "profile": prof["name"], "started_at": cards.stamp(now), "resumes": 0,
-                   "parked": None, "idle_since": None, "blocked_since": None,
-                   # The round's first start: a pr-review report newer than it is the round's own, through every
-                   # resume of a parked worker (`classify`). `started_at` moves with each resume.
-                   "round_started_at": (parked or {}).get("round_started_at") or cards.stamp(now)}
-            if parked and parked.get("limit_parks"):
-                rec["limit_parks"] = parked["limit_parks"]  # the limit parks in a row go on through the resume
-            # On record before the listing is asked for its id: a Ctrl-C or an error there still leaves a record
-            # that points at the running session (the next check fills the id in, `_fill_session_id`).
-            records[:] = [r for r in records if r is not old] + [rec]
-            try:
-                rec["session_id"] = new_sid = self._session_id(short)
-            finally:
-                self._record(short, project.get("name"), prof, rec["session_id"])
+        launched = False
+        try:
+            if made and self._in_data(made):  # a temp folder (TMPDIR) inside the data folder: before any discovery
+                raise WorkerError(f"the worker's empty folder {made} is in the data folder {self.data}; a worker "
+                                  "never runs there (set TMPDIR to a folder outside it)")
+            require_literal(self.data)  # before the tool discovery runs a session
+            found = self._tools(project, planned["cwd"], planned["env"], prof, card_id, role)
+            with self.registry.locked() as records:
+                # A pause written while the tools were listed: `cap_stop` reads the list under this lock after it writes
+                # paused.json, so a launch that commits here either sees the pause or is on the list it stops.
+                pz = cap.paused(self.data)
+                if pz is not None:
+                    raise cap.CapError(cap.refusal({"reason": "paused", "paused": pz}))
+                plan = self._plan_start(records, card, role, project, saved, cwd, needs, resume, prof)
+                if due is not None and not due(self._card(card_id)):
+                    # The card changed while the tools were listed (moved to lane done, an ask, a review applied).
+                    raise WorkerError(f"card {card_id} is no longer due for a review; nothing started")
+                if plan["cwd"] != planned["cwd"]:
+                    # The tools were found in another folder (the parked record changed meanwhile): they may not be
+                    # the ones this session loads.
+                    raise WorkerError(f"the worker's folder changed from {planned['cwd']} to {plan['cwd']} while its "
+                                      "tools were listed; start it again")
+                old, parked, port_range, env = plan["old"], plan["parked"], plan["ports"], plan["env"]
+                cwd, needs, sid, branch = plan["cwd"], plan["needs"], plan["sid"], plan["branch"]
+                name = session_name(card_id, role)
+                settings = self.run_dir(card_id) / f"settings-{role}.json"
+                argv = self._argv(role, name, settings, self._prompt(prompt, card, role, project, port_range, branch),
+                                  prof, sid)
+                write_json(settings, floor(role, found, self.data, env, prof, claude=self.claude))
+                if parked:
+                    # The parked session sits idle; the copy takes its place.
+                    self._stop(card_id, role, parked.get("short_id"), by, parked.get("session_id"))
+                elif resume:
+                    # The card's saved session (after a pause or an answer) may still be listed, idle: the copy takes
+                    # its place, so it is stopped first (its spend settled) rather than left running next to it.
+                    replaced = self._listed_session(sid)
+                    if replaced is not None:
+                        self._stop(card_id, role, replaced["id"], by, sid)
+                short = self._launch(argv, cwd, env)
+                launched = True
+                rec = {"card": card_id, "role": role, "project": project.get("name"), "session_name": name,
+                       "session_id": "", "short_id": short, "ports": port_range, "needs": needs, "cwd": cwd,
+                       "branch": branch, "profile": prof["name"], "started_at": cards.stamp(now), "resumes": 0,
+                       "parked": None, "idle_since": None, "blocked_since": None,
+                       # The round's first start: a pr-review report newer than it is the round's own, through every
+                       # resume of a parked worker (`classify`). `started_at` moves with each resume.
+                       "round_started_at": (parked or {}).get("round_started_at") or cards.stamp(now)}
+                if parked and parked.get("limit_parks"):
+                    rec["limit_parks"] = parked["limit_parks"]  # the limit parks in a row go on through the resume
+                # On record before the listing is asked for its id: a Ctrl-C or an error there still leaves a record
+                # that points at the running session (the next check fills the id in, `_fill_session_id`).
+                records[:] = [r for r in records if r is not old] + [rec]
+                try:
+                    rec["session_id"] = new_sid = self._session_id(short)
+                finally:
+                    self._record(short, project.get("name"), prof, rec["session_id"])
+        except BaseException:
+            if made and not launched:  # nothing runs in it: only the folder this call made, never a saved one
+                try:
+                    os.rmdir(made)
+                except OSError:
+                    pass
+            raise
         self._save_session(card_id, role, by, id=new_sid or sid, cwd=cwd, needs=needs, state="running", why=None,
                            question=None, profile=prof["name"])
         self._close_worker_asks(card_id, role, by)  # a new session: its old prompt, pause or question is over
@@ -1648,7 +1689,14 @@ class Workers:
                 "env": self._env(card, rec["role"], project, rec["ports"], rec.get("branch") or "", prof)}
 
     def _resume_tools(self, plan: dict) -> dict:
-        """Step 2, with the lock free: the tools the resumed session will load (`_tools`). Raises WorkerError."""
+        """Step 2, with the lock free: the tools the resumed session will load (`_tools`). A record's folder in the
+        data folder is refused, and its own folder (OWN_DIR) that is gone is made again at the same path
+        (`_remake_own_dir`). Raises WorkerError."""
+        if plan["cwd"] and self._in_data(plan["cwd"]):
+            raise WorkerError(f"cannot start the session: the worker's folder {plan['cwd']} is in the data folder "
+                              f"{self.data}; a worker never runs there; start it with --resume --cwd <another "
+                              "folder>")
+        self._remake_own_dir(plan["cwd"])
         if not (plan["cwd"] and Path(plan["cwd"]).is_dir()):  # checked first, so a gone worktree says so
             raise WorkerError(f"cannot start the session: the worker's folder {plan['cwd'] or '(none)'} is gone")
         require_literal(self.data)  # before the tool discovery runs a session

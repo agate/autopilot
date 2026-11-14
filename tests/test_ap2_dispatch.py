@@ -463,6 +463,24 @@ class StartTest(DispatchCase):
         out = self.gate(self.T + timedelta(minutes=1))  # the next round tries it again at once
         self.assertEqual([e["did"] for e in out["dispatch"]], ["started"])
 
+    def test_a_repo_that_is_the_data_folder_or_inside_it_starts_no_pass(self):
+        """A data folder kept in git (`repo: <data>`): there a relative write passes the Bash guard."""
+        (self.data / "sub").mkdir()
+        for repo in (self.data, self.data / "sub"):
+            with self.subTest(repo=repo):
+                group = {"group": str(repo), "projects": []}
+                with self.assertRaisesRegex(dispatch.DispatchError, "is the data folder or inside it"):
+                    dispatch.start(self.data, group, [], profiles.active(self.data), self.T, "shadow", claude=FAKE)
+        self.assertEqual(self.dispatch_calls(), [])
+        self.assertFalse((self.data / dispatch.DISPATCH).exists())
+        project_file(self.data, "notes", self.data)
+        self.add_card(project="notes")
+        out = self.gate(self.T)
+        errs = [e for e in out["errors"] if e.get("dispatch")]
+        self.assertEqual(len(errs), 1)
+        self.assertIn("is the data folder or inside it", errs[0]["error"])
+        self.assertEqual(self.dispatch_calls(), [])
+
     def test_a_profile_that_does_not_load_starts_nothing(self):
         self.add_card()
         (self.data / profiles.ACTIVE).write_text("not json", encoding="utf-8")
