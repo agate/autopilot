@@ -3811,19 +3811,29 @@ Calls the author made without asking (check them):
     - Live cards: every card gets `taken_over` (the time) and a live `do` (v2 works on it, v1 is paused for it).
       A task card also gets `branch` (v1's; an open task without one gets `projects.branch(project, <v1 id>,
       <slug of its title>)`, never the card key, whose colons git refuses; v1 has no id rule, so a computed branch
-      holding white space, a control character, `:`, `~`, `^`, `?`, `*`, `[`, `\` or `..` stops the take-over with
-      one line naming the task), `worktree` (v1's, when set), `needs`,
+      holding white space, a control character, `:`, `~`, `^`, `?`, `*`, `[`, `\`, `..` or `@{`, starting with `-`,
+      `/` or `.`, ending in `/` or `.`, holding `//`, or with a part starting with `.` or ending in `.lock` stops the
+      take-over with one line naming the task, and so does a `branch_pattern` that cannot be filled, such as
+      `{task.id}` or `{task[a]}`), `worktree` (v1's, when set), `needs`,
       `spec`, and `sessions` from v1's `{role: session id}` as `{role: {id, ids, cwd: <worktree or "">, needs,
       state: ended, why: "taken over from v1", at}}`, the shape `Workers._save_session` writes, so
       `start(..., resume=True)` continues it in its worktree. `lane` and `status` are mapped as by the import.
       Every decision gets a card: an open `ask` or `gate` an open question card; every other one (answered,
       resolved, undone, open `self` and `system`) a done question card (`ask: null`) whose `source.record` keeps
-      `kind`, `task`, `status`, `answer`, `answered_at` and `created_at`; `not_imported.decisions` is 0. A card the
+      `kind`, `task`, `status`, `answer`, `answered_at` and `created_at`; `not_imported.decisions` is 0. Every
+      decision card's `source.record` also keeps v1's `body`, `options` and `links` as given, and an open one's
+      `ask.text` (what v2 shows with an ask) is the body's text in the primary language when it is not blank, so
+      "answer it here" shows what v1 asked; the read-only import keeps its cards as they were. A card the
       import made keeps its id, parent and audit (`action: take_over`); one not made yet is added live. Nothing goes
       to `workers.json` and no worker starts: the dispatcher pass starts what comes next.
-    - Files: the whole project folder is copied to `<data>/v1/<name>/` with the same relative paths, by `shutil.copy2`
-      (same bytes and mtimes, so an old `handback.json` never looks newer than a v2 start), leaving out only v1's
-      `state.lock`. Each open task's `runs/<task>/` is also copied into its card's run folder
+    - Files: the whole project folder is copied to `<data>/v1/<name>/` with the same relative paths (same bytes,
+      mode and mtime, so an old `handback.json` never looks newer than a v2 start), leaving out only v1's
+      `state.lock`. Each copy, and the project file, is written to a temp file next to it (`.<name>.ap2-part`) and
+      put in place with `os.link`, so a write cut short (a full disk, Ctrl-C) leaves nothing at the final name and
+      the next run writes it whole; the temp file is removed in every case, and one a killed run left is replaced
+      (unlinked, never written through). A destination made meanwhile is never overwritten: `os.link` refuses it
+      and the take-over stops with one line. A v1 file whose name ends in `.ap2-part` is listed under `skipped`, so
+      it never meets a temp name. Each open task's `runs/<task>/` is also copied into its card's run folder
       (`<data>/sessions/<card>/`), where v2's workers read and write; none is when v1's `runs/` is itself a link (it
       is listed under `skipped`), and a task id that is not one plain path part (`.`, `..`, one holding a separator)
       gets no run-folder copy, so a copy never reads outside `runs/`. A `spec` inside the project folder points at its
@@ -3838,9 +3848,11 @@ Calls the author made without asking (check them):
       `branch_prefix`, `resources`, `health_checks`, `extra_hosts` and `mcp_servers` (one `key: <JSON>` line each,
       JSON being inside the YAML subset; a `null` or empty value is left out), only when it does not exist
       (`project_file: written`, `kept`, or `write` on a dry run). A value `projects.load` would refuse, or one that
-      does not read back the same, stops the take-over before any write.
+      does not read back the same, or one holding text that is not valid Unicode (a lone surrogate `json.loads`
+      takes from a `\ud800` escape, which cannot be written as UTF-8), stops the take-over before any write.
     - Second run: a card with `taken_over` is never rebuilt from v1 (`unchanged`), so what v2 changed since stays;
-      a copy whose destination exists is never written (`same`, or `kept` when its bytes differ); a file removed
+      a copy whose destination exists is never written (`same`, or `kept` when its bytes differ; a copy cut short
+      left no destination, so it is copied again); a file removed
       on the v2 side since is copied again (with v1's mtime), nothing else is; nothing is removed. A task or decision new in v1 since is added live. The plain import skips a project whose project
       card has `taken_over` and lists it under the report's `taken_over: [names]` (exit 0; the others import).
     - Choices taken (simplest reversible, v2 RULES.md line 3): refuse, not warn, when v1 is not paused (a warning

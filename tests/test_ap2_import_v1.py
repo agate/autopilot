@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import io
 import json
 import os
@@ -1596,15 +1597,17 @@ class TakeOverTest(unittest.TestCase):
             with self.subTest(key=key):
                 self.assertEqual((c["kind"], c["lane"], c["ask"]), ("question", "done", None))
                 self.assertTrue(c["taken_over"])
-                self.assertEqual(sorted(c["source"]["record"]),
-                                 ["answer", "answered_at", "created_at", "kind", "status", "task"])
+                self.assertEqual(sorted(c["source"]["record"]), ["answer", "answered_at", "body", "created_at",
+                                                                 "kind", "links", "options", "status", "task"])
         self.assertEqual(got["v1:shop:D5"]["source"]["record"]["answer"], "no")
+        self.assertEqual(got["v1:shop:D5"]["source"]["record"]["body"], {"en": "It still works."})
         self.assertEqual(got["v1:shop:D5"]["source"]["record"]["answered_at"], "2026-11-05T11:00:00Z")
         self.assertEqual(got["v1:shop:D3"]["source"]["record"]["kind"], "self")
         self.assertEqual(got["v1:shop:D3"]["parent"], got["v1:shop:PROJ-2"]["id"])
         self.assertEqual(got["v1:shop:D4"]["parent"], got["v1:shop"]["id"])
-        for key, kind in (("v1:shop:D1", "answer"), ("v1:shop:D2", "approve")):
-            self.assertEqual((got[key]["lane"], got[key]["ask"]), ("needs", {"type": kind, "from": "v1"}))
+        for key, kind, text in (("v1:shop:D1", "answer", "Two providers fit."),
+                                ("v1:shop:D2", "approve", "Approve to go on.")):
+            self.assertEqual((got[key]["lane"], got[key]["ask"]), ("needs", {"type": kind, "from": "v1", "text": text}))
             self.assertIn("v2 works on", got[key]["plain"]["do"]["en"])
         for task in ("PROJ-5", "PROJ-6"):
             self.assertEqual(got[f"v1:shop:{task}"]["lane"], "done")
@@ -1644,6 +1647,21 @@ class TakeOverTest(unittest.TestCase):
         self.assertFalse(run5.exists())
         self.assertTrue((record / "runs" / "PROJ-5" / "handback.json").is_file())
         self.assertEqual(got["v1:shop:PROJ-2"]["spec"], str(record / "specs" / "PROJ-2.md"))
+
+    def test_a_live_question_card_shows_v1s_body(self):
+        self.take_over()
+        got = self.by_key()
+        one = got["v1:shop:D1"]
+        self.assertEqual(one["ask"]["text"], "Two providers fit.")
+        self.assertEqual({k: one["source"]["record"][k] for k in ("body", "options", "links")},
+                         {"body": {"en": "Two providers fit."}, "options": [], "links": []})
+        self.edit_state("projects/shop", lambda s: s["decisions"][0].update(
+            id="D7", body={"en": " "}, options=[{"en": "A"}], links=["notes.md"]))
+        self.take_over()
+        seven = self.by_key()["v1:shop:D7"]
+        self.assertEqual(seven["ask"], {"type": "answer", "from": "v1"})  # a blank body gives no text
+        self.assertEqual((seven["source"]["record"]["options"], seven["source"]["record"]["links"]),
+                         ([{"en": "A"}], ["notes.md"]))
 
     def test_a_spec_outside_the_project_folder_is_kept(self):
         self.edit_state("projects/shop", lambda s: s["tasks"][1].update(spec="/elsewhere/PROJ-2.md"))
@@ -1696,26 +1714,115 @@ class TakeOverTest(unittest.TestCase):
         self.assertNotIn("v1:shop", self.by_key())
         self.assertEqual(list(target.iterdir()), [])
 
+    def set_branch_pattern(self, pattern, prefix):
+        cfg = json.loads((FIXTURE / "projects" / "shop" / "config.json").read_text())
+        (self.shop / "config.json").write_text(json.dumps(dict(cfg, branch_pattern=pattern, branch_prefix=prefix)))
+
     def test_a_computed_branch_git_refuses_stops_the_take_over(self):
-        for task_id in ("A:1", "fix total", "a~1", "a^1", "a?", "a*", "a[1", "a\\1", "a..b"):
-            with self.subTest(task_id=task_id):
+        default = ("{prefix}.{task}.{short}", "dev")
+        cases = [(task_id, default) for task_id in ("A:1", "fix total", "a~1", "a^1", "a?", "a*", "a[1", "a\\1",
+                                                     "a..b", "a@{1")]
+        cases += [("PROJ-1", ("{prefix}/{task}/{short}", None)),  # a leading /
+                  ("PROJ-1", ("{prefix}-{task}-{short}", None)),  # a leading -
+                  ("PROJ-1", (".{task}.{short}", "dev")),  # a leading .
+                  ("PROJ-1", ("{prefix}/{task}/", "dev")),  # a trailing /
+                  ("PROJ-1", ("{prefix}.{task}.", "dev")),  # a trailing .
+                  ("PROJ-1", ("{prefix}//{task}", "dev")),
+                  (".x", ("{prefix}/{task}/{short}", "dev")),  # a part starting with .
+                  ("a.lock", ("{prefix}/{task}/{short}", "dev")),  # a part ending in .lock
+                  ("PROJ-1", ("{prefix}.{task}.lock", "dev"))]
+        for task_id, (pattern, prefix) in cases:
+            with self.subTest(task_id=task_id, pattern=pattern, prefix=prefix):
+                self.set_branch_pattern(pattern, prefix)
                 self.edit_state("projects/shop", lambda s: s["tasks"][0].update(id=task_id))
                 line = self.refused()
                 self.assertIn(task_id, line)
                 self.assertIn("branch", line)
+        self.set_branch_pattern("{prefix}/{task}/{short}", "dev")
+        self.edit_state("projects/shop", lambda s: s["tasks"][0].update(id="PROJ-1"))
+        self.take_over()
+        self.assertEqual(self.by_key()["v1:shop:PROJ-1"]["branch"], "dev/PROJ-1/add-the-cart")
+
+    def test_a_branch_pattern_that_cannot_be_filled_is_one_line(self):
+        for pattern in ("{prefix}.{task.id}.{short}", "{prefix}.{task[a]}.{short}"):
+            with self.subTest(pattern=pattern):
+                self.set_branch_pattern(pattern, "dev")
+                line = self.refused()
+                self.assertIn("branch_pattern", line)
+                self.assertIn("PROJ-1", line)
 
     def test_a_project_file_made_meanwhile_is_one_line(self):
-        real_open = open
+        real_link = os.link
 
-        def racing(file, mode="r", *a, **k):
-            if mode == "x":
-                raise FileExistsError(17, "File exists", str(file))
-            return real_open(file, mode, *a, **k)
+        def racing(src, dst, *a, **k):
+            if str(dst).endswith("shop.yaml"):
+                Path(dst).write_text("repo: /made/meanwhile\n", encoding="utf-8")
+                raise FileExistsError(errno.EEXIST, "File exists", str(dst))
+            return real_link(src, dst, *a, **k)
 
-        with mock.patch("builtins.open", racing):
+        with mock.patch("os.link", racing):
             line = self.fails("--take-over", "shop")
         self.assertIn("cannot write", line)
         self.assertIn("shop.yaml", line)
+        self.assertEqual(projects.path(self.data, "shop").read_text(encoding="utf-8"), "repo: /made/meanwhile\n")
+        self.assertEqual(list(self.data.rglob("*.ap2-part")), [])
+
+    def test_a_copy_cut_short_leaves_no_file_and_the_next_run_copies_it_whole(self):
+        def short(src, dst, *a, **k):
+            data = src.read()
+            dst.write(data[:len(data) // 2])
+            raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+        with mock.patch("shutil.copyfileobj", short):
+            line = self.fails("--take-over", "shop")
+        self.assertIn(os.strerror(errno.ENOSPC), line)
+        self.assertEqual([p for p in (self.data / "v1").rglob("*") if not p.is_dir()], [])
+        self.assertFalse(os.path.lexists(projects.path(self.data, "shop")))
+        # A temp file an interrupted run left (here a link out of the data folder) is replaced, never followed.
+        outside = self.tmp / "outside-part"
+        outside.write_text("mine\n")
+        (self.data / "v1" / "shop" / ".state.json.ap2-part").symlink_to(outside)
+        files = self.project_entry(self.take_over())["files"]
+        self.assertIn("v1/shop/state.json", files["copied"])
+        self.assertEqual((self.data / "v1" / "shop" / "state.json").read_bytes(),
+                         (self.shop / "state.json").read_bytes())
+        self.assertEqual(outside.read_text(), "mine\n")
+        self.assertEqual(list(self.data.rglob("*.ap2-part")), [])
+        self.assertFalse([f for each in files.values() for f in each if "ap2-part" in f])
+
+    def test_a_v1_file_with_the_temp_files_name_is_skipped(self):
+        (self.shop / ".state.json.ap2-part").write_text("v1's own\n")
+        files = self.project_entry(self.take_over())["files"]
+        self.assertIn(".state.json.ap2-part", files["skipped"])
+        self.assertIn("v1/shop/state.json", files["copied"])
+        self.assertFalse(os.path.lexists(self.data / "v1" / "shop" / ".state.json.ap2-part"))
+
+    def test_a_project_file_cut_short_leaves_no_file_and_the_next_run_writes_it(self):
+        def short(src, dst, *a, **k):
+            data = src.read()
+            if not data.startswith(b"# From v1's config.json"):
+                dst.write(data)
+                return
+            dst.write(data[:10])
+            raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+        with mock.patch("shutil.copyfileobj", short):
+            line = self.fails("--take-over", "shop")
+        self.assertIn("shop.yaml", line)
+        self.assertFalse(os.path.lexists(projects.path(self.data, "shop")))
+        self.assertEqual(list(self.data.rglob("*.ap2-part")), [])
+        report = self.take_over()
+        self.assertEqual(self.project_entry(report)["project_file"], "written")
+        got = projects.load(self.data, "shop")
+        self.assertEqual((got["repo"], got["branch_prefix"]), ("/srv/repos/shop", "dev"))
+        self.assertEqual(self.by_key()["v1:shop:PROJ-1"]["branch"], "dev.PROJ-1.add-the-cart")
+
+    def test_a_config_value_that_is_not_valid_unicode_is_one_line(self):
+        cfg = json.loads((FIXTURE / "projects" / "shop" / "config.json").read_text())
+        (self.shop / "config.json").write_text(json.dumps(dict(cfg, mcp_servers=["srv\ud800"])))
+        line = self.refused()
+        self.assertIn("config.json", line)
+        self.assertIn("mcp_servers", line)
 
     # -- 6. the project's setup file ---------------------------------------------------------------------------
 

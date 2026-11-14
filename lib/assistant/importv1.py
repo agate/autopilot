@@ -18,14 +18,16 @@ first (`ap pause NAME`: v1's `paused` file, or `stopped: true`) with no v1 worke
 v1's folder is only read (`os.scandir`, `os.stat`, and copies from it). Its cards turn live (`taken_over`, the
 branch, worktree, needs, spec and saved sessions v2's workers continue), every decision gets a card (settled ones
 `done`, with the answer), the whole project folder is copied to `<data>/v1/<name>/` and each open task's run folder
-into its card's run folder (`shutil.copy2`; never overwritten, never removed, v1's links skipped, a link on the v2
-side refused), and `<data>/projects/<name>.yaml` is written from config.json when it does not exist. A card with
-`taken_over` is never rebuilt from v1, and the plain import skips a project whose project card has it.
+into its card's run folder (same bytes and mtime, through a temp file linked in place; never overwritten, never
+removed, v1's links skipped, a link on the v2 side refused), and `<data>/projects/<name>.yaml` is written from
+config.json when it does not exist. A card with `taken_over` is never rebuilt from v1, and the plain import skips
+a project whose project card has it.
 """
 from __future__ import annotations
 
 import copy
 import filecmp
+import io
 import json
 import os
 import re
@@ -61,9 +63,13 @@ PROJECT_FILE_KEYS = ("repo", "branch_pattern", "branch_prefix", "resources", "he
 RECORD = "v1"  # <data>/v1/<name>/: the copy of a taken-over project's folder
 V1_LOCK = "state.lock"  # v1's lock file, the one file of the project folder not copied
 TAKEN_OVER = "taken over from v1"
-# What `git check-ref-format` refuses in a branch name and a v1 task id may hold: white space or a control
-# character, `:`, `~`, `^`, `?`, `*`, `[`, `\`, and `..`.
-BAD_BRANCH = re.compile(r"[\s\x00-\x1f\x7f:~^?*\[\\]|\.\.")
+# What `git check-ref-format` refuses in a branch name and a v1 task id or branch_pattern may give: white space or
+# a control character, `:`, `~`, `^`, `?`, `*`, `[`, `\`, `..` and `@{`; a leading `-`, `/` or `.`; a trailing `/`
+# or `.`; `//`; a part starting with `.` (`/.`); a part ending in `.lock`.
+BAD_BRANCH = re.compile(r"[\s\x00-\x1f\x7f:~^?*\[\\]|\.\.|@\{|^[-/.]|[/.]$|//|/\.|\.lock(/|$)")
+# The temp file a copy or the project file is written to first, next to it (`.<name>.ap2-part`), then linked in
+# place: a write cut short never leaves a part file at the final name.
+PART = ".ap2-part"
 # The longest text a v1 label may give, in characters: a template longer than this is shown as its key (before it
 # is parsed), and a label that would fill longer is shown as written. v1's own labels are about 100 characters.
 MAX_LABEL = 1_000
@@ -378,7 +384,10 @@ class _Maker:
         sessions, in the shape `Workers._save_session` writes. Raises _Refused on a session v2 cannot resume."""
         branch, worktree = _given(t.get("branch")), _given(t.get("worktree"))
         if branch is None and t["status"] not in FINISHED:
-            branch = projects.branch(self.live["project"], t["id"], _slug(card["title"][self.langs[0]]))
+            try:
+                branch = projects.branch(self.live["project"], t["id"], _slug(card["title"][self.langs[0]]))
+            except ConfigError as e:
+                raise _Refused(f"task {t['id']}: config.json: {e}") from None
             if BAD_BRANCH.search(branch):
                 raise _Refused(f"state.json: task {t['id']}: its branch {cards.shown(branch)} (from the project's "
                                f"branch_pattern and the task id) is not one git takes; give the task a branch in v1")
@@ -425,11 +434,16 @@ class _Maker:
         record = {"kind": d.get("kind"), "task": d.get("task"), "status": d.get("status"),
                   "created_at": d.get("created_at")}
         do = ("do_question_live" if open_ else "do_settled") if self.live else ("do_question" if open_ else "do_closed")
+        ask = {"type": ASK[d["kind"]], "from": "v1"} if open_ else None
         if self.live:
-            record.update(answer=d.get("answer"), answered_at=d.get("answered_at"))
+            record.update(answer=d.get("answer"), answered_at=d.get("answered_at"), body=d.get("body"),
+                          options=d.get("options"), links=d.get("links"))
+            body = self.texts(d.get("body"), "")[self.langs[0]]
+            if ask is not None and not cards.blank(body):
+                ask["text"] = body  # what v2's page shows with the ask
         return self._mark(self.card("question", f"v1:{self.name}:{d['id']}", "needs" if open_ else "done",
                                     self.texts(d.get("title"), d["id"]), where, self.say(do), record, parent,
-                                    ask={"type": ASK[d["kind"]], "from": "v1"} if open_ else None))
+                                    ask=ask))
 
     def kept(self, old, new: dict) -> dict:
         """`new` with `old`'s non-blank texts in the languages that are not configured. Non-blank is `cards.blank`, so
@@ -738,8 +752,7 @@ def _take_over(store: Store, name: str, folder: Path, langs: tuple, labels: Labe
     if project_file == "written":
         try:
             pfile.parent.mkdir(exist_ok=True)
-            with open(pfile, "x", encoding="utf-8") as f:  # "x": a file made meanwhile is never overwritten
-                f.write(text)
+            _place(pfile, io.BytesIO(text.encode("utf-8")))  # a file made meanwhile is never overwritten
         except OSError as e:
             raise V1ImportError(f"cannot write {pfile}: {e}") from e
     added = {k for k in (key for key, _ in runs) if k not in existing}
@@ -773,6 +786,10 @@ def _project_file(cfg: dict, stop) -> tuple:
             ok, want = isinstance(value, list) and all(isinstance(v, str) and v for v in value), "a list of names"
         if not ok:
             stop(f"config.json: {key} must be {want} for v2's project file, not {cards.shown(value)}")
+        try:
+            json.dumps(value, ensure_ascii=False).encode("utf-8")
+        except UnicodeEncodeError:  # a lone surrogate json.loads takes from a `\ud800` escape
+            stop(f"config.json: {key} holds text that is not valid Unicode, which v2's project file cannot hold")
         values[key] = value
     text = "# From v1's config.json by `ap2 import-v1 --take-over`; yours to edit.\n" + "".join(
         f"{k}: {json.dumps(v, ensure_ascii=False)}\n" for k, v in values.items())
@@ -817,7 +834,7 @@ def _walk(src: Path, dst: Path, data: Path, seen: set, skip=()) -> list:
                 continue
             if e.is_dir(follow_symlinks=False):
                 todo.append((Path(e.path), d / e.name))
-            elif e.is_file(follow_symlinks=False):
+            elif e.is_file(follow_symlinks=False) and not e.name.endswith(PART):  # PART: the copy's own temp name
                 ops.append(("file", Path(e.path), d / e.name))
             else:
                 ops.append(("skip", Path(e.path), None))
@@ -829,8 +846,8 @@ def _walk(src: Path, dst: Path, data: Path, seen: set, skip=()) -> list:
 
 def _copy(ops: list, folder: Path, data: Path, files: dict, dry_run: bool) -> None:
     """Carry out `_walk`'s ops (with `dry_run`, only report them): a destination that exists is never written,
-    `same` when its bytes are the source's, else `kept`. `copy2` keeps the mtime, so an old result file never looks
-    newer than a v2 start."""
+    `same` when its bytes are the source's, else `kept`. The copy keeps the mtime (`_place`), so an old result file
+    never looks newer than a v2 start."""
     for kind, src, dst in ops:
         try:
             if kind == "skip":
@@ -844,6 +861,31 @@ def _copy(ops: list, folder: Path, data: Path, files: dict, dry_run: bool) -> No
             else:
                 files["copied"].append(str(dst.relative_to(data)))
                 if not dry_run:
-                    shutil.copy2(src, dst, follow_symlinks=False)
+                    fd = os.open(src, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))  # v1's links never followed
+                    with os.fdopen(fd, "rb") as f:
+                        _place(dst, f, like=src)
         except OSError as e:
             raise V1ImportError(f"cannot copy {src or ''} to {dst}: {e}") from e
+
+
+def _place(dst: Path, source, like: Optional[Path] = None) -> None:
+    """Write the bytes of the open file `source` to `dst`, which must not exist: into the temp file `.<name>` + PART
+    next to it, then `os.link` puts it at `dst` (FileExistsError when `dst` was made meanwhile: never overwritten).
+    With `like`, the temp takes `like`'s mode and mtime first (`shutil.copystat`). The temp file is removed in every
+    case, so a write cut short (a full disk, Ctrl-C) leaves nothing at `dst`; one a killed run left is replaced, never
+    written through (it is unlinked, then made new with O_EXCL)."""
+    tmp = dst.with_name(f".{dst.name}{PART}")
+    if os.path.lexists(tmp):
+        os.unlink(tmp)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o666)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            shutil.copyfileobj(source, f)
+        if like is not None:
+            shutil.copystat(like, tmp, follow_symlinks=False)
+        os.link(tmp, dst)
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
