@@ -1504,7 +1504,8 @@ Calls the author made without asking (check them):
     spend settle run once: the record then gets a `stopped_at`, and a later run skips the listing, the stop, the
     settle and the late errors. Before each take the card store is read first, and the take runs only when it
     reads. Until then each run adds one error, `the card store cannot be read (<why>); the scan session <short> is
-    taken once it can`. So a retry while the store is broken adds no raw copy and no settle row. One
+    taken once it can`. So a retry while the card store cannot be read adds no raw copy. A retry where the store
+    reads but a write fails still saves one raw copy each time. The stop and the settle run once either way. One
     still working after `SCAN_MAX_MIN` (15) minutes is stopped and taken with what it logged, plus one error. One
     whose `started_at` is more than `routines.GRACE` (5 minutes) after now (a run with a later `--now` started it,
     or the clock went back) is late too, since it would never grow old: it is stopped and taken, with one error that

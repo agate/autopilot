@@ -812,10 +812,10 @@ def finish(data, now: datetime, claude: Optional[str] = None, transcripts_dir=No
     A failed listing, or a session still working inside the time, waits for the next run; a failed listing once the
     session is that late adds one error. Once stopped and settled, the record gets a `stopped_at`, so a later run
     skips the listing, the stop, the settle and the late errors. Before the take, the card store must read; when it
-    does not, the record is kept with one error and nothing is taken (no raw copy, no settle row), and a later run
-    takes once it reads. A take that still fails on the store (a CardError or OSError) raises with the record kept,
-    so the next run checks and takes again. Returns `{open, ended, short_id, reads, errors}`; each read also says
-    its `via`."""
+    does not, the record is kept with one error and nothing is taken (no raw copy), and a later run takes once it
+    reads. When the store reads but a write fails (a CardError or OSError), the take still saves one raw copy each
+    time and raises with the record kept, so the next run checks and takes again. The stop and the settle run once
+    either way. Returns `{open, ended, short_id, reads, errors}`; each read also says its `via`."""
     from assistant import spend, transcripts
 
     data, claude = Path(data), _claude(claude)
