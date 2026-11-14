@@ -4,7 +4,8 @@ whether a dispatcher pass is due, the heartbeat and restore-point prune.
 A run is short and uses no AI itself: it reads files, decides, makes cards through the store, writes
 `<data>/gate.json` and exits. Its own file writes stay inside the data folder. The processes it starts are the
 `claude` CLI (`agents` and `stop` for the worker check and the scan session, and at most one `--bg` scan session per
-run, through `scan.start`) and each due `via: command` watch's `read.run`. In shadow mode it starts and resumes no
+run, through `scan.start`; `stop` and `rm` for the dispatcher pass and at most one `--bg` pass per run, through
+`dispatch.start`) and each due `via: command` watch's `read.run`. In shadow mode it starts and resumes no
 worker (`Workers` refuses that) and runs no source `writes`. One global lock,
 `<data>/.gate.lock`, keeps a second run from doing anything while one is going.
 
@@ -24,7 +25,14 @@ by itself; once the budget is spent a watch waits for its next due time, so one 
 and with it every later run and routine slot, for long; a long read belongs to `ap2 source read`); the due
 `mcp`, `connector` and `skill` watches share one scan session (`scan.start`), which a later run takes into cards
 when it ends (`scan.finish`); and
-`<data>/pass.json` records whether a dispatcher pass is due and why (`pass_due`). The gate starts no pass: the pass calls `pass_started` when it starts.
+`<data>/pass.json` records whether a dispatcher pass is due and why (`pass_due`).
+
+The dispatcher pass (8.0, `dispatch.py`): early in each run the open pass is looked at (`dispatch.finish`) and ended
+when its turn is over, it said `ap2 pass end`, it is gone or it ran past `dispatch.DISPATCH_MAX_MIN` minutes; after the
+pass-due check, when no pass is open, the run starts at most one (`_start_dispatch`): the next group of the round in
+`<data>/dispatch.json`'s `queue`, or, when a pass is due, the first group of a new round (`dispatch.groups`), and
+then `pass_started` moves `seen`. The gate never waits for a pass: a later run ends it. In shadow mode the pass still
+runs; its floor denies the outward writes.
 """
 from __future__ import annotations
 
@@ -37,7 +45,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Optional
 
-from assistant import cards, engine, routines, scan, sources, transcripts
+from assistant import cards, dispatch, engine, routines, scan, sources, transcripts
 from assistant import workers as workers_module
 from assistant.cards import CardError
 from assistant.config import ConfigError
@@ -645,6 +653,100 @@ def pass_started(data, now: datetime, store: Optional[Store] = None) -> dict:
     return out
 
 
+# -- the dispatcher pass (design 8.0, section 12 "Dispatcher pass") ----------------------------------------------------
+
+def _finish_dispatch(data: Path, now: datetime, store: Store, claude, transcripts_dir, entries: list, errors: list,
+                     log) -> None:
+    """End the open pass when it is over (`dispatch.finish`): one gate.log line and one `dispatch` entry per end."""
+    try:
+        out = dispatch.finish(data, now, claude=claude, transcripts_dir=transcripts_dir, store=store)
+    except Exception as e:  # noqa: BLE001 - one error; the record is kept, so the next run looks again
+        errors.append({"dispatch": True, "error": _error_text(e)})
+        log(f"dispatch: error: {_error_text(e)}")
+        return
+    if out is None:
+        return
+    for e in out["errors"]:
+        errors.append(e)
+        log(f"dispatch: error: {e['error']}")
+    if out["ended"]:
+        entry = {"did": out["how"], "short_id": out["short_id"], "group": out["group"], "projects": out["projects"]}
+        if out.get("card"):
+            entry["card"] = out["card"]
+        entries.append(entry)
+        card = f"; card {out['card']} asks the user to attach it" if out.get("card") else ""
+        log(f"dispatch: {out['short_id']} ({dispatch.label(out)}) ended ({out['how']}: {dispatch.HOW[out['how']]})"
+            f"{card}")
+
+
+def _start_dispatch(data: Path, now: datetime, store: Store, due: bool, claude, transcripts_dir, entries: list,
+                    errors: list, log) -> None:
+    """Start at most one pass, never while one is open: the next group of the round's queue, or, when a pass is
+    due, the first group of a new round, and then `pass_started` moves `seen` (once per round). The profile and the
+    cap are asked first: a refusal starts nothing and keeps the queue, and a due pass stays due. A group whose start
+    fails is one error and the next group of the round is tried in the same run; a new round where none starts
+    stays due."""
+    try:
+        rec = dispatch.read_record(data)
+    except (OSError, ValueError, RecursionError):  # damaged since `_finish_dispatch` looked: the next run removes it
+        return
+    if rec is not None and "short_id" in rec:
+        return  # one pass at a time
+    queue = list((rec or {}).get("queue") or [])
+    new_round = not queue
+    if new_round:
+        if not due:
+            return
+        try:
+            queue, bad = dispatch.groups(data, store)
+        except (CardError, OSError, RecursionError) as e:
+            errors.append({"dispatch": True, "error": str(e)})
+            log(f"dispatch: error: {e}")
+            return
+        for e in bad:
+            errors.append(e)
+            log(f"project {e['project']}: refused: {e['error']}")
+        if not queue:
+            if not bad:  # nothing live to serve: what changed is seen, so the pass is not due every run
+                try:
+                    pass_started(data, now, store)
+                except (CardError, WorkerError, OSError, RecursionError) as e:
+                    errors.append({"pass": True, "error": str(e)})
+                    log(f"pass: error: {e}")
+            return
+    try:
+        prof = dispatch.launch_profile(data, now, transcripts_dir, claude=claude, store=store)
+    except Exception as e:  # noqa: BLE001 - e.g. a ProfileError, a paused cap: nothing started
+        errors.append({"dispatch": True, "error": str(e) or type(e).__name__})
+        log(f"dispatch: not started: {e}")
+        return
+    started = None
+    for i, group in enumerate(queue):
+        try:
+            started = dispatch.start(data, group, queue[i + 1:], prof, now, store.cfg.mode, claude=claude)
+            break
+        except Exception as e:  # noqa: BLE001 - one error per group; the next group of the round is tried
+            errors.append({"dispatch": True, "error": str(e) or type(e).__name__})
+            log(f"dispatch: not started: {e}")
+    if started is None:
+        if not new_round:  # every group left in the round failed: the round is over
+            (data / dispatch.DISPATCH).unlink(missing_ok=True)
+        return
+    entries.append({"did": "started", "short_id": started["short_id"], "group": started["group"],
+                    "projects": started["projects"]})
+    log(f"dispatch: started {started['short_id']} for {dispatch.label(started)}; {len(started['queue'])} group(s) "
+        f"left in the round")
+    if started.get("note"):
+        errors.append({"dispatch": True, "error": started["note"]})
+        log(f"dispatch: {started['note']}")
+    if new_round:
+        try:
+            pass_started(data, now, store)
+        except (CardError, WorkerError, OSError, RecursionError) as e:  # at worst one extra pass
+            errors.append({"pass": True, "error": str(e)})
+            log(f"pass: error: {e}")
+
+
 def _run(data: Path, now: datetime, watches, store: Optional[Store], claude, transcripts_dir,
          usage_file) -> dict:
     log = Log(data, now)
@@ -700,6 +802,8 @@ def _run(data: Path, now: datetime, watches, store: Optional[Store], claude, tra
     checked = _check_workers(data, now, cfg, store, claude, transcripts_dir, usage_file, errors, log)
     reads = []
     scan_open = _finish_scan(data, now, cfg, claude, transcripts_dir, reads, errors, log)
+    dispatched = []
+    _finish_dispatch(data, now, store, claude, transcripts_dir, dispatched, errors, log)
 
     read_them = watches is None
     if read_them:
@@ -752,9 +856,10 @@ def _run(data: Path, now: datetime, watches, store: Optional[Store], claude, tra
             log(f"pruned {len(raw['removed'])} raw source file(s) older than {engine.RAW_KEEP.days} days")
 
     pass_due = _pass_due(data, now, store, errors, log)
+    _start_dispatch(data, now, store, pass_due, claude, transcripts_dir, dispatched, errors, log)
     errors = [{k: _safe(v) for k, v in e.items()} for e in errors]  # e.g. a file name that is not UTF-8
     out = {"last_run_at": cards.stamp(now), "routines": found, "workers": checked, "watches_due": due_names,
-           "reads": reads, "pruned": pruned, "pass_due": pass_due, "errors": errors}
+           "reads": reads, "pruned": pruned, "pass_due": pass_due, "dispatch": dispatched, "errors": errors}
     write_json(data / HEARTBEAT, out)
     log(f"run: {len(found)} routine slot(s), {len(due_names)} watch(es) due, {len(pruned)} pruned, "
         f"{len(errors)} error(s)")

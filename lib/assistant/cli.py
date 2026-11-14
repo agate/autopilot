@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from assistant import config, datadir, templates
-from assistant.cards import LANES, CardError
+from assistant.cards import ASK_TYPES, LANES, CardError
 from assistant.config import ConfigError, ShadowModeError
 from assistant.resources import WorkerError
 from assistant.store import Store
@@ -62,6 +62,25 @@ def _parser() -> argparse.ArgumentParser:
     li.add_argument("--kind")
     li.add_argument("--parent", metavar="ID")
     li.add_argument("--data", metavar="PATH", help=DATA_HELP)
+    ak = card_sub.add_parser("ask", help="open an ask on a card for the user and print the card",
+                             description="Set CARD's ask (type T, the words in FILE) and move it to the needs lane, "
+                                         "and print the card. Refused while the card has an open ask. The "
+                                         "dispatcher pass's way to ask the user (design 4.1, 3.7); writes only "
+                                         "inside the data folder.")
+    ak.add_argument("id", metavar="CARD")
+    ak.add_argument("--type", required=True, choices=ASK_TYPES, help="the ask's type")
+    ak.add_argument("--text-file", required=True, metavar="FILE", help="the ask's words, as a UTF-8 text file")
+    ak.add_argument("--from", dest="ask_from", default="dispatch", choices=("dispatch",),
+                    help="who asks (default: dispatch)")
+    ak.add_argument("--by", default="ap2", help=BY_HELP)
+    ak.add_argument("--data", metavar="PATH", help=DATA_HELP)
+    ln = card_sub.add_parser("lane", help="move a card to another lane and print it",
+                             description="Move CARD to LANE and print the card. An imported v1 copy is refused. "
+                                         "Writes only inside the data folder.")
+    ln.add_argument("id", metavar="CARD")
+    ln.add_argument("lane", metavar="LANE", choices=LANES)
+    ln.add_argument("--by", default="ap2", help=BY_HELP)
+    ln.add_argument("--data", metavar="PATH", help=DATA_HELP)
 
     se = sub.add_parser("search", help="find cards by their words",
                         description="Print, as a JSON list, the cards whose plain words, title, kind or feed hold "
@@ -78,6 +97,7 @@ def _parser() -> argparse.ArgumentParser:
     _source_parser(sub)
     _scan_parser(sub)
     _gate_parser(sub)
+    _pass_parser(sub)
     _install_parsers(sub)
     _template_parser(sub)
     _review_parser(sub)
@@ -271,10 +291,50 @@ def _read_card_file(name: str):
         raise CardError(f"{name!r}: not JSON: {e}") from e
 
 
+def _card_ask(args) -> dict:
+    from assistant import cards
+    try:
+        text = Path(args.text_file).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        raise CardError(f"cannot read {args.text_file!r}: {e}") from e
+    if cards.blank(text):
+        raise CardError(f"{args.text_file!r} holds no words for the ask")
+    cards.check_id(args.id)  # a bad id is refused before the data folder is touched
+    ask = {"type": args.type, "from": args.ask_from, "text": text.strip()}
+    store = _store(args)
+
+    def room(card):
+        cur = card.get("ask")
+        if cur is not None:
+            raise CardError(f"{card['id']} already has an open ask ({(cur or {}).get('type')} from "
+                            f"{(cur or {}).get('from') or 'the user'}); it is left as it is")
+        return f"ask {args.type} from {args.ask_from}"
+
+    return store.update_checked(args.id, {"ask": ask, "lane": "needs"}, by=args.by, check=room)
+
+
+def _card_lane(args) -> dict:
+    from assistant import cards
+    from assistant.importv1 import FEED as V1_FEED
+    cards.check_id(args.id)
+    store = _store(args)
+
+    def movable(card):
+        if card.get("feed") == V1_FEED:
+            raise CardError(f"{card['id']} is an imported v1 copy; v1 moves it")
+        return f"lane {card.get('lane')} -> {args.lane}"
+
+    return store.update_checked(args.id, {"lane": args.lane}, by=args.by, check=movable)
+
+
 def cmd_card(args) -> int:
     if args.card_command == "add":
         card = _read_card_file(args.file)  # read before the data folder is touched
         out = _store(args).add(card, by=args.by)
+    elif args.card_command == "ask":
+        out = _card_ask(args)
+    elif args.card_command == "lane":
+        out = _card_lane(args)
     elif args.card_command == "show":
         out = _store(args).get(args.id)
     else:
@@ -800,7 +860,9 @@ def _gate_parser(sub) -> None:
                                    "one here; the mcp, connector and skill ones in one scan session, which a later "
                                    "run takes into cards); prune restore points older than 30 days; write pass.json "
                                    "(whether a dispatcher pass is due and why), "
-                                   "gate.json and gate.log. It starts no dispatcher pass. Prints the run as JSON. "
+                                   "gate.json and gate.log. It starts at most one dispatcher pass (one claude --bg "
+                                   "session per repo group, one group at a time) and never waits for it: a later "
+                                   "run ends it. Prints the run as JSON. "
                                    "While another run holds the gate lock, prints {\"locked\": true, ...} and exits "
                                    "0.")
     g.add_argument("--now", type=_gate_now, metavar="ISO", help="run as if it were this time (default: now)")
@@ -816,6 +878,49 @@ def cmd_gate(args) -> int:
 
 
 COMMANDS["gate"] = cmd_gate
+
+
+# -- ap2 pass (the dispatcher pass, design 8.0 and section 12 "Dispatcher pass") ---------------------------------------
+# What the pass itself runs: `status` reads, `end` writes only <data>/dispatch-end.json (any mode).
+
+def _pass_parser(sub) -> None:
+    ps = sub.add_parser("pass", help="show or end the dispatcher pass",
+                        description="The dispatcher pass: one claude --bg session the gate starts per repo group "
+                                    "when pass.json says a pass is due.")
+    pc = ps.add_subparsers(dest="pass_command", metavar="<pass command>", title="pass commands")
+    pc.required = True
+    st = pc.add_parser("status", help="print pass.json and dispatch.json",
+                       description="Print {\"pass\": pass.json, \"dispatch\": dispatch.json, \"mode\"} as JSON "
+                                   "(null for a file that is not there): whether a pass is due and why, and the "
+                                   "open pass with the groups of its round still to serve.")
+    en = pc.add_parser("end", help="mark the open dispatcher pass ended",
+                       description="Mark the open pass ended (the pass's last step); the next gate run stops and "
+                                   "removes its session at once. Prints the marker as JSON.")
+    for c in (st, en):
+        c.add_argument("--data", metavar="PATH", help=DATA_HELP)
+
+
+def _read_json_or_none(path: Path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, RecursionError) as e:
+        raise ConfigError(f"{path}: cannot read: {e}") from e
+
+
+def cmd_pass(args) -> int:
+    from assistant import cards, dispatch, gate
+    data = datadir.ensure(datadir.resolve(args.data))
+    if args.pass_command == "end":
+        _print_json(dispatch.end(data, cards.now_utc()))
+        return 0
+    _print_json({"pass": _read_json_or_none(data / gate.PASS), "dispatch": _read_json_or_none(data / dispatch.DISPATCH),
+                 "mode": config.load(data).mode})
+    return 0
+
+
+COMMANDS["pass"] = cmd_pass
 
 
 # -- ap2 install, uninstall and doctor (v2's own launchd job; design section 12, "Install") ------------------------

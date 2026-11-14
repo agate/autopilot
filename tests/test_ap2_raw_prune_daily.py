@@ -24,7 +24,7 @@ from tests.test_ap2_raw_prune import NOW, RAW, RawCase, name
 
 UTC = timezone.utc
 SUMMARY = "run: 0 routine slot(s), 0 watch(es) due, 0 pruned, 0 error(s)"
-KEYS = ["errors", "last_run_at", "pass_due", "pruned", "reads", "routines", "watches_due", "workers"]
+KEYS = ["dispatch", "errors", "last_run_at", "pass_due", "pruned", "reads", "routines", "watches_due", "workers"]
 
 
 class DailyCase(RawCase):
