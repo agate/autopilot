@@ -1750,6 +1750,17 @@ class TakeOverTest(unittest.TestCase):
                 line = self.refused()
                 self.assertIn("branch_pattern", line)
                 self.assertIn("PROJ-1", line)
+                self.assertIn("config.json", line)
+
+    def test_a_bad_branch_pattern_in_a_kept_project_file_names_that_file(self):
+        path = projects.path(self.data, "shop")
+        path.parent.mkdir(parents=True)
+        path.write_text('repo: /my/own/checkout\nbranch_pattern: "{task.x}"\n', encoding="utf-8")
+        line = self.refused()
+        self.assertIn("branch_pattern", line)
+        self.assertIn("PROJ-1", line)
+        self.assertIn("shop.yaml", line)
+        self.assertNotIn("config.json", line)
 
     def test_a_project_file_made_meanwhile_is_one_line(self):
         real_link = os.link

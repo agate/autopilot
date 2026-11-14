@@ -336,7 +336,8 @@ def read_project(folder: Path) -> tuple:
 
 class _Maker:
     def __init__(self, name: str, folder: Path, langs: tuple, labels: Labels, live: Optional[dict] = None):
-        """`live` (a take-over): {at, project (its setup, for a branch), record (`<data>/v1/<name>`)}."""
+        """`live` (a take-over): {at, project (its setup, for a branch), from (the file that setup came from),
+        record (`<data>/v1/<name>`)}."""
         self.name, self.folder, self.langs, self.labels, self.live = name, folder, langs, labels, live
 
     def texts(self, value, fallback: str) -> dict:
@@ -393,7 +394,7 @@ class _Maker:
             try:
                 branch = projects.branch(self.live["project"], t["id"], _slug(card["title"][self.langs[0]]))
             except ConfigError as e:
-                raise _Refused(f"task {t['id']}: config.json: {e}") from None
+                raise _Refused(f"task {t['id']}: {self.live['from']}: {e}") from None
             if BAD_BRANCH.search(branch):
                 raise _Refused(f"state.json: task {t['id']}: its branch {cards.shown(branch)} (from the project's "
                                f"branch_pattern and the task id) is not one git takes; give the task a branch in v1")
@@ -732,7 +733,8 @@ def _take_over(store: Store, name: str, folder: Path, langs: tuple, labels: Labe
     text, values = ("", {}) if has_file else _project_file(cfg, stop)
     setup = projects.load(data, name) if has_file else dict(copy.deepcopy(projects.DEFAULTS), **values, name=name)
     record = data / RECORD / name
-    live = {"at": cards.stamp(store.clock()), "project": setup, "record": record}
+    live = {"at": cards.stamp(store.clock()), "project": setup, "from": str(pfile) if has_file else "config.json",
+            "record": record}
     try:
         entries, _ = plan(name, folder, langs, labels, existing, [k for k in existing if k.startswith(f"v1:{name}:")],
                           live=live)
