@@ -267,6 +267,26 @@ class InstallTest(HomeTest):
         self.assertEqual(pl["EnvironmentVariables"]["AP2_DATA"], str(other))
         self.assertEqual(pl["StandardErrorPath"], str(install.err_log_path(self.lhome)))
 
+    def test_no_data_flag_uses_ap2_data_else_the_default_folder(self):
+        # The plain `ap2 install`: no --data, so AP2_DATA decides, and without it the default folder in the home.
+        with mock.patch.dict(os.environ):
+            os.environ.pop("AP2_DATA", None)
+            default = datadir.resolve(None)
+            self.assertEqual(default, (self.home / "Documents" / "Assistant").resolve())
+            out, _, _ = self.do_install(data=None)
+            self.assertEqual(out["data_dir"], str(default))
+            pl = plistlib.loads((self.agents / "com.assistant.gate.plist").read_bytes())
+            self.assertEqual(pl["EnvironmentVariables"]["AP2_DATA"], str(default))
+            self.assertIn("macOS will ask", out["note"])
+            self.assertTrue((default / "config.yaml").is_file())
+        other = self.home / "other"
+        with mock.patch.dict(os.environ, {"AP2_DATA": str(other)}):
+            out, _, _ = self.do_install(data=None)
+            self.assertEqual(out["data_dir"], str(other.resolve()))
+            pl = plistlib.loads((self.agents / "com.assistant.gate.plist").read_bytes())
+            self.assertEqual(pl["EnvironmentVariables"]["AP2_DATA"], str(other.resolve()))
+            self.assertNotIn("macOS will ask", out["note"])
+
     def test_a_missing_tool_is_null_and_left_off_path(self):
         fake = FakeLaunchctl()
         out = install.install(self.data, agents_dir=self.agents, home=self.lhome, launchctl=fake,

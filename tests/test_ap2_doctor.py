@@ -41,6 +41,10 @@ class DoctorTest(unittest.TestCase):
             stub = self.tools / t
             stub.write_text("#!/bin/sh\nexit 0\n")
             stub.chmod(0o755)
+        # A check that drops its fake runner falls back to `_launchctl`; this makes that a failure, not a real call.
+        p = mock.patch.object(install, "_launchctl", lambda *a: self.fail(f"the real launchctl was run: {a}"))
+        p.start()
+        self.addCleanup(p.stop)
 
     def write_plist(self, label=install.LABEL, data=None, path=None, err_log=None):
         self.agents.mkdir(parents=True, exist_ok=True)
