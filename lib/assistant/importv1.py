@@ -427,8 +427,13 @@ class _Maker:
             return spec
         normal = Path(os.path.normpath(spec))
         # The spec as written and its real path (a link in it, such as a `--from` reached through one), against
-        # `--from`'s project folder and its real path. Nothing is read through it beyond `os.path.realpath`.
-        for path in dict.fromkeys((normal, Path(os.path.realpath(spec)))):
+        # `--from`'s project folder and its real path. Nothing is read through it beyond `os.path.realpath`, which
+        # raises ValueError (UnicodeEncodeError among them) on a NUL or a lone surrogate: then only `normal` is tried.
+        try:
+            real = Path(os.path.realpath(spec))
+        except ValueError:
+            real = normal
+        for path in dict.fromkeys((normal, real)):
             for base in dict.fromkeys((self.folder, self.folder.resolve())):
                 try:
                     return str(self.live["record"] / path.relative_to(base))
@@ -845,7 +850,8 @@ def _refuse_link(path: Path, data: Path, seen: set) -> None:
 def _walk(src: Path, dst: Path, data: Path, seen: set, skip=()) -> list:
     """The copy of the tree at `src` to `dst`: ("dir", None, dst), ("file", src, dst) and ("skip", src, None) for
     a link or anything not a file or folder (never followed). A folder comes before what it holds; `skip` names
-    left out at the top. Every destination is checked for links (`_refuse_link`). Only reads `src`."""
+    left out at the top. Every file to copy is opened for reading and closed, and every destination is checked for
+    links (`_refuse_link`), so an unreadable file or a link stops the copy before any write. Only reads `src`."""
     ops, todo = [], [(src, dst)]
     while todo:
         s, d = todo.pop()
@@ -861,6 +867,10 @@ def _walk(src: Path, dst: Path, data: Path, seen: set, skip=()) -> list:
             if e.is_dir(follow_symlinks=False):
                 todo.append((Path(e.path), d / e.name))
             elif e.is_file(follow_symlinks=False) and not e.name.endswith(PART):  # PART: the copy's own temp name
+                try:
+                    os.close(os.open(e.path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)))
+                except OSError as err:
+                    raise V1ImportError(f"cannot read the v1 file {e.path}: {err}") from err
                 ops.append(("file", Path(e.path), d / e.name))
             else:
                 ops.append(("skip", Path(e.path), None))

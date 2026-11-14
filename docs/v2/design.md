@@ -3809,7 +3809,7 @@ Calls the author made without asking (check them):
       acted on it yet; the line names each and says to run `ap resume NAME` in v1, let one pass act on them, then
       `ap pause NAME` and take over again); the project does not read (as
       for the import), a task's `sessions` names a role v2 has no worker for or holds a text that is not a session
-      id; a config.json value the project file would refuse (when the file is written); a link where a copy goes. `--dry-run` reports
+      id; a config.json value the project file would refuse (when the file is written); a v1 file to copy that cannot be read (the line names it); a link where a copy goes. `--dry-run` reports
       `take_over: {paused, workers, handling: [decision ids]}` and what would be added, changed and copied instead
       of refusing the first three.
     - Live cards: every card gets `taken_over` (the time) and a live `do` (v2 works on it, v1 is paused for it).
@@ -3847,10 +3847,12 @@ Calls the author made without asking (check them):
       gets no run-folder copy, so a copy never reads outside `runs/`. A `spec` inside the project folder points at its
       copy under `<data>/v1/<name>/`, also when it is written through a link to that folder (a `--from` reached
       through a link, `/tmp` against `/private/tmp`): the path as written and its `os.path.realpath` are both tried
-      against the project folder and its real path, and nothing is read through it; another `spec` is kept. A link (or anything not a file or folder) on the v1 side
+      against the project folder and its real path (only the path as written when `os.path.realpath` refuses it,
+      as it does a NUL or a lone surrogate), and nothing is read through it; another `spec` is kept. A link (or anything not a file or folder) on the v1 side
       is never followed or copied and is listed under `skipped`; a link on the v2 side (`<data>/v1`, anything under
-      it, `<data>/projects`, `<data>/sessions`, a run folder or a file in it) stops the take-over; every link check
-      runs before anything is written (a card added now gets its run folder after the cards are written, under the
+      it, `<data>/projects`, `<data>/sessions`, a run folder or a file in it) stops the take-over; every link check,
+      and every read check (each v1 file to copy is opened for reading and closed, never through a link), runs before
+      anything is written (a card added now gets its run folder after the cards are written, under the
       `<data>/sessions` already checked). The report's `files: {copied, same, kept, skipped}` lists destinations
       relative to the data folder (`skipped`: sources relative to the project folder). A dry run lists a run folder's
       copies only for a card that exists already.

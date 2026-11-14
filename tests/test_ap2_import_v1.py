@@ -1701,6 +1701,52 @@ class TakeOverTest(unittest.TestCase):
         self.assertEqual(self.by_key()["v1:shop:PROJ-2"]["spec"],
                          str(self.data / "v1" / "shop" / "specs" / "PROJ-2.md"))
 
+    def test_a_spec_with_a_lone_surrogate_is_one_line(self):
+        spec = str(self.shop / "specs") + "/\ud800.md"
+        self.edit_state("projects/shop", lambda s: s["tasks"][1].update(spec=spec))
+        for args in ((), ("--dry-run",)):
+            with self.subTest(args=args):
+                self.assertIn("PROJ-2", self.refused(*args))
+
+    def test_a_spec_with_a_nul_is_no_traceback(self):
+        self.edit_state("projects/shop", lambda s: s["tasks"][1].update(spec="/x\x00y"))
+        code = None
+        for args in (("--dry-run",), ()):
+            with self.subTest(args=args):
+                code, out, err = self.run_cli("--take-over", "shop", *args)
+                self.assertNotIn("Traceback", err)
+                if code == 0:
+                    self.assertEqual(err, "")
+                else:
+                    self.assertEqual(code, 1, err)
+                    self.assertEqual(len(err.splitlines()), 1, err)
+                    self.assertTrue(err.startswith("ap2: "), err)
+        if code == 0:
+            self.assertEqual(self.by_key()["v1:shop:PROJ-2"]["spec"], "/x\x00y")  # kept as written
+
+    def test_an_unreadable_v1_file_is_refused_before_any_write(self):
+        if os.geteuid() == 0:
+            self.skipTest("root reads a file whatever its mode")
+        locked = self.shop / "specs" / "PROJ-2.md"
+        for first in ((), ("--project", "shop")):  # into no data folder, then into one a plain import made
+            with self.subTest(first=first):
+                shutil.rmtree(self.data, ignore_errors=True)
+                if first:
+                    self.ok(*first)
+                before_v1 = snapshot(self.v1)
+                before = snapshot(self.data) if self.data.exists() else None
+                os.chmod(locked, 0)
+                self.addCleanup(os.chmod, locked, 0o644)
+                line = self.fails("--take-over", "shop")
+                os.chmod(locked, 0o644)
+                self.assertIn("cannot read the v1 file", line)
+                self.assertIn(str(locked), line)
+                self.assertEqual(snapshot(self.v1), before_v1)
+                if before is None:
+                    self.assertFalse(self.data.exists())
+                else:
+                    self.assertEqual(snapshot(self.data), before)
+
     def test_a_link_on_the_v2_side_stops_the_take_over(self):
         for where in ("v1", "v1/shop", "v1/shop/runs"):
             with self.subTest(where=where):
