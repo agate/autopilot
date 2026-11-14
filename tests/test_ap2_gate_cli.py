@@ -31,12 +31,24 @@ class Ap2GateCommandTest(unittest.TestCase):
         self.home = self.tmp / "home"
         self.home.mkdir()
         self.data = self.tmp / "data"
+        # A due pass starts a `claude --bg` dispatcher: the fake claude goes first on PATH, in a folder of its own
+        # (outside self.tmp, which must hold only data and home), so no real claude ever runs.
+        fakes = Path(tempfile.mkdtemp(prefix="ap2-gate-cli-fake-")).resolve()
+        self.addCleanup(shutil.rmtree, fakes, True)
+        (fakes / "bin").mkdir()
+        (fakes / "bin" / "claude").symlink_to(ROOT / "tests" / "bin" / "fake-claude-v2")
+        (fakes / "home").mkdir()
+        (fakes / "tmp").mkdir()  # TMPDIR: where the no-project pass's own folder lands, removed with `fakes`
+        self.fakes = fakes
 
     def run_ap2(self, *args):
         env = {k: v for k, v in os.environ.items() if k not in ("AP2_DATA", "LC_ALL")}
         # HOME points at an empty folder, so the real home is never reached; PYTHON_COLORS=0 keeps Python 3.14's
         # argparse from coloring its usage and errors.
-        env.update(HOME=str(self.home), AP2_DATA=str(self.data), PYTHON_COLORS="0", TZ="Pacific/Kiritimati")
+        env.update(HOME=str(self.home), AP2_DATA=str(self.data), PYTHON_COLORS="0", TZ="Pacific/Kiritimati",
+                   PATH=f"{self.fakes / 'bin'}{os.pathsep}{env.get('PATH', '')}",
+                   FAKE_CLAUDE_HOME=str(self.fakes / "home"), FAKE_CLAUDE_LOG=str(self.fakes / "claude.log"),
+                   TMPDIR=str(self.fakes / "tmp"))
         return subprocess.run([sys.executable, str(AP2), *args], capture_output=True, text=True, env=env,
                               errors="replace", timeout=30)
 
@@ -51,17 +63,38 @@ class Ap2GateCommandTest(unittest.TestCase):
         r = self.run_ap2("gate", "--now", "2025-11-11T09:01:30-08:00")
         self.assertEqual(r.returncode, 0, r.stderr)
         out = json.loads(r.stdout)
-        self.assertEqual(sorted(out), ["errors", "last_run_at", "pass_due", "pruned", "reads", "routines",
-                                       "watches_due", "workers"])
-        self.assertEqual((out["workers"], out["reads"], out["pass_due"], out["errors"]), ([], [], False, []))
+        self.assertEqual(sorted(out), ["dispatch", "errors", "last_run_at", "pass_due", "pruned", "reads",
+                                       "routines", "watches_due", "workers"])
+        self.assertEqual((out["workers"], out["reads"], out["pass_due"], out["dispatch"], out["errors"]),
+                         ([], [], False, [], []))
         self.assertIs(json.loads((self.data / "pass.json").read_text())["due"], False)
 
     def test_the_help_says_what_a_run_does(self):
         r = self.run_ap2("gate", "--help")
         self.assertEqual(r.returncode, 0, r.stderr)
         text = " ".join(r.stdout.split())
-        for words in ("check every worker", "due watches", "scan session", "pass.json", "starts no dispatcher pass"):
+        for words in ("check every worker", "due watches", "scan session", "pass.json",
+                      "starts at most one dispatcher pass", "never waits for it", "a later run ends it"):
             self.assertIn(words, text)
+        self.assertNotIn("starts no dispatcher pass", text)
+
+    def test_a_due_pass_starts_one_dispatcher_session_with_the_claude_on_path(self):
+        self.put_routine()  # its run card is ready: a pass is due
+        r = self.run_ap2("gate", "--now", "2025-11-11T09:01:30-08:00")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = json.loads(r.stdout)
+        self.assertEqual(out["errors"], [])
+        self.assertEqual([(d["did"], d["short_id"]) for d in out["dispatch"]], [("started", "s0001")])
+        calls = [json.loads(line) for line in (self.fakes / "claude.log").read_text().splitlines()]
+        bg = [c for c in calls if c["argv"][:1] == ["--bg"]]
+        self.assertEqual(len(bg), 1)
+        self.assertEqual(bg[0]["argv"][2], "ap2 dispatch · cards with no project")
+        status = json.loads(self.run_ap2("pass", "status").stdout)
+        self.assertEqual(status["dispatch"]["short_id"], "s0001")
+        self.assertIs(status["pass"]["due"], False)
+        self.assertEqual(status["mode"], "shadow")
+        again = json.loads(self.run_ap2("gate", "--now", "2025-11-11T17:02:30Z").stdout)
+        self.assertEqual(again["dispatch"], [])  # it still works: nothing ends, nothing starts
 
     def test_gate_prints_the_run_and_writes_the_heartbeat(self):
         self.put_routine()

@@ -48,6 +48,13 @@ def _inside(path: Path, claude: Path) -> bool:
         claude.exists() and any(p.exists() and os.path.samefile(p, claude) for p in (path, *path.parents)))
 
 
+def within(path, folder) -> bool:
+    """`path` is `folder` or inside it, under any spelling of either: both made absolute with symlinks followed, then
+    `_inside` (letter case ignored, and a same-folder check along the parents for macOS firmlinks). Keeps a worker's
+    folder and a dispatcher pass's repo out of the data folder."""
+    return _inside(Path(path).resolve(), Path(folder).resolve())
+
+
 def resolve(flag: Optional[str] = None) -> Path:
     """The data folder as an absolute path, symlinks followed. Nothing is created. Raises ConfigError."""
     if flag == "":

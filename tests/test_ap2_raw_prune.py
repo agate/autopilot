@@ -428,8 +428,8 @@ class GateRunTest(RawCase):
         out = self.gate()
         self.assertFalse(old.exists())
         self.assertTrue(young.exists())
-        self.assertEqual(sorted(out), ["errors", "last_run_at", "pass_due", "pruned", "reads", "routines",
-                                       "watches_due", "workers"])
+        self.assertEqual(sorted(out), ["dispatch", "errors", "last_run_at", "pass_due", "pruned", "reads",
+                                       "routines", "watches_due", "workers"])
         self.assertEqual(out["pruned"], [])  # restore points only
         self.assertEqual(json.loads((self.data / "gate.json").read_text(encoding="utf-8")), out)
         stamp = cards.stamp(NOW)

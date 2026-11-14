@@ -59,10 +59,17 @@ def routine(**over) -> dict:
 
 class GateCase(unittest.TestCase):
     cfg = Config()
+    # The dispatcher pass start (tests/test_ap2_dispatch.py tests it): off here, so a ready card in a test of
+    # something else starts no pass (and GateCase, which passes no `claude`, never finds the real one on PATH).
+    dispatch = False
 
     def setUp(self):
         self.data = Path(tempfile.mkdtemp(prefix="ap2-gate-")).resolve()
         self.addCleanup(shutil.rmtree, self.data, True)
+        if not self.dispatch:
+            off = mock.patch.object(gate, "_start_dispatch")
+            off.start()
+            self.addCleanup(off.stop)
         (self.data / "routines").mkdir()
         (self.data / "config.yaml").write_text(
             "secondary_language: zh\n" if self.cfg.secondary_language == "zh" else "", encoding="utf-8")
@@ -716,8 +723,8 @@ class HeartbeatTest(GateCase):
         heartbeat = json.loads((self.data / "gate.json").read_text())
         self.assertEqual(heartbeat, out)
         self.assertEqual(heartbeat["last_run_at"], "2026-11-10T14:30:05Z")
-        self.assertEqual(sorted(heartbeat), ["errors", "last_run_at", "pass_due", "pruned", "reads", "routines",
-                                             "watches_due", "workers"])
+        self.assertEqual(sorted(heartbeat), ["dispatch", "errors", "last_run_at", "pass_due", "pruned", "reads",
+                                             "routines", "watches_due", "workers"])
         self.gate(utc(2026, 11, 10, 14, 31, 5))
         self.assertEqual(json.loads((self.data / "gate.json").read_text())["last_run_at"], "2026-11-10T14:31:05Z")
 

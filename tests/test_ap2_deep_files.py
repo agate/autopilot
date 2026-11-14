@@ -257,6 +257,11 @@ class GateDeepTest(unittest.TestCase):
     def setUp(self):
         self.data = Path(tempfile.mkdtemp(prefix="ap2-deep-gate-")).resolve()
         self.addCleanup(shutil.rmtree, self.data, True)
+        # The routine's run card makes a pass due; these tests pass no `claude`, so the pass start is off (it is
+        # tested in tests/test_ap2_dispatch.py with the fake claude) and the real claude on PATH is never run.
+        off = mock.patch.object(gate, "_start_dispatch")
+        off.start()
+        self.addCleanup(off.stop)
         (self.data / "routines").mkdir()
         (self.data / "config.yaml").write_text("", encoding="utf-8")
         self.routine = self.data / "routines" / "digest.json"

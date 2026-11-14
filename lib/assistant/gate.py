@@ -4,7 +4,8 @@ whether a dispatcher pass is due, the heartbeat and restore-point prune.
 A run is short and uses no AI itself: it reads files, decides, makes cards through the store, writes
 `<data>/gate.json` and exits. Its own file writes stay inside the data folder. The processes it starts are the
 `claude` CLI (`agents` and `stop` for the worker check and the scan session, and at most one `--bg` scan session per
-run, through `scan.start`) and each due `via: command` watch's `read.run`. In shadow mode it starts and resumes no
+run, through `scan.start`; `stop` and `rm` for the dispatcher pass and at most one `--bg` pass per run, through
+`dispatch.start`) and each due `via: command` watch's `read.run`. In shadow mode it starts and resumes no
 worker (`Workers` refuses that) and runs no source `writes`. One global lock,
 `<data>/.gate.lock`, keeps a second run from doing anything while one is going.
 
@@ -24,7 +25,14 @@ by itself; once the budget is spent a watch waits for its next due time, so one 
 and with it every later run and routine slot, for long; a long read belongs to `ap2 source read`); the due
 `mcp`, `connector` and `skill` watches share one scan session (`scan.start`), which a later run takes into cards
 when it ends (`scan.finish`); and
-`<data>/pass.json` records whether a dispatcher pass is due and why (`pass_due`). The gate starts no pass: the pass calls `pass_started` when it starts.
+`<data>/pass.json` records whether a dispatcher pass is due and why (`pass_due`).
+
+The dispatcher pass (8.0, `dispatch.py`): early in each run the open pass is looked at (`dispatch.finish`) and ended
+when its turn is over, it said `ap2 pass end`, it is gone or it ran past `dispatch.DISPATCH_MAX_MIN` minutes; after the
+pass-due check, when no pass is open, the run starts at most one (`_start_dispatch`): the next group of the round in
+`<data>/dispatch.json`'s `queue`, or, when a pass is due, the first group of a new round (`dispatch.groups`), and
+then `pass_started` moves `seen`. The gate never waits for a pass: a later run ends it. In shadow mode the pass still
+runs; its floor denies the outward writes.
 """
 from __future__ import annotations
 
@@ -37,7 +45,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Optional
 
-from assistant import cards, engine, routines, scan, sources, transcripts
+from assistant import cards, dispatch, engine, routines, scan, sources, transcripts
 from assistant import workers as workers_module
 from assistant.cards import CardError
 from assistant.config import ConfigError
@@ -617,10 +625,12 @@ def _why(present: dict, seen: dict) -> list:
     return why
 
 
-def _pass_due(data: Path, now: datetime, store: Store, errors: list, log) -> bool:
-    """Write `<data>/pass.json` atomically: `{due, since, why, seen, checked_at}`, and return `due`. A change since
-    `seen` (what was there when the last pass started) makes a pass due; a standing state does not. `since` is
-    kept from the first run that found it due. Nothing is started here."""
+def _pass_due(data: Path, now: datetime, store: Store, errors: list, log) -> tuple:
+    """Write `<data>/pass.json` atomically: `{due, since, why, seen, checked_at}`, and return `(due, present)`:
+    `present` is the snapshot `why` came from (None when it cannot be read), for `pass_started` to write as `seen`,
+    so a change that lands after this look stays unseen and makes the next round due. A change since `seen` (what
+    was there when the last pass started) makes a pass due; a standing state does not. `since` is kept from the
+    first run that found it due. Nothing is started here."""
     path = data / PASS
     saved, damaged = _read_pass(path)
     if damaged:
@@ -631,7 +641,7 @@ def _pass_due(data: Path, now: datetime, store: Store, errors: list, log) -> boo
     except (CardError, WorkerError, OSError, RecursionError) as e:  # RecursionError: a workers.json nested too deep
         errors.append({"pass": True, "error": str(e)})
         log(f"pass: error: {e}")
-        return False
+        return False, None
     seen = saved.get("seen") or _empty_seen()
     why = _why(present, seen)
     since = None
@@ -644,17 +654,217 @@ def _pass_due(data: Path, now: datetime, store: Store, errors: list, log) -> boo
             pass
         log(f"pass due: {len(why)} reason(s)")
     write_json(path, {"due": bool(why), "since": since, "why": why, "seen": seen, "checked_at": cards.stamp(now)})
-    return bool(why)
+    return bool(why), present
 
 
-def pass_started(data, now: datetime, store: Optional[Store] = None) -> dict:
-    """A dispatcher pass starts at `now`: what is there now becomes `seen`, and the pass is no longer due. Returns
-    the pass record written to `<data>/pass.json`. Raises CardError, WorkerError or OSError."""
+def pass_started(data, now: datetime, store: Optional[Store] = None, present: Optional[dict] = None) -> dict:
+    """A dispatcher pass starts at `now`: `present` (the snapshot the round's `why` came from, `_pass_due`'s), or
+    without it what is there now, becomes `seen`, and the pass is no longer due. Returns the pass record written to
+    `<data>/pass.json`. Raises CardError, WorkerError or OSError."""
     data = Path(data)
     store = store if store is not None else Store(data, clock=lambda: now)
-    out = {"due": False, "since": None, "why": [], "seen": _present(data, store), "checked_at": cards.stamp(now)}
+    seen = present if present is not None else _present(data, store)
+    out = {"due": False, "since": None, "why": [], "seen": seen, "checked_at": cards.stamp(now)}
     write_json(data / PASS, out)
     return out
+
+
+# -- the dispatcher pass (design 8.0, section 12 "Dispatcher pass") ----------------------------------------------------
+
+def _finish_dispatch(data: Path, now: datetime, store: Store, claude, transcripts_dir, entries: list, errors: list,
+                     log) -> None:
+    """End the open pass when it is over (`dispatch.finish`): one gate.log line and one `dispatch` entry per end."""
+    try:
+        out = dispatch.finish(data, now, claude=claude, transcripts_dir=transcripts_dir, store=store)
+    except Exception as e:  # noqa: BLE001 - one error; the record is kept, so the next run looks again
+        errors.append({"dispatch": True, "error": _error_text(e)})
+        log(f"dispatch: error: {_error_text(e)}")
+        return
+    if out is None:
+        return
+    for e in out["errors"]:
+        errors.append(e)
+        log(f"dispatch: error: {e['error']}")
+    if out["ended"]:
+        entry = {"did": out["how"], "short_id": out["short_id"], "group": out["group"], "projects": out["projects"]}
+        if out.get("card"):
+            entry["card"] = out["card"]
+        entries.append(entry)
+        card = f"; card {out['card']} asks the user to attach it" if out.get("card") else ""
+        log(f"dispatch: {out['short_id']} ({dispatch.label(out)}) ended ({out['how']}: {dispatch.HOW[out['how']]})"
+            f"{card}")
+
+
+UNSEEN = ""  # `seen`'s mark for an answered ask no pass has seen: no open ask's signature (`_present`) is empty
+
+
+def _unsee(seen: dict, why: list, ids: set) -> dict:
+    """`seen` with the reasons in `why` of the cards `ids` undone, so the next `_why` gives them again: a ready card
+    leaves `ready`, a result file leaves `results`, and an answered ask becomes UNSEEN (its old signature is gone)."""
+    out = {"ready": list(seen["ready"]), "results": dict(seen["results"]), "asks": dict(seen["asks"])}
+    for w in why:
+        card = w.get("card")
+        if not isinstance(card, str) or card not in ids:
+            continue
+        if w.get("why") == "ready":
+            out["ready"] = [c for c in out["ready"] if c != card]
+        elif w.get("why") == "result":
+            out["results"].pop(f"{card}/{w.get('file')}", None)
+        elif w.get("why") == "answered":
+            out["asks"][card] = UNSEEN
+    return out
+
+
+def _named(why: list) -> set:
+    """The card ids the round's reasons `why` name."""
+    return {w["card"] for w in why if isinstance(w.get("card"), str)}
+
+
+def _unsee_saved(data: Path, now: datetime, why: list, ids: set) -> None:
+    """Undo the round's reasons of the cards `ids` in pass.json's `seen` (written when the round started), so the
+    next round is due for them. A missing or damaged pass.json is left as it is (the next `_pass_due` says so).
+    Raises OSError."""
+    saved, damaged = _read_pass(data / PASS)
+    if damaged or not saved or not ids:
+        return
+    write_json(data / PASS, dict(saved, seen=_unsee(saved["seen"], why, ids), checked_at=cards.stamp(now)))
+
+
+def _start_dispatch(data: Path, now: datetime, store: Store, due: bool, claude, transcripts_dir, entries: list,
+                    errors: list, log, present: Optional[dict] = None) -> None:
+    """Start at most one pass, never while one is open: the next group of the round's queue, or, when a pass is
+    due, the first group of a new round, and then `pass_started` moves `seen` (once per round) to `present`, the
+    snapshot `_pass_due` took in this run, so what lands while the pass launches stays unseen. A new round freezes
+    pass.json's `why` (written by `_pass_due` in this run, before `pass_started` clears it) on the pass's record, and
+    the queue carries it to each next group. A new round serves only the groups holding a card its `why` names
+    (`dispatch.named`); with none, nothing starts and `seen` moves (but for a refused project's cards). The profile
+    and the cap are asked first: a refusal starts nothing and keeps the queue, and a due pass stays due. A group that
+    does not start (any error) is one error and is dropped from the round, and its cards' reasons are left unseen
+    (`_unsee`; also the cards of a project `groups` refused), so the next round is due for them and tries again
+    (that round serves only them), and no group holds the head of the queue. After any other error the next group
+    is tried in the same run; after `claude --bg` itself fails (`dispatch.LaunchError`) no other group is tried
+    this run, and the queue-only record (made for a new round) holds the rest of the queue and `retry_at`, now plus
+    `dispatch.LAUNCH_RETRY_MIN` minutes: no run starts a pass before then (a `retry_at` further away than that means
+    the clock went back, and is ignored), so a `claude --bg` that keeps hanging costs one timeout per backoff, not
+    one per run. A running round's queue is checked again with `dispatch.named` (a store error keeps it as it is, one
+    error): a group whose named cards went (done, say) is not served, and a queue left with none is removed. A new
+    round where none starts and none is left in the queue stays due."""
+    try:
+        rec = dispatch.read_record(data)
+    except (OSError, ValueError, RecursionError):  # damaged since `_finish_dispatch` looked: the next run removes it
+        return
+    if rec is not None and "short_id" in rec:
+        return  # one pass at a time
+    retry = (rec or {}).get("retry_at")
+    if retry and now < cards.parse_stamp(retry) <= now + timedelta(minutes=dispatch.LAUNCH_RETRY_MIN):
+        return  # a launch failed lately: no `claude --bg` before retry_at (one further away: the clock went back)
+    queue = list((rec or {}).get("queue") or [])
+    why = list((rec or {}).get("why") or [])
+    new_round = not queue
+    bad = []
+    if not new_round:
+        try:  # a group whose named cards went since the round started (done, say) costs no pass
+            queue = dispatch.named(store, queue, _named(why))
+        except (CardError, OSError, RecursionError) as e:  # which cards they hold is unknown: the queue is kept
+            errors.append({"dispatch": True, "error": str(e)})
+            log(f"dispatch: error: {e}")
+        if not queue:
+            try:
+                (data / dispatch.DISPATCH).unlink(missing_ok=True)
+                log("dispatch: no group left in the round holds a card it names; the round is over")
+            except OSError as e:
+                errors.append({"dispatch": True, "error": str(e)})
+                log(f"dispatch: error: {e}")
+            return
+    if new_round:
+        if not due:
+            return
+        saved, _ = _read_pass(data / PASS)
+        why = saved.get("why") if isinstance(saved.get("why"), list) else []
+        try:
+            queue, bad = dispatch.groups(data, store)
+            # Only the groups holding a card the round names: a failed group's retry costs no pass for the others.
+            queue = dispatch.named(store, queue, _named(why))
+            refused = dispatch.members(store, [], [e["project"] for e in bad]) if bad else set()
+        except (CardError, OSError, RecursionError) as e:
+            errors.append({"dispatch": True, "error": str(e)})
+            log(f"dispatch: error: {e}")
+            return
+        for e in bad:
+            errors.append(e)
+            log(f"project {e['project']}: refused: {e['error']}; its cards are tried again next round")
+        if not queue:  # nothing the round names to serve: what changed is seen (a refused project's cards are not),
+            try:  # so the pass is not due every run for the rest, and a refused project costs no pass
+                snap = present if present is not None else _present(data, store)
+                pass_started(data, now, store, present=_unsee(snap, why, refused))
+            except (CardError, WorkerError, OSError, RecursionError) as e:
+                errors.append({"pass": True, "error": str(e)})
+                log(f"pass: error: {e}")
+            return
+    try:
+        prof = dispatch.launch_profile(data, now, transcripts_dir, claude=claude, store=store)
+    except Exception as e:  # noqa: BLE001 - e.g. a ProfileError, a paused cap: nothing started
+        errors.append({"dispatch": True, "error": str(e) or type(e).__name__})
+        log(f"dispatch: not started: {e}")
+        return
+    started, failed, rest, retry = None, [], [], None
+    for i, group in enumerate(queue):
+        try:
+            started = dispatch.start(data, group, queue[i + 1:], prof, now, store.cfg.mode, claude=claude, why=why)
+            break
+        except dispatch.LaunchError as e:  # claude --bg failed (or hung 120 s): no pass starts before `retry`
+            retry = cards.stamp(now + timedelta(minutes=dispatch.LAUNCH_RETRY_MIN))
+            errors.append({"dispatch": True, "error": f"{e}; next try at {retry}"})
+            log(f"dispatch: not started: {e}; {dispatch.label(group)} is dropped from this round and tried again "
+                f"next round; no other group is tried this run; next try at {retry}")
+            failed.append(group)
+            rest = queue[i + 1:]
+            break
+        except Exception as e:  # noqa: BLE001 - one error per group; the next group of the round is tried
+            errors.append({"dispatch": True, "error": str(e) or type(e).__name__})
+            log(f"dispatch: not started: {e}; {dispatch.label(group)} is dropped from this round and tried again "
+                f"next round")
+            failed.append(group)
+    unseen = set()
+    if failed or bad:
+        try:
+            unseen = dispatch.members(store, failed, [e["project"] for e in bad])
+        except (CardError, OSError, RecursionError) as e:  # which cards they hold is unknown: every card the
+            unseen = _named(why)  # round names is left unseen, so the next round is due for them all
+            errors.append({"dispatch": True, "error": str(e)})
+            log(f"dispatch: error: {e}")
+    if started is None:
+        try:
+            if retry:  # a launch failed: the next run at or after `retry` starts the next group (or a new round)
+                write_json(data / dispatch.DISPATCH, {"queue": rest, "why": why, "retry_at": retry})
+            elif rest:  # the next run starts the next group
+                write_json(data / dispatch.DISPATCH, {"queue": rest, "why": why})
+            elif not new_round:  # every group left in the round failed: the round is over
+                (data / dispatch.DISPATCH).unlink(missing_ok=True)
+        except OSError as e:
+            errors.append({"dispatch": True, "error": str(e)})
+            log(f"dispatch: error: {e}")
+            if new_round:
+                return  # no queue was written: the pass stays due
+        if new_round and not rest:
+            return  # nothing started and nothing waits: the pass stays due
+    else:
+        entries.append({"did": "started", "short_id": started["short_id"], "group": started["group"],
+                        "projects": started["projects"]})
+        log(f"dispatch: started {started['short_id']} for {dispatch.label(started)}; {len(started['queue'])} "
+            f"group(s) left in the round")
+        if started.get("note"):
+            errors.append({"dispatch": True, "error": started["note"]})
+            log(f"dispatch: {started['note']}")
+    try:
+        if new_round:
+            snap = present if present is not None else _present(data, store)
+            pass_started(data, now, store, present=_unsee(snap, why, unseen))
+        elif unseen:
+            _unsee_saved(data, now, why, unseen)
+    except (CardError, WorkerError, OSError, RecursionError) as e:  # at worst one extra pass, or one round late
+        errors.append({"pass": True, "error": str(e)})
+        log(f"pass: error: {e}")
 
 
 def _run(data: Path, now: datetime, watches, store: Optional[Store], claude, transcripts_dir,
@@ -712,6 +922,8 @@ def _run(data: Path, now: datetime, watches, store: Optional[Store], claude, tra
     checked = _check_workers(data, now, cfg, store, claude, transcripts_dir, usage_file, errors, log)
     reads = []
     scan_open = _finish_scan(data, now, cfg, claude, transcripts_dir, reads, errors, log)
+    dispatched = []
+    _finish_dispatch(data, now, store, claude, transcripts_dir, dispatched, errors, log)
 
     read_them = watches is None
     if read_them:
@@ -763,10 +975,11 @@ def _run(data: Path, now: datetime, watches, store: Optional[Store], claude, tra
         if raw["removed"]:
             log(f"pruned {len(raw['removed'])} raw source file(s) older than {engine.RAW_KEEP.days} days")
 
-    pass_due = _pass_due(data, now, store, errors, log)
+    pass_due, present = _pass_due(data, now, store, errors, log)
+    _start_dispatch(data, now, store, pass_due, claude, transcripts_dir, dispatched, errors, log, present=present)
     errors = [{k: _safe(v) for k, v in e.items()} for e in errors]  # e.g. a file name that is not UTF-8
     out = {"last_run_at": cards.stamp(now), "routines": found, "workers": checked, "watches_due": due_names,
-           "reads": reads, "pruned": pruned, "pass_due": pass_due, "errors": errors}
+           "reads": reads, "pruned": pruned, "pass_due": pass_due, "dispatch": dispatched, "errors": errors}
     write_json(data / HEARTBEAT, out)
     log(f"run: {len(found)} routine slot(s), {len(due_names)} watch(es) due, {len(pruned)} pruned, "
         f"{len(errors)} error(s)")

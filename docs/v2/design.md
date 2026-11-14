@@ -398,7 +398,8 @@ roles:
 
 A user template, or one Claude drafts, can combine roles and write briefs. It cannot add tools or permissions: each
 role keeps the tools and permission floor it ships with. Which folder a role runs in comes from the card (its repo
-worktree, or the data folder).
+worktree, or, for a card with no repo, a new empty folder of its own, made again at the same path when the system's
+temp cleaner removed it; never the data folder, under any spelling of its path).
 
 ### 6.1 Review angles **[decided]**
 
@@ -851,7 +852,7 @@ How it is built (`lib/assistant/prreview.py`, `commands/pr-review.md`, `ap2 revi
   which the floor allows by rule; deny wins over allow, so it is not denied); the `hook-*` commands are left alone:
   `review apply`, `review sync`, every `card` and `worker` command but those two, and every other command
   (`config`, `search`, `restore`, `source`, `scan`, `gate`, `template`, `profile`, `spend`, `cap`, `serve`, `phone`,
-  `import-v1`, `install`, `uninstall`, `doctor`). In a worker's own session (`AP2_ROLE` set), `review plan`,
+  `import-v1`, `install`, `uninstall`, `doctor`, `pass`). In a worker's own session (`AP2_ROLE` set), `review plan`,
   `review check` and `worker park` refuse
   a card (for the park, a card and role) that is not the worker's own (`AP2_CARD`, `AP2_ROLE`), the park reads the
   real usage file and ignores `--usage`, and the floor's park allow rule names only the worker's own card and role,
@@ -1036,6 +1037,11 @@ Three layers, as in v1:
 
 Small **scan sessions** (section 5.3) only read sources; they decide nothing about work. `every: each pass` means
 "read during each dispatcher pass".
+
+How v2 runs the pass **[decided by the builder]**: the gate starts it (`claude --bg`, one repo group at a time,
+driven by `lib/assistant/builtin/RUNBOOK.md`) when `pass.json` says a pass is due, never waits for it, and a later
+gate run ends it; the pass's last step is `ap2 pass end`. It runs in shadow mode too, with the outward writes denied.
+See the "Dispatcher pass" entry in section 12.
 
 ### 8.1 Background sessions **[decided, from v1]**
 
@@ -1848,31 +1854,34 @@ Calls the author made without asking (check them):
     it due and reset when it is not due. gate.log gets `pass due: <n> reason(s)` when due. A damaged `pass.json` is
     one error and the run goes on from an empty `seen`. A `workers.json` that cannot be read (nested too deep
     included) is one error `{"pass": true, "error"}` that names the file (the workers check reports it too, as its
-    own `{"workers": true}` error), and no `pass.json` is written that run. The gate starts no pass. The choices: a change since the
+    own `{"workers": true}` error), and no `pass.json` is written that run. The same run then starts at most one
+    dispatcher pass (the "Dispatcher pass" entry below); it never waits for it. The choices: a change since the
     last pass makes a pass due, a standing state does not (as v1's `fingerprint` and `should_dispatch` do), so a
     pass that could start nothing is not due again every minute; reverse: delete the file, the next run rebuilds it.
-    Only `gate.pass_started(data, now)` updates `seen` (it copies the present state and clears `due`); the pass
-    calls it when it starts, so until there is a pass a due pass stays due. Ready is a cheap wake-up, not the start
+    Only `gate.pass_started(data, now)` updates `seen` (it copies the present state and clears `due`); the gate
+    calls it when it starts the first group of a round, so until a pass starts a due pass stays due. Ready is a cheap wake-up, not the start
     plan: the gate does not resolve `depends_on` or check `max_workers` or resources (the pass does,
     `resources.plan`), and an imported v1 copy is never ready unless it is taken over. "Answered" means an ask that
     closed: the store has no answer field on an ask, so an ask that was open at the last pass and is not open now
     counts; at worst this wakes one extra pass.
   - Heartbeat: every run writes `<data>/gate.json` atomically: `{"last_run_at": <UTC>, "routines": [{routine,
     slot, key, action (run, late, skip, exists or start), card, late_minutes}], "workers": [the check's entries],
-    "watches_due": [...], "reads": [...], "pruned": [point ids], "pass_due": true | false, "errors": [...]}`; text in `errors` that UTF-8 cannot write (a file name that is not UTF-8) is written with
+    "watches_due": [...], "reads": [...], "pruned": [point ids], "pass_due": true | false, "dispatch": [{did,
+    short_id, group, projects, card?}], "errors": [...]}`; text in `errors` that UTF-8 cannot write (a file name that is not UTF-8) is written with
     backslash escapes. Every line of `<data>/gate.log` starts with the run's UTC time
     (`2026-11-10T14:30:05Z run: ...`), one line per routine action or error and one summary line; past 1 MB it is
     renamed `gate.log.1` (one old file is kept). Each run calls `Store.prune()`, then, on the first run of a UTC
     day, prunes old raw source files (see the source engine above): `pruned <N> raw source file(s) older than 30
-    days` in gate.log when N > 0 (N counts raw files and reports), not in `gate.json` (its eight keys above);
+    days` in gate.log when N > 0 (N counts raw files and reports), not in `gate.json` (its nine keys above);
     its errors go in `errors`. A later run the same UTC day does not prune and writes no line for it.
   - One run at a time: `<data>/.gate.lock` is taken with a non-blocking `flock`; a run that finds it held prints
     `{"locked": true, "lock": <path>}`, writes nothing and exits 0. A lock that cannot be taken for any other reason
     (`ENOLCK` on a network share) is a config error: one `ap2: cannot lock the gate ...` line and exit 1. The gate's
     own file writes stay inside the data folder and it opens no socket. The processes it starts are the `claude`
-    CLI (`agents` and `stop` for the worker check and the scan session, and at most one `--bg` scan session per
-    run, never a worker in shadow mode) and each due command watch's `read.run`; with no worker on record and no
-    due watch it starts none. It runs no source `writes`. The time is passed in (`gate.run(data, now)`), never read
+    CLI (`agents` and `stop` for the worker check and the scan session, at most one `--bg` scan session per run,
+    `agents`, `stop` and `rm` for the dispatcher pass and at most one `--bg` pass per run, in shadow mode too, and
+    never a worker in shadow mode) and each due command watch's `read.run`; with no worker on record, no due watch,
+    no open pass and no pass due it starts none. It runs no source `writes`. The time is passed in (`gate.run(data, now)`), never read
     inside.
   - A clock that went back. A routine whose `last_slot`, read in its `tz`, is more than the 5-minute grace after
     now gets one error, `<file>: last_slot <slot> is later than now (<now>); the clock may have gone back. Set
@@ -1901,7 +1910,8 @@ Calls the author made without asking (check them):
     stderr goes to `~/Library/Logs/assistant/gate.err.log` (section 12, "Install").
   - `ap2 gate [--data PATH] [--now ISO]` runs once and prints the run as JSON: it starts the due routine slots,
     checks every worker, reads the due watches from the user's sources, starts or takes one scan session and writes
-    `pass.json`; it starts no dispatcher pass. `--now` needs a zone (`Z` or an
+    `pass.json`, and starts at most one dispatcher pass (one `claude --bg` session per repo group, one group at a
+    time), which it never waits for: a later run ends it. `--now` needs a zone (`Z` or an
     offset); a time without one is an argument error (exit 2). `--now` may not be later than the real time plus
     the 5-minute grace, also an argument error: a run writes `last_slot`, makes cards and prunes restore points,
     so a run in the future would hold back every real slot until then and prune points and raw files that are only
@@ -1910,6 +1920,171 @@ Calls the author made without asking (check them):
     in `errors` and still exits 0 (launchd runs it again in a minute); a bad `config.yaml` or data folder is one
     `ap2: ...` line and exit 1. This slice installs nothing; the launchd job is written by `ap2 install`
     (section 12, "Install").
+- **[decided by the builder]** Dispatcher pass (design 8.0, phase 2 slice 2). Module: `lib/assistant/dispatch.py`;
+  the runbook is `lib/assistant/builtin/RUNBOOK.md`, written for cards.
+  - Groups: `dispatch.groups(data, store)` gives one group per distinct `repo` of the projects (`projects.load`)
+    named by live cards (not `done`, not an imported v1 copy without `taken_over`: a taken-over v1 card is live,
+    and the take-over writes its `projects/<name>.yaml` when it is missing), with the project names sorted, and last the group
+    None: live cards with no `project`, and projects with no `repo`. That pass runs in a new empty folder of its own
+    (`tempfile.mkdtemp`, prefix `ap2-dispatch-`), not in the data folder (the choice below). A project
+    that does not load is one error `{"project", "error"}` (`project <name>: refused: ...` in gate.log) and is left
+    out; the others still group.
+  - Start: after the pass-due check, when no pass is open, a run starts at most one pass: the next group of
+    `<data>/dispatch.json`'s `queue`, or, when a pass is due, the first group of a new round, and then calls
+    `gate.pass_started`. A new round serves only the groups that hold a card its `why` names (`dispatch.named`); a
+    reason whose card is in no group (a done card, an imported v1 copy, a refused project's card) serves no pass.
+    The start is `claude --bg -n "ap2 dispatch · <projects, or cards with no project>" --permission-mode auto
+    --settings <data>/sessions/dispatch/settings-dispatcher.json [--model <model>] [--strict-mcp-config] <prompt>`
+    in the group's repo (the group None's own folder for that group), the prompt naming the runbook's absolute
+    path, the projects and the data folder. `dispatch.json` is `{group, projects, short_id, session_id, started_at,
+    profile, queue, why, token, looks, seen_busy, cwd?}` (`cwd`, the group None's own folder, only for that group).
+    `why` is the round's reasons, frozen when the round starts: the gate reads the `why` the pass-due check just
+    wrote to `pass.json` before `pass_started` empties it, puts it on the record, and the queue-only record
+    `{queue, why}` carries it to each next group's record; the pass reads it as `dispatch.why` from
+    `ap2 pass status` (a record without it, written before it was, reads as no reasons). `token` is the pass's own
+    random token, also `AP2_PASS` in its launch env (not in the shared settings file). The profile and the cap are
+    asked first (`dispatch.launch_profile`): a refusal starts nothing and is one error `{"dispatch": true, "error"}`,
+    the queue is kept and a due pass stays due. A group that does not start (any error: its repo is not a folder,
+    the launch cannot enter it, its settings are refused, or `claude --bg` fails) is one error naming it, is dropped
+    from the round, and its cards are left unseen (as are the cards of a project `groups` refused), so the next round
+    is due for them and tries again (the choice below). After a failure for that group the next group of the round
+    is tried in the same run. When `claude --bg` fails (`dispatch.LaunchError`, also a launch that hangs to its
+    120-second timeout) no other group is tried that run, the error and its gate.log line end with "next try at
+    <stamp>", and the queue-only record (made for a new round too) holds the rest of the queue and `retry_at`, that
+    stamp: now plus LAUNCH_RETRY_MIN (15) minutes. No run starts a pass before it (the choice below); a `retry_at`
+    further away than LAUNCH_RETRY_MIN minutes means the clock went back, and is ignored. A record with `retry_at`
+    is still queue-only: `finish` passes it by, and it is no open pass. A running round's queue is checked again
+    with `dispatch.named` before each start: a group whose named cards went since the round started (moved to
+    `done`, say) is not served, and a queue left with none is removed, so nothing starts; a store that does not read
+    there keeps the queue as it is, with one error. A new round where none starts and none is left in the queue
+    stays due. A new round with no group to serve calls
+    `pass_started` (with a refused project's cards left unseen), so the same change does not make a pass due every
+    run, and a refused project costs one error line per run and no pass, and stays due until it is fixed.
+    Each start is one gate.log line and one gate.json `dispatch` entry `{"did": "started", ...}`.
+  - End: early in each run `dispatch.finish` looks the pass up in `claude agents`. It ends when `ap2 pass end`
+    marked it (`<data>/dispatch-end.json` `{short_id, started_at, ended_at, token}`, its own file because the gate
+    rewrites `dispatch.json`; a marker counts only when its `short_id`, `started_at` and `token` match the record;
+    how `ended`), when its turn ended (state done or failed, or status idle, once a run saw it busy, the start's
+    listing included, or after LOOKS (3) runs saw it so; `turn`), when it was stopped or is gone (`gone`), or
+    past DISPATCH_MAX_MIN (30) minutes (`late`). It is stopped (`claude stop`), its spend settled, and removed
+    (`claude rm`), and with it (or when it is gone) the group None's own folder (only a folder the record's `cwd`
+    names that has the prefix, right in the temp folder). Waiting at a permission prompt (state blocked, status
+    waiting; `blocked`) opens one card (kind and feed `dispatch`, lane needs, keyed `dispatch:<short id>`) whose ask
+    is `fix`, from `dispatch`, telling the user to `claude attach <id>`, and the session is stopped but not removed;
+    its own folder is kept with it. Each end but
+    `ended` and `blocked` is one error. A start more than the 5-minute grace after now is `late` with an error that
+    ends with "the clock may have gone back", as the scan session's. A failed listing waits (one error once the
+    pass is late); a damaged record (also one whose `looks` is not a whole number or whose `seen_busy` is not true
+    or false) is removed with one error, so it never holds later passes back. Then the record keeps only `{queue,
+    why}` (so the same run starts the next group) or goes. Each end is one gate.log line and one gate.json
+    `dispatch` entry.
+  - Floor: the pass's settings are built like the worker floor: the data folder's protected files (`PROTECTED`,
+    which holds `pass.json`, `dispatch.json` and `dispatch-end.json` too, so no worker can edit them either: a forged
+    `dispatch.json` naming another session would have the next gate run stop and remove it, and a `{"queue": []}`
+    record would hide the open pass) and the package denied for Edit, v1's dispatcher Bash denials
+    (`perms.BASH_DENY`: text-prefix rules for the plain `gh pr comment`, `gh pr review`, `gh issue comment|create`,
+    `gh pr edit --add-reviewer`; best effort, `gh -R o/r pr comment` or `gh pr edit 5 --add-reviewer bob` gets past
+    them, so the runbook says never to do these at all), in every mode the outward MCP tools of the group's projects'
+    `tools` (v1's `denied_tools`, as v1's dispatcher floor; best effort: in live mode, where the pass loads the
+    user's MCP servers, it denies only the outward tools the projects list, and a project that lists none gets no MCP
+    denies), no nested session in every mode (`workers.nested_session_denies`, the read-only floor's own rules:
+    `claude` in every spelling, the claude the pass starts with included, and v1's `ap` commands, since `ap oneoff`
+    runs `claude -p`; `claude -p` would run under the user's own settings and MCP servers, past the floor and
+    `--strict-mcp-config`; the runbook runs neither), in every mode the built-in tools that act outside the floor and
+    the runbook never uses (`dispatch.BUILTIN_DENY`: RemoteTrigger, CronCreate, CronDelete, ScheduleWakeup,
+    ArtifactComments, Artifact, ArtifactData, PushNotification, SendMessage, Workflow, PublishPlugin,
+    ShareOnboardingGuide, DesignSync; Read, Write, Bash, Glob, Grep and the rest stay), the `hook-park` and
+    `hook-guard` hooks, env `AP2_ROLE=dispatcher`, `AP2_DATA`, `AP2_RUN_DIR` (`<data>/sessions/dispatch/`, where it
+    writes the texts it hands to `ap2 card ask`) and `AP2_PROFILE`, allow rules for exactly the `ap2` steps the
+    runbook runs, by the package's absolute `bin/ap2` (the prompt names that path): `pass status`, `pass end`, `card
+    list`, `card show`, `card ask`, `card lane`, `worker list`, `worker start`, `template show` and `search` as
+    prefix rules, and `cap` and `cap --json` as exact rules, so `ap2 cap answer|resume`, `ap2 worker
+    answer|end|park|finish` and `ap2 card add` are never allowed by rule; and the profile's overlay merged under it.
+    In any mode but live it also denies `git` and `gh` whole (`Bash(git:*)`, `Bash(gh:*)`): a prefix rule matches
+    only the command or the command and a space, so a rule per verb misses every form that puts an option before the
+    verb (`git -P push`, `git --git-dir=/r/.git push`, `gh -R o/r pr merge 5`, `gh --repo=o/r pr ready 5`); in shadow
+    mode the runbook runs no git or gh at all (worktrees, fetches, pushes and merges are live only). Best effort, as
+    every text rule: `/usr/bin/git` or `env git` gets past it. It also denies the ticket-status tools of the group's
+    projects' `tools` (live mode moves the ticket), and the pass starts with `--strict-mcp-config` and no
+    `--mcp-config`, so it loads no MCP server or connector at all (a project with no `tools`, the default, and the
+    no-project group name none to deny); v1 isolates its page sessions the same way. Its spend launch row is kind
+    `dispatcher`.
+  - Commands: `ap2 pass status` prints `{pass, dispatch, mode}`; `ap2 pass end` writes the end marker (no open
+    pass: one `ap2: ...` line, exit 1). Run with `AP2_PASS` set (by a pass) that is not the open pass's token, it
+    is refused the same way and ends nothing: a pass stopped at a prompt and resumed by the user later cannot end
+    another group's pass. With `AP2_ROLE` set and no `AP2_PASS` (a worker: Workers strip every `AP2_*` name, so a
+    worker never has `AP2_PASS`) it is refused too ("only the open dispatcher pass or a person ends it"). Without
+    either (a person at a terminal) it ends the open pass. `ap2 card ask CARD
+    --type T --text-file F [--from dispatch]` sets the ask `{type, from, text}` and the lane `needs` through
+    `Store.update_checked`, refused while the card has an open ask and for an imported v1 copy that is not taken
+    over; `ap2 card lane CARD LANE` moves a card, refusing such a copy too (a taken-over card is v2's to move). A
+    bad id is exit 1, a bad type, lane or `--from` exit 2.
+    They write only inside the data folder, so they run in shadow mode.
+  - The choices (each reversible):
+    - The gate does not wait. v1's `dispatch.run` polls the pass inside the gate for up to `dispatch_timeout_s`;
+      v2's gate is short and holds one lock, so it starts the pass and a later run ends it, as the scan session.
+      Reverse: wait in the gate.
+    - One pass at a time, groups in turn: one open pass for the whole data folder ("never two dispatchers at
+      once", as v1), the groups of a round one after another through `queue`. Reverse: one per group in parallel.
+    - `seen` moves when a round starts, to the very snapshot the round's `why` came from (`_pass_due` hands its
+      look to `pass_started`, which writes it as `seen` instead of looking again): a change that lands while the
+      round runs, the first pass's launch included, makes the next round due; at worst one extra pass.
+    - A group that does not start is dropped from the round, and its cards are left unseen: for a new round
+      `pass_started` writes `seen` with those cards' reasons in the round's `why` undone (`gate._unsee`: a ready card
+      leaves `ready`, a result file leaves `results`, an answered ask is marked `""`, which no open ask's signature
+      is), and inside a running round the gate undoes them in `pass.json`'s `seen` (a missing or damaged one is left
+      as it is). The cards of a project `groups` refused are left unseen the same way. So the next round is due for
+      them and tries again, and no group holds the head of the queue (a group whose launch fails only in its own repo
+      would otherwise stop every group and every later round). When the store does not read to find a failed
+      group's cards, every card the round's `why` names is left unseen. A `LaunchError` still ends that run's
+      attempts; the failed group is dropped too. Reverse: keep the failed group at the head of the queue.
+    - A failed launch backs off: after a `LaunchError` no pass starts for LAUNCH_RETRY_MIN (15) minutes
+      (`retry_at` on the queue-only record), so a `claude --bg` that keeps hanging costs one 120-second timeout per
+      15 minutes, not one per run while `.gate.lock` is held, as the scan waits for its watch's next due time. A
+      group that fails for any other reason does not back off. Reverse: try again on the next run.
+    - A round serves only the groups its `why` names: the retry of a failed group (or a refused project) costs no
+      pass for the others. Each new round queues only the groups that hold a card named in its `why`; a refused
+      project's card is in no group, so the round that retries it starts nothing, writes `seen` with that card left
+      unseen, and is one error line each run until the project is fixed, with no spend. Without this, a persistent
+      failure would start a fresh pass for every healthy group on every run. Reverse: queue every live group in each
+      round.
+    - The group None's pass runs in a new empty folder of its own, outside the data folder, not in the data folder
+      as the spec says: the Bash guard judges only the data-folder paths a command names, so a relative write from
+      inside the data folder (`config.yaml`, `dispatch.json`, `items/`, `.claude/settings.json`) would pass it, and
+      the data folder would be the session's project root, whose `.claude/`, `.mcp.json` and `CLAUDE.md` a later
+      session loads. The pr-review worker runs outside the data folder for the same reason. The pass still finds
+      the data folder through `AP2_DATA` and writes its texts to `AP2_RUN_DIR`. A new folder that lands in the data
+      folder anyway (a `TMPDIR` inside it) is removed again and the group starts no pass (one `DispatchError` line).
+      `finish` removes the folder with the session, and keeps it with a pass kept for `claude attach`. The workers it starts stay out of the data folder
+      too: the runbook starts a card with no repo without `--cwd`, so `Workers.start` gives it a new empty folder of
+      its own (prefix `ap2-worker-`, left in the temp folder), and refuses a `--cwd` that is the data folder or inside
+      it. A group whose `repo` is the data folder or inside it (a data folder kept in git) starts no pass either: one
+      `DispatchError` line for that group, which is dropped from the round as any group that does not start. Every
+      one of these checks is `datadir.within`: symlinks followed, letter case ignored (macOS file systems are
+      case-insensitive) and a same-folder check along the parents (macOS firmlinks such as
+      `/System/Volumes/Data/...`). Reverse: run it in the data folder.
+    - Answered asks: the runbook acts on each `answered` entry of its group (an ask that closed). `ap2 card show`
+      gives the card; the closed ask itself is in the restore point the closing `audit` entry names
+      (`<data>/restore/<id>.json`, `card.ask`), since the card's `ask` no longer holds it. Only an ask from
+      `dispatch` is acted on: an approved merge goes on with the clean `prloop.json` steps (live only), a confirmed
+      plan starts the next role, a closed `fix` is checked again and goes on from where it was opened (or opens a
+      new `fix`), an `answer` goes on with the user's words, a declined one leaves the card.
+    - Shadow mode runs the pass: it reads, opens asks and records what it would do; the floor denies the outward
+      writes, and `Workers` already refuses a worker start in shadow mode. Switch-over can compare v2's decisions
+      with v1's before live mode.
+    - The model and profile: the pass runs on the active profile (as the scan does), with its `dispatcher_model`,
+      else its `model`, else none (the subscription's default), and the cap counts it. This differs from v1, where
+      page sessions always run on the subscription: v2 has one profile switch, and a gateway profile's cap must see
+      every session it pays for.
+    - `--permission-mode auto` (the workers' mode, and v1's dispatcher's): without it a background pass stops at
+      its first prompt.
+    - DISPATCH_MAX_MIN is 30: a pass still working after it is stopped, and the next run may start a new one.
+    - A pass that ends without `ap2 pass end` is treated like an ended turn: stopped and removed, one gate.log line
+      and one error, so the page shows it. No stuck card in this slice (v1's `dispatcher_stuck`): telling that a
+      pass could have started work and did not needs the start plan the pass resolves, which the gate does not
+      have.
+    - `ap2 card ask` also moves the card to `needs`, the lane of what waits on the user, so the pass cannot open an
+      ask the page files under another lane.
 - **[decided by the builder]** Templates and roles (design 4.2, 6).
   - Built-in templates live in `lib/assistant/builtin/templates/<kind>.yaml` (the plugin's folder, found from
     `templates.py`'s own path; not the repo's `templates/`, which holds v1's page labels). v2 ships `question`,
@@ -2880,7 +3055,24 @@ Calls the author made without asking (check them):
     v2's own). A resume is `claude --bg --resume <id> -n ... --permission-mode ... --settings ... <prompt>`.
     The resume id comes from the card or the worker list, so it is checked first: letters, digits and `-`, not
     starting with `-`. Anything else is refused before claude runs, so it can never become a flag. `--cwd` is
-    saved absolute, so a later check run from another folder still finds it.
+    saved absolute, so a later check run from another folder still finds it. A folder that is the data folder or
+    inside it is refused (one `WorkerError` line), whether given, parked or saved, under any spelling of its path
+    (`datadir.within`: symlinks followed, letter case ignored, a same-folder check along the parents for macOS
+    firmlinks): there a relative write passes the Bash guard, and the data folder would be the session's project
+    root. The line says where the folder came from: a given one, that a card with no repo needs no `--cwd`; a
+    parked or saved one, to pass `--cwd <another folder>`, or on `--resume` (claude finds a saved session by its
+    folder, so it cannot be resumed elsewhere) to end the worker and start the role again without `--resume`, with
+    `--cwd <another folder>`. A card with no repo (no project, or a project with no
+    `repo`) started with no folder (none given, parked or saved) runs in a new empty folder (`tempfile.mkdtemp`,
+    prefix `ap2-worker-`, mode 0700), saved as the role's `cwd`, so `--resume` reuses it. That new folder is checked
+    the same way before the tool discovery (a `TMPDIR` inside the data folder is refused and the folder removed), and
+    a start that fails before its launch (discovery, a pause, the second plan, `due`, the launch) removes it again.
+    Started folders are left in the temp folder; the system's temp cleaner (on macOS, items older than 3 days) or a
+    reboot may remove one, so a parked or saved folder of its own (`ap2-worker-` name) that is gone is made again at
+    the same path (mode 0700) by the next start, `--resume` or in-place resume, after the data-folder check: the same
+    path keeps `--resume` working, since claude finds a saved session by its project folder. A failed start leaves
+    such a re-made folder (empty, and saved on the card). Any other folder that is gone is still refused. A card with
+    a repo and no folder is still refused ("pass --cwd").
   - `check()` classifies each worker: done (its result file newer than its start), question (`question.json`
     newer than its start), parked, unknown (the listing failed: nothing is done), dead (no session, its process
     gone, or state failed), blocked (status waiting), idle (state blocked or done, or status idle), running. Done:
