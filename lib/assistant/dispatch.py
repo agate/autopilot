@@ -4,7 +4,7 @@ driven by the v2 runbook (`builtin/RUNBOOK.md`), that decides what happens next 
 - `groups(data, store)`: the groups a pass may serve, one per distinct `repo` of the projects live cards name (a
   taken-over v1 card is live, a plain imported v1 copy is not), plus the group None (cards with no project, and
   projects with no repo), which runs in the data folder.
-- `settings(data, profile, projects, mode)`: the pass's `--settings`, built like the worker floor.
+- `settings(data, profile, projects, mode, claude)`: the pass's `--settings`, built like the worker floor.
 - `start(data, group, queue, profile, now, mode, why)`: start one pass and record it in `<data>/dispatch.json`
   `{group, projects, short_id, session_id, started_at, profile, queue, why, token, looks, seen_busy}`, with a spend
   launch row (kind `dispatcher`). `queue` holds the groups of this round still to serve, `why` the round's reasons
@@ -62,6 +62,12 @@ RUNBOOK = Path(__file__).resolve().parent / "builtin" / "RUNBOOK.md"
 # `gh --repo=o/r pr ready 5`). In shadow mode the runbook runs no git or gh at all (worktrees, fetches, pushes and
 # merges are live only). Best effort, as every text rule: `/usr/bin/git` or `env git` gets past it.
 SHADOW_DENY = ("Bash(git:*)", "Bash(gh:*)")
+# The built-in tools that act outside the floor and the runbook never uses, denied in every mode: a scheduled or
+# remote agent, the user's claude.ai pages, a push to their phone, a message to another session, a workflow, a
+# plugin or a design sync. Read, Write, Bash, Glob, Grep and the rest stay.
+BUILTIN_DENY = ("RemoteTrigger", "CronCreate", "CronDelete", "ScheduleWakeup", "ArtifactComments", "Artifact",
+                "ArtifactData", "PushNotification", "SendMessage", "Workflow", "PublishPlugin", "ShareOnboardingGuide",
+                "DesignSync")
 # Exactly the ap2 steps the runbook runs, allowed by rule so the auto-mode classifier never judges them: `:*` rules
 # for the steps that take words after them, exact rules for `ap2 cap` (so `ap2 cap answer|resume`, `ap2 worker
 # answer|end|park|finish` and `ap2 card add` are never allowed by rule).
@@ -122,22 +128,28 @@ def label(group: dict) -> str:
 
 # -- the floor ------------------------------------------------------------------------------------------------------
 
-def settings(data, profile: dict, projects: list, mode: str) -> dict:
+def settings(data, profile: dict, projects: list, mode: str, claude: Optional[str] = None) -> dict:
     """The pass's `--settings`, built like the worker floor (`workers.floor`): the data folder's protected files
     (with pass.json, dispatch.json and its end marker) and the package denied for Edit, v1's dispatcher denials
-    (`settings/dispatcher.json`: `perms.BASH_DENY`), the park and Bash guard hooks, `AP2_ROLE=dispatcher` in its env,
-    and the profile's overlay merged under it (`profiles.merge`). In any mode but live it also denies the outward
-    writes: SHADOW_DENY (git and gh whole) and the outward MCP tools of `projects`' `tools` (v1's `denied_tools`,
-    and its ticket-status tools); `start` also loads no MCP server then (`--strict-mcp-config`). Refused
-    (WorkerError) for a path a permission rule cannot name literally (`workers.require_literal`)."""
+    (`settings/dispatcher.json`: `perms.BASH_DENY`), the outward MCP tools of `projects`' `tools` (v1's
+    `denied_tools`, as v1's dispatcher floor), no nested session (`workers.nested_session_denies`: the claude CLI
+    in every spelling, the one at `claude` included, and v1's `ap`), the built-in tools in BUILTIN_DENY, the
+    park and Bash guard hooks, `AP2_ROLE=dispatcher` in its env, and the profile's overlay merged under it
+    (`profiles.merge`), in every mode. In any mode but live it also denies SHADOW_DENY (git and gh whole) and the
+    ticket-status tools of `projects`' `tools` (live moves the ticket); `start` also loads no MCP server then
+    (`--strict-mcp-config`). Refused (WorkerError) for a path a permission rule cannot name literally
+    (`workers.require_literal`)."""
     data = Path(data)
     workers_module.require_literal(data)
     pkg = workers_module.package_root()
     deny = [f"Edit(/{data}/{name})" for name in workers_module.PROTECTED + (PASS, DISPATCH, END)]
     deny += [f"Edit(/{pkg}/**)"] + list(v1_perms.BASH_DENY)
+    tools = sorted({t for p in projects for t in (p.get("tools") or [])})
+    deny += v1_perms.denied_tools(tools)
+    deny += workers_module.nested_session_denies(claude) + list(BUILTIN_DENY)
     if mode != "live":
-        tools = sorted({t for p in projects for t in (p.get("tools") or [])})
-        deny += list(SHADOW_DENY) + v1_perms.denied_tools(tools) + v1_perms.status_tools(tools)
+        deny += list(SHADOW_DENY) + v1_perms.status_tools(tools)
+    deny = list(dict.fromkeys(deny))
     ap2 = pkg / "bin" / "ap2"
     allow = [f"Bash({ap2} {verb}:*)" for verb in ALLOWED] + [f"Bash({ap2} {verb})" for verb in ALLOWED_EXACT]
     hooks = {"PreToolUse": [
@@ -186,13 +198,14 @@ def start(data, group: dict, queue: list, profile: dict, now: datetime, mode: st
     (`--strict-mcp-config`, no `--mcp-config`). The record is written right after the launch (a record that cannot
     be written stops the session again), then with the session id once the listing shows it (best effort); a spend
     launch row (kind `dispatcher`) follows, and a failure there is the record's `note`. Raises LaunchError when
-    `claude --bg` fails, DispatchError (or ConfigError, WorkerError) for this group, when nothing started."""
+    `claude --bg` fails, DispatchError (or ConfigError, WorkerError) for this group, when nothing started: also when
+    the launch cannot enter the group's repo (an OSError naming it), so the next group is still tried."""
     data, claude = Path(data), _claude(claude)
     projs = [projects_module.load(data, n) for n in group.get("projects") or []]
     cwd = Path(group["group"]) if group.get("group") else data
     if not cwd.is_dir():
         raise DispatchError(f"no dispatcher pass started for {label(group)}: the repo {cwd} is not a folder")
-    s = settings(data, profile, projs, mode)
+    s = settings(data, profile, projs, mode, claude=claude)
     run = data / RUN_DIR
     try:
         run.mkdir(parents=True, exist_ok=True)
@@ -213,7 +226,12 @@ def start(data, group: dict, queue: list, profile: dict, now: datetime, mode: st
     env["AP2_PASS"] = token  # the launch env only: the shared settings file never holds a newer pass's token
     try:
         short = v1_workers._launch(argv, str(cwd), env)
-    except (OSError, RuntimeError, subprocess.SubprocessError) as e:
+    except OSError as e:
+        if e.filename == str(cwd):  # the repo cannot be entered (no access, or gone since the check): this group's
+            raise DispatchError(f"no dispatcher pass started for {label(group)}: cannot enter the repo {cwd}: "
+                                f"{e.strerror or e}") from e
+        raise LaunchError(f"cannot start the dispatcher pass for {label(group)}: {e}") from e
+    except (RuntimeError, subprocess.SubprocessError) as e:
         raise LaunchError(f"cannot start the dispatcher pass for {label(group)}: {e}") from e
     rec = {"group": group.get("group"), "projects": list(group.get("projects") or []), "short_id": short,
            "session_id": "", "started_at": cards.stamp(now), "profile": profile["name"], "queue": list(queue),

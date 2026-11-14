@@ -218,6 +218,20 @@ class RunbookTest(Ap2Case):
         self.assertNotIn("pass.why", text)  # pass_started empties it as the round starts: the pass reads its record
         self.assertIn("**`prreview.json`.** The gate already applied it (`ap2 worker check`); leave it.", text)
         self.assertIn("the absolute `ap2` path your prompt names", text)
+        self.assertNotIn("(denied in every mode)", text)  # v1's prefix rules deny only the plain forms
+
+    def test_the_runbook_acts_on_answered_asks(self):
+        """`dispatch.why` names an ask that closed (`answered`); a step must act on it, or an approved merge (or a
+        confirmed plan, a repaired fix) would never go on."""
+        text = " ".join(RUNBOOK.read_text(encoding="utf-8").split())
+        section = text.split("## 3. Answered asks", 1)[1].split(" ## ", 1)[0]
+        self.assertIn("For each `answered` card in `dispatch.why`", section)
+        self.assertIn("`ap2 card show <card>`", section)
+        self.assertIn("$AP2_DATA/restore/<restore>.json", section)
+        for words in ("**`approve` (a merge).**", "**`confirm` (a plan).**", "**`fix` (a repair).**",
+                      "**`answer` (a question or a draft).**", "**Declined.**"):
+            self.assertIn(words, section)
+        self.assertIn(["card", "show"], runbook_commands())
 
 
 if __name__ == "__main__":

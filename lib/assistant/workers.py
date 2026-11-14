@@ -506,6 +506,24 @@ def _gh_aliases(path: Path) -> list:
     return list(dict.fromkeys(found))
 
 
+def nested_session_denies(claude: Optional[str] = None) -> list:
+    """The deny rules for a nested session, each once. `claude -p ...` would run under the user's own settings, not
+    the floor, so `claude` is denied as typed, as `claude` (the session's own path) and the one on PATH, where each
+    link leads, and every other version in the folder a link leads into (`_versions`). No v1 command either (`ap
+    oneoff` runs `claude -p`): bare, at `<package>/bin/ap`, and the `ap` on PATH. The commands are the in-repo list,
+    the fixed extra list (V1_AP_EXTRA), and each one the `ap` on PATH declares (`_ap_commands`: it can be an
+    installed v1 with commands the in-repo one lacks; its modules are read, never run). Best effort. The read-only
+    floor and the dispatcher pass's floor (`dispatch.settings`) both deny these."""
+    found = shutil.which("claude")
+    nested = [f"Bash({c}:*)" for c in _spellings("claude", claude or found or "claude", found)]
+    nested += [f"Bash({c}:*)" for c in _versions(claude, found)]
+    ap_on_path = shutil.which("ap")
+    v1_ap = _spellings("ap", str(package_root() / "bin" / "ap"), ap_on_path)
+    verbs = dict.fromkeys(roles.V1_AP_COMMANDS + roles.V1_AP_EXTRA + tuple(_ap_commands(ap_on_path)))
+    nested += [f"Bash({cmd} {verb}:*)" for verb in verbs for cmd in v1_ap]
+    return list(dict.fromkeys(nested))
+
+
 def floor(role: str, project: dict, data: Path, env: dict, profile: Optional[dict] = None,
           claude: Optional[str] = None) -> dict:
     """The worker's permission floor (`--settings`): v1's outward-tool denials (`perms.denied_tools`, from the
@@ -546,20 +564,8 @@ def floor(role: str, project: dict, data: Path, env: dict, profile: Optional[dic
         # Write.
         deny += list(roles.READ_ONLY_DENIED) + list(roles.READ_ONLY_BASH_DENIED)
         deny += [f"Bash({cmd} {verb}:*)" for verb in roles.READ_ONLY_AP2_DENIED for cmd in ("ap2", ap2)]
-        # No nested session: `claude -p ...` would run under the user's own settings, not this floor, so `claude` is
-        # denied as typed, as the worker's own path and the one on PATH, where each link leads, and every other
-        # version in the folder a link leads into (`_versions`). No v1 command either (`ap oneoff` runs
-        # `claude -p`): bare, at `<package>/bin/ap`, and the `ap` on PATH. The commands are the in-repo list, the
-        # fixed extra list (V1_AP_EXTRA), and each one the `ap` on PATH declares (`_ap_commands`: it can be an
-        # installed v1 with commands the in-repo one lacks; its modules are read, never run). Best effort.
-        found = shutil.which("claude")
-        nested = [f"Bash({c}:*)" for c in _spellings("claude", claude or found or "claude", found)]
-        nested += [f"Bash({c}:*)" for c in _versions(claude, found)]
-        ap_on_path = shutil.which("ap")
-        v1_ap = _spellings("ap", str(package_root() / "bin" / "ap"), ap_on_path)
-        verbs = dict.fromkeys(roles.V1_AP_COMMANDS + roles.V1_AP_EXTRA + tuple(_ap_commands(ap_on_path)))
-        nested += [f"Bash({cmd} {verb}:*)" for verb in verbs for cmd in v1_ap]
-        deny += [r for r in dict.fromkeys(nested) if r not in deny]
+        # No nested session: no `claude` in any spelling and no v1 `ap` (`nested_session_denies`).
+        deny += [r for r in nested_session_denies(claude) if r not in deny]
         # No tool its role does not list, MCP or built-in, but the tool search and `Task` (READ_ONLY_KEPT): v1's
         # outward-verb list leaves an MCP server's delete, update, submit or merge tool open, the session loads
         # every server the user's sessions do, and it starts with every built-in tool (a scheduled cloud agent, the

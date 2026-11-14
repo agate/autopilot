@@ -625,10 +625,12 @@ def _why(present: dict, seen: dict) -> list:
     return why
 
 
-def _pass_due(data: Path, now: datetime, store: Store, errors: list, log) -> bool:
-    """Write `<data>/pass.json` atomically: `{due, since, why, seen, checked_at}`, and return `due`. A change since
-    `seen` (what was there when the last pass started) makes a pass due; a standing state does not. `since` is
-    kept from the first run that found it due. Nothing is started here."""
+def _pass_due(data: Path, now: datetime, store: Store, errors: list, log) -> tuple:
+    """Write `<data>/pass.json` atomically: `{due, since, why, seen, checked_at}`, and return `(due, present)`:
+    `present` is the snapshot `why` came from (None when it cannot be read), for `pass_started` to write as `seen`,
+    so a change that lands after this look stays unseen and makes the next round due. A change since `seen` (what
+    was there when the last pass started) makes a pass due; a standing state does not. `since` is kept from the
+    first run that found it due. Nothing is started here."""
     path = data / PASS
     saved, damaged = _read_pass(path)
     if damaged:
@@ -639,7 +641,7 @@ def _pass_due(data: Path, now: datetime, store: Store, errors: list, log) -> boo
     except (CardError, WorkerError, OSError, RecursionError) as e:  # RecursionError: a workers.json nested too deep
         errors.append({"pass": True, "error": str(e)})
         log(f"pass: error: {e}")
-        return False
+        return False, None
     seen = saved.get("seen") or _empty_seen()
     why = _why(present, seen)
     since = None
@@ -652,15 +654,17 @@ def _pass_due(data: Path, now: datetime, store: Store, errors: list, log) -> boo
             pass
         log(f"pass due: {len(why)} reason(s)")
     write_json(path, {"due": bool(why), "since": since, "why": why, "seen": seen, "checked_at": cards.stamp(now)})
-    return bool(why)
+    return bool(why), present
 
 
-def pass_started(data, now: datetime, store: Optional[Store] = None) -> dict:
-    """A dispatcher pass starts at `now`: what is there now becomes `seen`, and the pass is no longer due. Returns
-    the pass record written to `<data>/pass.json`. Raises CardError, WorkerError or OSError."""
+def pass_started(data, now: datetime, store: Optional[Store] = None, present: Optional[dict] = None) -> dict:
+    """A dispatcher pass starts at `now`: `present` (the snapshot the round's `why` came from, `_pass_due`'s), or
+    without it what is there now, becomes `seen`, and the pass is no longer due. Returns the pass record written to
+    `<data>/pass.json`. Raises CardError, WorkerError or OSError."""
     data = Path(data)
     store = store if store is not None else Store(data, clock=lambda: now)
-    out = {"due": False, "since": None, "why": [], "seen": _present(data, store), "checked_at": cards.stamp(now)}
+    seen = present if present is not None else _present(data, store)
+    out = {"due": False, "since": None, "why": [], "seen": seen, "checked_at": cards.stamp(now)}
     write_json(data / PASS, out)
     return out
 
@@ -692,9 +696,10 @@ def _finish_dispatch(data: Path, now: datetime, store: Store, claude, transcript
 
 
 def _start_dispatch(data: Path, now: datetime, store: Store, due: bool, claude, transcripts_dir, entries: list,
-                    errors: list, log) -> None:
+                    errors: list, log, present: Optional[dict] = None) -> None:
     """Start at most one pass, never while one is open: the next group of the round's queue, or, when a pass is
-    due, the first group of a new round, and then `pass_started` moves `seen` (once per round). A new round freezes
+    due, the first group of a new round, and then `pass_started` moves `seen` (once per round) to `present`, the
+    snapshot `_pass_due` took in this run, so what lands while the pass launches stays unseen. A new round freezes
     pass.json's `why` (written by `_pass_due` in this run, before `pass_started` clears it) on the pass's record, and
     the queue carries it to each next group. The profile and the cap are asked first: a refusal starts nothing and
     keeps the queue, and a due pass stays due. A group whose start fails is one error and the next group of the
@@ -727,7 +732,7 @@ def _start_dispatch(data: Path, now: datetime, store: Store, due: bool, claude, 
         if not queue:
             if not bad:  # nothing live to serve: what changed is seen, so the pass is not due every run
                 try:
-                    pass_started(data, now, store)
+                    pass_started(data, now, store, present=present)
                 except (CardError, WorkerError, OSError, RecursionError) as e:
                     errors.append({"pass": True, "error": str(e)})
                     log(f"pass: error: {e}")
@@ -772,7 +777,7 @@ def _start_dispatch(data: Path, now: datetime, store: Store, due: bool, claude, 
         log(f"dispatch: {started['note']}")
     if new_round:
         try:
-            pass_started(data, now, store)
+            pass_started(data, now, store, present=present)
         except (CardError, WorkerError, OSError, RecursionError) as e:  # at worst one extra pass
             errors.append({"pass": True, "error": str(e)})
             log(f"pass: error: {e}")
@@ -886,8 +891,8 @@ def _run(data: Path, now: datetime, watches, store: Optional[Store], claude, tra
         if raw["removed"]:
             log(f"pruned {len(raw['removed'])} raw source file(s) older than {engine.RAW_KEEP.days} days")
 
-    pass_due = _pass_due(data, now, store, errors, log)
-    _start_dispatch(data, now, store, pass_due, claude, transcripts_dir, dispatched, errors, log)
+    pass_due, present = _pass_due(data, now, store, errors, log)
+    _start_dispatch(data, now, store, pass_due, claude, transcripts_dir, dispatched, errors, log, present=present)
     errors = [{k: _safe(v) for k, v in e.items()} for e in errors]  # e.g. a file name that is not UTF-8
     out = {"last_run_at": cards.stamp(now), "routines": found, "workers": checked, "watches_due": due_names,
            "reads": reads, "pruned": pruned, "pass_due": pass_due, "dispatch": dispatched, "errors": errors}

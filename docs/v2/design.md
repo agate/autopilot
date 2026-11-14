@@ -1931,22 +1931,22 @@ Calls the author made without asking (check them):
     `<data>/dispatch.json`'s `queue`, or, when a pass is due, the first group of a new round, and then calls
     `gate.pass_started`. The start is `claude --bg -n "ap2 dispatch · <projects, or cards with no project>"
     --permission-mode auto --settings <data>/sessions/dispatch/settings-dispatcher.json [--model <model>]
-    [--strict-mcp-config] <prompt>` in the group's repo, the prompt naming the runbook's absolute path, the
-    projects and the data folder. `dispatch.json` is `{group, projects, short_id, session_id, started_at, profile,
-    queue, why, token, looks, seen_busy}`. `why` is the round's reasons, frozen when the round starts: the gate
-    reads the `why` the pass-due check just wrote to `pass.json` before `pass_started` empties it, puts it on the
-    record, and the queue-only record `{queue, why}` carries it to each next group's record; the pass reads it as
-    `dispatch.why` from `ap2 pass status` (a record without it, written before it was, reads as no reasons).
-    `token` is the pass's own random token, also `AP2_PASS` in its launch env (not in the shared settings file).
-    The profile and the cap are asked first (`dispatch.launch_profile`): a refusal starts nothing and
-    is one error `{"dispatch": true, "error"}`, the queue is kept and a due pass stays due. A group whose start
-    fails for that group (its repo is not a folder, its settings are refused) is one error, and the next group of
-    the round is tried in the same run. When `claude --bg` itself fails (`dispatch.LaunchError`, also a launch that
-    hangs to its 120-second timeout), every other group would fail the same way: it is one error, no other group
-    is tried that run, and the queue is kept from that group on, so the next run tries again. A new round where
-    none starts stays due. A round with nothing live to serve (and no project
-    error) calls `pass_started`, so the same change does not make a pass due every run. Each start is one
-    gate.log line and one gate.json `dispatch` entry `{"did": "started", ...}`.
+    [--strict-mcp-config] <prompt>` in the group's repo, the prompt naming the runbook's absolute path, the projects
+    and the data folder. `dispatch.json` is `{group, projects, short_id, session_id, started_at, profile, queue, why,
+    token, looks, seen_busy}`. `why` is the round's reasons, frozen when the round starts: the gate reads the `why`
+    the pass-due check just wrote to `pass.json` before `pass_started` empties it, puts it on the record, and the
+    queue-only record `{queue, why}` carries it to each next group's record; the pass reads it as `dispatch.why` from
+    `ap2 pass status` (a record without it, written before it was, reads as no reasons). `token` is the pass's own
+    random token, also `AP2_PASS` in its launch env (not in the shared settings file). The profile and the cap are
+    asked first (`dispatch.launch_profile`): a refusal starts nothing and is one error `{"dispatch": true, "error"}`,
+    the queue is kept and a due pass stays due. A group whose start fails for that group (its repo is not a folder,
+    or the launch cannot enter it: an OSError naming the repo, such as a folder with no access or one removed since
+    the check; its settings are refused) is one error, and the next group of the round is tried in the same run. When
+    `claude --bg` itself fails (`dispatch.LaunchError`, also a launch that hangs to its 120-second timeout), every
+    other group would fail the same way: it is one error, no other group is tried that run, and the queue is kept
+    from that group on, so the next run tries again. A new round where none starts stays due. A round with nothing
+    live to serve (and no project error) calls `pass_started`, so the same change does not make a pass due every run.
+    Each start is one gate.log line and one gate.json `dispatch` entry `{"did": "started", ...}`.
   - End: early in each run `dispatch.finish` looks the pass up in `claude agents`. It ends when `ap2 pass end`
     marked it (`<data>/dispatch-end.json` `{short_id, started_at, ended_at, token}`, its own file because the gate
     rewrites `dispatch.json`; a marker counts only when its `short_id`, `started_at` and `token` match the record;
@@ -1962,24 +1962,35 @@ Calls the author made without asking (check them):
     or false) is removed with one error, so it never holds later passes back. Then the record keeps only `{queue,
     why}` (so the same run starts the next group) or goes. Each end is one gate.log line and one gate.json
     `dispatch` entry.
-  - Floor: the pass's settings are built like the worker floor: the data folder's protected files (and
-    `pass.json`, `dispatch.json`, `dispatch-end.json`) and the package denied for Edit, v1's dispatcher Bash
-    denials (`perms.BASH_DENY`: no `gh pr comment`, `gh pr review`, `gh issue comment|create`, `gh pr edit
-    --add-reviewer`), the `hook-park` and `hook-guard` hooks, env `AP2_ROLE=dispatcher`, `AP2_DATA`, `AP2_RUN_DIR`
-    (`<data>/sessions/dispatch/`, where it writes the texts it hands to `ap2 card ask`) and `AP2_PROFILE`, allow
-    rules for exactly the `ap2` steps the runbook runs, by the package's absolute `bin/ap2` (the prompt names that
-    path): `pass status`, `pass end`, `card list`, `card show`, `card ask`, `card lane`, `worker list`, `worker
-    start`, `template show` and `search` as prefix rules, and `cap` and `cap --json` as exact rules, so `ap2 cap
-    answer|resume`, `ap2 worker answer|end|park|finish` and `ap2 card add` are never allowed by rule; and the
-    profile's overlay merged under it. In any mode but live it also denies `git` and `gh` whole (`Bash(git:*)`,
-    `Bash(gh:*)`): a prefix rule matches only the command or the command and a space, so a rule per verb misses
-    every form that puts an option before the verb (`git -P push`, `git --git-dir=/r/.git push`, `gh -R o/r pr
-    merge 5`, `gh --repo=o/r pr ready 5`); in shadow mode the runbook runs no git or gh at all (worktrees, fetches,
-    pushes and merges are live only). Best effort, as every text rule: `/usr/bin/git` or `env git` gets past it.
-    It also denies the outward MCP tools of the group's projects' `tools` (v1's `denied_tools` and its
-    ticket-status tools), and the pass starts with `--strict-mcp-config` and no `--mcp-config`, so it loads no MCP
-    server or connector at all (a project with no `tools`, the default, and the no-project group name none to
-    deny); v1 isolates its page sessions the same way. Its spend launch row is kind `dispatcher`.
+  - Floor: the pass's settings are built like the worker floor: the data folder's protected files (and `pass.json`,
+    `dispatch.json`, `dispatch-end.json`) and the package denied for Edit, v1's dispatcher Bash denials
+    (`perms.BASH_DENY`: text-prefix rules for the plain `gh pr comment`, `gh pr review`, `gh issue comment|create`,
+    `gh pr edit --add-reviewer`; best effort, `gh -R o/r pr comment` or `gh pr edit 5 --add-reviewer bob` gets past
+    them, so the runbook says never to do these at all), in every mode the outward MCP tools of the group's projects'
+    `tools` (v1's `denied_tools`, as v1's dispatcher floor; best effort: in live mode, where the pass loads the
+    user's MCP servers, it denies only the outward tools the projects list, and a project that lists none gets no MCP
+    denies), no nested session in every mode (`workers.nested_session_denies`, the read-only floor's own rules:
+    `claude` in every spelling, the claude the pass starts with included, and v1's `ap` commands, since `ap oneoff`
+    runs `claude -p`; `claude -p` would run under the user's own settings and MCP servers, past the floor and
+    `--strict-mcp-config`; the runbook runs neither), in every mode the built-in tools that act outside the floor and
+    the runbook never uses (`dispatch.BUILTIN_DENY`: RemoteTrigger, CronCreate, CronDelete, ScheduleWakeup,
+    ArtifactComments, Artifact, ArtifactData, PushNotification, SendMessage, Workflow, PublishPlugin,
+    ShareOnboardingGuide, DesignSync; Read, Write, Bash, Glob, Grep and the rest stay), the `hook-park` and
+    `hook-guard` hooks, env `AP2_ROLE=dispatcher`, `AP2_DATA`, `AP2_RUN_DIR` (`<data>/sessions/dispatch/`, where it
+    writes the texts it hands to `ap2 card ask`) and `AP2_PROFILE`, allow rules for exactly the `ap2` steps the
+    runbook runs, by the package's absolute `bin/ap2` (the prompt names that path): `pass status`, `pass end`, `card
+    list`, `card show`, `card ask`, `card lane`, `worker list`, `worker start`, `template show` and `search` as
+    prefix rules, and `cap` and `cap --json` as exact rules, so `ap2 cap answer|resume`, `ap2 worker
+    answer|end|park|finish` and `ap2 card add` are never allowed by rule; and the profile's overlay merged under it.
+    In any mode but live it also denies `git` and `gh` whole (`Bash(git:*)`, `Bash(gh:*)`): a prefix rule matches
+    only the command or the command and a space, so a rule per verb misses every form that puts an option before the
+    verb (`git -P push`, `git --git-dir=/r/.git push`, `gh -R o/r pr merge 5`, `gh --repo=o/r pr ready 5`); in shadow
+    mode the runbook runs no git or gh at all (worktrees, fetches, pushes and merges are live only). Best effort, as
+    every text rule: `/usr/bin/git` or `env git` gets past it. It also denies the ticket-status tools of the group's
+    projects' `tools` (live mode moves the ticket), and the pass starts with `--strict-mcp-config` and no
+    `--mcp-config`, so it loads no MCP server or connector at all (a project with no `tools`, the default, and the
+    no-project group name none to deny); v1 isolates its page sessions the same way. Its spend launch row is kind
+    `dispatcher`.
   - Commands: `ap2 pass status` prints `{pass, dispatch, mode}`; `ap2 pass end` writes the end marker (no open
     pass: one `ap2: ...` line, exit 1). Run with `AP2_PASS` set (by a pass) that is not the open pass's token, it
     is refused the same way and ends nothing: a pass stopped at a prompt and resumed by the user later cannot end
@@ -1995,8 +2006,15 @@ Calls the author made without asking (check them):
       Reverse: wait in the gate.
     - One pass at a time, groups in turn: one open pass for the whole data folder ("never two dispatchers at
       once", as v1), the groups of a round one after another through `queue`. Reverse: one per group in parallel.
-    - `seen` moves when a round starts: a change that lands while the round runs makes the next round due; at
-      worst one extra pass.
+    - `seen` moves when a round starts, to the very snapshot the round's `why` came from (`_pass_due` hands its
+      look to `pass_started`, which writes it as `seen` instead of looking again): a change that lands while the
+      round runs, the first pass's launch included, makes the next round due; at worst one extra pass.
+    - Answered asks: the runbook acts on each `answered` entry of its group (an ask that closed). `ap2 card show`
+      gives the card; the closed ask itself is in the restore point the closing `audit` entry names
+      (`<data>/restore/<id>.json`, `card.ask`), since the card's `ask` no longer holds it. Only an ask from
+      `dispatch` is acted on: an approved merge goes on with the clean `prloop.json` steps (live only), a confirmed
+      plan starts the next role, a closed `fix` is checked again and goes on from where it was opened (or opens a
+      new `fix`), an `answer` goes on with the user's words, a declined one leaves the card.
     - Shadow mode runs the pass: it reads, opens asks and records what it would do; the floor denies the outward
       writes, and `Workers` already refuses a worker start in shadow mode. Switch-over can compare v2's decisions
       with v1's before live mode.

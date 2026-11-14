@@ -16,7 +16,9 @@ Run each `ap2` command as a command of its own, written out in full.
   (all of `git` and `gh`), and no MCP server is loaded.
 - **Live mode.** You may run the outward steps below, and only those, only for the cards of your group.
 - Never edit a card file, `pass.json`, `dispatch.json` or `config.yaml` by hand: use the `ap2` commands.
-- Never post a PR comment or review, never open an issue, never add a reviewer (denied in every mode).
+- Never post a PR comment or review, never open an issue, never add a reviewer, in any mode. v1's prefix rules deny
+  the plain forms (`gh pr comment`, `gh pr review`, `gh issue create`, `gh pr edit --add-reviewer`), best effort:
+  other spellings get past them, so never rely on them.
 - A card whose `feed` is `v1-import` is v1's copy unless it has `taken_over`: read it, never change it. With
   `taken_over` it is live and v2 works on it, like any other card.
 
@@ -36,7 +38,7 @@ For each `result` in `dispatch.why`, read `$AP2_DATA/sessions/<card>/<file>` and
 worker that wrote it.
 
 - **`handback.json` (implement handed back).** Answer its `open_questions` from the card, its template and the
-  repo's rules when you can. Write the review brief (step 3) and start the review role on the same worktree.
+  repo's rules when you can. Write the review brief (step 4) and start the review role on the same worktree.
 - **`review.json`, verdict pass.** Live: squash the branch to one commit, push it, open the PR
   (`gh pr create`), then start the PR loop role. Shadow: open no PR; open an `answer` ask that says the review
   passed and what you would ship.
@@ -50,7 +52,31 @@ worker that wrote it.
 - **`question.json`.** The gate already made it the card's ask; leave it.
 - **`prreview.json`.** The gate already applied it (`ap2 worker check`); leave it.
 
-## 3. Start the next role of each ready card
+## 3. Answered asks
+
+For each `answered` card in `dispatch.why` of your group, run `ap2 card show <card>`. It prints the card as JSON.
+Its `ask` no longer holds the ask that closed (it is null, or a newer ask). Its `audit` says who closed it and when:
+the newest entries, each `{at, by, did, restore}`. The `restore` of the entry that closed it names a restore point,
+`$AP2_DATA/restore/<restore>.json`; its `card.ask` is the ask as it was (`type`, `from`, `text`). Read that file;
+never change it. Words the user wrote about the card are in its newest `questions` (their `text`).
+
+Act only on an ask whose `from` is `dispatch` (one a pass opened). Leave every other ask (a worker's, the cap's,
+v1's): the gate and the workers handle those. Leave a card whose `kind` is `dispatch` too. Then continue from where
+the ask was opened:
+
+- **Declined.** The card is now `done`, or the user's words say no: leave the card. Open a new ask (step 5) only
+  when something still needs the user.
+- **`approve` (a merge).** This answer is the approval step 2 waits for. Live only: read
+  `$AP2_DATA/sessions/<card>/prloop.json` again and run step 2's clean `prloop.json` steps (`gh pr ready <n>` when
+  it is a draft, then the merge once every check passed). Shadow: do nothing more.
+- **`confirm` (a plan).** Go ahead: start the card's next role as in step 4 (live mode only, and only while step 1
+  allows starts).
+- **`fix` (a repair).** Check the card again: read it and the file the ask was about. Repaired: continue from the
+  step that opened the ask (step 2 for a result file, step 4 for a ready card). Still broken: open a new `fix` ask.
+- **`answer` (a question or a draft).** Continue from the step that opened the ask with the user's words. The
+  shadow-mode `answer` for a passed review needs nothing more.
+
+## 4. Start the next role of each ready card
 
 For each `ready` card in `dispatch.why` of your group (live mode only, and only while step 1 allows starts):
 
@@ -69,7 +95,7 @@ For each `ready` card in `dispatch.why` of your group (live mode only, and only 
    resources, `--resume` to continue the role's saved session). A card with no repo runs in `$AP2_DATA`.
 6. Run `ap2 card lane <card> running` once its first worker started.
 
-## 4. Ask the user
+## 5. Ask the user
 
 Open an ask only for what the user alone can decide, one per card, in plain words (design 3.7: short sentences,
 everyday words, exact numbers kept, and what happens after they answer):
@@ -81,7 +107,7 @@ Write the words to `$AP2_RUN_DIR/ask-<card>.txt`, then run
 `ap2 card ask <card> --type <type> --text-file <file>`. It moves the card to `needs` and refuses while the card
 already has an open ask: leave that one as it is.
 
-## 5. End
+## 6. End
 
 Run `ap2 pass end`. It is always your last step, also when you did nothing: the next gate run stops your session
 and starts the next group of the round. Then stop.

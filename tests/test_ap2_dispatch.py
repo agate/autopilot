@@ -177,12 +177,43 @@ class FloorTest(DispatchCase):
 
     def test_live_mode_allows_the_outward_writes(self):
         deny = self.floor("live")["permissions"]["deny"]
-        for rule in dispatch.SHADOW_DENY + ("mcp__slack__slack_send_message", "mcp__jira__transitionJiraIssue"):
+        for rule in dispatch.SHADOW_DENY + ("mcp__jira__transitionJiraIssue",):  # live moves the ticket
             self.assertNotIn(rule, deny)
+        self.assertIn("mcp__slack__slack_send_message", deny)  # v1's dispatcher floor denies it in every mode
+        for tool in ("mcp__slack__slack_read_channel", "mcp__jira__getJiraIssue"):
+            self.assertNotIn(tool, deny)
         for rule in ("Bash(git -C:*)", "Bash(git -c:*)", "Bash(git --git-dir:*)", "Bash(git --work-tree:*)",
                      "Bash(gh api:*)"):
             self.assertNotIn(rule, deny)
         self.assertEqual(sorted(deny), sorted(set(deny)))
+
+    def test_every_mode_denies_a_nested_session_as_the_read_only_floor_does(self):
+        """`claude -p` would run under the user's own settings and MCP servers, and v1's `ap oneoff` runs it."""
+        pkg = workers.package_root()
+        for mode in ("shadow", "live"):
+            with self.subTest(mode=mode):
+                deny = self.floor(mode)["permissions"]["deny"]
+                for rule in workers.nested_session_denies():
+                    self.assertIn(rule, deny)
+                for rule in ("Bash(claude:*)", "Bash(ap oneoff:*)", f"Bash({pkg / 'bin' / 'ap'} oneoff:*)"):
+                    self.assertIn(rule, deny)
+                self.assertNotIn("Bash(ap:*)", deny)  # it would prefix every `ap2` command
+                self.assertEqual(len(deny), len(set(deny)))
+        fake = dispatch.settings(self.data, profiles.builtin(), [], "live", claude=str(FAKE))["permissions"]["deny"]
+        self.assertIn(f"Bash({FAKE}:*)", fake)  # the claude the pass is started with, as typed
+
+    def test_every_mode_denies_the_outward_built_in_tools_and_keeps_the_runbooks(self):
+        self.assertEqual(set(dispatch.BUILTIN_DENY), {
+            "RemoteTrigger", "CronCreate", "CronDelete", "ScheduleWakeup", "ArtifactComments", "Artifact",
+            "ArtifactData", "PushNotification", "SendMessage", "Workflow", "PublishPlugin", "ShareOnboardingGuide",
+            "DesignSync"})
+        for mode in ("shadow", "live"):
+            with self.subTest(mode=mode):
+                deny = self.floor(mode)["permissions"]["deny"]
+                for tool in dispatch.BUILTIN_DENY:
+                    self.assertIn(tool, deny)
+                for tool in ("Read", "Write", "Bash", "Glob", "Grep", "Edit", "ToolSearch", "Task", "Agent"):
+                    self.assertNotIn(tool, deny)
 
     def test_the_profile_overlay_is_merged_under_the_floor(self):
         prof = dict(profiles.builtin(), name="mine", settings={"cleanupPeriodDays": 9, "env": {"AP2_ROLE": "x",
@@ -431,6 +462,71 @@ class RoundTest(DispatchCase):
         out = self.gate(self.T + timedelta(minutes=3))
         self.assertEqual(out["dispatch"][0]["did"], "started")
         self.assertIsNone(out["dispatch"][0]["group"])
+
+    def test_a_repo_the_launch_cannot_enter_is_this_groups_error_and_the_next_group_starts(self):
+        """A folder that exists but cannot be entered fails the launch with an OSError naming it: that is this
+        group's failure, not `claude --bg`'s, so it never holds the other groups (and every later round) back."""
+        if os.geteuid() == 0:
+            self.skipTest("root enters a folder with no permissions")
+        first, second = self.tmp / "a-repo", self.tmp / "b-repo"
+        first.mkdir()
+        second.mkdir()
+        project_file(self.data, "alpha", first)
+        project_file(self.data, "beta", second)
+        self.add_card(project="alpha")
+        self.add_card(project="beta")
+        first.chmod(0)
+        self.addCleanup(first.chmod, 0o755)
+        out = self.gate(self.T)
+        errs = [e for e in out["errors"] if e.get("dispatch")]
+        self.assertEqual(len(errs), 1)
+        self.assertIn("cannot enter the repo", errs[0]["error"])
+        self.assertNotIn("no other group is tried this run", self.gate_log())
+        [started] = out["dispatch"]
+        self.assertEqual((started["did"], started["group"]), ("started", str(second)))
+        self.assertEqual(self.dispatch_calls()[-1]["cwd"], str(second))
+        self.assertEqual(self.record()["queue"], [{"group": str(self.repo), "projects": ["shop"]},
+                                                  {"group": None, "projects": []}])
+        self.assertIs(self.pass_file()["due"], False)
+
+    def test_a_repo_gone_between_the_check_and_the_launch_is_this_groups_error(self):
+        err = FileNotFoundError(2, "No such file or directory", str(self.repo))
+        with mock.patch.object(dispatch.v1_workers, "_launch", side_effect=err):
+            with self.assertRaises(dispatch.DispatchError) as caught:
+                dispatch.start(self.data, {"group": str(self.repo), "projects": ["shop"]}, [], profiles.builtin(),
+                               self.T, "shadow", claude=str(FAKE))
+        self.assertNotIsInstance(caught.exception, dispatch.LaunchError)
+        self.assertIn("cannot enter the repo", str(caught.exception))
+        # An OSError about anything else (the claude CLI itself) is still a launch failure.
+        missing = FileNotFoundError(2, "No such file or directory", "/no/claude")
+        with mock.patch.object(dispatch.v1_workers, "_launch", side_effect=missing):
+            with self.assertRaises(dispatch.LaunchError):
+                dispatch.start(self.data, {"group": str(self.repo), "projects": ["shop"]}, [], profiles.builtin(),
+                               self.T, "shadow", claude=str(FAKE))
+
+    def test_a_change_that_lands_while_the_round_starts_makes_the_next_round_due(self):
+        """`seen` is the snapshot the round's `why` came from, not a second look after the launch: a result file
+        written while `claude --bg` runs is in no round's `why` yet, so the next round is due with it."""
+        cid = self.add_card(project="shop")
+        real = dispatch.start
+
+        def start(*a, **kw):
+            rec = real(*a, **kw)
+            self.run_file(cid, "handback.json")
+            return rec
+
+        with mock.patch.object(dispatch, "start", side_effect=start):
+            self.gate(self.T)
+        self.assertNotIn(f"{cid}/handback.json", self.pass_file()["seen"]["results"])
+        self.assertEqual([w for w in self.record()["why"] if w["why"] == "result"], [])
+        dispatch.end(self.data, self.T + timedelta(minutes=1))
+        self.gate(self.T + timedelta(minutes=1))  # the second group of the first round
+        dispatch.end(self.data, self.T + timedelta(minutes=2))
+        out = self.gate(self.T + timedelta(minutes=2))
+        self.assertIs(out["pass_due"], True)
+        self.assertEqual([e["did"] for e in out["dispatch"]], ["ended", "started"])
+        self.assertIn({"why": "result", "card": cid, "file": "handback.json"}, self.record()["why"])
+        self.assertIn(f"{cid}/handback.json", self.pass_file()["seen"]["results"])
 
     def test_a_group_that_cannot_start_is_one_error_and_the_next_group_starts(self):
         self.repo.rmdir()
