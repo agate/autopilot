@@ -1814,7 +1814,7 @@ class ScanFinishTest(LoopCase):
         with mock.patch("assistant.scan.take", side_effect=cards.CardError("the store is broken")) as take:
             out = self.gate(self.T + timedelta(hours=2))  # vendor-a would be due again by its time
         take.assert_called_once()
-        self.assertEqual(self.scan_record(), self.rec)
+        self.assertEqual(self.scan_record(), dict(self.rec, stopped_at="2026-11-10T16:00:00Z"))  # stopped, settled
         [err] = out["errors"]
         self.assertTrue(err["scan"])
         self.assertIn("the store is broken", err["error"])
@@ -1824,6 +1824,38 @@ class ScanFinishTest(LoopCase):
         self.assertNotEqual(self.scan_record()["short_id"], "s0001")  # taken; the due watch started a new scan
         self.assertEqual([r["made"] for r in again["reads"] if r["watch"] == "vendor-a"], [1])
         self.assertEqual([c["key"] for c in self.store().list()], ["vendor-a:i1"])
+
+    def test_while_the_card_store_cannot_be_read_a_retry_takes_nothing_and_stops_and_settles_once(self):
+        hook = {"tool_name": "mcp__vendor__list_incidents", "tool_input": {},
+                "tool_response": json.dumps([item(1)])}
+        scan.save_raw(self.rec["plan"], json.dumps(hook).encode())
+        self.set_agent("s0001", state="done", status="idle")
+        bad = self.data / "items" / "2026-11" / "c-20261110-130000-abcdef.json"
+        bad.parent.mkdir(parents=True)
+        bad.write_text('{"id": "c-2026', encoding="utf-8")
+        raw = self.data / "sources" / ".raw" / "vendor-a"
+        settled = self.data / "spend" / "settled.jsonl"
+
+        def rows() -> int:
+            return len(settled.read_text().splitlines()) if settled.exists() else 0
+        for minutes in (2, 3, 4):
+            out = self.gate(self.T + timedelta(minutes=minutes))
+            [err] = [e for e in out["errors"] if e.get("scan")]
+            self.assertTrue(err["error"].startswith("the card store cannot be read ("), err["error"])
+            self.assertIn(str(bad), err["error"])
+            self.assertTrue(err["error"].endswith("; the scan session s0001 is taken once it can"), err["error"])
+            self.assertEqual(self.scan_record(), dict(self.rec, stopped_at="2026-11-10T14:02:00Z"))
+            self.assertEqual(sorted(raw.iterdir()) if raw.exists() else [], [])  # no raw copy is saved
+            self.assertEqual(out["watches_due"], [])
+        self.assertEqual(self.argvs().count(["stop", "s0001"]), 1)
+        self.assertEqual(rows(), 1)
+        bad.unlink()  # the store is repaired
+        out = self.gate(self.T + timedelta(minutes=5))
+        self.assertFalse((self.data / "scan-session.json").exists())
+        self.assertEqual([(r["watch"], r["made"]) for r in out["reads"]], [("vendor-a", 1)])
+        self.assertEqual([c["key"] for c in self.store().list()], ["vendor-a:i1"])
+        self.assertEqual([e for e in out["errors"] if e.get("scan")], [])
+        self.assertEqual((self.argvs().count(["stop", "s0001"]), rows()), (1, 1))
 
     def list_as_stopped(self, short):
         """The CLI keeps a stopped session on its listing with no pid and no status."""
@@ -1850,7 +1882,7 @@ class ScanFinishTest(LoopCase):
         with mock.patch("assistant.scan.take", side_effect=cards.CardError("the store is broken")):
             first = self.gate(self.T + timedelta(minutes=2))
         self.assertIn("the store is broken", first["errors"][0]["error"])
-        self.assertEqual(self.scan_record(), self.rec)
+        self.assertEqual(self.scan_record(), dict(self.rec, stopped_at="2026-11-10T14:02:00Z"))
         self.list_as_stopped("s0001")  # the first run stopped it; the CLI still lists it
         out = self.gate(self.T + timedelta(minutes=3))  # well before SCAN_MAX_MIN
         self.assertFalse((self.data / "scan-session.json").exists())
@@ -1939,6 +1971,7 @@ class PassDueTest(LoopCase):
         self.assertEqual([e for e in out["errors"] if "pass" in e],
                          [{"pass": True, "error": out["errors"][-1]["error"]}])
         self.assertIn("recursion", out["errors"][-1]["error"])
+        self.assertIn(f"{self.data / 'workers.json'}: cannot read the worker list", out["errors"][-1]["error"])
         self.assertIs(out["pass_due"], False)
         self.assertEqual(json.loads((self.data / "gate.json").read_text(encoding="utf-8")), out)
         self.assertIn("pass: error:", self.gate_log())

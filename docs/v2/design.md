@@ -1499,8 +1499,12 @@ Calls the author made without asking (check them):
     (`scan.take`) and the record removed. Stop first, then take:
     a stop that fails keeps the record (the next run tries again, so no session is left running with no record), and
     a session that ran too long logs nothing more while it is taken. A take that fails on the store (a `CardError`
-    or an `OSError`) keeps the record too: the gate reports one `{"scan": true}` error, the next run stops and takes
-    again, and the scan watches are not timed meanwhile. Nothing is lost, and it heals once the store works. One
+    or an `OSError`) keeps the record too: the gate reports one `{"scan": true}` error, the next run takes again, and
+    the scan watches are not timed meanwhile. Nothing is lost, and it heals once the store works. The stop and the
+    spend settle run once: the record then gets a `stopped_at`, and a later run skips the listing, the stop, the
+    settle and the late errors. Before each take the card store is read first, and the take runs only when it
+    reads. Until then each run adds one error, `the card store cannot be read (<why>); the scan session <short> is
+    taken once it can`. So a retry while the store is broken adds no raw copy and no settle row. One
     still working after `SCAN_MAX_MIN` (15) minutes is stopped and taken with what it logged, plus one error. One
     whose `started_at` is more than `routines.GRACE` (5 minutes) after now (a run with a later `--now` started it,
     or the clock went back) is late too, since it would never grow old: it is stopped and taken, with one error that
@@ -1612,7 +1616,8 @@ Calls the author made without asking (check them):
     in `seen` that is no longer open the same way; `due` is `bool(why)`; `since` is kept from the first run that found
     it due and reset when it is not due. gate.log gets `pass due: <n> reason(s)` when due. A damaged `pass.json` is
     one error and the run goes on from an empty `seen`. A `workers.json` that cannot be read (nested too deep
-    included) is one error `{"pass": true, "error"}`, and no `pass.json` is written that run. The gate starts no pass. The choices: a change since the
+    included) is one error `{"pass": true, "error"}` that names the file (the workers check reports it too, as its
+    own `{"workers": true}` error), and no `pass.json` is written that run. The gate starts no pass. The choices: a change since the
     last pass makes a pass due, a standing state does not (as v1's `fingerprint` and `should_dispatch` do), so a
     pass that could start nothing is not due again every minute; reverse: delete the file, the next run rebuilds it.
     Only `gate.pass_started(data, now)` updates `seen` (it copies the present state and clears `due`); the pass

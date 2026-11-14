@@ -46,9 +46,10 @@ from typing import Callable, Optional
 from autopilot import sessions as v1_sessions
 
 from assistant import cards, config, engine as engine_module, routines, sources
+from assistant.cards import CardError
 from assistant.config import ConfigError
 from assistant.sources import SourceError
-from assistant.store import write_json
+from assistant.store import Store, write_json
 
 SCAN = Path(sources.FOLDER) / ".scan"
 PLAN = "plan.json"
@@ -809,9 +810,12 @@ def finish(data, now: datetime, claude: Optional[str] = None, transcripts_dir=No
     (one more error), or it started more than `routines.GRACE` after now (one error that ends with
     `routines.WENT_BACK`): it is stopped (`claude stop`, its spend settled), taken (`take`) and the record removed.
     A failed listing, or a session still working inside the time, waits for the next run; a failed listing once the
-    session is that late adds one error. A take that fails on the store (a CardError or OSError) raises with the
-    record kept, so the next run stops and takes again. Returns `{open, ended,
-    short_id, reads, errors}`; each read also says its `via`."""
+    session is that late adds one error. Once stopped and settled, the record gets a `stopped_at`, so a later run
+    skips the listing, the stop, the settle and the late errors. Before the take, the card store must read; when it
+    does not, the record is kept with one error and nothing is taken (no raw copy, no settle row), and a later run
+    takes once it reads. A take that still fails on the store (a CardError or OSError) raises with the record kept,
+    so the next run checks and takes again. Returns `{open, ended, short_id, reads, errors}`; each read also says
+    its `via`."""
     from assistant import spend, transcripts
 
     data, claude = Path(data), _claude(claude)
@@ -828,45 +832,59 @@ def finish(data, now: datetime, claude: Optional[str] = None, transcripts_dir=No
         return out
     short, sid = rec["short_id"], rec.get("session_id") or ""
     out["short_id"] = short
-    started = cards.parse_stamp(rec["started_at"])
-    ahead = started - now > routines.GRACE  # a start later than now never grows old, so it counts as late
-    over = ahead or now - started >= timedelta(minutes=SCAN_MAX_MIN)
-    went_back = f"; {routines.WENT_BACK}" if ahead else ""
-    listing = v1_sessions.list_all(claude)
-    if listing is None:  # unknown, not gone: the next run looks again
-        if over:
-            out["errors"].append({"scan": True, "error": f"cannot list the sessions; the scan session {short} has "
-                                                         f"been open since {rec['started_at']}, and the scan "
-                                                         f"watches wait{went_back}"})
-        return out
-    s = v1_sessions.find_by_id(short, listing)
-    ended = (s is None or (s.get("pid") is not None and not v1_sessions.pid_alive(s.get("pid")))
-             or s.get("state") in ("done", "blocked", "failed", "stopped") or s.get("status") == "idle")
-    late = not ended and over
-    if not (ended or late):
-        return out
-    projects = Path(transcripts_dir) if transcripts_dir else transcripts.default_projects()
-    try:
-        if s is not None:
-            subprocess.run([claude, "stop", short], capture_output=True, timeout=60, stdin=subprocess.DEVNULL)
-    except (OSError, subprocess.SubprocessError) as e:
-        out["errors"].append({"scan": True, "error": f"cannot stop the scan session {short}: {e}; the next run "
-                                                     f"tries again"})
-        return out
-    finally:
+    # A record with a `stopped_at` was stopped, settled and reported by an earlier run whose take could not go on.
+    if not isinstance(rec.get("stopped_at"), str):
+        started = cards.parse_stamp(rec["started_at"])
+        ahead = started - now > routines.GRACE  # a start later than now never grows old, so it counts as late
+        over = ahead or now - started >= timedelta(minutes=SCAN_MAX_MIN)
+        went_back = f"; {routines.WENT_BACK}" if ahead else ""
+        listing = v1_sessions.list_all(claude)
+        if listing is None:  # unknown, not gone: the next run looks again
+            if over:
+                out["errors"].append({"scan": True, "error": f"cannot list the sessions; the scan session {short} has "
+                                                             f"been open since {rec['started_at']}, and the scan "
+                                                             f"watches wait{went_back}"})
+            return out
+        s = v1_sessions.find_by_id(short, listing)
+        ended = (s is None or (s.get("pid") is not None and not v1_sessions.pid_alive(s.get("pid")))
+                 or s.get("state") in ("done", "blocked", "failed", "stopped") or s.get("status") == "idle")
+        late = not ended and over
+        if not (ended or late):
+            return out
+        projects = Path(transcripts_dir) if transcripts_dir else transcripts.default_projects()
         try:
-            spend.settle(data, projects, short=short, session_id=sid, listing=lambda: v1_sessions.list_all(claude),
-                         now=now)
-        except Exception:  # noqa: BLE001 - bookkeeping never stops a finish
+            if s is not None:
+                subprocess.run([claude, "stop", short], capture_output=True, timeout=60, stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.SubprocessError) as e:
+            out["errors"].append({"scan": True, "error": f"cannot stop the scan session {short}: {e}; the next run "
+                                                         f"tries again"})
+            return out
+        finally:
+            try:
+                spend.settle(data, projects, short=short, session_id=sid, listing=lambda: v1_sessions.list_all(claude),
+                             now=now)
+            except Exception:  # noqa: BLE001 - bookkeeping never stops a finish
+                pass
+        if late and ahead:
+            out["errors"].append({"scan": True, "error": f"the scan session {short} started at {rec['started_at']}, "
+                                                         f"later than now ({cards.stamp(now)}); it was stopped and "
+                                                         f"taken with what it logged{went_back}"})
+        elif late:
+            out["errors"].append({"scan": True, "error": f"the scan session {short} was still working after "
+                                                         f"{SCAN_MAX_MIN} minutes; it was stopped and taken with what "
+                                                         f"it logged"})
+        try:  # best effort: without it the next run lists, stops and settles once more
+            write_json(path, dict(rec, stopped_at=cards.stamp(now)))
+        except OSError:
             pass
-    if late and ahead:
-        out["errors"].append({"scan": True, "error": f"the scan session {short} started at {rec['started_at']}, "
-                                                     f"later than now ({cards.stamp(now)}); it was stopped and "
-                                                     f"taken with what it logged{went_back}"})
-    elif late:
-        out["errors"].append({"scan": True, "error": f"the scan session {short} was still working after "
-                                                     f"{SCAN_MAX_MIN} minutes; it was stopped and taken with what "
-                                                     f"it logged"})
+    try:  # the take would fail on the store after saving one more raw copy, so look first
+        Store(data, cfg=cfg, clock=lambda: now).list()
+    except ConfigError:  # config.yaml does not load: the take below reports it
+        pass
+    except (CardError, OSError, RecursionError) as e:
+        out["errors"].append({"scan": True, "error": f"the card store cannot be read ({e}); the scan session "
+                                                     f"{short} is taken once it can"})
+        return out
     try:
         p, _ = load_plan(rec["plan"])
         via = {c["source"]: c["via"] for c in p["calls"]}
